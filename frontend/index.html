@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ScholarWeave</title>
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="Local-first research paper assistant and visual LLM workflow builder." />
+    <script>
+      // Apply the saved theme before first paint so there is no flash of the wrong palette.
+      try {
+        var saved = localStorage.getItem('scholarweave-theme');
+        document.documentElement.dataset.theme = ['paper', 'cloud', 'amoled'].indexOf(saved) >= 0 ? saved : 'paper';
+      } catch (error) {
+        document.documentElement.dataset.theme = 'paper';
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
