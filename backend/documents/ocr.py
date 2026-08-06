@@ -47,7 +47,7 @@ class DocumentOCR:
         if self.settings.ocr_engine == "surya":
             return all(
                 importlib.util.find_spec(package) is not None
-                for package in ("torch", "transformers", "markdownify")
+                for package in ("torch", "torchvision", "transformers", "markdownify")
             )
         try:
             import pytesseract
@@ -328,6 +328,7 @@ class DocumentOCR:
                                 "device": self.settings.surya_device,
                                 "max_new_tokens": self.settings.surya_max_new_tokens,
                                 "max_image_width": self.settings.surya_max_image_width,
+                                "parent_pid": os.getpid(),
                                 "images": [str(path) for path in image_paths],
                             }
                         ),

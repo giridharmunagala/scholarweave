@@ -48,6 +48,7 @@ def get_document(document_id: str, container=Depends(services)) -> DocumentRespo
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_document(document_id: str, container=Depends(services)) -> Response:
+    container.direct_agents.repository.clear_document_analysis(document_id)
     if not container.documents.delete_document(document_id):
         raise HTTPException(status_code=404, detail="Document was not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -75,6 +76,7 @@ async def ingest_document(
     container=Depends(services),
 ) -> DocumentResponse:
     await container.documents.ingest_document(document_id, force_ocr=mode == "ocr")
+    container.direct_agents.repository.clear_document_analysis(document_id)
     return _document_response(container, document_id)
 
 

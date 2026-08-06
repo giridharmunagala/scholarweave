@@ -30,7 +30,17 @@ DEFAULT_ENTRYPOINT = "transform"
 # Runs inside the child. Kept as source text rather than a module so the child can stay
 # isolated (`-I`) without needing the backend package on its path.
 _CHILD_RUNNER = r'''
-import builtins, io, json, os, resource, sys
+import builtins, ctypes, io, json, os, resource, signal, sys
+
+_expected_parent = int(os.environ["SCHOLARWEAVE_PARENT_PID"])
+if os.getppid() != _expected_parent:
+    os._exit(143)
+if sys.platform.startswith("linux"):
+    _libc = ctypes.CDLL(None, use_errno=True)
+    if _libc.prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+        os._exit(143)
+    if os.getppid() != _expected_parent:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 def _fail(message, kind="error"):
     sys.stdout.write(json.dumps({"ok": False, "error": message, "kind": kind}))
@@ -254,7 +264,11 @@ async def run_python(
         cwd=str(scratch),
         # Its own session, so a timeout can kill everything the code spawned.
         start_new_session=True,
-        env={"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"},
+        env={
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONIOENCODING": "utf-8",
+            "SCHOLARWEAVE_PARENT_PID": str(os.getpid()),
+        },
     )
 
     try:
@@ -270,6 +284,10 @@ async def run_python(
                 f"The code did not finish within {resolved_limits.timeout_seconds:g} seconds.",
                 kind="timeout",
             ) from None
+        except asyncio.CancelledError:
+            _kill_process_group(process)
+            await asyncio.shield(process.wait())
+            raise
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

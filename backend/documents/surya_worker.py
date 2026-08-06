@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import gc
 import json
+import os
 import re
+import signal
 import sys
 from pathlib import Path
 from typing import Any
@@ -12,6 +15,21 @@ SURYA_OCR_PROMPT = (
     "OCR this image to HTML. Each block is a div with data-label and data-bbox "
     "(x0 y0 x1 y1, normalized 0-1000)."
 )
+
+PR_SET_PDEATHSIG = 1
+
+
+def _arm_parent_death_signal(expected_parent_pid: int) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    if os.getppid() != expected_parent_pid:
+        raise RuntimeError("Surya worker parent exited before worker startup.")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if os.getppid() != expected_parent_pid:
+        os.kill(os.getpid(), signal.SIGTERM)
 
 
 def _device_name(requested: str, torch: Any) -> str:
@@ -126,6 +144,8 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
     try:
+        manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
+        _arm_parent_death_signal(int(manifest["parent_pid"]))
         run(args.manifest, args.output)
     except Exception as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)

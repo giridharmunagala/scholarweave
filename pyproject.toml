@@ -24,6 +24,7 @@ dependencies = [
   "python-multipart>=0.0.9,<1",
   "sqlalchemy>=2.0,<3",
   "torch>=2.6,<3",
+  "torchvision>=0.21,<1",
   "transformers>=5.2,<6",
   "uvicorn[standard]>=0.30,<1"
 ]

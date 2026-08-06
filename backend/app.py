@@ -15,6 +15,7 @@ from backend.bootstrap import ApplicationServices, create_services
 from backend.core.config import Settings
 from backend.conversations.router import router as conversations_router
 from backend.core.router import router as core_router
+from backend.direct_agents.router import router as direct_agents_router
 from backend.providers.router import router as providers_router
 from backend.research.router import router as research_router
 from backend.runs.router import router as runs_router
@@ -49,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conversations_router,
         runs_router,
         research_router,
+        direct_agents_router,
         workspace_router,
     ):
         app.include_router(router, prefix=prefix)

@@ -16,6 +16,7 @@ const NAV_GROUPS: Array<{ title: string; items: NavEntry[] }> = [
     items: [
       { to: '/', label: 'Overview', icon: 'overview' },
       { to: '/chat', label: 'Builder', icon: 'builder' },
+      { to: '/research-chat', label: 'Research chat', icon: 'agents' },
       { to: '/papers', label: 'Papers', icon: 'papers' },
     ],
   },
@@ -40,6 +41,7 @@ const COMPACT_KEY = 'scholarweave-sidebar-compact';
 
 const TITLES: Array<[string, string]> = [
   ['/chat', 'Builder'],
+  ['/research-chat', 'Research chat'],
   ['/agents', 'Agents'],
   ['/tools', 'Tools'],
   ['/runs', 'Runs'],

@@ -376,6 +376,50 @@ async def test_running_ingestion_can_be_stopped(
     assert document.metadata_json["ingestion"]["phase_label"] == "Ingestion stopped"
 
 
+@pytest.mark.anyio
+async def test_server_shutdown_stops_running_ingestions(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "shutdown-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Shutdown",
+                source_filename="shutdown.pdf",
+                content_type="application/pdf",
+                status="uploaded",
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    started = anyio.Event()
+
+    async def blocked_ingestion(
+        _document_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        started.set()
+        await anyio.sleep_forever()
+        raise AssertionError("cancelled ingestion resumed unexpectedly")
+
+    monkeypatch.setattr(services.document_ingestion, "ingest", blocked_ingestion)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(services.documents.ingest_document, document_id)
+        await started.wait()
+        await services.close()
+
+    document = services.documents.get_document(document_id)
+    assert document is not None
+    assert document.status == "uploaded"
+    assert document.metadata_json["ingestion"]["phase"] == "stopped"
+    assert "server shutdown" in document.metadata_json["ingestion"]["phase_label"]
+
+
 def test_stale_ingestion_is_recovered_for_retry(test_settings) -> None:
     services = create_services(test_settings)
     document_id = "stale-document"

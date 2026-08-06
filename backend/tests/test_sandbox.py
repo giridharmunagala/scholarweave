@@ -85,6 +85,40 @@ def test_runaway_code_is_stopped_by_the_timeout() -> None:
     assert excinfo.value.kind == "timeout"
 
 
+@pytest.mark.anyio
+async def test_cancelling_tool_execution_kills_its_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = asyncio.create_subprocess_exec
+    captured: list[asyncio.subprocess.Process] = []
+
+    async def capture_process(*args, **kwargs):
+        process = await original(*args, **kwargs)
+        captured.append(process)
+        return process
+
+    monkeypatch.setattr(
+        "backend.tools.sandbox.asyncio.create_subprocess_exec",
+        capture_process,
+    )
+    task = asyncio.create_task(
+        run_python(
+            "import time\ndef transform(inputs):\n    time.sleep(60)\n    return None",
+            {},
+            allowed_imports=["time"],
+            limits=SandboxLimits(timeout_seconds=120),
+        )
+    )
+    while not captured:
+        await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert captured[0].returncode is not None
+
+
 def test_memory_hogs_are_stopped() -> None:
     with pytest.raises(SandboxError) as excinfo:
         _run(

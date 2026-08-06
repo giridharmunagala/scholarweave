@@ -5,6 +5,7 @@ import { Loading } from '../shared/components/Ui';
 
 const DashboardPage = lazy(() => import('../features/dashboard/DashboardPage'));
 const ChatPage = lazy(() => import('../features/chat/ChatPage'));
+const DirectAgentsPage = lazy(() => import('../features/direct-agents/DirectAgentsPage'));
 const AgentsGalleryPage = lazy(() => import('../features/agents/gallery/AgentsGalleryPage'));
 const AgentEditorPage = lazy(() => import('../features/agents/editor/AgentEditorPage'));
 const ToolsPage = lazy(() => import('../features/tools/ToolsPage'));
@@ -17,6 +18,7 @@ export default function App() {
   const { pathname } = useLocation();
   let page = <DashboardPage />;
   if (pathname === '/chat') page = <ChatPage />;
+  else if (pathname === '/research-chat') page = <DirectAgentsPage />;
   else if (pathname === '/agents') page = <AgentsGalleryPage />;
   else if (pathname.startsWith('/agents/')) page = <AgentEditorPage />;
   else if (pathname === '/tools') page = <ToolsPage />;

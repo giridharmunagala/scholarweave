@@ -15,6 +15,7 @@ from backend.builder.todos import (
 )
 from backend.core.config import Settings
 from backend.documents import DocumentService
+from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
 from backend.persistence.files import SafeStorage
@@ -35,6 +36,7 @@ class ApplicationToolRuntime:
         agent_service: AgentService | None = None,
         function_tool_service: FunctionToolService | None = None,
         tool_catalog: ToolCatalog | None = None,
+        direct_agent_repository: DirectAgentRepository | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -44,6 +46,7 @@ class ApplicationToolRuntime:
         self._agents = agent_service
         self._function_tools = function_tool_service
         self._catalog = tool_catalog
+        self._direct_agents = direct_agent_repository
 
     async def invoke(
         self,
@@ -55,6 +58,11 @@ class ApplicationToolRuntime:
             "builder.todos.create": create_builder_todo_plan,
             "builder.todos.update": update_builder_todo,
             "builder.finish": finish_builder_run,
+            "research.pages.read_all": self._read_all_paper_pages,
+            "research.pages.read_retained": self._read_retained_paper_pages,
+            "research.page_decisions.save": self._save_page_decisions,
+            "research.summaries.save": self._save_paper_summary,
+            "research.summaries.list": self._list_paper_summaries,
             "documents.list": self._list_documents,
             "documents.read_chunks": self._read_document_chunks,
             "retrieval.keyword_search": self._keyword_search,
@@ -77,6 +85,161 @@ class ApplicationToolRuntime:
             await context.emit("builder.todos.updated", result)
         await context.emit("tool.application_completed", {"catalog_id": catalog_id})
         return result
+
+    def _read_all_paper_pages(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = self._scoped_document(arguments, context)
+        result = self._read_pages(document_id, arguments, retained_only=False)
+        self._record_read_pages(context, result)
+        return result
+
+    def _read_retained_paper_pages(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = self._scoped_document(arguments, context)
+        result = self._read_pages(document_id, arguments, retained_only=True)
+        self._record_read_pages(context, result)
+        return result
+
+    def _read_pages(
+        self,
+        document_id: str,
+        arguments: dict[str, Any],
+        *,
+        retained_only: bool,
+    ) -> dict[str, Any]:
+        details = self._documents.get_document_details(document_id)
+        if details is None:
+            raise ValueError("Paper was not found.")
+        document, artifacts, _ = details
+        manifest_artifact = next(
+            (artifact for artifact in artifacts if artifact.kind == "extracted_manifest"),
+            None,
+        )
+        if document.status != "ready" or manifest_artifact is None:
+            raise ValueError("Paper must be ingested before its pages can be read.")
+        manifest = self._documents.artifact_content(manifest_artifact)
+        if not isinstance(manifest, dict) or not isinstance(manifest.get("pages"), list):
+            raise ValueError("Paper page manifest is invalid.")
+        raw_pages = [page for page in manifest["pages"] if isinstance(page, dict)]
+        decisions = self._require_direct_agents().page_decisions(document_id)
+        pages = [
+            {
+                "page_number": int(page["page"]),
+                "text": str(page.get("text") or ""),
+                "decision": decisions.get(int(page["page"]), "unreviewed"),
+            }
+            for page in raw_pages
+            if not retained_only or decisions.get(int(page["page"])) != "no_keep"
+        ]
+        start_page = int(arguments["start_page"])
+        limit = int(arguments["limit"])
+        available = [page for page in pages if page["page_number"] >= start_page]
+        selected = available[:limit]
+        next_page = selected[-1]["page_number"] + 1 if selected else start_page
+        return {
+            "document_id": document_id,
+            "title": document.title,
+            "total_pages": len(raw_pages),
+            "available_pages": len(pages),
+            "pages": selected,
+            "has_more": len(available) > len(selected),
+            "next_page": next_page,
+        }
+
+    def _save_page_decisions(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = self._scoped_document(arguments, context)
+        if context.metadata.get("direct_agent_key") != "paper_cleaner":
+            raise ValueError("Only the paper cleaner can save page decisions.")
+        decisions = list(arguments["decisions"])
+        document = self._documents.get_document(document_id)
+        if document is None or document.page_count is None:
+            raise ValueError("Paper must be ingested before page decisions can be saved.")
+        page_numbers = [int(decision["page_number"]) for decision in decisions]
+        if len(page_numbers) != len(set(page_numbers)):
+            raise ValueError("A decision batch cannot contain duplicate page numbers.")
+        if any(page < 1 or page > document.page_count for page in page_numbers):
+            raise ValueError("A page decision is outside the paper's page range.")
+        staged = context.metadata.get("paper_page_decisions")
+        staged_by_page = dict(staged) if isinstance(staged, dict) else {}
+        for decision in decisions:
+            staged_by_page[str(int(decision["page_number"]))] = decision
+        context.metadata["paper_page_decisions"] = staged_by_page
+        decided_pages = set(context.metadata.get("paper_pages_decided", []))
+        decided_pages.update(page_numbers)
+        context.metadata["paper_pages_decided"] = sorted(decided_pages)
+        return {
+            "document_id": document_id,
+            "saved_count": len(decisions),
+            "total_saved": len(staged_by_page),
+            "total_pages": document.page_count,
+            "status": "staged_until_run_completes",
+        }
+
+    def _save_paper_summary(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = self._scoped_document(arguments, context)
+        if context.metadata.get("direct_agent_key") != "summary":
+            raise ValueError("Only the summary agent can save paper summaries.")
+        context.metadata["paper_summary"] = {
+            "contribution": str(arguments["contribution"]),
+            "contributions_detail": str(arguments["contributions_detail"]),
+            "experimentation_results": str(arguments["experimentation_results"]),
+            "open_areas": list(arguments["open_areas"]),
+        }
+        context.metadata["paper_summary_saved"] = True
+        return {
+            "document_id": document_id,
+            "saved": True,
+            "status": "staged_until_run_completes",
+        }
+
+    def _list_paper_summaries(
+        self,
+        _arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> list[dict[str, Any]]:
+        if context.metadata.get("direct_agent_key") != "open_areas":
+            raise ValueError("Only the open-areas agent can list stored paper summaries.")
+        context.metadata["paper_summaries_listed"] = True
+        return self._require_direct_agents().list_summaries()
+
+    @staticmethod
+    def _scoped_document(
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> str:
+        document_id = str(arguments["document_id"])
+        allowed = context.metadata.get("direct_agent_document_ids")
+        if not isinstance(allowed, list) or document_id not in allowed:
+            raise ValueError("The requested paper is outside this direct-agent conversation.")
+        return document_id
+
+    @staticmethod
+    def _record_read_pages(
+        context: ScholarWeaveContext,
+        result: dict[str, Any],
+    ) -> None:
+        context.metadata["paper_pages_tool_called"] = True
+        read_pages = set(context.metadata.get("paper_pages_read", []))
+        read_pages.update(
+            int(page["page_number"])
+            for page in result["pages"]
+            if isinstance(page, dict) and "page_number" in page
+        )
+        context.metadata["paper_pages_read"] = sorted(read_pages)
 
     def _list_documents(
         self,
@@ -366,3 +529,8 @@ class ApplicationToolRuntime:
         if self._function_tools is None:
             raise RuntimeError("Function-tool authoring is not configured.")
         return self._function_tools
+
+    def _require_direct_agents(self) -> DirectAgentRepository:
+        if self._direct_agents is None:
+            raise RuntimeError("Direct research-agent tools are not configured.")
+        return self._direct_agents

@@ -119,6 +119,7 @@ def _register_models() -> None:
     from backend.agents import models as agent_models  # noqa: F401
     from backend.conversations import models as conversation_models  # noqa: F401
     from backend.core import models as core_models  # noqa: F401
+    from backend.direct_agents import models as direct_agent_models  # noqa: F401
     from backend.documents import models as document_models  # noqa: F401
     from backend.providers import models as provider_models  # noqa: F401
     from backend.runs import models as run_models  # noqa: F401

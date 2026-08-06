@@ -22,6 +22,8 @@ from backend.documents.ingestion import DocumentIngestion
 from backend.documents.ocr import DocumentOCR
 from backend.documents.repository import DocumentRepository
 from backend.documents.vision import VisionEnhancer
+from backend.direct_agents import DirectAgentService
+from backend.direct_agents.repository import DirectAgentRepository
 from backend.runs.broker import EventBroker
 from backend.providers.ollama import OllamaClient
 from backend.persistence import create_session_factory
@@ -72,9 +74,11 @@ class ApplicationServices:
     events: EventBroker
     runs: RunService
     builder: BuilderService
+    direct_agents: DirectAgentService
     sdk_version: str = SUPPORTED_SDK_VERSION
 
     async def close(self) -> None:
+        await self.documents.close()
         await self.runs.close()
         await self.sdk_clients.close()
         engine = self.session_factory.kw.get("bind")
@@ -156,6 +160,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         ConversationRepository(session_factory),
         sdk_sessions,
     )
+    direct_agent_repository = DirectAgentRepository(session_factory)
     events = EventBroker()
     tool_runtime = ApplicationToolRuntime(
         settings=resolved,
@@ -166,6 +171,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         agent_service=agents,
         function_tool_service=function_tools,
         tool_catalog=tool_catalog,
+        direct_agent_repository=direct_agent_repository,
     )
     runs = RunService(
         RunRepository(session_factory),
@@ -174,6 +180,12 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         events,
     )
     builder = BuilderService(compiler, conversations, runs)
+    direct_agents = DirectAgentService(
+        direct_agent_repository,
+        conversations,
+        compiler,
+        documents,
+    )
     providers = ProviderService(
         provider_repository,
         model_runtime,
@@ -209,4 +221,5 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         events=events,
         runs=runs,
         builder=builder,
+        direct_agents=direct_agents,
     )

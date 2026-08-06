@@ -440,6 +440,76 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/research-agent-conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Direct Conversations */
+        get: operations["list_direct_conversations_api_research_agent_conversations_get"];
+        put?: never;
+        /** Create Direct Conversation */
+        post: operations["create_direct_conversation_api_research_agent_conversations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/research-agent-conversations/{conversation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Direct Conversation */
+        get: operations["get_direct_conversation_api_research_agent_conversations__conversation_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Direct Conversation */
+        delete: operations["delete_direct_conversation_api_research_agent_conversations__conversation_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/research-agent-conversations/{conversation_id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send Direct Message */
+        post: operations["send_direct_message_api_research_agent_conversations__conversation_id__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/research-agents": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Research Agents */
+        get: operations["list_research_agents_api_research_agents_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs": {
         parameters: {
             query?: never;
@@ -937,7 +1007,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "builder";
+            kind: "agent" | "builder" | "direct_agent";
             /** Last Message Preview */
             last_message_preview: string;
             model_reference: components["schemas"]["ModelReferenceSpec"];
@@ -977,7 +1047,119 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "builder";
+            kind: "agent" | "builder" | "direct_agent";
+            /** Last Message Preview */
+            last_message_preview: string;
+            model_reference: components["schemas"]["ModelReferenceSpec"];
+            session_policy: components["schemas"]["SessionPolicySpec"];
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** DirectAgentResponse */
+        DirectAgentResponse: {
+            /** Description */
+            description: string;
+            /**
+             * Key
+             * @enum {string}
+             */
+            key: "summary" | "open_areas" | "qa" | "paper_cleaner";
+            /** Name */
+            name: string;
+            /** Requires Document */
+            requires_document: boolean;
+        };
+        /** DirectConversationCreateRequest */
+        DirectConversationCreateRequest: {
+            /**
+             * Agent Key
+             * @enum {string}
+             */
+            agent_key: "summary" | "open_areas" | "qa" | "paper_cleaner";
+            /** Document Ids */
+            document_ids?: string[];
+            model_reference?: components["schemas"]["ModelReferenceSpec"];
+            /**
+             * Title
+             * @default New agent chat
+             */
+            title: string;
+        };
+        /** DirectConversationDetailResponse */
+        DirectConversationDetailResponse: {
+            /**
+             * Agent Key
+             * @enum {string}
+             */
+            agent_key: "summary" | "open_areas" | "qa" | "paper_cleaner";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Document Ids */
+            document_ids: string[];
+            /** Id */
+            id: string;
+            /** Items */
+            items: components["schemas"]["SessionItemResponse"][];
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "direct_agent";
+            /** Last Message Preview */
+            last_message_preview: string;
+            model_reference: components["schemas"]["ModelReferenceSpec"];
+            session_policy: components["schemas"]["SessionPolicySpec"];
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** DirectConversationMessageRequest */
+        DirectConversationMessageRequest: {
+            /** Content */
+            content: string;
+        };
+        /** DirectConversationMessageResponse */
+        DirectConversationMessageResponse: {
+            conversation: components["schemas"]["DirectConversationResponse"];
+            run: components["schemas"]["RunResponse"];
+        };
+        /** DirectConversationResponse */
+        DirectConversationResponse: {
+            /**
+             * Agent Key
+             * @enum {string}
+             */
+            agent_key: "summary" | "open_areas" | "qa" | "paper_cleaner";
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Document Ids */
+            document_ids: string[];
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "direct_agent";
             /** Last Message Preview */
             last_message_preview: string;
             model_reference: components["schemas"]["ModelReferenceSpec"];
@@ -3054,6 +3236,174 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_direct_conversations_api_research_agent_conversations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectConversationResponse"][];
+                };
+            };
+        };
+    };
+    create_direct_conversation_api_research_agent_conversations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DirectConversationCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectConversationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_direct_conversation_api_research_agent_conversations__conversation_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectConversationDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_direct_conversation_api_research_agent_conversations__conversation_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_direct_message_api_research_agent_conversations__conversation_id__messages_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DirectConversationMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectConversationMessageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_research_agents_api_research_agents_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DirectAgentResponse"][];
                 };
             };
         };

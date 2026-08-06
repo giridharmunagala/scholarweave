@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -17,6 +18,19 @@ class FakeOllama:
     async def unload_all_models(self) -> list[str]:
         self.events.append("unload")
         return ["resident-model"]
+
+
+def test_surya_availability_requires_torchvision(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = test_settings.model_copy(update={"ocr_engine": "surya"})
+    monkeypatch.setattr(
+        "backend.documents.ocr.importlib.util.find_spec",
+        lambda package: None if package == "torchvision" else object(),
+    )
+
+    assert DocumentOCR(settings).available() is False
 
 
 @pytest.mark.anyio
@@ -82,6 +96,8 @@ async def test_surya_unloads_ollama_and_serializes_isolated_workers(
         maximum_active_workers = max(maximum_active_workers, active_workers)
         await anyio.sleep(0.01)
         output_path = Path(command[command.index("--output") + 1])
+        manifest_path = Path(command[command.index("--manifest") + 1])
+        assert json.loads(manifest_path.read_text(encoding="utf-8"))["parent_pid"] == os.getpid()
         output_path.write_text(json.dumps({"pages": ["recognized"]}), encoding="utf-8")
         active_workers -= 1
         return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")

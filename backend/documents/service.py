@@ -26,6 +26,8 @@ class DocumentService:
         self.ingestion = ingestion
         self.ocr = ocr
         self._active_ingestions: dict[str, anyio.CancelScope] = {}
+        self._ingestion_finished: dict[str, anyio.Event] = {}
+        self._closing = False
 
     def ocr_available(self) -> bool:
         return self.ocr.available()
@@ -104,6 +106,8 @@ class DocumentService:
         triage_model: str | None = None,
         progress: ProgressCallback | None = None,
     ) -> dict[str, Any]:
+        if self._closing:
+            raise DocumentProcessingError("The server is shutting down.")
         if force_ocr and not self.ocr.available():
             raise DocumentProcessingError(
                 f"The configured {self.ingestion.settings.ocr_engine} OCR runtime is unavailable."
@@ -137,8 +141,10 @@ class DocumentService:
             if progress is not None:
                 await progress(payload)
 
+        finished = anyio.Event()
         with anyio.CancelScope() as cancel_scope:
             self._active_ingestions[document_id] = cancel_scope
+            self._ingestion_finished[document_id] = finished
             try:
                 result = await self.ingestion.ingest(
                     document_id,
@@ -152,7 +158,9 @@ class DocumentService:
                 )
             finally:
                 self._active_ingestions.pop(document_id, None)
+                self._ingestion_finished.pop(document_id, None)
                 self.repository.finish_failed_ingestion(document_id, previous_status)
+                finished.set()
         if cancel_scope.cancel_called:
             return {"document_id": document_id, "stopped": True}
         return result
@@ -163,6 +171,28 @@ class DocumentService:
         if cancel_scope is not None:
             cancel_scope.cancel()
         return document
+
+    async def close(self) -> None:
+        self._closing = True
+        active = [
+            (
+                document_id,
+                cancel_scope,
+                self._ingestion_finished[document_id],
+            )
+            for document_id, cancel_scope in tuple(self._active_ingestions.items())
+            if document_id in self._ingestion_finished
+        ]
+        for document_id, cancel_scope, _ in active:
+            document = self.repository.get(document_id)
+            if document is not None and document.status == "processing":
+                self.repository.stop_ingestion(
+                    document_id,
+                    phase_label="Ingestion stopped during server shutdown",
+                )
+            cancel_scope.cancel()
+        for _, _, finished in active:
+            await finished.wait()
 
     async def enhance_document_page(
         self,

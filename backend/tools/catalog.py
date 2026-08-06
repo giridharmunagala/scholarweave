@@ -79,6 +79,97 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
         True,
     ),
     (
+        "research.pages.read_all",
+        "read_all_paper_pages",
+        "Read exact extracted page text, including pages previously marked no-keep.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "start_page": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["document_id", "start_page", "limit"],
+        ),
+        True,
+    ),
+    (
+        "research.pages.read_retained",
+        "read_retained_paper_pages",
+        "Read exact page text while excluding pages marked no-keep by the paper cleaner.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "start_page": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["document_id", "start_page", "limit"],
+        ),
+        True,
+    ),
+    (
+        "research.page_decisions.save",
+        "save_paper_page_decisions",
+        "Persist keep or no-keep decisions for reviewed paper pages.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "decisions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": _object_schema(
+                        {
+                            "page_number": {"type": "integer", "minimum": 1},
+                            "decision": {"type": "string", "enum": ["keep", "no_keep"]},
+                            "reason": {"type": "string", "minLength": 1},
+                        },
+                        required=["page_number", "decision", "reason"],
+                    ),
+                },
+            },
+            required=["document_id", "decisions"],
+        ),
+        True,
+    ),
+    (
+        "research.summaries.save",
+        "save_paper_summary",
+        "Persist the fixed four-part summary for a paper.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "contribution": {"type": "string", "minLength": 1},
+                "contributions_detail": {"type": "string", "minLength": 1},
+                "experimentation_results": {"type": "string", "minLength": 1},
+                "open_areas": {
+                    "type": "array",
+                    "items": _object_schema(
+                        {
+                            "statement": {"type": "string", "minLength": 1},
+                            "citation": {"type": "string", "minLength": 1},
+                        },
+                        required=["statement", "citation"],
+                    ),
+                },
+            },
+            required=[
+                "document_id",
+                "contribution",
+                "contributions_detail",
+                "experimentation_results",
+                "open_areas",
+            ],
+        ),
+        True,
+    ),
+    (
+        "research.summaries.list",
+        "list_paper_summaries",
+        "List all saved four-part paper summaries in the repository.",
+        _object_schema({}),
+        True,
+    ),
+    (
         "documents.list",
         "list_documents",
         "List papers",

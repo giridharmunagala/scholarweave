@@ -34,7 +34,7 @@ class BuilderConversationCreateRequest(ConversationSchema):
 class ConversationResponse(ConversationSchema):
     id: str
     title: str
-    kind: Literal["agent", "builder"]
+    kind: Literal["agent", "builder", "direct_agent"]
     agent_revision_id: str | None
     model_reference: ModelReferenceSpec
     session_policy: SessionPolicySpec

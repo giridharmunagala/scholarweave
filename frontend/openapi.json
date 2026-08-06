@@ -753,7 +753,8 @@
           "kind": {
             "enum": [
               "agent",
-              "builder"
+              "builder",
+              "direct_agent"
             ],
             "title": "Kind",
             "type": "string"
@@ -857,7 +858,8 @@
           "kind": {
             "enum": [
               "agent",
-              "builder"
+              "builder",
+              "direct_agent"
             ],
             "title": "Kind",
             "type": "string"
@@ -899,6 +901,268 @@
           "updated_at"
         ],
         "title": "ConversationResponse",
+        "type": "object"
+      },
+      "DirectAgentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "key": {
+            "enum": [
+              "summary",
+              "open_areas",
+              "qa",
+              "paper_cleaner"
+            ],
+            "title": "Key",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "requires_document": {
+            "title": "Requires Document",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "description",
+          "requires_document"
+        ],
+        "title": "DirectAgentResponse",
+        "type": "object"
+      },
+      "DirectConversationCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_key": {
+            "enum": [
+              "summary",
+              "open_areas",
+              "qa",
+              "paper_cleaner"
+            ],
+            "title": "Agent Key",
+            "type": "string"
+          },
+          "document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 1,
+            "title": "Document Ids",
+            "type": "array"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "title": {
+            "default": "New agent chat",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_key"
+        ],
+        "title": "DirectConversationCreateRequest",
+        "type": "object"
+      },
+      "DirectConversationDetailResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_key": {
+            "enum": [
+              "summary",
+              "open_areas",
+              "qa",
+              "paper_cleaner"
+            ],
+            "title": "Agent Key",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Ids",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SessionItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "kind": {
+            "const": "direct_agent",
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_message_preview": {
+            "title": "Last Message Preview",
+            "type": "string"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "session_policy": {
+            "$ref": "#/components/schemas/SessionPolicySpec"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "kind",
+          "agent_key",
+          "document_ids",
+          "model_reference",
+          "session_policy",
+          "status",
+          "last_message_preview",
+          "created_at",
+          "updated_at",
+          "items"
+        ],
+        "title": "DirectConversationDetailResponse",
+        "type": "object"
+      },
+      "DirectConversationMessageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "DirectConversationMessageRequest",
+        "type": "object"
+      },
+      "DirectConversationMessageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/DirectConversationResponse"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunResponse"
+          }
+        },
+        "required": [
+          "conversation",
+          "run"
+        ],
+        "title": "DirectConversationMessageResponse",
+        "type": "object"
+      },
+      "DirectConversationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_key": {
+            "enum": [
+              "summary",
+              "open_areas",
+              "qa",
+              "paper_cleaner"
+            ],
+            "title": "Agent Key",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Ids",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "direct_agent",
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_message_preview": {
+            "title": "Last Message Preview",
+            "type": "string"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "session_policy": {
+            "$ref": "#/components/schemas/SessionPolicySpec"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "kind",
+          "agent_key",
+          "document_ids",
+          "model_reference",
+          "session_policy",
+          "status",
+          "last_message_preview",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DirectConversationResponse",
         "type": "object"
       },
       "DocumentChunkResponse": {
@@ -5216,6 +5480,222 @@
         "summary": "Verify Provider",
         "tags": [
           "providers"
+        ]
+      }
+    },
+    "/api/research-agent-conversations": {
+      "get": {
+        "operationId": "list_direct_conversations_api_research_agent_conversations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DirectConversationResponse"
+                  },
+                  "title": "Response List Direct Conversations Api Research Agent Conversations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Direct Conversations",
+        "tags": [
+          "direct research agents"
+        ]
+      },
+      "post": {
+        "operationId": "create_direct_conversation_api_research_agent_conversations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DirectConversationCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Direct Conversation",
+        "tags": [
+          "direct research agents"
+        ]
+      }
+    },
+    "/api/research-agent-conversations/{conversation_id}": {
+      "delete": {
+        "operationId": "delete_direct_conversation_api_research_agent_conversations__conversation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Direct Conversation",
+        "tags": [
+          "direct research agents"
+        ]
+      },
+      "get": {
+        "operationId": "get_direct_conversation_api_research_agent_conversations__conversation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectConversationDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Direct Conversation",
+        "tags": [
+          "direct research agents"
+        ]
+      }
+    },
+    "/api/research-agent-conversations/{conversation_id}/messages": {
+      "post": {
+        "operationId": "send_direct_message_api_research_agent_conversations__conversation_id__messages_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DirectConversationMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DirectConversationMessageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send Direct Message",
+        "tags": [
+          "direct research agents"
+        ]
+      }
+    },
+    "/api/research-agents": {
+      "get": {
+        "operationId": "list_research_agents_api_research_agents_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DirectAgentResponse"
+                  },
+                  "title": "Response List Research Agents Api Research Agents Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Research Agents",
+        "tags": [
+          "direct research agents"
         ]
       }
     },

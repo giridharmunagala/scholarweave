@@ -13,6 +13,7 @@ OpenAI, Azure AI Foundry, and OpenAI-compatible endpoints.
 | **Papers** | Upload PDFs, extract text and figures, OCR text-poor pages, index chunks, and inspect page-level quality. |
 | **Agents** | Compose SDK `Agent`, `FunctionTool`, hosted tool, `Agent.as_tool()`, handoff, guardrail, structured-output, and model-setting primitives. |
 | **Builder chat** | Create and revise validated SDK blueprints through an ordinary SDK agent with a persistent SDK session, visible stepwise TODOs, and save-receipt completion. |
+| **Research chat** | Talk directly with four code-defined agents for fixed paper summaries, cross-summary open areas, paper Q&A, and page-level keep/no-keep cleaning. |
 | **Tools** | Use built-in research/workspace tools or author revisioned sandboxed Python `FunctionTool` callbacks. |
 | **Runs** | Inspect SDK run items, tool calls, handoffs, guardrails, usage, interruptions, compaction, and streamed lifecycle events. |
 | **Workspace** | Read and write safe local text artifacts without exposing arbitrary filesystem access. |
@@ -119,7 +120,8 @@ driver. For CUDA 13:
 ```
 
 Open <http://127.0.0.1:8000>, configure provider defaults under **Settings**, ingest papers under
-**Papers**, then create an SDK blueprint under **Agents** or through **Builder chat**.
+**Papers**, then use the fixed agents under **Research chat** or create an SDK blueprint under
+**Agents** or through **Builder chat**.
 
 ## Providers
 
