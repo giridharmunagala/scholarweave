@@ -1,0 +1,13 @@
+.tool-card h2 { font-size: var(--text-base); }
+.tool-card .tag { justify-self: start; max-width: 100%; }
+.tool-badge {
+  display: grid;
+  justify-self: start;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.tool-badge.kind-custom { background: color-mix(in srgb, var(--hosted) 16%, transparent); color: var(--hosted); }

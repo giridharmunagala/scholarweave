@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from backend.app import create_backend_services
-from backend.models import Document
+from backend.bootstrap import create_services
+from backend.documents.models import Document
 
 
 def test_retrieval_services_support_keyword_vector_and_merge(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
     with services.session_factory() as session:
         session.add(Document(id="doc-1", title="Doc", source_filename="doc.pdf", content_type="application/pdf", status="ready"))
         session.commit()

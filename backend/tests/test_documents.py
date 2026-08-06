@@ -3,18 +3,20 @@ from __future__ import annotations
 import base64
 import shutil
 
+import anyio
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from backend.app import create_app, create_backend_services
+from backend.app import create_app
+from backend.bootstrap import create_services
 from backend.documents import DocumentProcessingError
-from backend.ollama import OllamaError
-from backend.models import Artifact
+from backend.providers.ollama import OllamaError
+from backend.documents.models import Artifact, Document, DocumentChunk
 
 
 def test_artifact_records_are_idempotent_by_owned_path(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
     path = "workspace/result.md"
     first_file = services.storage.write_text(test_settings.artifacts_dir, path, "first")
     first = services.documents.create_artifact_record(
@@ -51,6 +53,360 @@ def test_artifact_records_are_idempotent_by_owned_path(test_settings) -> None:
         )
 
 
+def test_artifact_responses_are_not_cached(test_settings) -> None:
+    services = create_services(test_settings)
+    stored = services.storage.write_text(
+        test_settings.artifacts_dir,
+        "documents/cache-test/extracted.md",
+        "fresh extraction",
+    )
+    artifact = services.documents.create_artifact_record(
+        owner_type="document",
+        kind="extracted_markdown",
+        relative_path="documents/cache-test/extracted.md",
+        media_type="text/markdown",
+        stored=stored,
+    )
+    client = TestClient(create_app(test_settings))
+
+    content = client.get(f"/api/artifacts/{artifact.id}/content")
+    raw = client.get(f"/api/artifacts/{artifact.id}/raw")
+
+    assert content.status_code == 200
+    assert content.headers["cache-control"] == "no-store"
+    assert raw.status_code == 200
+    assert raw.headers["cache-control"] == "no-store"
+
+
+def test_text_layer_inspection_recommends_an_ingestion_mode(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+
+    class FakePage:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def extract_text(self) -> str:
+            return self.text
+
+    class FakeReader:
+        pages = [
+            FakePage("Embedded text " * 10),
+            FakePage("Embedded text " * 10),
+            FakePage(""),
+        ]
+
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", lambda _: FakeReader())
+
+    summary = services.document_ocr.inspect_text_layer(test_settings.data_dir / "paper.pdf")
+
+    assert summary == {
+        "total_pages": 3,
+        "embedded_text_pages": 2,
+        "embedded_text_ratio": pytest.approx(2 / 3),
+        "recommended_mode": "ocr",
+    }
+
+
+@pytest.mark.anyio
+async def test_ingestion_persists_progress_and_completion(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "progress-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Progress",
+                source_filename="progress.pdf",
+                content_type="application/pdf",
+                status="uploaded",
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    async def complete_ingestion(_document_id: str, **kwargs: object) -> dict[str, object]:
+        assert services.documents.get_document(document_id).status == "processing"
+        progress = kwargs["progress"]
+        assert callable(progress)
+        await progress(
+            {
+                "phase": "ocr",
+                "phase_label": "Rendering and OCR",
+                "completed_pages": 1,
+                "total_pages": 2,
+            }
+        )
+        processing = services.documents.get_document(document_id)
+        assert processing is not None
+        assert processing.metadata_json["ingestion"]["completed_pages"] == 1
+        services.document_repository.mark_ready(
+            document_id,
+            page_count=2,
+            metadata={"figure_count": 0},
+        )
+        return {"document_id": document_id}
+
+    monkeypatch.setattr(services.document_ingestion, "ingest", complete_ingestion)
+
+    await services.documents.ingest_document(document_id)
+
+    completed = services.documents.get_document(document_id)
+    assert completed is not None
+    assert completed.status == "ready"
+    assert completed.metadata_json["ingestion"] == {
+        "phase": "complete",
+        "phase_label": "Ingestion complete",
+        "completed_pages": 2,
+        "total_pages": 2,
+    }
+
+
+@pytest.mark.anyio
+async def test_forced_ocr_is_forwarded_to_ingestion(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "forced-ocr-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Forced OCR",
+                source_filename="forced.pdf",
+                content_type="application/pdf",
+                status="uploaded",
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    async def complete_ingestion(_document_id: str, **kwargs: object) -> dict[str, object]:
+        assert kwargs["force_ocr"] is True
+        services.document_repository.mark_ready(
+            document_id,
+            page_count=1,
+            metadata={"extraction_mode": "ocr"},
+        )
+        return {"document_id": document_id}
+
+    monkeypatch.setattr(services.document_ocr, "available", lambda: True)
+    monkeypatch.setattr(services.document_ingestion, "ingest", complete_ingestion)
+
+    await services.documents.ingest_document(document_id, force_ocr=True)
+
+    completed = services.documents.get_document(document_id)
+    assert completed is not None
+    assert completed.metadata_json["extraction_mode"] == "ocr"
+
+
+@pytest.mark.anyio
+async def test_forced_ocr_clears_stale_generated_outputs(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "ocr-cleanup-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="OCR Cleanup",
+                source_filename="cleanup.pdf",
+                content_type="application/pdf",
+                status="ready",
+                page_count=1,
+                metadata_json={},
+            )
+        )
+        session.add(
+            DocumentChunk(
+                document_id=document_id,
+                chunk_index=0,
+                section_title="Old",
+                page_start=1,
+                page_end=1,
+                citation="p.1",
+                text="stale text",
+                metadata_json={},
+            )
+        )
+        session.commit()
+    source_file = services.storage.write_text(
+        test_settings.documents_dir,
+        f"{document_id}/source.pdf",
+        "source",
+    )
+    source_artifact = services.documents.create_artifact_record(
+        owner_type="document",
+        kind="source_pdf",
+        document_id=document_id,
+        relative_path=source_file.relative_path,
+        media_type="application/pdf",
+        stored=source_file,
+        storage_area="documents",
+    )
+    stale_file = services.storage.write_text(
+        test_settings.artifacts_dir,
+        f"documents/{document_id}/extracted.md",
+        "old markdown",
+    )
+    stale_artifact = services.documents.create_artifact_record(
+        owner_type="document",
+        kind="extracted_markdown",
+        document_id=document_id,
+        relative_path=stale_file.relative_path,
+        media_type="text/markdown",
+        stored=stale_file,
+    )
+    orphan_file = services.storage.write_text(
+        test_settings.artifacts_dir,
+        f"documents/{document_id}/orphan-note.md",
+        "orphan",
+    )
+
+    async def complete_ingestion(_document_id: str, **kwargs: object) -> dict[str, object]:
+        assert kwargs["force_ocr"] is True
+        details = services.documents.get_document_details(document_id)
+        assert details is not None
+        _, artifacts, chunks = details
+        assert [artifact.kind for artifact in artifacts] == ["source_pdf"]
+        assert chunks == []
+        assert source_file.absolute_path.exists()
+        assert not stale_file.absolute_path.exists()
+        assert not orphan_file.absolute_path.exists()
+        services.document_repository.mark_ready(
+            document_id,
+            page_count=1,
+            metadata={"extraction_mode": "ocr"},
+        )
+        return {"document_id": document_id}
+
+    monkeypatch.setattr(services.document_ocr, "available", lambda: True)
+    monkeypatch.setattr(services.document_ingestion, "ingest", complete_ingestion)
+
+    await services.documents.ingest_document(document_id, force_ocr=True)
+
+    assert services.documents.get_artifact(source_artifact.id) is not None
+    assert services.documents.get_artifact(stale_artifact.id) is None
+
+
+@pytest.mark.anyio
+async def test_failed_ingestion_does_not_leave_document_processing(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "failed-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Failure",
+                source_filename="failure.pdf",
+                content_type="application/pdf",
+                status="uploaded",
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    async def fail_ingestion(_document_id: str, **_kwargs: object) -> dict[str, object]:
+        raise DocumentProcessingError("PDF extraction failed")
+
+    monkeypatch.setattr(services.document_ingestion, "ingest", fail_ingestion)
+
+    with pytest.raises(DocumentProcessingError, match="PDF extraction failed"):
+        await services.documents.ingest_document(document_id)
+
+    failed = services.documents.get_document(document_id)
+    assert failed is not None
+    assert failed.status == "failed"
+    assert failed.metadata_json["ingestion"]["phase"] == "failed"
+
+
+@pytest.mark.anyio
+async def test_running_ingestion_can_be_stopped(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "stoppable-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Stoppable",
+                source_filename="stoppable.pdf",
+                content_type="application/pdf",
+                status="uploaded",
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    started = anyio.Event()
+
+    async def blocked_ingestion(
+        _document_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        started.set()
+        await anyio.sleep_forever()
+        raise AssertionError("cancelled ingestion resumed unexpectedly")
+
+    monkeypatch.setattr(services.document_ingestion, "ingest", blocked_ingestion)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(services.documents.ingest_document, document_id)
+        await started.wait()
+        stopped = services.documents.stop_ingestion(document_id)
+        assert stopped.status == "uploaded"
+
+    document = services.documents.get_document(document_id)
+    assert document is not None
+    assert document.status == "uploaded"
+    assert document.metadata_json["ingestion"]["phase"] == "stopped"
+    assert document.metadata_json["ingestion"]["phase_label"] == "Ingestion stopped"
+
+
+def test_stale_ingestion_is_recovered_for_retry(test_settings) -> None:
+    services = create_services(test_settings)
+    document_id = "stale-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Stale",
+                source_filename="stale.pdf",
+                content_type="application/pdf",
+                status="processing",
+                page_count=4,
+                metadata_json={
+                    "ingestion": {
+                        "phase": "ocr",
+                        "previous_status": "ready",
+                    }
+                },
+            )
+        )
+        session.commit()
+
+    assert services.document_repository.recover_stale_ingestions() == [document_id]
+
+    document = services.documents.get_document(document_id)
+    assert document is not None
+    assert document.status == "ready"
+    assert document.metadata_json["ingestion"]["phase"] == "stopped"
+    assert "restart" in document.metadata_json["ingestion"]["phase_label"]
+
+
 @pytest.mark.skipif(shutil.which("tesseract") is None, reason="Tesseract is not installed")
 def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
     image_module = pytest.importorskip("PIL.Image")
@@ -70,7 +426,7 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
             "/api/documents",
             files={"file": ("scanned.pdf", pdf, "application/pdf")},
         )
-    assert upload.status_code == 200
+    assert upload.status_code == 201
 
     document_id = upload.json()["id"]
     ingested = client.post(f"/api/documents/{document_id}/ingest")
@@ -91,7 +447,7 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
 
 @pytest.mark.anyio
 async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FakeOllama:
         def __init__(self) -> None:
@@ -102,7 +458,7 @@ async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
             return {"response": '{"quality":"good","issues":[]}'}
 
     fake_ollama = FakeOllama()
-    services.documents.ollama = fake_ollama  # type: ignore[assignment]
+    services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     image = b"rendered-page"
     figure_path = "/api/artifacts/figure-id/raw"
     pages = [
@@ -122,7 +478,7 @@ async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
     async def collect_progress(payload: dict[str, object]) -> None:
         progress_events.append(payload)
 
-    await services.documents._enhance_pages(
+    await services.document_vision.enhance_pages(
         pages,
         "big-vision-model",
         triage_model="small-vision-model",
@@ -156,7 +512,7 @@ async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
 
 @pytest.mark.anyio
 async def test_average_ocr_keeps_the_original_text(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FakeOllama:
         def __init__(self) -> None:
@@ -167,7 +523,7 @@ async def test_average_ocr_keeps_the_original_text(test_settings) -> None:
             return {"response": '{"quality":"average","issues":["Table borders were lost."]}'}
 
     fake_ollama = FakeOllama()
-    services.documents.ollama = fake_ollama  # type: ignore[assignment]
+    services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     pages = [
         {
             "page": 1,
@@ -180,7 +536,11 @@ async def test_average_ocr_keeps_the_original_text(test_settings) -> None:
         }
     ]
 
-    await services.documents._enhance_pages(pages, "big-vision-model", triage_model="small-vision-model")
+    await services.document_vision.enhance_pages(
+        pages,
+        "big-vision-model",
+        triage_model="small-vision-model",
+    )
 
     assert fake_ollama.calls == 1
     assert pages[0]["ocr_quality"] == "average"
@@ -191,7 +551,7 @@ async def test_average_ocr_keeps_the_original_text(test_settings) -> None:
 
 @pytest.mark.anyio
 async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FakeOllama:
         def __init__(self) -> None:
@@ -206,7 +566,7 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
             return {"response": "## Results\n\n| A | B |\n|---|---|\n| 1 | 2 |"}
 
     fake_ollama = FakeOllama()
-    services.documents.ollama = fake_ollama  # type: ignore[assignment]
+    services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     image = b"rendered-page"
     figure_path = "/api/artifacts/figure-id/raw"
     pages = [
@@ -226,7 +586,7 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
     async def collect_progress(payload: dict[str, object]) -> None:
         progress_events.append(payload)
 
-    await services.documents._enhance_pages(
+    await services.document_vision.enhance_pages(
         pages,
         "big-vision-model",
         triage_model="small-vision-model",
@@ -246,7 +606,7 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
     assert pages[0]["llm_validation_status"] == "passed"
     assert "| A | B |" in pages[0]["text"]
     assert figure_path in pages[0]["text"]
-    chunks = services.documents._chunk_pages(pages, title="Test")
+    chunks = services.document_formatter.chunk_pages(pages, title="Test")
     assert any("| A | B |\n|---|---|\n| 1 | 2 |" in chunk["text"] for chunk in chunks)
     phases = [event["phase"] for event in progress_events]
     assert phases[0] == "ocr_triage"
@@ -257,7 +617,7 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
 
 @pytest.mark.anyio
 async def test_empty_ocr_is_rewritten_without_a_triage_call(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FakeOllama:
         def __init__(self) -> None:
@@ -270,7 +630,7 @@ async def test_empty_ocr_is_rewritten_without_a_triage_call(test_settings) -> No
             return {"response": "# Recovered heading"}
 
     fake_ollama = FakeOllama()
-    services.documents.ollama = fake_ollama  # type: ignore[assignment]
+    services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     pages = [
         {
             "page": 1,
@@ -283,7 +643,11 @@ async def test_empty_ocr_is_rewritten_without_a_triage_call(test_settings) -> No
         }
     ]
 
-    await services.documents._enhance_pages(pages, "big-vision-model", triage_model="small-vision-model")
+    await services.document_vision.enhance_pages(
+        pages,
+        "big-vision-model",
+        triage_model="small-vision-model",
+    )
 
     assert fake_ollama.calls == ["big-vision-model", "small-vision-model"]
     assert pages[0]["ocr_quality"] == "poor"
@@ -293,7 +657,7 @@ async def test_empty_ocr_is_rewritten_without_a_triage_call(test_settings) -> No
 
 @pytest.mark.anyio
 async def test_failed_triage_request_falls_back_to_rewriting(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FlakyOllama:
         async def generate(self, model: str, prompt: str, **kwargs: object) -> dict[str, str]:
@@ -301,7 +665,7 @@ async def test_failed_triage_request_falls_back_to_rewriting(test_settings) -> N
                 raise OllamaError("connection reset")
             return {"response": "# Rewritten page"}
 
-    services.documents.ollama = FlakyOllama()  # type: ignore[assignment]
+    services.document_vision.ollama = FlakyOllama()  # type: ignore[assignment]
     pages = [
         {
             "page": 1,
@@ -314,7 +678,11 @@ async def test_failed_triage_request_falls_back_to_rewriting(test_settings) -> N
         }
     ]
 
-    await services.documents._enhance_pages(pages, "big-vision-model", triage_model="small-vision-model")
+    await services.document_vision.enhance_pages(
+        pages,
+        "big-vision-model",
+        triage_model="small-vision-model",
+    )
 
     assert pages[0]["ocr_quality"] == "poor"
     assert "OCR quality check failed" in pages[0]["ocr_quality_issues"][0]
@@ -325,7 +693,7 @@ async def test_failed_triage_request_falls_back_to_rewriting(test_settings) -> N
 
 @pytest.mark.anyio
 async def test_llm_rewrite_falls_back_to_ocr_when_response_is_empty(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class EmptyOllama:
         async def generate(self, model: str, prompt: str, **kwargs: object) -> dict[str, str]:
@@ -333,7 +701,7 @@ async def test_llm_rewrite_falls_back_to_ocr_when_response_is_empty(test_setting
                 return {"response": '{"quality":"poor","issues":["Text is scrambled."]}'}
             return {"response": "", "thinking": "internal reasoning only"}
 
-    services.documents.ollama = EmptyOllama()  # type: ignore[assignment]
+    services.document_vision.ollama = EmptyOllama()  # type: ignore[assignment]
     pages = [
         {
             "page": 1,
@@ -346,7 +714,7 @@ async def test_llm_rewrite_falls_back_to_ocr_when_response_is_empty(test_setting
         }
     ]
 
-    await services.documents._enhance_pages(
+    await services.document_vision.enhance_pages(
         pages,
         "thinking-vision-model",
         triage_model="small-vision-model",
@@ -358,13 +726,13 @@ async def test_llm_rewrite_falls_back_to_ocr_when_response_is_empty(test_setting
         "No LLM enhancement was applied because the model returned only an internal "
         "thinking trace. The original OCR output is used directly."
     )
-    markdown = services.documents._build_markdown("Paper", pages)
+    markdown = services.document_formatter.build_markdown("Paper", pages)
     assert "**OCR note:** No LLM enhancement was applied" in markdown
 
 
 @pytest.mark.anyio
 async def test_validation_rejects_unfaithful_rewrite(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class RejectingOllama:
         async def generate(self, model: str, prompt: str, **kwargs: object) -> dict[str, str]:
@@ -379,7 +747,7 @@ async def test_validation_rejects_unfaithful_rewrite(test_settings) -> None:
                 return {"response": '{"quality":"poor","issues":["Text is scrambled."]}'}
             return {"response": "# Invented Results\n\nAccuracy was 100%."}
 
-    services.documents.ollama = RejectingOllama()  # type: ignore[assignment]
+    services.document_vision.ollama = RejectingOllama()  # type: ignore[assignment]
     pages = [
         {
             "page": 1,
@@ -392,7 +760,7 @@ async def test_validation_rejects_unfaithful_rewrite(test_settings) -> None:
         }
     ]
 
-    await services.documents._enhance_pages(
+    await services.document_vision.enhance_pages(
         pages,
         "big-vision-model",
         triage_model="small-vision-model",
@@ -409,7 +777,7 @@ async def test_validation_rejects_unfaithful_rewrite(test_settings) -> None:
 
 @pytest.mark.anyio
 async def test_forced_repair_skips_triage(test_settings) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FakeOllama:
         def __init__(self) -> None:
@@ -422,7 +790,7 @@ async def test_forced_repair_skips_triage(test_settings) -> None:
             return {"response": "# Manually rewritten"}
 
     fake_ollama = FakeOllama()
-    services.documents.ollama = fake_ollama  # type: ignore[assignment]
+    services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     pages = [
         {
             "page": 1,
@@ -435,7 +803,7 @@ async def test_forced_repair_skips_triage(test_settings) -> None:
         }
     ]
 
-    await services.documents._enhance_pages(
+    await services.document_vision.enhance_pages(
         pages,
         "big-vision-model",
         triage_model="small-vision-model",
@@ -453,7 +821,7 @@ async def test_forced_ocr_uses_embedded_text_when_tesseract_fails(
     test_settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    services = create_backend_services(test_settings)
+    services = create_services(test_settings)
 
     class FakePage:
         def extract_text(self) -> str:
@@ -465,12 +833,12 @@ async def test_forced_ocr_uses_embedded_text_when_tesseract_fails(
     async def raise_processing_error(image_png: bytes, page_number: int) -> str:
         raise DocumentProcessingError("Tesseract exited abnormally")
 
-    monkeypatch.setattr("backend.documents.PdfReader", lambda _: FakeReader())
-    monkeypatch.setattr(services.documents, "ocr_available", lambda: True)
-    monkeypatch.setattr(services.documents, "_render_page_png", lambda *_: b"page")
-    monkeypatch.setattr(services.documents, "_ocr_image", raise_processing_error)
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", lambda _: FakeReader())
+    monkeypatch.setattr(services.document_ocr, "available", lambda: True)
+    monkeypatch.setattr(services.document_ocr, "render_page_png", lambda *_: b"page")
+    monkeypatch.setattr(services.document_ocr, "ocr_image", raise_processing_error)
 
-    pages = await services.documents._extract_pages(
+    pages = await services.document_ocr.extract_pages(
         test_settings.data_dir / "unused.pdf",
         force_ocr=True,
         retain_page_images=True,
@@ -489,7 +857,7 @@ def test_extracted_figures_are_local_raw_artifacts(test_settings, tmp_path) -> N
     pdf_path = tmp_path / "figure.pdf"
     image.save(pdf_path, "PDF")
 
-    figures = services.documents._extract_figures(pdf_path, "document-id")
+    figures = services.document_figures.extract(pdf_path, "document-id")
 
     assert len(figures) == 1
     figure = figures[0]
@@ -497,7 +865,7 @@ def test_extracted_figures_are_local_raw_artifacts(test_settings, tmp_path) -> N
     assert artifact is not None
     assert artifact.kind == "extracted_figure"
     assert artifact.media_type == "image/png"
-    assert figure["path"] == f"/api/artifacts/{artifact.id}/raw"
+    assert figure["path"] == f"/api/artifacts/{artifact.id}/raw?sha256={artifact.sha256}"
     assert services.documents.artifact_bytes(artifact).startswith(b"\x89PNG")
     response = TestClient(app).get(figure["path"])
     assert response.status_code == 200

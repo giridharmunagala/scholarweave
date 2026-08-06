@@ -1,0 +1,61 @@
+import { apiUrl } from './client';
+
+export interface RunStreamEvent {
+  sequence: number;
+  event_type: string;
+  payload: Record<string, unknown>;
+}
+
+export const RUN_EVENT_TYPES = [
+  'run.started',
+  'run.resumed',
+  'run.completed',
+  'run.failed',
+  'run.cancelled',
+  'run.paused',
+  'run.item',
+  'agent.updated',
+  'agent.started',
+  'agent.completed',
+  'model.stream',
+  'model.started',
+  'model.completed',
+  'tool.started',
+  'tool.completed',
+  'builder.todos.updated',
+  'handoff.completed',
+  'guardrail.result',
+  'guardrail.tripwire',
+  'approval.requested',
+  'approval.resolved',
+  'compaction.started',
+  'compaction.completed',
+  'compaction.failed',
+  'usage.updated',
+] as const;
+
+export function subscribeToRun(
+  runId: string,
+  after: number,
+  onEvent: (event: RunStreamEvent) => void,
+  onError: () => void,
+): () => void {
+  let cursor = after;
+  const source = new EventSource(
+    apiUrl(`/runs/${encodeURIComponent(runId)}/events?after=${after}`),
+  );
+  const deliver = (message: MessageEvent<string>) => {
+    const event = JSON.parse(message.data) as RunStreamEvent;
+    if (event.sequence <= cursor) return;
+    cursor = event.sequence;
+    onEvent(event);
+  };
+  source.onmessage = deliver;
+  for (const eventType of RUN_EVENT_TYPES) {
+    source.addEventListener(eventType, (message) => {
+      deliver(message as MessageEvent<string>);
+    });
+  }
+  source.onerror = onError;
+  return () => source.close();
+}

@@ -1,0 +1,212 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import anyio
+from sqlalchemy.orm import Session, sessionmaker
+
+from backend.agents.compiler import AgentCompiler
+from backend.agents.guardrails import create_guardrail_catalog
+from backend.agents.repository import AgentRepository
+from backend.agents.service import AgentService
+from backend.builder.service import BuilderService
+from backend.core.config import Settings
+from backend.conversations.repository import ConversationRepository
+from backend.conversations.service import ConversationService
+from backend.core.settings_service import SettingsService
+from backend.documents import DocumentService
+from backend.documents.figures import FigureExtractor
+from backend.documents.formatting import DocumentFormatter
+from backend.documents.ingestion import DocumentIngestion
+from backend.documents.ocr import DocumentOCR
+from backend.documents.repository import DocumentRepository
+from backend.documents.vision import VisionEnhancer
+from backend.runs.broker import EventBroker
+from backend.providers.ollama import OllamaClient
+from backend.persistence import create_session_factory
+from backend.providers.runtime import ModelRuntime
+from backend.providers.repository import ProviderRepository
+from backend.providers.sdk_models import ProfileModelResolver, SdkClientPool
+from backend.providers.service import ProviderService
+from backend.documents.retrieval import RetrievalService
+from backend.runs.repository import RunRepository
+from backend.runs.service import RunService
+from backend.runtime.sdk_compat import SUPPORTED_SDK_VERSION, assert_supported_sdk
+from backend.runtime.sessions import SdkSessionFactory
+from backend.persistence.files import SafeStorage
+from backend.tools.catalog import create_tool_catalog
+from backend.tools.repository import FunctionToolRepository
+from backend.tools.runtime import ApplicationToolRuntime
+from backend.tools.service import FunctionToolService
+from backend.workspace.service import WorkspaceService
+
+
+@dataclass(slots=True)
+class ApplicationServices:
+    settings: Settings
+    session_factory: sessionmaker[Session]
+    settings_service: SettingsService
+    storage: SafeStorage
+    ollama: OllamaClient
+    model_runtime: ModelRuntime
+    sdk_clients: SdkClientPool
+    model_resolver: ProfileModelResolver
+    providers: ProviderService
+    retrieval: RetrievalService
+    document_repository: DocumentRepository
+    document_ocr: DocumentOCR
+    document_vision: VisionEnhancer
+    document_formatter: DocumentFormatter
+    document_figures: FigureExtractor
+    document_ingestion: DocumentIngestion
+    documents: DocumentService
+    workspace: WorkspaceService
+    tool_catalog: Any
+    guardrail_catalog: Any
+    function_tools: FunctionToolService
+    compiler: AgentCompiler
+    agents: AgentService
+    sdk_sessions: SdkSessionFactory
+    conversations: ConversationService
+    events: EventBroker
+    runs: RunService
+    builder: BuilderService
+    sdk_version: str = SUPPORTED_SDK_VERSION
+
+    async def close(self) -> None:
+        await self.runs.close()
+        await self.sdk_clients.close()
+        engine = self.session_factory.kw.get("bind")
+        if engine is not None:
+            engine.dispose()
+
+
+def create_services(settings: Settings | None = None) -> ApplicationServices:
+    assert_supported_sdk()
+    resolved = settings or Settings()
+    resolved.ensure_directories()
+    session_factory = create_session_factory(resolved)
+    settings_service = SettingsService(resolved, session_factory)
+    settings_service.load()
+
+    provider_repository = ProviderRepository(session_factory)
+    provider_repository.ensure_default_ollama(base_url=resolved.ollama_base_url)
+    ollama_gpu_lock = anyio.Lock()
+    ollama = OllamaClient(resolved, request_lock=ollama_gpu_lock)
+    model_runtime = ModelRuntime(
+        session_factory,
+        resolved,
+        ollama,
+        ollama_gpu_lock,
+    )
+    sdk_clients = SdkClientPool(model_runtime)
+    model_resolver = ProfileModelResolver(model_runtime, sdk_clients)
+
+    storage = SafeStorage(resolved)
+    workspace = WorkspaceService(storage)
+    retrieval = RetrievalService(session_factory, resolved)
+    document_repository = DocumentRepository(session_factory, resolved, storage)
+    document_repository.recover_stale_ingestions()
+    document_ocr = DocumentOCR(
+        resolved,
+        ollama=OllamaClient(resolved),
+        ollama_gpu_lock=ollama_gpu_lock,
+    )
+    document_formatter = DocumentFormatter(resolved)
+    document_vision = VisionEnhancer(
+        resolved,
+        ollama,
+        model_runtime,
+        document_formatter,
+    )
+    document_figures = FigureExtractor(
+        resolved,
+        storage,
+        document_repository,
+    )
+    document_ingestion = DocumentIngestion(
+        resolved,
+        storage,
+        document_repository,
+        retrieval,
+        document_ocr,
+        document_vision,
+        document_figures,
+        document_formatter,
+    )
+    documents = DocumentService(
+        document_repository,
+        document_ingestion,
+        document_ocr,
+    )
+
+    tool_catalog = create_tool_catalog()
+    function_tools = FunctionToolService(
+        FunctionToolRepository(session_factory),
+        resolved,
+    )
+    tool_catalog.register_dynamic_factory(function_tools.dynamic_factory)
+    guardrail_catalog = create_guardrail_catalog()
+    compiler = AgentCompiler(model_resolver, tool_catalog, guardrail_catalog)
+    agents = AgentService(AgentRepository(session_factory), compiler)
+
+    sdk_sessions = SdkSessionFactory(resolved.database_path)
+    conversations = ConversationService(
+        ConversationRepository(session_factory),
+        sdk_sessions,
+    )
+    events = EventBroker()
+    tool_runtime = ApplicationToolRuntime(
+        settings=resolved,
+        documents=documents,
+        workspace=workspace,
+        retrieval=retrieval,
+        storage=storage,
+        agent_service=agents,
+        function_tool_service=function_tools,
+        tool_catalog=tool_catalog,
+    )
+    runs = RunService(
+        RunRepository(session_factory),
+        sdk_sessions,
+        tool_runtime,
+        events,
+    )
+    builder = BuilderService(compiler, conversations, runs)
+    providers = ProviderService(
+        provider_repository,
+        model_runtime,
+        model_resolver,
+        sdk_clients,
+    )
+    return ApplicationServices(
+        settings=resolved,
+        session_factory=session_factory,
+        settings_service=settings_service,
+        storage=storage,
+        ollama=ollama,
+        model_runtime=model_runtime,
+        sdk_clients=sdk_clients,
+        model_resolver=model_resolver,
+        providers=providers,
+        retrieval=retrieval,
+        document_repository=document_repository,
+        document_ocr=document_ocr,
+        document_vision=document_vision,
+        document_formatter=document_formatter,
+        document_figures=document_figures,
+        document_ingestion=document_ingestion,
+        documents=documents,
+        workspace=workspace,
+        tool_catalog=tool_catalog,
+        guardrail_catalog=guardrail_catalog,
+        function_tools=function_tools,
+        compiler=compiler,
+        agents=agents,
+        sdk_sessions=sdk_sessions,
+        conversations=conversations,
+        events=events,
+        runs=runs,
+        builder=builder,
+    )

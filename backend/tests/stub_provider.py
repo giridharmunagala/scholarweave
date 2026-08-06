@@ -1,7 +1,7 @@
-"""A tiny OpenAI-compatible server, so agent nodes are testable without Ollama running.
+"""A tiny OpenAI-compatible server for deterministic SDK integration tests.
 
-Implements just enough of ``/v1/chat/completions`` to exercise the paths the executor
-depends on: plain replies, a tool call followed by a reply, and JSON output.
+Implements enough of ``/v1/chat/completions`` to exercise plain replies, streaming,
+tool calls, model discovery, and embeddings without a live provider.
 """
 
 from __future__ import annotations
@@ -52,30 +52,50 @@ class StubProvider:
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
         self.reply = "Stub answer."
-        #: Scripted (needle, reply) pairs matched against the prompt, so a workflow with
-        #: several differently-instructed agents can be given a different answer for each.
-        self.replies: list[tuple[str, str]] = []
         self.call_tool: str | None = None
         self.tool_arguments: dict[str, Any] = {}
+        self.tool_plans: list[tuple[str, str, dict[str, Any]]] = []
+        self.tool_plan_cursor = 0
         self.base_url = ""
 
-    def _reply_for(self, payload: dict[str, Any]) -> str:
-        prompt = json.dumps(payload.get("messages") or [])
-        for needle, reply in self.replies:
-            if needle in prompt:
-                return reply
+    def _reply_for(self, _payload: dict[str, Any]) -> str:
         return self.reply
 
     def responses(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.requests.append(payload)
-        already_called = any(message.get("role") == "tool" for message in payload.get("messages", []))
-        if self.call_tool and not already_called:
+        prompt = json.dumps(payload.get("messages") or [])
+        called_tools = [
+            call.get("function", {}).get("name")
+            for message in payload.get("messages", [])
+            for call in message.get("tool_calls") or []
+        ]
+        already_called = bool(called_tools)
+        offered_tools = {
+            (tool.get("function") or {}).get("name")
+            for tool in payload.get("tools") or []
+        }
+        matching_plans = [
+            (tool_name, arguments)
+            for needle, tool_name, arguments in self.tool_plans
+            if needle in prompt and tool_name in offered_tools
+        ]
+        planned_tool = (
+            matching_plans[self.tool_plan_cursor]
+            if self.tool_plan_cursor < len(matching_plans)
+            else None
+        )
+        configured_tool = self.call_tool if self.call_tool in offered_tools else None
+        tool_name = configured_tool or (planned_tool[0] if planned_tool else None)
+        tool_arguments = self.tool_arguments if self.call_tool else (planned_tool[1] if planned_tool else {})
+        if tool_name and (planned_tool is not None or not already_called):
+            if planned_tool is not None:
+                self.tool_plan_cursor += 1
             return _message(
                 tool_calls=[
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": self.call_tool, "arguments": json.dumps(self.tool_arguments)},
+                        "function": {"name": tool_name, "arguments": json.dumps(tool_arguments)},
                     }
                 ]
             )

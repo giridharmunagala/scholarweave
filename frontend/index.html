@@ -5,15 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ScholarWeave</title>
     <meta name="color-scheme" content="light dark" />
-    <meta name="description" content="Local-first research paper assistant and visual LLM workflow builder." />
+    <meta name="description" content="Local-first research paper assistant and visual LLM agent builder." />
     <script>
-      // Apply the saved theme before first paint so there is no flash of the wrong palette.
-      try {
-        var saved = localStorage.getItem('scholarweave-theme');
-        document.documentElement.dataset.theme = ['paper', 'cloud', 'amoled'].indexOf(saved) >= 0 ? saved : 'paper';
-      } catch (error) {
-        document.documentElement.dataset.theme = 'paper';
-      }
+      // Resolve the saved theme before first paint so there is no flash of the wrong palette.
+      (function () {
+        var themes = ['paper', 'cloud', 'slate', 'forest', 'amoled'];
+        var preference = 'paper';
+        try {
+          var saved = localStorage.getItem('scholarweave-theme');
+          if (saved === 'system' || themes.indexOf(saved) >= 0) preference = saved;
+        } catch (error) {
+          /* Storage can be unavailable; the default is fine. */
+        }
+        var resolved = preference;
+        if (preference === 'system') {
+          resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'slate' : 'paper';
+        }
+        document.documentElement.dataset.theme = resolved;
+        document.documentElement.dataset.themePreference = preference;
+      })();
     </script>
   </head>
   <body>

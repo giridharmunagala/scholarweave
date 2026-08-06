@@ -1,4 +1,4 @@
-"""Backend package for the local LLM workflow app."""
+"""ScholarWeave's OpenAI Agents SDK application backend."""
 
 __all__ = ["__version__"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

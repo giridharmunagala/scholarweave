@@ -6,18 +6,23 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "generate:api": "python ../scripts/export_openapi.py openapi.json && openapi-typescript openapi.json -o src/api/schema.generated.ts",
+    "check:api": "python ../scripts/check_api_contracts.py",
     "preview": "vite preview",
     "test": "vitest run"
   },
   "dependencies": {
     "@xyflow/react": "^12.8.5",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.7.0",
+    "openapi-typescript": "7.13.0",
     "typescript": "^5.6.3",
     "vite": "^6.4.3",
     "vitest": "^3.2.6"
