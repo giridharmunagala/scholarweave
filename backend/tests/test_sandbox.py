@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from backend.sandbox import SandboxError, SandboxLimits, run_python
+from backend.tools.sandbox import SandboxError, SandboxLimits, run_python
 
 ALLOWED = ["json", "math", "re", "statistics", "datetime"]
 

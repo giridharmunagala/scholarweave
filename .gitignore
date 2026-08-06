@@ -1,10 +1,44 @@
+# Local configuration and secrets
 .env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python environments and caches
 .venv/
+venv/
+env/
+.direnv/
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 *.py[cod]
+
+# Application runtime data and generated workspaces
 local_data/
 workspace/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Logs
+logs/
+*.log
+*.log.*
+*calls.jsonl
+
+# Downloaded models and tool caches
+models/
+.cache/
+.huggingface/
+
+# Frontend dependencies and build output
 frontend/.node/
 frontend/node_modules/
 frontend/dist/
@@ -12,3 +46,8 @@ frontend/coverage/
 frontend/*.tsbuildinfo
 frontend/vite.config.js
 frontend/vite.config.d.ts
+
+# Local editor and OS files
+.idea/
+.vscode/
+.DS_Store

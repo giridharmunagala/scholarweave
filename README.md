@@ -1,87 +1,83 @@
 # ScholarWeave
 
-**A local-first workspace for turning research papers into visual, reusable AI workflows.**
+**A local-first research workspace built directly on the OpenAI Agents SDK.**
 
-ScholarWeave combines PDF ingestion, OCR, retrieval, OpenAI Agents SDK orchestration, and a
-node-based editor in one self-hosted app. Use local Ollama models by default, connect a cloud
-provider when needed, and keep papers, runs, vectors, notes, and intermediate artifacts on your
-machine.
+ScholarWeave combines PDF ingestion, OCR, retrieval, SDK-native agent composition, and a visual
+authoring canvas in one self-hosted application. It supports local Ollama models, OpenAI, Azure
+OpenAI, Azure AI Foundry, and OpenAI-compatible endpoints.
 
-![ScholarWeave dashboard](docs/screenshots/dashboard.png)
-
-## What you can do
+## Capabilities
 
 | Area | Capabilities |
 | --- | --- |
 | **Papers** | Upload PDFs, extract text and figures, OCR text-poor pages, index chunks, and inspect page-level quality. |
-| **Agents** | Build graph-based agents, tools, handoffs, branches, reusable subworkflows, and structured outputs. |
-| **Models** | Use Ollama, OpenAI, Azure OpenAI, Azure AI Foundry, or another OpenAI-compatible endpoint. |
-| **Automation** | Add sandboxed Python transforms, revisioned custom nodes, map/reduce steps, conditions, and bounded repeats. |
-| **Observability** | Watch tokens, tool calls, handoffs, node outputs, errors, OCR progress, and saved artifacts in real time. |
-| **Notes** | Read and organize workflow-generated Markdown from a safe local workspace. |
+| **Agents** | Compose SDK `Agent`, `FunctionTool`, hosted tool, `Agent.as_tool()`, handoff, guardrail, structured-output, and model-setting primitives. |
+| **Builder chat** | Create and revise validated SDK blueprints through an ordinary SDK agent with a persistent SDK session, visible stepwise TODOs, and save-receipt completion. |
+| **Tools** | Use built-in research/workspace tools or author revisioned sandboxed Python `FunctionTool` callbacks. |
+| **Runs** | Inspect SDK run items, tool calls, handoffs, guardrails, usage, interruptions, compaction, and streamed lifecycle events. |
+| **Workspace** | Read and write safe local text artifacts without exposing arbitrary filesystem access. |
 
-## How ScholarWeave works
+## Runtime model
 
-### 1. Add a paper
+ScholarWeave does not implement a separate graph executor. The canvas is a presentation layer over
+an `AgentBlueprint`, which is compiled into real SDK objects:
 
-Drop in a PDF and ScholarWeave creates a local document record, extracts its text, stores figures,
-splits the content into chunks, and prepares it for retrieval. Tesseract handles scanned pages.
-Optional vision models can triage OCR quality and rewrite only the pages that need help.
+- Each autonomous component is an SDK `Agent`.
+- Capabilities are SDK `FunctionTool` or hosted-tool instances.
+- Delegation uses `handoff()` or `Agent.as_tool()`.
+- Validation uses SDK input, output, tool-input, and tool-output guardrails.
+- Every execution uses SDK `Runner`.
+- Pause and resume use serialized SDK `RunState`.
+- Runtime observations are projections of SDK run items, hooks, and stream events.
 
-![Paper library and page-level OCR quality](docs/screenshots/paper-library.png)
+Canvas coordinates are stored separately and never affect execution. There are no generic nodes,
+ports, data-flow edges, conditions, or application-owned orchestration phases.
 
-### 2. Start from a template or a saved agent
+## Sessions, context, and compaction
 
-Use the included paper ingestion, Q&A, hierarchical summary, OCR enhancement, and research-agent
-templates, or create a graph from scratch. Saved agents can also be reused as nodes inside other
-agents.
+Model-visible conversation history is owned exclusively by the SDK `Session` contract:
 
-![Saved agents and starter templates](docs/screenshots/agent-library.png)
+- Conversations use one SQLite-backed SDK session each.
+- Genuine OpenAI Responses models can use `OpenAIResponsesCompactionSession`.
+- Local and compatible models use a `Session` decorator whose compactor is itself an SDK agent.
+- Compaction replaces old history with a valid SDK assistant summary plus a protected recent tail.
+- Removed history is not retained in a hidden parallel transcript.
+- The chat UI renders a stable compaction marker when replacement occurs.
 
-### 3. Connect agents, tools, and handoffs
-
-Drag nodes onto the canvas and connect typed ports. A data node becomes an agent tool when its
-`tool` output is wired to an agent. Connect one agent to another agent's `handoffs` port to delegate
-work. Each node can inherit application defaults or select its own provider and model.
-
-![Visual agent editor](docs/screenshots/visual-editor.png)
-
-### 4. Run and inspect every step
-
-The run inspector records each node, streamed output, tool call, handoff, warning, error, and final
-artifact. Nested agents remain visible at full depth, and active runs can be cancelled.
-
-![Run history and execution details](docs/screenshots/run-inspector.png)
+`ScholarWeaveContext` carries live repositories, IDs, services, and event sinks through
+`RunContextWrapper`. Local context is not added to model input unless instructions or a tool
+deliberately expose data.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    UI["React + Vite UI"] --> API["FastAPI"]
-    API --> DB[("SQLite")]
-    API --> FILES["Local papers, artifacts, and notes"]
-    API --> OCR["PDF extraction + Tesseract"]
-    API --> ENGINE["Workflow executor"]
-    ENGINE --> SDK["OpenAI Agents SDK"]
-    ENGINE --> SANDBOX["Sandboxed Python nodes"]
-    SDK --> OLLAMA["Ollama"]
-    SDK --> CLOUD["OpenAI / Azure / compatible APIs"]
+    UI["Feature-first React UI"] --> API["Feature FastAPI routers"]
+    API --> SERVICES["Feature services"]
+    SERVICES --> REPOS["Repositories"]
+    SERVICES --> RUNTIME["SDK runtime"]
+    RUNTIME --> SDK["OpenAI Agents SDK 0.19.4"]
+    RUNTIME --> PROVIDERS["Provider model resolver"]
+    RUNTIME --> SESSIONS["SDK sessions + compaction"]
+    RUNTIME --> TOOLS["SDK tools + guardrails"]
+    REPOS --> DB[("SQLite")]
+    TOOLS --> DOCS["Documents + retrieval"]
+    TOOLS --> WORKSPACE["Safe workspace + sandbox"]
 ```
 
-- The production React build is served by FastAPI.
-- Workflow metadata, runs, settings, and vectors are stored in SQLite.
-- Uploaded documents, extracted content, figures, and generated artifacts stay in `local_data/`.
-- Notes and workflow file nodes are restricted to `workspace/`.
-- Provider API keys are stored locally, masked by the API, and never embedded in workflow exports.
+The backend is organized by feature under `backend/agents`, `builder`, `conversations`,
+`documents`, `providers`, `runs`, `tools`, and `workspace`. `backend/bootstrap.py` is the
+composition root. The frontend mirrors those features under `frontend/src/features`; API types are
+generated from FastAPI OpenAPI rather than maintained manually.
 
 ## Quick start
 
 ### Prerequisites
 
 - Python 3.12+
-- Node.js 20+ for the initial UI build
-- [Ollama](https://ollama.com/) for the default local setup, or credentials for another supported provider
-- Tesseract OCR and the required language pack for scanned PDFs
+- Node.js 20+
+- [Ollama](https://ollama.com/) for a local setup, or credentials for another supported provider
+- Tesseract OCR and the required language pack for scanned PDFs, or an NVIDIA GPU for Surya OCR 2
 
 On Ubuntu or Debian:
 
@@ -89,16 +85,16 @@ On Ubuntu or Debian:
 sudo apt install tesseract-ocr tesseract-ocr-eng
 ```
 
-For a fully local setup, pull one chat model and one embedding model:
+For a local setup, pull chat/tool and embedding models:
 
 ```bash
 ollama pull llama3.1:8b
 ollama pull nomic-embed-text
 ```
 
-Agent graphs with connected tools require a model that supports tool calling.
+The selected agent model must support tool calling when its blueprint binds tools.
 
-### Install
+### Install and run
 
 ```bash
 git clone https://github.com/giridharmunagala/scholarweave.git
@@ -111,107 +107,91 @@ cd frontend
 npm ci
 npm run build
 cd ..
-```
 
-### Run
-
-```bash
 .venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ```
 
-Open [http://127.0.0.1:8000](http://127.0.0.1:8000).
-
-On first use:
-
-1. Open **Settings -> Model providers** and verify an Ollama or cloud-provider profile.
-2. Assign application defaults for chat, tool calling, embeddings, and vision as needed.
-3. Upload and ingest a PDF under **Papers**.
-4. Open **Agents**, choose a template, complete its generated input form, and run it.
-5. Follow live progress and inspect outputs under **Runs**.
-
-## Workflow model
-
-- **Workflow Input** nodes declare typed inputs such as text, numbers, JSON, lists, or document IDs.
-- **Workflow Output** and **Final Output** nodes publish named results.
-- **Agent** nodes hold instructions, optional structured-output schemas, model overrides, and turn limits.
-- **Run when** rules and **If / Else** nodes provide typed conditional execution without evaluating arbitrary expressions.
-- **Map**, **Reduce**, and bounded repeat nodes support long-document and batch workflows.
-- Any saved workflow can be nested as a single node. Recursive graphs are rejected and nesting depth is capped.
-- The Python export action emits a standalone Agents SDK script without API keys.
-
-### Long-document summaries
-
-The included hierarchical-summary template folds a paper in stages instead of sending the full
-document in one oversized prompt:
-
-1. Summarize bounded batches of chunks.
-2. Fold those notes into cluster summaries.
-3. Produce the final briefing from the smaller set of summaries.
-
-Prompt context, map fan-out, repeat count, concurrency, and nesting depth all have configurable
-safety limits. Oversized prompts retain the beginning and end while recording a warning.
-
-## OCR pipeline
-
-Standard ingestion extracts embedded PDF text and falls back to Tesseract on text-poor pages.
-With **LLM-enhanced OCR** enabled, ScholarWeave:
-
-1. OCRs each page locally.
-2. Uses a small vision model to rate the page as good, average, or poor.
-3. Sends only poor pages to the configured enhancement model for Markdown reconstruction.
-4. Re-rates rewritten pages and falls back to the original OCR text if validation still fails.
-
-Individual pages can be rewritten later from the paper detail screen.
-
-## Configuration and local data
-
-Settings can be changed in the UI or through environment variables prefixed with
-`SCHOLARWEAVE_`, for example:
+When enabling Surya on an NVIDIA system, install the CUDA PyTorch wheel that matches the host
+driver. For CUDA 13:
 
 ```bash
-SCHOLARWEAVE_OLLAMA_BASE_URL=http://127.0.0.1:11434
-SCHOLARWEAVE_MAX_CONTEXT_CHARS=40000
+.venv/bin/pip install --upgrade --index-url https://download.pytorch.org/whl/cu130 torch torchvision
 ```
+
+Open <http://127.0.0.1:8000>, configure provider defaults under **Settings**, ingest papers under
+**Papers**, then create an SDK blueprint under **Agents** or through **Builder chat**.
+
+## Providers
+
+Provider profiles are resolved through the SDK model boundary:
+
+- OpenAI profiles use `OpenAIResponsesModel`.
+- Ollama and OpenAI-compatible profiles use `OpenAIChatCompletionsModel`.
+- Azure OpenAI and Azure AI Foundry use their supported OpenAI clients.
+- Provider capabilities are checked when a blueprint compiles; unsupported hosted tools or model
+  features fail validation rather than degrading silently.
+
+API keys are stored only in the local SQLite database, are masked by API responses, and are never
+included in Python exports.
+
+## OCR and retrieval
+
+PDF ingestion extracts embedded text and OCRs text-poor pages with either Tesseract or
+`datalab-to/surya-ocr-2`. Surya is loaded directly from Hugging Face in an isolated process; resident
+Ollama models can be unloaded first, and process exit releases Surya's CUDA allocation after each
+job. Optional vision models can rewrite poor pages after OCR. Documents are chunked for keyword and
+vector retrieval; agents access that data through typed SDK tools instead of implicit prompt
+injection. Surya's weights use a modified OpenRAIL-M license; review its Hugging Face model card for
+commercial-use terms.
+
+## Local data and cutover
 
 | Path | Contents |
 | --- | --- |
-| `local_data/metadata.sqlite3` | Settings, provider profiles, workflows, runs, and vectors |
+| `local_data/metadata.sqlite3` | Settings, provider profiles, SDK blueprints, custom tools, conversations, runs, documents, and vectors |
 | `local_data/documents/` | Uploaded PDFs |
-| `local_data/artifacts/` | Extracted content, figures, and run outputs |
-| `workspace/` | Markdown notes and files available to workflow file nodes |
+| `local_data/artifacts/` | Extracted content, figures, and generated artifacts |
+| `local_data/llm_calls.jsonl` | Credential-redacted model request audit log |
+| `workspace/` | Safe text files available through workspace tools |
 
-These paths, `.env`, virtual environments, dependencies, and frontend build output are excluded
-from Git.
+On the first SDK-schema startup, ScholarWeave creates a timestamped
+`metadata.pre-sdk-*.sqlite3` backup, removes incompatible runtime records, and preserves providers,
+documents, chunks, and artifacts. Old graph definitions, node runs, builder plans, and Markdown
+memory are intentionally not migrated.
+
+Settings can also be provided through `SCHOLARWEAVE_` environment variables, for example:
+
+```bash
+SCHOLARWEAVE_OLLAMA_BASE_URL=http://127.0.0.1:11434
+SCHOLARWEAVE_AGENT_COMPACTION_THRESHOLD_ITEMS=30
+```
 
 ## Development
 
-Run the API with reload:
-
 ```bash
+# API with reload
 .venv/bin/uvicorn backend.app:app --reload --port 8000
-```
 
-Run the Vite development server in another terminal:
+# Frontend development server
+cd frontend && npm run dev
 
-```bash
-cd frontend
-npm run dev
-```
+# Generate API contracts
+cd frontend && npm run generate:api
 
-The Vite server proxies `/api` to FastAPI.
+# Verify committed contracts have no backend drift
+cd frontend && npm run check:api
 
-Run the existing checks:
-
-```bash
-.venv/bin/pytest
+# Checks
+pytest
 cd frontend && npm test && npm run build
 ```
 
-## Security note
+`openai-agents==0.19.4` and `openapi-typescript==7.13.0` are exact pins. SDK upgrades are explicit
+compatibility work and should update contract tests and generated API types together.
 
-Provider keys are stored in the local SQLite database, which is not encrypted. Protect
-`local_data/metadata.sqlite3` with normal filesystem permissions and never commit or share it.
+## Security
 
-Python nodes run in a separate process with network access blocked, an import allowlist, a timeout,
-and CPU and memory limits. This is protection against mistakes, not a hardened security boundary.
-Disable Python nodes in **Settings -> Python node sandbox** if untrusted users can edit workflows.
+Protect `local_data/metadata.sqlite3` with normal filesystem permissions; it is not encrypted.
+Sandboxed Python tools run in an isolated subprocess with network blocking, an import allowlist,
+timeout, and CPU/memory limits. This protects against mistakes but is not a hardened security
+boundary, so disable Python tools when untrusted users can author tool code.

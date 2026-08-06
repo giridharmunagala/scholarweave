@@ -1,0 +1,153 @@
+.agent-editor-page { max-width: none; }
+
+.editor-toolbar { padding: var(--space-3); }
+.editor-toolbar .toolbar { justify-content: flex-start; row-gap: var(--space-2); }
+.editor-toolbar .run-inline {
+  flex: 1 0 100%;
+  border-left: none;
+  border-top: 1px solid var(--border);
+  margin-top: var(--space-1);
+  padding: var(--space-3) 0 0;
+}
+.editor-toolbar .run-inline input { flex: 1 1 auto; }
+.editor-toolbar select { min-width: 200px; width: auto; }
+.editor-toolbar .toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  padding-right: var(--space-3);
+}
+.editor-toolbar .toolbar-group + .toolbar-group { border-left: 1px solid var(--border); padding-left: var(--space-3); }
+.run-inline input { width: min(360px, 45vw); }
+
+.editor-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: var(--space-4);
+  min-height: 660px;
+}
+
+.agent-canvas {
+  min-height: 660px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+.inspector-panel { max-height: 78vh; overflow: auto; }
+.inspector-panel .stack { gap: var(--space-3); }
+
+/* React Flow chrome follows the theme. */
+.agent-canvas .react-flow__controls-button {
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  fill: var(--text);
+}
+.agent-canvas .react-flow__controls-button:hover { background: var(--surface-2); }
+.agent-canvas .react-flow__controls { border-radius: var(--radius-sm); box-shadow: var(--shadow-md); overflow: hidden; }
+.agent-canvas .react-flow__minimap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.agent-canvas .react-flow__attribution { background: transparent; color: var(--muted); opacity: .5; }
+.agent-canvas .react-flow__handle {
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--surface);
+  background: var(--muted);
+}
+.agent-canvas .react-flow__handle:hover { background: var(--accent); }
+
+/* Canvas node cards. */
+.primitive-card {
+  width: 208px;
+  display: grid;
+  gap: .3rem;
+  padding: .7rem .75rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--agent);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.primitive-card:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+.primitive-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent), var(--shadow-md);
+}
+.primitive-card strong { color: var(--text-strong); font-size: var(--text-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.primitive-card small { color: var(--muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.primitive-card.kind-function_tool { border-left-color: var(--tool); }
+.primitive-card.kind-hosted_tool { border-left-color: var(--hosted); }
+.primitive-card.kind-guardrail { border-left-color: var(--guardrail); }
+
+.primitive-kind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: .62rem;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.primitive-kind .entry-flag {
+  padding: .05rem .3rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 20%, transparent);
+  color: var(--warning);
+  letter-spacing: .06em;
+}
+
+/* Edge colours mirror the SDK relationship kinds. */
+.react-flow__edge.edge-tool path { stroke: var(--tool); }
+.react-flow__edge.edge-handoff path { stroke: var(--handoff); }
+.react-flow__edge.edge-agent-tool path { stroke: var(--agent); stroke-dasharray: 5; }
+.react-flow__edge.edge-guardrail path { stroke: var(--guardrail); stroke-dasharray: 3; }
+.react-flow__edge.selected path { stroke-width: 3; }
+.react-flow__edge-text { fill: var(--text); font-size: 10px; }
+.react-flow__edge-textbg { fill: var(--surface); }
+
+/* Canvas legend keeps edge meanings discoverable without extra clicks. */
+.canvas-legend {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.canvas-legend span { display: inline-flex; align-items: center; gap: .4rem; }
+.canvas-legend i { width: 14px; height: 2px; border-radius: 2px; background: currentColor; }
+.legend-tool { color: var(--tool); }
+.legend-handoff { color: var(--handoff); }
+.legend-agent-tool { color: var(--agent); }
+.legend-guardrail { color: var(--guardrail); }
+
+/* Inspector. */
+.inspector-heading { display: flex; align-items: start; justify-content: space-between; gap: var(--space-2); }
+.inspector-heading h2 { margin: 0; overflow-wrap: anywhere; }
+.relationship-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-1); }
+
+.inspector-section {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  padding: .6rem .7rem;
+}
+.inspector-section summary { cursor: pointer; font-size: var(--text-sm); font-weight: 650; }
+.inspector-section[open] summary { margin-bottom: var(--space-3); }
+
+.schema-editor { min-height: 170px; font-family: var(--font-mono); font-size: var(--text-xs); }
+
+.template-card { cursor: pointer; }
+
+@media (max-width: 1080px) {
+  .editor-grid { grid-template-columns: minmax(0, 1fr); }
+  .inspector-panel { max-height: none; }
+}

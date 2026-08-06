@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.config import Settings
+from backend.core.config import Settings
 from backend.tests.stub_provider import stub_provider  # noqa: F401  (re-exported fixture)
 
 
