@@ -10,6 +10,7 @@ from backend.documents.figures import FigureExtractor
 from backend.documents.formatting import DocumentFormatter
 from backend.documents.models import Document
 from backend.documents.ocr import DocumentOCR
+from backend.documents.paper import build_paper_manifest
 from backend.documents.repository import DocumentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.documents.vision import OCR_QUALITY_LEVELS, VisionEnhancer
@@ -238,19 +239,28 @@ class DocumentIngestion:
         triage_model: str | None = None,
         extraction_mode: str,
     ) -> dict[str, Any]:
-        serializable_pages = [
-            {key: value for key, value in page.items() if not key.startswith("_")}
-            for page in pages
-        ]
+        extracted_char_count = sum(
+            len(str(page.get("text") or "").strip()) for page in pages
+        )
+        if extracted_char_count == 0:
+            raise DocumentProcessingError(
+                "No readable text was extracted from the paper. Retry ingestion with OCR."
+            )
         chunks = self.formatter.chunk_pages(pages, title=document.title)
+        if not chunks:
+            raise DocumentProcessingError(
+                "Paper extraction produced no readable chunks. Retry ingestion with OCR."
+            )
         markdown = self.formatter.build_markdown(document.title, pages)
-        manifest = {
-            "document_id": document.id,
-            "title": document.title,
-            "pages": serializable_pages,
-            "chunks": chunks,
-            "figures": figure_artifacts,
-        }
+        manifest = build_paper_manifest(
+            document_id=document.id,
+            title=document.title,
+            source_filename=document.source_filename,
+            content_type=document.content_type,
+            pages=pages,
+            chunks=chunks,
+            figures=figure_artifacts,
+        )
         markdown_path = f"documents/{document.id}/extracted.md"
         json_path = f"documents/{document.id}/manifest.json"
         stored_md = self.storage.write_text(self.settings.artifacts_dir, markdown_path, markdown)
@@ -336,6 +346,9 @@ class DocumentIngestion:
                 "ocr_llm_triage_model": triage_model,
                 "figure_count": len(figure_artifacts),
                 "extraction_mode": extraction_mode,
+                "paper_manifest_schema_version": manifest["schema_version"],
+                "extracted_char_count": manifest["content"]["char_count"],
+                "chunk_count": manifest["content"]["chunk_count"],
             },
         )
         return {

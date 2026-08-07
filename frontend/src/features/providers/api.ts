@@ -9,6 +9,10 @@ export type ProviderUpdate = components['schemas']['ProviderUpdate'];
 export type ProviderModels = components['schemas']['ProviderModelsResponse'];
 export type ProviderVerification = components['schemas']['ProviderVerifyResponse'];
 
+export function modelIsEnabled(model: Provider['models'][number]): boolean {
+  return model.enabled;
+}
+
 export const providersApi = {
   settings: () => request<Settings>('/settings'),
   updateSettings: (payload: SettingsUpdate) =>

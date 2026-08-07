@@ -114,7 +114,7 @@ def builder_blueprint(model_reference: dict) -> AgentBlueprint:
                     "Always call list_sdk_primitives before drafting a blueprint and follow its "
                     "agent_blueprint_schema and examples exactly. Keep instructions, model, "
                     "model_settings, and output inside each agents entry; use kind on tools; put "
-                    "max_turns under run and compaction settings under session. Build only "
+                    "max_turns under run. Build only "
                     "with Agent, FunctionTool, Agent.as_tool, Handoff, guardrails, structured output, "
                     "ModelSettings, RunConfig, and Session policy fields represented by the blueprint "
                     "schema. Never invent generic nodes, ports, DAG data edges, conditions, "

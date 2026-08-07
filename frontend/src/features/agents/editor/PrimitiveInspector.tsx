@@ -14,15 +14,18 @@ import {
   HandoffInspector,
 } from './RelationshipInspectors';
 import { StructuredOutputEditor } from './StructuredOutputEditor';
+import { modelIsEnabled, type Provider } from '../../providers/api';
 
 export function PrimitiveInspector({
   blueprint,
   setBlueprint,
+  providers,
   selected,
   onRemove,
 }: {
   blueprint: AgentBlueprint;
   setBlueprint: Dispatch<SetStateAction<AgentBlueprint>>;
+  providers: Provider[];
   selected:
     | { kind: 'agent'; value: AgentSpec | undefined }
     | { kind: 'tool'; value: ToolSpec | undefined }
@@ -74,6 +77,14 @@ export function PrimitiveInspector({
   }
   if (selected.kind === 'agent') {
     const agent = selected.value;
+    const selectedProvider = providers.find(
+      (provider) => provider.id === agent.model?.provider_profile_id,
+    );
+    const availableModels = (selectedProvider?.models ?? []).filter(
+      (model) =>
+        modelIsEnabled(model)
+        && (!model.capabilities?.length || model.capabilities.includes('chat')),
+    );
     const update = (patch: Partial<AgentSpec>) =>
       setBlueprint((current) => ({
         ...current,
@@ -95,8 +106,46 @@ export function PrimitiveInspector({
         <label className="field">Description<input value={agent.description ?? ''} onChange={(event) => update({ description: event.target.value })} /></label>
         <label className="field">Instructions<textarea value={agent.instructions} onChange={(event) => update({ instructions: event.target.value })} /></label>
         <div className="field-row">
-          <label className="field">Provider profile ID<input value={agent.model?.provider_profile_id ?? ''} onChange={(event) => update({ model: { ...agent.model, provider_profile_id: event.target.value || null } })} /></label>
-          <label className="field">Model<input value={agent.model?.model ?? ''} onChange={(event) => update({ model: { ...agent.model, model: event.target.value || null } })} /></label>
+          <label className="field">
+            Provider
+            <select
+              value={agent.model?.provider_profile_id ?? ''}
+              onChange={(event) =>
+                update({
+                  model: {
+                    provider_profile_id: event.target.value || null,
+                    model: null,
+                  },
+                })
+              }
+            >
+              <option value="">Default provider</option>
+              {providers
+                .filter((provider) => provider.models.some(modelIsEnabled))
+                .map((provider) => (
+                  <option value={provider.id} key={provider.id}>{provider.name}</option>
+                ))}
+            </select>
+          </label>
+          <label className="field">
+            Model
+            <select
+              value={agent.model?.model ?? ''}
+              disabled={!selectedProvider}
+              onChange={(event) =>
+                update({ model: { ...agent.model, model: event.target.value || null } })
+              }
+            >
+              <option value="">Default model</option>
+              {agent.model?.model
+                && !availableModels.some((model) => model.name === agent.model?.model) ? (
+                  <option value={agent.model.model}>Unavailable: {agent.model.model}</option>
+                ) : null}
+              {availableModels.map((model) => (
+                <option value={model.name} key={model.name}>{model.name}</option>
+              ))}
+            </select>
+          </label>
         </div>
         <ModelSettingsEditor settings={settings} onChange={updateSettings} />
         <StructuredOutputEditor output={agent.output ?? null} onChange={(output) => update({ output })} />
@@ -163,7 +212,6 @@ function RunSettings({
   setBlueprint: Dispatch<SetStateAction<AgentBlueprint>>;
 }) {
   const run = blueprint.run!;
-  const session = blueprint.session!;
   return (
     <div className="inspector stack">
       <span className="eyebrow">Runner and session</span>
@@ -174,12 +222,6 @@ function RunSettings({
         <label className="field">Tool concurrency<input type="number" min={1} value={run.max_tool_concurrency ?? ''} onChange={(event) => setBlueprint((current) => ({ ...current, run: { ...run, max_tool_concurrency: event.target.value ? Number(event.target.value) : null } }))} /></label>
       </div>
       <label className="check-row"><input type="checkbox" checked={run.tracing_enabled} onChange={(event) => setBlueprint((current) => ({ ...current, run: { ...run, tracing_enabled: event.target.checked } }))} />Enable SDK tracing</label>
-      <label className="field">Session strategy<select value={session.strategy} onChange={(event) => setBlueprint((current) => ({ ...current, session: { ...session, strategy: event.target.value as typeof session.strategy } }))}><option value="auto">Auto</option><option value="openai_responses">OpenAI Responses</option><option value="local">Local compactor agent</option></select></label>
-      <label className="check-row"><input type="checkbox" checked={session.compaction_enabled} onChange={(event) => setBlueprint((current) => ({ ...current, session: { ...session, compaction_enabled: event.target.checked } }))} />Enable history compaction</label>
-      <div className="field-row">
-        <label className="field">Compact at items<input type="number" min={4} disabled={!session.compaction_enabled} value={session.compaction_threshold_items} onChange={(event) => setBlueprint((current) => ({ ...current, session: { ...session, compaction_threshold_items: Number(event.target.value) } }))} /></label>
-        <label className="field">Recent items<input type="number" min={2} disabled={!session.compaction_enabled} value={session.recent_items_to_keep} onChange={(event) => setBlueprint((current) => ({ ...current, session: { ...session, recent_items_to_keep: Number(event.target.value) } }))} /></label>
-      </div>
     </div>
   );
 }

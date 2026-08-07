@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -15,6 +16,7 @@ from backend.builder.todos import (
 )
 from backend.core.config import Settings
 from backend.documents import DocumentService
+from backend.documents.paper import manifest_pages
 from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
@@ -58,17 +60,29 @@ class ApplicationToolRuntime:
             "builder.todos.create": create_builder_todo_plan,
             "builder.todos.update": update_builder_todo,
             "builder.finish": finish_builder_run,
+            "tools.search": self._search_tools,
             "research.pages.read_all": self._read_all_paper_pages,
             "research.pages.read_retained": self._read_retained_paper_pages,
             "research.page_decisions.save": self._save_page_decisions,
             "research.summaries.save": self._save_paper_summary,
             "research.summaries.list": self._list_paper_summaries,
             "documents.list": self._list_documents,
+            "documents.inspect": self._inspect_paper,
+            "documents.ingest": self._ingest_paper,
+            "documents.read_pages": self._read_paper_pages,
             "documents.read_chunks": self._read_document_chunks,
             "retrieval.keyword_search": self._keyword_search,
             "workspace.list": self._list_workspace,
+            "workspace.search": self._search_workspace,
             "workspace.read": self._read_workspace,
             "workspace.write": self._write_workspace,
+            "workspace.markdown.replace": self._replace_workspace_markdown,
+            "workspace.markdown.append": self._append_workspace_markdown,
+            "workspace.tags.set": self._set_workspace_tags,
+            "workspace.tags.search": self._search_workspace_tags,
+            "workspace.note.create": self._create_workspace_note,
+            "workspace.paper.ensure": self._ensure_paper_workspace,
+            "workspace.paper.name.set": self._set_paper_workspace_name,
             "artifacts.write": self._write_artifact,
             "sdk.catalog": self._sdk_catalog,
             "agents.list": self._list_agents,
@@ -81,10 +95,56 @@ class ApplicationToolRuntime:
         if handler is None:
             raise ValueError(f"Unknown application tool '{catalog_id}'.")
         result = handler(arguments, context)
+        if inspect.isawaitable(result):
+            result = await result
         if catalog_id in {"builder.todos.create", "builder.todos.update"}:
             await context.emit("builder.todos.updated", result)
         await context.emit("tool.application_completed", {"catalog_id": catalog_id})
         return result
+
+    def _search_tools(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        from backend.autonomous.service import AUTONOMOUS_TOOL_IDS
+
+        available_catalog_ids = {catalog_id for _, catalog_id in AUTONOMOUS_TOOL_IDS}
+        query = str(arguments.get("query") or "").strip().casefold()
+        definitions = self._catalog.definitions() if self._catalog is not None else ()
+        tools = [
+            {
+                "catalog_id": definition.catalog_id,
+                "name": definition.name,
+                "description": definition.description,
+                "parameters_schema": definition.parameters_schema,
+                "requires_approval": False,
+            }
+            for definition in definitions
+            if definition.catalog_id in available_catalog_ids
+        ]
+        if self._function_tools is not None:
+            tools.extend(
+                {
+                    "catalog_id": f"custom:{document.latest_revision.id}",
+                    "name": document.record.name,
+                    "description": document.latest_revision.description,
+                    "parameters_schema": document.latest_revision.parameters_schema_json,
+                    "requires_approval": document.latest_revision.requires_approval,
+                }
+                for document in self._function_tools.list()
+            )
+        if query:
+            tools = [
+                tool
+                for tool in tools
+                if query
+                in " ".join(
+                    str(tool.get(field) or "")
+                    for field in ("catalog_id", "name", "description")
+                ).casefold()
+            ]
+        return {"query": query or None, "count": len(tools), "tools": tools}
 
     def _read_all_paper_pages(
         self,
@@ -246,15 +306,133 @@ class ApplicationToolRuntime:
         _arguments: dict[str, Any],
         _context: ScholarWeaveContext,
     ) -> list[dict[str, Any]]:
-        return [
-            {
-                "id": document.id,
-                "title": document.title,
-                "status": document.status,
-                "page_count": document.page_count,
-            }
-            for document in self._documents.list_documents()
+        documents = []
+        for document in self._documents.list_documents():
+            details = self._documents.get_document_details(document.id)
+            artifacts = details[1] if details else []
+            chunks = details[2] if details else []
+            has_manifest = any(
+                artifact.kind == "extracted_manifest" for artifact in artifacts
+            )
+            readable = document.status == "ready" and has_manifest and bool(chunks)
+            documents.append(
+                {
+                    "id": document.id,
+                    "title": document.title,
+                    "status": document.status,
+                    "page_count": document.page_count,
+                    "readable": readable,
+                    "chunk_count": len(chunks),
+                    "next_action": None if readable else "inspect_paper",
+                }
+            )
+        return documents
+
+    def _inspect_paper(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = str(arguments["document_id"])
+        details = self._documents.get_document_details(document_id)
+        if details is None:
+            raise ValueError("Paper was not found.")
+        document, artifacts, chunks = details
+        source = next(
+            (artifact for artifact in artifacts if artifact.kind == "source_pdf"),
+            None,
+        )
+        manifest_artifact = next(
+            (artifact for artifact in artifacts if artifact.kind == "extracted_manifest"),
+            None,
+        )
+        manifest = (
+            self._documents.artifact_content(manifest_artifact)
+            if manifest_artifact is not None
+            else None
+        )
+        content = manifest.get("content", {}) if isinstance(manifest, dict) else {}
+        sections = manifest.get("sections", []) if isinstance(manifest, dict) else []
+        chunk_chars = sum(len(chunk.text) for chunk in chunks)
+        readable = (
+            document.status == "ready"
+            and manifest_artifact is not None
+            and bool(chunks)
+            and bool(content.get("char_count") or chunk_chars)
+        )
+        return {
+            "document_id": document.id,
+            "title": document.title,
+            "source_filename": document.source_filename,
+            "status": document.status,
+            "page_count": document.page_count,
+            "source_available": source is not None,
+            "readable": readable,
+            "content": {
+                "char_count": int(content.get("char_count") or chunk_chars),
+                "chunk_count": len(chunks),
+                "nonempty_page_count": content.get("nonempty_page_count"),
+            },
+            "sections": sections,
+            "next_action": (
+                None
+                if readable
+                else "Call ingest_paper with mode='embedded', or mode='ocr' for scanned pages."
+            ),
+        }
+
+    async def _ingest_paper(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = str(arguments["document_id"])
+        mode = str(arguments["mode"])
+        await self._documents.ingest_document(document_id, force_ocr=mode == "ocr")
+        return self._inspect_paper({"document_id": document_id}, context)
+
+    def _read_paper_pages(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = str(arguments["document_id"])
+        details = self._documents.get_document_details(document_id)
+        if details is None:
+            raise ValueError("Paper was not found.")
+        document, artifacts, chunks = details
+        manifest_artifact = next(
+            (artifact for artifact in artifacts if artifact.kind == "extracted_manifest"),
+            None,
+        )
+        if document.status != "ready" or manifest_artifact is None or not chunks:
+            raise ValueError(
+                "Paper has no readable extracted content. Inspect and ingest it before reading."
+            )
+        pages = manifest_pages(self._documents.artifact_content(manifest_artifact))
+        start_page = int(arguments["start_page"])
+        limit = int(arguments["limit"])
+        available = [
+            page for page in pages if int(page.get("page") or 0) >= start_page
         ]
+        selected = available[:limit]
+        return {
+            "document_id": document_id,
+            "title": document.title,
+            "page_count": len(pages),
+            "pages": [
+                {
+                    "page_number": int(page["page"]),
+                    "citation": str(page.get("citation") or f"p.{int(page['page'])}"),
+                    "text": str(page.get("text") or ""),
+                }
+                for page in selected
+            ],
+            "has_more": len(available) > len(selected),
+            "next_page": (
+                int(selected[-1]["page"]) + 1 if selected else start_page
+            ),
+        }
 
     def _read_document_chunks(
         self,
@@ -263,11 +441,20 @@ class ApplicationToolRuntime:
     ) -> list[dict[str, Any]]:
         start = int(arguments.get("start") or 0)
         limit = int(arguments.get("limit") or 20)
-        chunks = self._retrieval.fetch_document_chunks(str(arguments["document_id"]))
+        document_id = str(arguments["document_id"])
+        document = self._documents.get_document(document_id)
+        if document is None:
+            raise ValueError("Paper was not found.")
+        chunks = self._retrieval.fetch_document_chunks(document_id)
+        if document.status != "ready" or not chunks:
+            raise ValueError(
+                "Paper has no readable extracted content. Inspect and ingest it before reading."
+            )
         return [
             {
                 "chunk_id": chunk.id,
                 "chunk_index": chunk.chunk_index,
+                "section_title": chunk.section_title,
                 "citation": chunk.citation,
                 "page_start": chunk.page_start,
                 "page_end": chunk.page_end,
@@ -291,8 +478,11 @@ class ApplicationToolRuntime:
         self,
         _arguments: dict[str, Any],
         _context: ScholarWeaveContext,
-    ) -> list[str]:
-        return [document.path for document in self._workspace.list_files()]
+    ) -> list[dict[str, Any]]:
+        return [
+            {"path": document.path, "tags": list(document.tags)}
+            for document in self._workspace.list_files()
+        ]
 
     def _read_workspace(
         self,
@@ -303,8 +493,31 @@ class ApplicationToolRuntime:
         return {
             "path": document.path,
             "media_type": document.media_type,
+            "tags": list(document.tags),
             "content": document.content,
         }
+
+    def _search_workspace(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "path": document.path,
+                "name": document.note_name or document.paper_name or document.name,
+                "kind": document.kind,
+                "tags": list(document.tags),
+                "modified_at": document.modified_at.isoformat(),
+            }
+            for document in self._workspace.search(
+                query=arguments.get("query"),
+                kinds=list(arguments["kinds"]),
+                tags=list(arguments["tags"]),
+                limit=int(arguments["limit"]),
+                offset=int(arguments["offset"]),
+            )
+        ]
 
     def _write_workspace(
         self,
@@ -326,7 +539,123 @@ class ApplicationToolRuntime:
             "path": document.path,
             "size_bytes": document.size_bytes,
             "sha256": document.sha256,
+            "tags": list(document.tags),
         }
+
+    def _replace_workspace_markdown(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document = self._workspace.replace_markdown(
+            str(arguments["path"]),
+            str(arguments["old_text"]),
+            str(arguments["new_text"]),
+            replace_all=bool(arguments["replace_all"]),
+        )
+        self._append_workspace_receipt(context, document, "Updated")
+        return self._workspace_result(document)
+
+    def _append_workspace_markdown(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document = self._workspace.append_markdown(
+            str(arguments["path"]),
+            str(arguments["content"]),
+        )
+        self._append_workspace_receipt(context, document, "Updated")
+        return self._workspace_result(document)
+
+    def _set_workspace_tags(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document = self._workspace.set_tags(
+            str(arguments["path"]),
+            list(arguments["tags"]),
+        )
+        return {"path": document.path, "tags": list(document.tags)}
+
+    def _search_workspace_tags(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"path": document.path, "tags": list(document.tags)}
+            for document in self._workspace.list_files(tags=list(arguments["tags"]))
+        ]
+
+    def _ensure_paper_workspace(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = str(arguments["document_id"])
+        document = self._documents.get_document(document_id)
+        if document is None:
+            raise ValueError("Paper was not found.")
+        return self._workspace.ensure_paper_folder(document.id, document.title)
+
+    def _create_workspace_note(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document = self._workspace.create_note(
+            name=str(arguments["name"]),
+            content=str(arguments["content"]),
+            tags=list(arguments["tags"]),
+        )
+        self._append_workspace_receipt(context, document, "Created")
+        return {
+            **self._workspace_result(document),
+            "note_id": document.note_id,
+            "name": document.note_name,
+            "kind": document.kind,
+        }
+
+    def _set_paper_workspace_name(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, str]:
+        document_id = str(arguments["document_id"])
+        document = self._documents.get_document(document_id)
+        if document is None:
+            raise ValueError("Paper was not found.")
+        self._workspace.ensure_paper_folder(document.id, document.title)
+        return self._workspace.set_paper_name(
+            document.id,
+            str(arguments["paper_name"]),
+        )
+
+    @staticmethod
+    def _workspace_result(document) -> dict[str, Any]:
+        return {
+            "path": document.path,
+            "size_bytes": document.size_bytes,
+            "sha256": document.sha256,
+            "tags": list(document.tags),
+        }
+
+    @staticmethod
+    def _append_workspace_receipt(
+        context: ScholarWeaveContext,
+        document,
+        action: str,
+    ) -> None:
+        context.receipts.append(
+            ToolReceipt(
+                kind="file",
+                title=f"{action} {document.path}",
+                href=f"/workspace?path={document.path}",
+                metadata={"sha256": document.sha256},
+            )
+        )
 
     def _write_artifact(
         self,

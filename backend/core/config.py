@@ -29,8 +29,6 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 60.0
 
     agent_tracing_enabled: bool = False
-    agent_compaction_threshold_items: int = 20
-    agent_compaction_recent_items: int = 8
 
     python_tool_enabled: bool = True
     python_tool_timeout_seconds: float = 10.0
@@ -64,14 +62,11 @@ class Settings(BaseSettings):
     max_chunks_per_document: int = 2000
     pdf_min_text_chars: int = 40
     ocr_language: str = "eng"
-    ocr_engine: Literal["tesseract", "surya"] = "tesseract"
-    surya_model: str = "datalab-to/surya-ocr-2"
-    surya_device: Literal["auto", "cuda", "cpu"] = "auto"
-    surya_max_new_tokens: int = 8192
-    surya_max_image_width: int = 2048
-    surya_timeout_seconds: float = 1800.0
-    surya_unload_ollama_models: bool = True
-    surya_cache_dir: Path | None = None
+    ocr_engine: Literal["tesseract", "docling"] = "docling"
+    docling_device: Literal["auto", "cuda", "cpu"] = "auto"
+    docling_ocr_backend: Literal["onnxruntime", "torch"] = "onnxruntime"
+    docling_batch_size: int = 4
+    docling_num_threads: int = 4
     ocr_llm_enhancement_enabled: bool = False
     ocr_llm_model: str | None = None
     ocr_llm_triage_model: str | None = None
@@ -85,9 +80,6 @@ class Settings(BaseSettings):
         self.documents_dir = (self.documents_dir or self.data_dir / "documents").resolve()
         self.database_path = (self.database_path or self.data_dir / "metadata.sqlite3").resolve()
         self.llm_log_path = (self.llm_log_path or self.data_dir / "llm_calls.jsonl").resolve()
-        self.surya_cache_dir = (
-            self.surya_cache_dir or self.data_dir / "models" / "surya"
-        ).resolve()
         return self
 
     def ensure_directories(self) -> None:
@@ -96,6 +88,5 @@ class Settings(BaseSettings):
             self.workspace_dir,
             self.artifacts_dir,
             self.documents_dir,
-            self.surya_cache_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)

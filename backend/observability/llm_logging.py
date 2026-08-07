@@ -64,13 +64,22 @@ class LoggingTransport(httpx.AsyncBaseTransport):
         model = request_body.get("model") if isinstance(request_body, dict) else None
         try:
             response = await self._transport.handle_async_request(request)
-            body = await response.aread()
-            self._logger.write(
+            if response.is_closed:
+                self._logger.write(
+                    provider=self._provider,
+                    model=str(model) if model else None,
+                    operation=request.url.path,
+                    request=request_body,
+                    response=_decode_response_body(response.content),
+                )
+                return response
+            response.stream = _LoggingStream(
+                response.stream,
+                logger=self._logger,
                 provider=self._provider,
                 model=str(model) if model else None,
                 operation=request.url.path,
-                request=request_body,
-                response=_decode_response_body(body),
+                request_body=request_body,
             )
             return response
         except Exception as exc:
@@ -85,6 +94,56 @@ class LoggingTransport(httpx.AsyncBaseTransport):
 
     async def aclose(self) -> None:
         await self._transport.aclose()
+
+
+class _LoggingStream(httpx.AsyncByteStream):
+    """Copies response bytes for audit logging without delaying the consumer."""
+
+    def __init__(
+        self,
+        stream: httpx.AsyncByteStream,
+        *,
+        logger: LLMCallLogger,
+        provider: str,
+        model: str | None,
+        operation: str,
+        request_body: Any,
+    ) -> None:
+        self._stream = stream
+        self._logger = logger
+        self._provider = provider
+        self._model = model
+        self._operation = operation
+        self._request_body = request_body
+        self._chunks: list[bytes] = []
+        self._logged = False
+
+    async def __aiter__(self):
+        try:
+            async for chunk in self._stream:
+                self._chunks.append(chunk)
+                yield chunk
+        except Exception as exc:
+            self._log(error=exc)
+            raise
+        else:
+            self._log()
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+    def _log(self, error: BaseException | None = None) -> None:
+        if self._logged:
+            return
+        self._logged = True
+        self._logger.write(
+            provider=self._provider,
+            model=self._model,
+            operation=self._operation,
+            request=self._request_body,
+            response=_decode_response_body(b"".join(self._chunks)),
+            error=error,
+        )
 
 
 class LockedTransport(httpx.AsyncBaseTransport):

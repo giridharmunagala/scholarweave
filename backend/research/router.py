@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 from backend.api.dependencies import services
 from backend.research.schemas import (
@@ -89,6 +93,35 @@ async def stop_document_ingestion(
     return _document_response(container, document_id)
 
 
+@router.get("/documents/{document_id}/ingest/events")
+async def stream_document_ingestion(
+    document_id: str,
+    container=Depends(services),
+) -> StreamingResponse:
+    _document_response(container, document_id)
+
+    async def events() -> AsyncIterator[str]:
+        async with container.documents.subscribe_to_ingestion(document_id) as queue:
+            while True:
+                document = _document_response(container, document_id)
+                yield _document_sse(document)
+                if document.status != "processing":
+                    break
+                try:
+                    await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.get("/artifacts/{artifact_id}", response_model=ArtifactResponse)
 def get_artifact(artifact_id: str, container=Depends(services)) -> ArtifactResponse:
     artifact = container.documents.get_artifact(artifact_id)
@@ -158,6 +191,11 @@ def _document_response(container, document_id: str) -> DocumentResponse:
         created_at=document.created_at,
         updated_at=document.updated_at,
     )
+
+
+def _document_sse(document: DocumentResponse) -> str:
+    data = json.dumps(document.model_dump(mode="json"), ensure_ascii=True)
+    return f"event: document.updated\ndata: {data}\n\n"
 
 
 def _artifact_response(artifact) -> ArtifactResponse:

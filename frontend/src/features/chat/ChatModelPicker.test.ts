@@ -14,9 +14,10 @@ describe('builder chat model picker', () => {
         id: 'provider-1',
         name: 'Local models',
         models: [
-          { name: 'builder', capabilities: ['chat', 'tools'] },
-          { name: 'unknown', capabilities: [] },
-          { name: 'embed', capabilities: ['embedding'] },
+          { name: 'builder', capabilities: ['chat', 'tools'], enabled: true },
+          { name: 'unknown', capabilities: [], enabled: true },
+          { name: 'disabled', capabilities: ['chat', 'tools'], enabled: false },
+          { name: 'embed', capabilities: ['embedding'], enabled: true },
         ],
       },
     ] as Provider[];

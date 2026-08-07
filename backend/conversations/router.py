@@ -93,6 +93,63 @@ async def delete_conversation(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.get("/agent/conversations", response_model=list[ConversationResponse])
+def list_autonomous_conversations(container=Depends(services)) -> list[ConversationResponse]:
+    return [_response(record) for record in container.autonomous.list_conversations()]
+
+
+@router.post(
+    "/agent/conversations",
+    response_model=ConversationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_autonomous_conversation(
+    payload: BuilderConversationCreateRequest,
+    container=Depends(services),
+) -> ConversationResponse:
+    return _response(
+        container.autonomous.create_conversation(
+            title=payload.title,
+            model_reference=payload.model_reference,
+        )
+    )
+
+
+@router.get(
+    "/agent/conversations/{conversation_id}",
+    response_model=ConversationDetailResponse,
+)
+async def get_autonomous_conversation(
+    conversation_id: str,
+    container=Depends(services),
+) -> ConversationDetailResponse:
+    record = container.autonomous.get_conversation(conversation_id)
+    if record.kind != "autonomous":
+        raise ValueError("Conversation is not an autonomous-agent chat.")
+    items = await container.autonomous.conversation_items(conversation_id)
+    return ConversationDetailResponse(**_response(record).model_dump(), items=items)
+
+
+@router.post(
+    "/agent/conversations/{conversation_id}/messages",
+    response_model=ConversationMessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def send_autonomous_message(
+    conversation_id: str,
+    payload: ConversationMessageRequest,
+    container=Depends(services),
+) -> ConversationMessageResponse:
+    record = container.autonomous.get_conversation(conversation_id)
+    if record.kind != "autonomous":
+        raise ValueError("Conversation is not an autonomous-agent chat.")
+    run = container.autonomous.start_message(conversation_id, payload.content)
+    return ConversationMessageResponse(
+        conversation=_response(container.autonomous.get_conversation(conversation_id)),
+        run=run_response(container.runs.get(run.id)),
+    )
+
+
 @router.get("/builder/conversations", response_model=list[ConversationResponse])
 def list_builder_conversations(container=Depends(services)) -> list[ConversationResponse]:
     return [_response(record) for record in container.builder.list_conversations()]
@@ -151,6 +208,8 @@ async def send_builder_message(
 
 
 def _compile_conversation(record, container):
+    if record.kind == "autonomous":
+        return container.autonomous.compile_conversation(record.id)
     if record.kind == "builder":
         return container.compiler.compile(builder_blueprint(record.model_reference_json))
     if record.agent_revision_id is None:

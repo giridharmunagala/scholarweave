@@ -34,12 +34,18 @@ def configure_provider(client: TestClient, stub_provider) -> str:
                 },
                 "tools": {
                     "provider_profile_id": profile_id,
-                    "model": "stub-model",
+                    "model": "ignored-tool-model",
                 },
             }
         },
     )
     assert response.status_code == 200, response.text
+    assert response.json()["default_model_references"] == {
+        "chat": {
+            "provider_profile_id": profile_id,
+            "model": "stub-model",
+        }
+    }
     return profile_id
 
 
@@ -102,6 +108,64 @@ def test_agent_revision_and_runner_api(test_settings, stub_provider) -> None:
         assert run["final_output"] == "Stub answer."
         assert any(item["type"] == "message_output_item" for item in run["items"])
         assert any(event["event_type"] == "run.completed" for event in run["events"])
+
+
+def test_autonomous_research_agent_discovers_and_calls_tools_until_done(
+    test_settings,
+    stub_provider,
+) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        profile_id = configure_provider(client, stub_provider)
+        stub_provider.tool_plans = [
+            (
+                "Research saved papers",
+                "search_available_tools",
+                {"query": "paper"},
+            ),
+            (
+                "Research saved papers",
+                "list_documents",
+                {},
+            ),
+        ]
+        conversation_response = client.post(
+            "/api/agent/conversations",
+            json={
+                "title": "Research papers",
+                "model_reference": {
+                    "provider_profile_id": profile_id,
+                    "model": "stub-model",
+                },
+            },
+        )
+        assert conversation_response.status_code == 201, conversation_response.text
+        conversation = conversation_response.json()
+        assert conversation["kind"] == "autonomous"
+
+        message_response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={"content": "Research saved papers"},
+        )
+        assert message_response.status_code == 202, message_response.text
+        run_id = message_response.json()["run"]["id"]
+
+        deadline = time.monotonic() + 10
+        run = None
+        while time.monotonic() < deadline:
+            run = client.get(f"/api/runs/{run_id}").json()
+            if run["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.05)
+
+        assert run is not None
+        assert run["status"] == "completed", run
+        assert {"search_available_tools", "list_documents"} <= set(stub_provider.tools_offered)
+        assert sum(item["type"] == "tool_call_output_item" for item in run["items"]) == 2
+
+        detail = client.get(f"/api/agent/conversations/{conversation['id']}")
+        assert detail.status_code == 200, detail.text
+        assert any(item["role"] == "user" for item in detail.json()["items"])
 
 
 def test_function_tool_authoring_api(test_settings) -> None:

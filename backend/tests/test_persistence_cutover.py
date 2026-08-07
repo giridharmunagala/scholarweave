@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import sqlite3
 
-from sqlalchemy import inspect, text
+from sqlalchemy import create_engine, inspect, text
 
 from backend.core.config import Settings
-from backend.persistence.database import SCHEMA_GENERATION, create_session_factory
+from backend.persistence.database import (
+    SCHEMA_GENERATION,
+    _remove_legacy_compaction_items,
+    create_session_factory,
+)
 
 
 def test_sdk_schema_cutover_backs_up_and_preserves_research_data(tmp_path) -> None:
@@ -77,6 +81,36 @@ def test_sdk_schema_cutover_backs_up_and_preserves_research_data(tmp_path) -> No
     second_factory = create_session_factory(settings)
     second_factory.kw["bind"].dispose()
     assert len(list(settings.database_path.parent.glob("metadata.pre-sdk-*.sqlite3"))) == 1
+
+
+def test_legacy_compaction_items_are_removed_without_deleting_normal_history(tmp_path) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'sessions.sqlite3'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE sdk_session_items (
+                id INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                message_data TEXT NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO sdk_session_items VALUES (1, 'conversation', ?)",
+            ('{"role":"assistant","content":"[ScholarWeave history compacted]\\nsummary"}',),
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO sdk_session_items VALUES (2, 'conversation', ?)",
+            ('{"role":"user","content":"latest"}',),
+        )
+
+    _remove_legacy_compaction_items(engine)
+
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT message_data FROM sdk_session_items ORDER BY id"
+        ).scalars().all()
+    assert rows == ['{"role":"user","content":"latest"}']
 
 
 def _create_legacy_database(path) -> None:

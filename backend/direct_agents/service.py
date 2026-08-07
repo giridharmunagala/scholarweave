@@ -17,6 +17,7 @@ from backend.direct_agents.repository import DirectAgentRepository
 from backend.direct_agents.schemas import DirectAgentKey
 from backend.documents import DocumentService
 from backend.runtime.context import ScholarWeaveContext
+from backend.workspace.service import WorkspaceService
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +64,13 @@ class DirectAgentService:
         conversations: ConversationService,
         compiler: AgentCompiler,
         documents: DocumentService,
+        workspace: WorkspaceService,
     ) -> None:
         self.repository = repository
         self._conversations = conversations
         self._compiler = compiler
         self._documents = documents
+        self._workspace = workspace
 
     def create_conversation(
         self,
@@ -163,6 +166,14 @@ class DirectAgentService:
                     experimentation_results=str(summary["experimentation_results"]),
                     open_areas=list(summary["open_areas"]),
                 )
+                paper_workspace = self._workspace.ensure_paper_folder(
+                    document_id,
+                    document.title,
+                )
+                self._workspace.write_file(
+                    paper_workspace["summary_path"],
+                    _summary_markdown(document.title, summary),
+                )
                 return
             expected = set(range(1, document.page_count + 1))
             if read_pages != expected:
@@ -178,6 +189,24 @@ class DirectAgentService:
             )
 
         return validate
+
+
+def _summary_markdown(title: str, summary: dict) -> str:
+    open_areas = list(summary["open_areas"])
+    if open_areas:
+        open_areas_markdown = "\n".join(
+            f"- {area['statement']} ({area['citation']})"
+            for area in open_areas
+        )
+    else:
+        open_areas_markdown = "No explicit open research areas were identified."
+    return (
+        f"# {title}\n\n"
+        f"## Contribution\n\n{summary['contribution']}\n\n"
+        f"## Detailed contributions\n\n{summary['contributions_detail']}\n\n"
+        f"## Experiments and results\n\n{summary['experimentation_results']}\n\n"
+        f"## Open research areas\n\n{open_areas_markdown}\n"
+    )
 
 
 def direct_agent_blueprint(

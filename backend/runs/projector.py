@@ -4,7 +4,6 @@ from typing import Any
 
 from agents import (
     AgentUpdatedStreamEvent,
-    CompactionItem,
     HandoffCallItem,
     HandoffOutputItem,
     ItemHelpers,
@@ -60,7 +59,7 @@ def project_run_item(item: RunItem) -> dict[str, Any]:
                 "item_key": run_item_key(item),
             }
         )
-    elif isinstance(item, (HandoffCallItem, ReasoningItem, CompactionItem)):
+    elif isinstance(item, (HandoffCallItem, ReasoningItem)):
         pass
     return projection
 

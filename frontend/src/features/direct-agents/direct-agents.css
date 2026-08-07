@@ -5,6 +5,10 @@
   margin-bottom: var(--space-4);
 }
 
+/* This page stacks an agent picker above the transcript, so the chat column
+   gets a bounded height of its own instead of filling the viewport. */
+.direct-agents-page .chat-layout { height: clamp(28rem, 62vh, 52rem); }
+
 .direct-agent-card {
   grid-template-columns: auto minmax(0, 1fr);
   gap: .25rem var(--space-2);

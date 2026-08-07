@@ -178,7 +178,7 @@ export default function DirectAgentsPage() {
   }
 
   return (
-    <div className="page page-wide">
+    <div className="page page-wide direct-agents-page">
       <PageHeader
         eyebrow="Code-defined agents"
         title="Research agent chat"
@@ -209,24 +209,30 @@ export default function DirectAgentsPage() {
       </div>
       <div className="chat-layout">
         <aside className="conversation-list panel" aria-label="Agent conversations">
-          {conversations.map((conversation) => (
-            <button
-              type="button"
-              disabled={sending}
-              key={conversation.id}
-              className={current?.id === conversation.id ? 'conversation active' : 'conversation'}
-              onClick={() => {
-                void open(conversation.id).catch(setError);
-                setRun(null);
-                setStream(emptyChatStream);
-                setOptimisticUser(null);
-              }}
-            >
-              <strong>{conversation.title}</strong>
-              <small>{agentName(agents, conversation.agent_key)} · {conversation.last_message_preview || 'No messages yet'}</small>
-            </button>
-          ))}
-          {!conversations.length ? <p className="conversation-empty">No research agent chats yet.</p> : null}
+          <div className="conversation-scroll">
+            {conversations.map((conversation) => (
+              <div
+                className={current?.id === conversation.id ? 'conversation active' : 'conversation'}
+                key={conversation.id}
+              >
+                <button
+                  type="button"
+                  disabled={sending}
+                  className="conversation-open"
+                  onClick={() => {
+                    void open(conversation.id).catch(setError);
+                    setRun(null);
+                    setStream(emptyChatStream);
+                    setOptimisticUser(null);
+                  }}
+                >
+                  <strong>{conversation.title}</strong>
+                  <small>{agentName(agents, conversation.agent_key)} · {conversation.last_message_preview || 'No messages yet'}</small>
+                </button>
+              </div>
+            ))}
+            {!conversations.length ? <p className="conversation-empty">No research agent chats yet.</p> : null}
+          </div>
         </aside>
         <section className="chat-surface panel">
           <div className="direct-agent-context">
@@ -258,85 +264,122 @@ export default function DirectAgentsPage() {
               />
             ) : null}
             {current?.items.map((item, index) =>
-              item.is_compaction ? (
-                <div className="compaction-marker" key={index}>Earlier SDK session history was compacted and replaced.</div>
-              ) : item.text ? (
+              item.text ? (
                 <article className={`message role-${item.role ?? 'activity'}`} key={index}>
-                  <span>{item.role ?? item.type}</span>
-                  <MarkdownViewer content={item.text} />
+                  <span className="message-avatar" aria-hidden="true">
+                    <Icon name={item.role === 'user' ? 'user' : 'sparkle'} size={14} />
+                  </span>
+                  <div className="message-body">
+                    <div className="message-header"><span>{item.role ?? item.type}</span></div>
+                    <MarkdownViewer content={item.text} />
+                  </div>
                 </article>
               ) : null,
             )}
             {optimisticUser ? (
               <article className="message role-user optimistic">
-                <span>user</span>
-                <p>{optimisticUser}</p>
+                <span className="message-avatar" aria-hidden="true">
+                  <Icon name="user" size={14} />
+                </span>
+                <div className="message-body">
+                  <div className="message-header"><span>user</span></div>
+                  <p>{optimisticUser}</p>
+                </div>
               </article>
             ) : null}
             {stream.assistant ? (
               <article className="message role-assistant streaming">
-                <span>assistant · streaming</span>
-                <MarkdownViewer content={stream.assistant} />
+                <span className="message-avatar" aria-hidden="true">
+                  <Icon name="sparkle" size={14} />
+                </span>
+                <div className="message-body">
+                  <div className="message-header"><span>assistant · streaming</span></div>
+                  <MarkdownViewer content={stream.assistant} />
+                  <i className="stream-cursor" aria-hidden="true" />
+                </div>
               </article>
             ) : null}
             {run ? (
-              <div className="run-activity">
-                <div className="row-between">
+              <div className="run-activity static">
+                <div className="row-between run-activity-head">
                   <strong>Run activity</strong>
                   <StatusPill value={run.status} />
                 </div>
-                {stream.tools.map((tool) => (
-                  <div className="live-tool" key={tool.sequence}>
-                    <span className={`tool-dot ${tool.status}`} aria-hidden="true" />
-                    <code>{tool.toolName}</code>
-                    <small>{tool.status}</small>
-                  </div>
-                ))}
-                {stream.reasoning ? (
-                  <details className="reasoning-stream">
-                    <summary>Reasoning</summary>
-                    <p>{stream.reasoning}</p>
-                  </details>
-                ) : null}
-                {run.error ? <div className="notice error">{run.error}</div> : null}
+                <div className="run-activity-content">
+                  {stream.tools.map((tool) => (
+                    <div className="live-tool" key={tool.sequence}>
+                      <span className="activity-icon tool"><Icon name="tools" size={14} /></span>
+                      <span className="live-tool-body">
+                        <strong>{humanize(tool.toolName)}</strong>
+                        <small>{tool.status === 'running' ? 'Using tool…' : 'Tool finished'}</small>
+                      </span>
+                      <span className={`tool-status ${tool.status}`}>
+                        {tool.status === 'running'
+                          ? <span className="spinner tiny" aria-hidden="true" />
+                          : <Icon name="check" size={13} />}
+                        {tool.status === 'running' ? 'Running' : 'Done'}
+                      </span>
+                    </div>
+                  ))}
+                  {stream.reasoning ? (
+                    <details className="reasoning-stream">
+                      <summary>
+                        <span className="activity-icon reasoning"><Icon name="sparkle" size={14} /></span>
+                        <span>
+                          <strong>Reasoning</strong>
+                          <small>Following the agent's approach</small>
+                        </span>
+                        <Icon className="activity-chevron" name="arrowRight" size={13} />
+                      </summary>
+                      <div className="reasoning-content">{stream.reasoning}</div>
+                    </details>
+                  ) : null}
+                  {run.error ? <div className="notice error">{run.error}</div> : null}
+                </div>
               </div>
             ) : null}
           </div>
           <div className="composer">
-            <ChatModelPicker
-              providers={providers}
-              settings={settings}
-              value={modelReference}
-              disabled={sending || Boolean(current)}
-              onChange={setModelReference}
-            />
-            <textarea
-              disabled={sending}
-              value={content}
-              onChange={(event) => setContent(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault();
-                  void send();
-                }
-              }}
-              placeholder={composerPlaceholder(selectedAgentKey)}
-            />
-            <button
-              className="button"
-              type="button"
-              disabled={
-                sending
-                || !content.trim()
-                || Boolean(selectedAgent?.requires_document && !selectedDocumentId)
-              }
-              onClick={() => void send()}
-            >
-              {sending ? 'Running…' : 'Send'}
-            </button>
-            <p className="composer-hint">
-              <kbd>Enter</kbd> to send · <kbd>Shift</kbd> + <kbd>Enter</kbd> for a new line
-            </p>
+            <div className="composer-box">
+              <textarea
+                rows={1}
+                disabled={sending}
+                value={content}
+                onChange={(event) => setContent(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+                placeholder={composerPlaceholder(selectedAgentKey)}
+              />
+              <div className="composer-actions">
+                <ChatModelPicker
+                  providers={providers}
+                  settings={settings}
+                  value={modelReference}
+                  disabled={sending || Boolean(current)}
+                  onChange={setModelReference}
+                />
+                <span className="composer-hint">
+                  <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline
+                </span>
+                <button
+                  className="button icon composer-send"
+                  type="button"
+                  aria-label="Send message"
+                  disabled={
+                    sending
+                    || !content.trim()
+                    || Boolean(selectedAgent?.requires_document && !selectedDocumentId)
+                  }
+                  onClick={() => void send()}
+                >
+                  {sending ? <span className="spinner tiny" aria-hidden="true" /> : <Icon name="arrowRight" size={16} />}
+                </button>
+              </div>
+            </div>
           </div>
         </section>
       </div>
@@ -345,9 +388,7 @@ export default function DirectAgentsPage() {
 }
 
 function defaultAgentModel(settings: Settings): ModelReference {
-  return settings.default_model_references.tools
-    ?? settings.default_model_references.chat
-    ?? {};
+  return settings.default_model_references.chat ?? {};
 }
 
 function agentName(agents: DirectAgent[], key: DirectAgent['key']): string {
@@ -373,4 +414,9 @@ function composerPlaceholder(key: DirectAgent['key']): string {
   if (key === 'open_areas') return 'Find open research areas across my paper summaries…';
   if (key === 'qa') return 'Ask a question about this paper…';
   return 'Review every page and flag it keep or no keep…';
+}
+
+function humanize(value: string): string {
+  const words = value.replace(/[_-]+/g, ' ').trim();
+  return words ? words.charAt(0).toLocaleUpperCase() + words.slice(1) : 'Tool';
 }

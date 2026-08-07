@@ -116,6 +116,18 @@ class ModelRuntime:
         model = selected.model if selected else None
         if not model:
             raise ProviderRuntimeError(f"No {capability} model is configured.")
+        declared_model = next(
+            (
+                item
+                for item in (profile.models_json or [])
+                if item.get("name") == model
+            ),
+            None,
+        )
+        if declared_model is not None and not bool(declared_model.get("enabled", True)):
+            raise ProviderRuntimeError(
+                f"Model '{model}' is disabled for provider profile '{profile.name}'."
+            )
         return ResolvedModel(
             profile_id=profile.id,
             profile_name=profile.name,

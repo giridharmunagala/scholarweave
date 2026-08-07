@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import anyio
@@ -27,6 +30,7 @@ class DocumentService:
         self.ocr = ocr
         self._active_ingestions: dict[str, anyio.CancelScope] = {}
         self._ingestion_finished: dict[str, anyio.Event] = {}
+        self._ingestion_subscribers: dict[str, set[asyncio.Queue[None]]] = {}
         self._closing = False
 
     def ocr_available(self) -> bool:
@@ -138,6 +142,7 @@ class DocumentService:
 
         async def track_progress(payload: dict[str, Any]) -> None:
             self.repository.update_ingestion_progress(document_id, payload)
+            self._notify_ingestion_subscribers(document_id)
             if progress is not None:
                 await progress(payload)
 
@@ -160,6 +165,7 @@ class DocumentService:
                 self._active_ingestions.pop(document_id, None)
                 self._ingestion_finished.pop(document_id, None)
                 self.repository.finish_failed_ingestion(document_id, previous_status)
+                self._notify_ingestion_subscribers(document_id)
                 finished.set()
         if cancel_scope.cancel_called:
             return {"document_id": document_id, "stopped": True}
@@ -170,7 +176,25 @@ class DocumentService:
         document = self.repository.stop_ingestion(document_id)
         if cancel_scope is not None:
             cancel_scope.cancel()
+        self._notify_ingestion_subscribers(document_id)
         return document
+
+    @asynccontextmanager
+    async def subscribe_to_ingestion(self, document_id: str) -> AsyncIterator[asyncio.Queue[None]]:
+        queue: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
+        subscribers = self._ingestion_subscribers.setdefault(document_id, set())
+        subscribers.add(queue)
+        try:
+            yield queue
+        finally:
+            subscribers.discard(queue)
+            if not subscribers:
+                self._ingestion_subscribers.pop(document_id, None)
+
+    def _notify_ingestion_subscribers(self, document_id: str) -> None:
+        for queue in tuple(self._ingestion_subscribers.get(document_id, ())):
+            if queue.empty():
+                queue.put_nowait(None)
 
     async def close(self) -> None:
         self._closing = True

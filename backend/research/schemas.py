@@ -54,7 +54,7 @@ class IngestionOptionsResponse(ResearchSchema):
     embedded_text_ratio: float
     recommended_mode: Literal["embedded", "ocr"]
     ocr_available: bool
-    ocr_engine: Literal["tesseract", "surya"]
+    ocr_engine: Literal["tesseract", "docling"]
 
 
 class ArtifactContentResponse(ResearchSchema):

@@ -23,7 +23,6 @@ from backend.runs.events import PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
 from backend.runs.repository import RunRepository
 from backend.runtime.context import ScholarWeaveContext, ToolRuntime
-from backend.runtime.compaction_events import observe_compaction
 from backend.runtime.hooks import ScholarWeaveRunHooks
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
@@ -264,7 +263,7 @@ class RunService:
             {"agent_name": compiled.blueprint.name},
         )
         try:
-            async with lock, observe_compaction(sink.emit):
+            async with lock:
                 session_snapshot = await session.get_items() if session is not None else None
                 stream = Runner.run_streamed(
                     compiled.entry_agent,

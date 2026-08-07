@@ -15,6 +15,7 @@ from backend.core.config import Settings
 from backend.core.json import dumps_json, loads_json
 
 SCHEMA_GENERATION = 2
+_LEGACY_COMPACTION_MARKER = "[ScholarWeave history compacted]"
 _ARTIFACTS_BACKUP_TABLE = "_sdk_cutover_artifacts"
 _CHUNKS_BACKUP_TABLE = "_sdk_cutover_document_chunks"
 _RUNTIME_TABLES = (
@@ -49,6 +50,8 @@ _OBSOLETE_SETTING_KEYS = (
     "agent_todo_max_retries",
     "agent_max_replans",
     "agent_compaction_threshold_chars",
+    "agent_compaction_threshold_items",
+    "agent_compaction_recent_items",
     "agent_memory_max_file_bytes",
     "default_generation_model",
     "default_embedding_model",
@@ -93,6 +96,7 @@ def create_session_factory(settings: Settings) -> sessionmaker[Session]:
     )
     _cut_over_schema(engine, settings)
     Base.metadata.create_all(engine)
+    _remove_legacy_compaction_items(engine)
     _restore_preserved_runtime_dependents(engine)
     _write_schema_generation(engine)
     return sessionmaker(
@@ -115,6 +119,16 @@ def session_scope(session_factory: sessionmaker[Session]) -> Iterator[Session]:
         session.close()
 
 
+def _remove_legacy_compaction_items(engine: Engine) -> None:
+    if "sdk_session_items" not in inspect(engine).get_table_names():
+        return
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "DELETE FROM sdk_session_items WHERE instr(message_data, ?) > 0",
+            (_LEGACY_COMPACTION_MARKER,),
+        )
+
+
 def _register_models() -> None:
     from backend.agents import models as agent_models  # noqa: F401
     from backend.conversations import models as conversation_models  # noqa: F401
@@ -124,6 +138,7 @@ def _register_models() -> None:
     from backend.providers import models as provider_models  # noqa: F401
     from backend.runs import models as run_models  # noqa: F401
     from backend.tools import models as tool_models  # noqa: F401
+    from backend.workspace import models as workspace_models  # noqa: F401
 
 
 def _cut_over_schema(engine: Engine, settings: Settings) -> None:

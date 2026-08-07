@@ -28,9 +28,6 @@ export const RUN_EVENT_TYPES = [
   'guardrail.tripwire',
   'approval.requested',
   'approval.resolved',
-  'compaction.started',
-  'compaction.completed',
-  'compaction.failed',
   'usage.updated',
 ] as const;
 

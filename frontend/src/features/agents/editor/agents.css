@@ -19,7 +19,75 @@
   padding-right: var(--space-3);
 }
 .editor-toolbar .toolbar-group + .toolbar-group { border-left: 1px solid var(--border); padding-left: var(--space-3); }
+.toolbar-hint { color: var(--muted); font-size: var(--text-xs); }
 .run-inline input { width: min(360px, 45vw); }
+
+.add-node-menu { position: relative; }
+.add-node-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 50;
+  display: grid;
+  width: min(430px, calc(100vw - 3rem));
+  max-height: min(560px, 70vh);
+  padding: var(--space-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  overflow: auto;
+}
+.add-node-search {
+  position: sticky;
+  top: calc(var(--space-2) * -1);
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--muted);
+}
+.add-node-search input { flex: 1; min-width: 0; border: 0; background: transparent; box-shadow: none; }
+.add-node-search input:focus { box-shadow: none; }
+.add-node-group {
+  padding: var(--space-3) var(--space-2) var(--space-1);
+  color: var(--muted);
+  font-size: .65rem;
+  font-weight: 800;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+.add-node-option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: .65rem .6rem;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.add-node-option:hover, .add-node-option:focus-visible { background: var(--surface-2); }
+.add-node-option-copy { display: grid; flex: 1; min-width: 0; gap: .15rem; }
+.add-node-option-copy strong { color: var(--text-strong); font-size: var(--text-sm); }
+.add-node-option-copy small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-node-kind {
+  flex: none;
+  padding: .15rem .4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: .62rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+.add-node-empty { margin: 0; padding: var(--space-5); text-align: center; }
 
 .editor-grid {
   display: grid;
@@ -53,13 +121,55 @@
   background: var(--surface);
 }
 .agent-canvas .react-flow__attribution { background: transparent; color: var(--muted); opacity: .5; }
-.agent-canvas .react-flow__handle {
-  width: 8px;
-  height: 8px;
-  border: 1px solid var(--surface);
-  background: var(--muted);
+.agent-canvas .react-flow__handle.connection-port {
+  width: 16px;
+  height: 16px;
+  border: 3px solid var(--surface);
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--border-strong), var(--shadow-sm);
+  transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
-.agent-canvas .react-flow__handle:hover { background: var(--accent); }
+.agent-canvas .react-flow__handle.connection-port:hover {
+  transform: translate(-50%, -50%) scale(1.3);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.agent-canvas .connection-port-secondary { width: 12px !important; height: 12px !important; background: var(--muted) !important; }
+.agent-canvas.is-connecting .react-flow__handle.target {
+  background: var(--success);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--success) 25%, transparent);
+}
+.connection-port-in::after, .connection-port-out::after {
+  position: absolute;
+  top: 50%;
+  padding: .12rem .3rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: .08em;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+.connection-port-in::after { content: 'IN'; left: 16px; transform: translateY(-50%); }
+.connection-port-out::after { content: 'OUT'; right: 16px; transform: translateY(-50%); }
+.primitive-card:hover .connection-port-in::after,
+.primitive-card:hover .connection-port-out::after,
+.agent-canvas.is-connecting .connection-port-in::after { opacity: 1; }
+.connection-help {
+  display: grid;
+  gap: .12rem;
+  max-width: 280px;
+  padding: .5rem .65rem !important;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  box-shadow: var(--shadow-sm);
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.connection-help strong { color: var(--text-strong); }
 
 /* Canvas node cards. */
 .primitive-card {

@@ -10,6 +10,7 @@ from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.agents.compiler import AgentCompiler
 from backend.agents.export import export_agent
 from backend.agents.guardrails import create_guardrail_catalog
+from backend.agents.instructions import GLOBAL_AGENT_INSTRUCTIONS
 from backend.core.errors import ValidationError
 from backend.providers.types import ModelReference, ResolvedAgentModel
 
@@ -143,6 +144,8 @@ def test_compiler_builds_real_sdk_topology() -> None:
     assert len(compiled.entry_agent.handoffs) == 1
     assert compiled.entry_agent.handoffs[0].agent_name == "Researcher"
     assert compiled.agents_by_id["researcher"].output_type is not None
+    assert GLOBAL_AGENT_INSTRUCTIONS in compiled.entry_agent.instructions
+    assert GLOBAL_AGENT_INSTRUCTIONS in compiled.agents_by_id["researcher"].instructions
     assert compiled.max_turns == 10
 
 
@@ -315,6 +318,8 @@ def test_python_export_preserves_sdk_topology_and_exact_tool_schema() -> None:
     source = export_agent(definition, tool_catalog=tool_catalog())
 
     compile(source, "exported_agent.py", "exec")
+    assert "double-dollar delimiters" in source
+    assert "$$<math>$$" in source
 
     assert "from agents import (" in source
     assert "params_json_schema={'type': 'object', 'properties': {'text': {'type': 'string'}}" in source

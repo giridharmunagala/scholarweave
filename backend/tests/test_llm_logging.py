@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -149,3 +150,39 @@ async def test_logging_transport_persists_normalized_stream_response(tmp_path) -
     logged = json.loads(log_path.read_text())
     assert logged["response"]["object"] == "chat.completion"
     assert logged["response"]["choices"][0]["message"]["content"] == "Hello world"
+
+
+@pytest.mark.anyio
+async def test_logging_transport_does_not_buffer_streaming_response(tmp_path) -> None:
+    release_second_chunk = asyncio.Event()
+
+    class ProviderStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"first"
+            await release_second_chunk.wait()
+            yield b"second"
+
+    async def provider(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=ProviderStream(),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    log_path = tmp_path / "llm_calls.jsonl"
+    transport = LoggingTransport(LLMCallLogger(log_path), "test", httpx.MockTransport(provider))
+    async with httpx.AsyncClient(transport=transport) as client:
+        async with client.stream(
+            "POST",
+            "https://provider.test/v1/chat/completions",
+            json={"model": "test-model"},
+        ) as response:
+            chunks = response.aiter_bytes()
+            assert await anext(chunks) == b"first"
+            assert not log_path.exists()
+            release_second_chunk.set()
+            assert await anext(chunks) == b"second"
+            with pytest.raises(StopAsyncIteration):
+                await anext(chunks)
+
+    assert json.loads(log_path.read_text())["response"] == "firstsecond"

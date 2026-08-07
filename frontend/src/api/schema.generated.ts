@@ -4,6 +4,58 @@
  */
 
 export interface paths {
+    "/api/agent/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Autonomous Conversations */
+        get: operations["list_autonomous_conversations_api_agent_conversations_get"];
+        put?: never;
+        /** Create Autonomous Conversation */
+        post: operations["create_autonomous_conversation_api_agent_conversations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/conversations/{conversation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Autonomous Conversation */
+        get: operations["get_autonomous_conversation_api_agent_conversations__conversation_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/conversations/{conversation_id}/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Send Autonomous Message */
+        post: operations["send_autonomous_message_api_agent_conversations__conversation_id__messages_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agents": {
         parameters: {
             query?: never;
@@ -312,6 +364,23 @@ export interface paths {
         put?: never;
         /** Ingest Document */
         post: operations["ingest_document_api_documents__document_id__ingest_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/ingest/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Stream Document Ingestion */
+        get: operations["stream_document_ingestion_api_documents__document_id__ingest_events_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -738,6 +807,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspace/files/folder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Folder */
+        delete: operations["delete_folder_api_workspace_files_folder_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/files/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Note */
+        post: operations["create_note_api_workspace_files_notes_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -968,18 +1071,6 @@ export interface components {
              */
             title: string;
         };
-        /** CompactionRunItem */
-        CompactionRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "compaction_item";
-        };
         /** ConversationCreateRequest */
         ConversationCreateRequest: {
             /** Agent Revision Id */
@@ -1007,7 +1098,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "builder" | "direct_agent";
+            kind: "agent" | "autonomous" | "builder" | "direct_agent";
             /** Last Message Preview */
             last_message_preview: string;
             model_reference: components["schemas"]["ModelReferenceSpec"];
@@ -1047,7 +1138,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "builder" | "direct_agent";
+            kind: "agent" | "autonomous" | "builder" | "direct_agent";
             /** Last Message Preview */
             last_message_preview: string;
             model_reference: components["schemas"]["ModelReferenceSpec"];
@@ -1489,7 +1580,7 @@ export interface components {
              * Ocr Engine
              * @enum {string}
              */
-            ocr_engine: "tesseract" | "surya";
+            ocr_engine: "tesseract" | "docling";
             /**
              * Recommended Mode
              * @enum {string}
@@ -1631,6 +1722,11 @@ export interface components {
         ProviderModel: {
             /** Capabilities */
             capabilities?: ("chat" | "embedding" | "vision" | "tools")[];
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
             /** Name */
             name: string;
         };
@@ -1813,7 +1909,7 @@ export interface components {
             /** Interruptions */
             interruptions: components["schemas"]["RunInterruptionResponse"][];
             /** Items */
-            items: (components["schemas"]["MessageRunItem"] | components["schemas"]["ToolCallRunItem"] | components["schemas"]["ToolOutputRunItem"] | components["schemas"]["HandoffCallRunItem"] | components["schemas"]["HandoffOutputRunItem"] | components["schemas"]["ReasoningRunItem"] | components["schemas"]["CompactionRunItem"] | components["schemas"]["ToolApprovalRunItem"] | components["schemas"]["ToolSearchCallRunItem"] | components["schemas"]["ToolSearchOutputRunItem"] | components["schemas"]["McpListToolsRunItem"] | components["schemas"]["McpApprovalRequestRunItem"] | components["schemas"]["McpApprovalResponseRunItem"])[];
+            items: (components["schemas"]["MessageRunItem"] | components["schemas"]["ToolCallRunItem"] | components["schemas"]["ToolOutputRunItem"] | components["schemas"]["HandoffCallRunItem"] | components["schemas"]["HandoffOutputRunItem"] | components["schemas"]["ReasoningRunItem"] | components["schemas"]["ToolApprovalRunItem"] | components["schemas"]["ToolSearchCallRunItem"] | components["schemas"]["ToolSearchOutputRunItem"] | components["schemas"]["McpListToolsRunItem"] | components["schemas"]["McpApprovalRequestRunItem"] | components["schemas"]["McpApprovalResponseRunItem"])[];
             /** Last Agent Name */
             last_agent_name: string | null;
             /** Started At */
@@ -1856,8 +1952,6 @@ export interface components {
         };
         /** SessionItemResponse */
         SessionItemResponse: {
-            /** Is Compaction */
-            is_compaction: boolean;
             /** Raw */
             raw: unknown;
             /** Role */
@@ -1868,35 +1962,9 @@ export interface components {
             type: string;
         };
         /** SessionPolicySpec */
-        SessionPolicySpec: {
-            /**
-             * Compaction Enabled
-             * @default true
-             */
-            compaction_enabled: boolean;
-            /**
-             * Compaction Threshold Items
-             * @default 20
-             */
-            compaction_threshold_items: number;
-            /**
-             * Recent Items To Keep
-             * @default 8
-             */
-            recent_items_to_keep: number;
-            /**
-             * Strategy
-             * @default auto
-             * @enum {string}
-             */
-            strategy: "auto" | "openai_responses" | "local";
-        };
+        SessionPolicySpec: Record<string, never>;
         /** SettingsResponse */
         SettingsResponse: {
-            /** Agent Compaction Recent Items */
-            agent_compaction_recent_items: number;
-            /** Agent Compaction Threshold Items */
-            agent_compaction_threshold_items: number;
             /** Agent Tracing Enabled */
             agent_tracing_enabled: boolean;
             /** Artifacts Dir */
@@ -1909,13 +1977,27 @@ export interface components {
             default_model_references: {
                 [key: string]: components["schemas"]["ModelReferenceSpec"];
             };
+            /** Docling Batch Size */
+            docling_batch_size: number;
+            /**
+             * Docling Device
+             * @enum {string}
+             */
+            docling_device: "auto" | "cuda" | "cpu";
+            /** Docling Num Threads */
+            docling_num_threads: number;
+            /**
+             * Docling Ocr Backend
+             * @enum {string}
+             */
+            docling_ocr_backend: "onnxruntime" | "torch";
             /** Documents Dir */
             documents_dir: string;
             /**
              * Ocr Engine
              * @enum {string}
              */
-            ocr_engine: "tesseract" | "surya";
+            ocr_engine: "tesseract" | "docling";
             /** Ocr Llm Enhancement Enabled */
             ocr_llm_enhancement_enabled: boolean;
             /** Ocr Llm Model */
@@ -1936,38 +2018,27 @@ export interface components {
             request_timeout_seconds: number;
             /** Retrieval Max Context Chars */
             retrieval_max_context_chars: number;
-            /**
-             * Surya Device
-             * @enum {string}
-             */
-            surya_device: "auto" | "cuda" | "cpu";
-            /** Surya Max Image Width */
-            surya_max_image_width: number;
-            /** Surya Max New Tokens */
-            surya_max_new_tokens: number;
-            /** Surya Model */
-            surya_model: string;
-            /** Surya Timeout Seconds */
-            surya_timeout_seconds: number;
-            /** Surya Unload Ollama Models */
-            surya_unload_ollama_models: boolean;
             /** Workspace Dir */
             workspace_dir: string;
         };
         /** SettingsUpdate */
         SettingsUpdate: {
-            /** Agent Compaction Recent Items */
-            agent_compaction_recent_items?: number | null;
-            /** Agent Compaction Threshold Items */
-            agent_compaction_threshold_items?: number | null;
             /** Agent Tracing Enabled */
             agent_tracing_enabled?: boolean | null;
             /** Default Model References */
             default_model_references?: {
                 [key: string]: components["schemas"]["ModelReferenceSpec"];
             } | null;
+            /** Docling Batch Size */
+            docling_batch_size?: number | null;
+            /** Docling Device */
+            docling_device?: ("auto" | "cuda" | "cpu") | null;
+            /** Docling Num Threads */
+            docling_num_threads?: number | null;
+            /** Docling Ocr Backend */
+            docling_ocr_backend?: ("onnxruntime" | "torch") | null;
             /** Ocr Engine */
-            ocr_engine?: ("tesseract" | "surya") | null;
+            ocr_engine?: ("tesseract" | "docling") | null;
             /** Ocr Llm Enhancement Enabled */
             ocr_llm_enhancement_enabled?: boolean | null;
             /** Ocr Llm Model */
@@ -1988,18 +2059,6 @@ export interface components {
             request_timeout_seconds?: number | null;
             /** Retrieval Max Context Chars */
             retrieval_max_context_chars?: number | null;
-            /** Surya Device */
-            surya_device?: ("auto" | "cuda" | "cpu") | null;
-            /** Surya Max Image Width */
-            surya_max_image_width?: number | null;
-            /** Surya Max New Tokens */
-            surya_max_new_tokens?: number | null;
-            /** Surya Model */
-            surya_model?: string | null;
-            /** Surya Timeout Seconds */
-            surya_timeout_seconds?: number | null;
-            /** Surya Unload Ollama Models */
-            surya_unload_ollama_models?: boolean | null;
         };
         /** ToolApprovalRunItem */
         ToolApprovalRunItem: {
@@ -2114,6 +2173,8 @@ export interface components {
         WorkspaceFileContentResponse: {
             /** Content */
             content: unknown;
+            /** Kind */
+            kind: string;
             /** Media Type */
             media_type: string;
             /**
@@ -2123,13 +2184,25 @@ export interface components {
             modified_at: string;
             /** Name */
             name: string;
+            /** Note Id */
+            note_id?: string | null;
+            /** Note Name */
+            note_name?: string | null;
+            /** Paper Id */
+            paper_id?: string | null;
+            /** Paper Name */
+            paper_name?: string | null;
             /** Path */
             path: string;
             /** Size Bytes */
             size_bytes: number;
+            /** Tags */
+            tags: string[];
         };
         /** WorkspaceFileResponse */
         WorkspaceFileResponse: {
+            /** Kind */
+            kind: string;
             /** Media Type */
             media_type: string;
             /**
@@ -2139,10 +2212,20 @@ export interface components {
             modified_at: string;
             /** Name */
             name: string;
+            /** Note Id */
+            note_id?: string | null;
+            /** Note Name */
+            note_name?: string | null;
+            /** Paper Id */
+            paper_id?: string | null;
+            /** Paper Name */
+            paper_name?: string | null;
             /** Path */
             path: string;
             /** Size Bytes */
             size_bytes: number;
+            /** Tags */
+            tags: string[];
         };
         /** WorkspaceFileWriteRequest */
         WorkspaceFileWriteRequest: {
@@ -2150,6 +2233,20 @@ export interface components {
             content: unknown;
             /** Path */
             path: string;
+            /** Tags */
+            tags?: string[] | null;
+        };
+        /** WorkspaceNoteCreateRequest */
+        WorkspaceNoteCreateRequest: {
+            /**
+             * Content
+             * @default
+             */
+            content: string;
+            /** Name */
+            name: string;
+            /** Tags */
+            tags?: string[];
         };
     };
     responses: never;
@@ -2160,6 +2257,125 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_autonomous_conversations_api_agent_conversations_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationResponse"][];
+                };
+            };
+        };
+    };
+    create_autonomous_conversation_api_agent_conversations_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BuilderConversationCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_autonomous_conversation_api_agent_conversations__conversation_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    send_autonomous_message_api_agent_conversations__conversation_id__messages_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConversationMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationMessageResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_agents_api_agents_get: {
         parameters: {
             query?: never;
@@ -2918,6 +3134,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stream_document_ingestion_api_documents__document_id__ingest_events_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -3978,6 +4225,68 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_folder_api_workspace_files_folder_delete: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_note_api_workspace_files_notes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceNoteCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFileContentResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

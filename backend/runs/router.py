@@ -132,7 +132,14 @@ async def stream_events(
                 cursor = sequence
                 yield _sse(sequence, event["event_type"], event["payload"])
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _sse(sequence: int, event_type: str, payload: dict) -> str:

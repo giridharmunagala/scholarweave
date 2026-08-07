@@ -211,6 +211,11 @@ async def test_cleaner_decisions_gate_pages_and_summary_repository(test_settings
         "summary",
         [document_id],
     )(summary_context)
+    summary_file = services.workspace.read_file(
+        f"papers/{document_id}/summary.md"
+    )
+    assert "A contribution." in summary_file.content
+    assert summary_file.tags == ("paper", f"paper:{document_id}", "summary")
     open_areas_context = ScholarWeaveContext(
         run_id="open-areas-run",
         tool_runtime=runtime,

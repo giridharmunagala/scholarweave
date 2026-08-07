@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Connection, Edge } from '@xyflow/react';
 import { agentsApi } from '../api';
+import { providersApi, type Provider } from '../../providers/api';
 import {
   blankAgent,
   blankBlueprint,
@@ -23,6 +24,7 @@ export function useAgentEditor(agentId: string | null) {
   const [presentation, setPresentation] = useState<AgentPresentation>({ positions: {} });
   const [record, setRecord] = useState<AgentResponse | null>(null);
   const [catalog, setCatalog] = useState<SdkCatalog | null>(null);
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>('agent:agent');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -33,11 +35,13 @@ export function useAgentEditor(agentId: string | null) {
     let cancelled = false;
     Promise.all([
       agentsApi.catalog(),
+      providersApi.list(),
       agentId ? agentsApi.get(agentId) : Promise.resolve(null),
     ])
-      .then(([nextCatalog, nextRecord]) => {
+      .then(([nextCatalog, nextProviders, nextRecord]) => {
         if (cancelled) return;
         setCatalog(nextCatalog);
+        setProviders(nextProviders);
         if (nextRecord) {
           setRecord(nextRecord);
           setBlueprint(normalizeBlueprint(nextRecord.latest_revision.blueprint));
@@ -179,6 +183,7 @@ export function useAgentEditor(agentId: string | null) {
     setPresentation,
     record,
     catalog,
+    providers,
     selectedId,
     setSelectedId,
     selected,

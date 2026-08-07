@@ -130,6 +130,8 @@ class SafeStorage:
                 relative_path = candidate.resolve().relative_to(resolved_base)
             except ValueError:
                 continue
+            if relative_path.parts and relative_path.parts[0] == ".scholarweave":
+                continue
             files.append(relative_path.as_posix())
         return sorted(files, key=str.casefold)
 
@@ -141,7 +143,9 @@ class SafeStorage:
         )
         stat = absolute.stat()
         return WorkspaceFileInfo(
-            relative_path=Path(relative_path).as_posix(),
+            relative_path=absolute.resolve().relative_to(
+                self.settings.workspace_dir.resolve()
+            ).as_posix(),
             size_bytes=stat.st_size,
             modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
         )
@@ -157,6 +161,21 @@ class SafeStorage:
         if not absolute.is_file():
             raise StorageError("Workspace path is not a file")
         absolute.unlink()
+        self._remove_empty_parents(absolute.parent, self.settings.workspace_dir)
+
+    def delete_workspace_folder(self, relative_path: str) -> None:
+        absolute = self._safe_path(self.settings.workspace_dir, relative_path)
+        resolved_base = self.settings.workspace_dir.resolve()
+        if absolute.resolve() == resolved_base:
+            raise StorageError("Refusing to delete the workspace root")
+        if not absolute.exists():
+            raise FileNotFoundError(relative_path)
+        if not absolute.is_dir():
+            raise StorageError("Workspace path is not a folder")
+        relative = absolute.resolve().relative_to(resolved_base)
+        if relative.parts and relative.parts[0] == ".scholarweave":
+            raise StorageError("Refusing to delete workspace metadata")
+        shutil.rmtree(absolute)
         self._remove_empty_parents(absolute.parent, self.settings.workspace_dir)
 
     def read_workspace_markdown(self, relative_path: str) -> tuple[WorkspaceMarkdownFile, str]:

@@ -9,6 +9,7 @@ from backend.agents.blueprint import FunctionToolSpec
 from backend.core.config import Settings
 from backend.core.errors import ValidationError
 from backend.persistence import create_session_factory
+from backend.documents.models import Document
 from backend.runtime.context import ScholarWeaveContext
 from backend.bootstrap import create_services
 from backend.tools.catalog import create_tool_catalog
@@ -79,6 +80,222 @@ async def test_sdk_catalog_exposes_blueprint_contract(test_settings) -> None:
         schema = result["agent_blueprint_schema"]
         assert {"entry_agent_id", "agents"} <= set(schema["required"])
         assert result["agent_blueprint_examples"][0]["tools"][0]["kind"] == "function"
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_autonomous_tool_search_finds_builtin_and_custom_tools(test_settings) -> None:
+    services = create_services(test_settings)
+    try:
+        services.function_tools.create(
+            name="extract_claims",
+            description="Extract evidence-backed claims from research text.",
+            parameters_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            output_schema=None,
+            code="def invoke(arguments):\n    return {'claims': [arguments['text']]}\n",
+            requires_approval=True,
+        )
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="tool-search-run", tool_runtime=runtime)
+
+        builtin = await runtime.invoke(
+            "tools.search",
+            {"query": "keyword"},
+            context,
+        )
+        custom = await runtime.invoke(
+            "tools.search",
+            {"query": "evidence"},
+            context,
+        )
+
+        assert "search_papers" in [tool["name"] for tool in builtin["tools"]]
+        tag_tools = await runtime.invoke(
+            "tools.search",
+            {"query": "tags"},
+            context,
+        )
+        assert {
+            "search_workspace_file_tags",
+            "set_workspace_file_tags",
+        } <= {tool["name"] for tool in tag_tools["tools"]}
+        paper_name_tools = await runtime.invoke(
+            "tools.search",
+            {"query": "display name"},
+            context,
+        )
+        assert "set_paper_workspace_name" in {
+            tool["name"] for tool in paper_name_tools["tools"]
+        }
+        note_tools = await runtime.invoke(
+            "tools.search",
+            {"query": "server-generated"},
+            context,
+        )
+        assert "create_workspace_note" in {
+            tool["name"] for tool in note_tools["tools"]
+        }
+        assert [tool["name"] for tool in custom["tools"]] == ["extract_claims"]
+        assert custom["tools"][0]["requires_approval"] is True
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_workspace_markdown_and_tag_tools_are_wired(test_settings) -> None:
+    services = create_services(test_settings)
+    try:
+        services.workspace.write_file("notes/paper.md", "# Paper\n\nOld")
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="workspace-run", tool_runtime=runtime)
+
+        await runtime.invoke(
+            "workspace.markdown.replace",
+            {
+                "path": "notes/paper.md",
+                "old_text": "Old",
+                "new_text": "New",
+                "replace_all": False,
+            },
+            context,
+        )
+        await runtime.invoke(
+            "workspace.markdown.append",
+            {"path": "notes/paper.md", "content": "\nMore"},
+            context,
+        )
+        tagged = await runtime.invoke(
+            "workspace.tags.set",
+            {"path": "notes/paper.md", "tags": ["paper", "attention"]},
+            context,
+        )
+        matches = await runtime.invoke(
+            "workspace.tags.search",
+            {"tags": ["ATTENTION"]},
+            context,
+        )
+
+        assert services.workspace.read_file("notes/paper.md").content == (
+            "# Paper\n\nNew\n\nMore"
+        )
+        assert tagged["tags"] == ["paper", "attention"]
+        assert matches == [
+            {"path": "notes/paper.md", "tags": ["paper", "attention"]}
+        ]
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_workspace_note_creation_and_indexed_search_are_wired(test_settings) -> None:
+    services = create_services(test_settings)
+    try:
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="note-run", tool_runtime=runtime)
+
+        created = await runtime.invoke(
+            "workspace.note.create",
+            {
+                "name": "Attention implementation ideas",
+                "content": "Test grouped-query attention with a paged KV cache.",
+                "tags": ["attention", "implementation"],
+            },
+            context,
+        )
+        found = await runtime.invoke(
+            "workspace.search",
+            {
+                "query": "paged cache",
+                "kinds": ["note"],
+                "tags": ["attention"],
+                "limit": 10,
+                "offset": 0,
+            },
+            context,
+        )
+
+        assert created["path"] == f"notes/{created['note_id']}/note.md"
+        assert created["name"] == "Attention implementation ideas"
+        assert found == [
+            {
+                "path": created["path"],
+                "name": "Attention implementation ideas",
+                "kind": "note",
+                "tags": ["note", "attention", "implementation"],
+                "modified_at": found[0]["modified_at"],
+            }
+        ]
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_paper_tools_report_and_reject_missing_extracted_content(
+    test_settings,
+) -> None:
+    services = create_services(test_settings)
+    try:
+        document_id = "metadata-only-paper"
+        with services.session_factory() as session:
+            session.add(
+                Document(
+                    id=document_id,
+                    title="Metadata Only",
+                    source_filename="paper.pdf",
+                    content_type="application/pdf",
+                    status="ready",
+                    page_count=22,
+                    metadata_json={},
+                )
+            )
+            session.commit()
+        source = services.storage.write_text(
+            test_settings.documents_dir,
+            f"{document_id}/source/paper.pdf",
+            "source",
+        )
+        services.documents.create_artifact_record(
+            owner_type="document",
+            kind="source_pdf",
+            document_id=document_id,
+            relative_path=source.relative_path,
+            media_type="application/pdf",
+            stored=source,
+            storage_area="documents",
+        )
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="paper-tools-run", tool_runtime=runtime)
+
+        listed = await runtime.invoke("documents.list", {}, context)
+        inspected = await runtime.invoke(
+            "documents.inspect",
+            {"document_id": document_id},
+            context,
+        )
+
+        assert listed[0]["readable"] is False
+        assert listed[0]["next_action"] == "inspect_paper"
+        assert inspected["source_available"] is True
+        assert inspected["readable"] is False
+        assert "ingest_paper" in inspected["next_action"]
+        with pytest.raises(ValueError, match="Inspect and ingest"):
+            await runtime.invoke(
+                "documents.read_chunks",
+                {"document_id": document_id, "start": 0, "limit": 20},
+                context,
+            )
+        with pytest.raises(ValueError, match="Inspect and ingest"):
+            await runtime.invoke(
+                "documents.read_pages",
+                {"document_id": document_id, "start_page": 1, "limit": 5},
+                context,
+            )
     finally:
         await services.close()
 

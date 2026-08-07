@@ -11,6 +11,7 @@ from backend.agents.blueprint import (
     GuardrailSpec,
     WebSearchToolSpec,
 )
+from backend.agents.instructions import with_global_agent_instructions
 from backend.agents.catalog import GuardrailCatalog, ToolCatalog
 
 
@@ -54,7 +55,6 @@ def _preamble(blueprint: AgentBlueprint) -> list[str]:
         "    GuardrailFunctionOutput,",
         "    InputGuardrail,",
         "    ModelSettings,",
-        "    OpenAIResponsesCompactionSession,",
         "    OutputGuardrail,",
         "    RunConfig,",
         "    Runner,",
@@ -325,7 +325,7 @@ def _render_agents(lines: list[str], blueprint: AgentBlueprint) -> None:
                 f"{_identifier('agent_' + spec.id)} = Agent(",
                 f"    name={spec.name!r},",
                 f"    handoff_description={spec.description!r},",
-                f"    instructions={spec.instructions!r},",
+                f"    instructions={with_global_agent_instructions(spec.instructions)!r},",
                 f"    model={model_name!r},",
                 f"    model_settings=ModelSettings(**{_literal(settings)}),",
                 f"    output_type={output},",
@@ -378,44 +378,16 @@ def _render_session_and_runner(
     blueprint: AgentBlueprint,
 ) -> None:
     entry = _identifier("agent_" + blueprint.entry_agent_id)
-    policy = blueprint.session.model_dump(mode="json")
     run_settings = blueprint.run
     lines.extend(
         [
             "",
-            f"SESSION_POLICY = {_literal(policy)}",
-            "BASE_SESSION = SQLiteSession(",
+            "SESSION = SQLiteSession(",
             "    'scholarweave-export',",
             "    'scholarweave-agent-sessions.sqlite3',",
             ")",
         ]
     )
-    if blueprint.session.compaction_enabled and blueprint.session.strategy == "openai_responses":
-        model_name = next(
-            spec.model.model
-            for spec in blueprint.agents
-            if spec.id == blueprint.entry_agent_id
-        )
-        lines.extend(
-            [
-                "SESSION = OpenAIResponsesCompactionSession(",
-                "    'scholarweave-export',",
-                "    BASE_SESSION,",
-                f"    model={model_name or 'gpt-4.1'!r},",
-                "    should_trigger_compaction=lambda context: len(",
-                "        context['compaction_candidate_items']",
-                f"    ) >= {blueprint.session.compaction_threshold_items},",
-                ")",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                "# For strategy='local', wrap BASE_SESSION with an SDK-agent Session decorator",
-                "# that replaces old items. SQLiteSession remains the SDK history contract.",
-                "SESSION = BASE_SESSION",
-            ]
-        )
     lines.extend(
         [
             "RUN_CONFIG = RunConfig(",

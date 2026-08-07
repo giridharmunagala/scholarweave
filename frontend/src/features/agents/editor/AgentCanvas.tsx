@@ -3,13 +3,14 @@ import {
   Controls,
   MarkerType,
   MiniMap,
+  Panel,
   ReactFlow,
   type Connection,
   type Edge,
   type EdgeMouseHandler,
   type NodeMouseHandler,
 } from '@xyflow/react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { projectEdges, projectNodes, type PrimitiveNode } from './canvasProjection';
 import { PrimitiveCard } from './PrimitiveCard';
 import { useTheme } from '../../../shared/theme/ThemeProvider';
@@ -40,6 +41,7 @@ export function AgentCanvas({
   onDeleteEdge: (edge: Edge) => void;
 }) {
   const { theme } = useTheme();
+  const [connecting, setConnecting] = useState(false);
   const nodes = useMemo(
     () =>
       projectNodes(blueprint, presentation).map((node) => ({
@@ -92,7 +94,7 @@ export function AgentCanvas({
   const selectEdge: EdgeMouseHandler = (_event, edge) => onSelect(edge.id);
 
   return (
-    <div className="agent-canvas" aria-label="SDK primitive canvas">
+    <div className={`agent-canvas ${connecting ? 'is-connecting' : ''}`} aria-label="SDK primitive canvas">
       <ReactFlow
         nodes={nodes}
         edges={displayedEdges}
@@ -104,11 +106,21 @@ export function AgentCanvas({
         onEdgeClick={selectEdge}
         onPaneClick={() => onSelect(null)}
         onConnect={onConnect}
+        onConnectStart={() => setConnecting(true)}
+        onConnectEnd={() => setConnecting(false)}
+        connectOnClick
+        connectionRadius={32}
+        connectionLineStyle={{ stroke: palette.accent, strokeWidth: 2.5 }}
+        defaultEdgeOptions={{ interactionWidth: 30 }}
         onNodeDragStop={(_event, node) => onMove(node.id, node.position)}
         onEdgesDelete={(deleted) => deleted.forEach(onDeleteEdge)}
         deleteKeyCode={['Backspace', 'Delete']}
         proOptions={{ hideAttribution: false }}
       >
+        <Panel position="top-left" className="connection-help">
+          <strong>Connect nodes</strong>
+          <span>Drag or click <b>OUT</b>, then choose an <b>IN</b> handle.</span>
+        </Panel>
         <Background color={palette.grid} gap={22} size={1.2} />
         <Controls showInteractive={false} />
         <MiniMap

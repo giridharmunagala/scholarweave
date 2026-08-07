@@ -11,6 +11,11 @@ type Artifact = Document['artifacts'][number];
 type ArtifactContent = components['schemas']['ArtifactContentResponse'];
 type IngestionOptions = components['schemas']['IngestionOptionsResponse'];
 type IngestionMode = IngestionOptions['recommended_mode'];
+type IngestionProgress = {
+  completed: number;
+  total: number;
+  percent: number;
+};
 
 function displayKind(kind: string): string {
   return kind.split('_').join(' ');
@@ -26,6 +31,29 @@ function ingestionStatus(document: Document): string {
   const completed = typeof progress.completed_pages === 'number' ? progress.completed_pages : null;
   const total = typeof progress.total_pages === 'number' ? progress.total_pages : null;
   return completed !== null && total !== null ? `${label}: ${completed} of ${total} pages.` : `${label}.`;
+}
+
+function ingestionProgress(document: Document): IngestionProgress | null {
+  const value = document.metadata.ingestion;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const progress = value as Record<string, unknown>;
+  const completed = progress.completed_pages;
+  const total = progress.total_pages;
+  if (
+    typeof completed !== 'number' ||
+    typeof total !== 'number' ||
+    !Number.isFinite(completed) ||
+    !Number.isFinite(total) ||
+    total <= 0
+  ) {
+    return null;
+  }
+  const boundedCompleted = Math.min(Math.max(completed, 0), total);
+  return {
+    completed: boundedCompleted,
+    total,
+    percent: Math.round((boundedCompleted / total) * 100),
+  };
 }
 
 function ingestionDetail(document: Document): string {
@@ -91,11 +119,30 @@ export default function PapersPage() {
   const hasProcessingDocuments = documents.some((document) => document.status === 'processing');
   useEffect(() => {
     if (!hasProcessingDocuments) return;
-    const timer = window.setInterval(() => {
-      load().catch(setError);
-    }, 1200);
-    return () => window.clearInterval(timer);
-  }, [hasProcessingDocuments]);
+    const sources = documents
+      .filter((document) => document.status === 'processing')
+      .map((document) => {
+        const source = new EventSource(
+          apiUrl(`/documents/${encodeURIComponent(document.id)}/ingest/events`),
+        );
+        source.addEventListener('document.updated', (message) => {
+          const updated = JSON.parse((message as MessageEvent<string>).data) as Document;
+          setDocuments((items) =>
+            items.map((item) => (item.id === updated.id ? updated : item)),
+          );
+          setSelected((current) => (current?.id === updated.id ? updated : current));
+          if (updated.status !== 'processing') source.close();
+        });
+        return source;
+      });
+    return () => sources.forEach((source) => source.close());
+  }, [
+    hasProcessingDocuments,
+    documents
+      .filter((document) => document.status === 'processing')
+      .map((document) => document.id)
+      .join(','),
+  ]);
 
   const previewArtifact = useCallback(async (artifact: Artifact) => {
     const requestId = previewRequestId.current + 1;
@@ -250,6 +297,7 @@ export default function PapersPage() {
   );
   const operationBusy = busyAction !== null;
   const recommendedMode = ingestionOptions?.recommended_mode ?? 'embedded';
+  const pageProgress = selected ? ingestionProgress(selected) : null;
 
   return (
     <div className="page">
@@ -381,8 +429,25 @@ export default function PapersPage() {
               ) : null}
               {ingesting ? (
                 <div className="notice info ingestion-progress" role="status" aria-live="polite">
-                  <span className="spinner" aria-hidden="true" />
-                  <span>{ingestionStatus(selected)} {ingestionDetail(selected)}</span>
+                  <div className="ingestion-progress-summary">
+                    <span className="spinner" aria-hidden="true" />
+                    <span>{ingestionStatus(selected)} {ingestionDetail(selected)}</span>
+                  </div>
+                  {pageProgress ? (
+                    <div className="page-progress">
+                      <div className="page-progress-label">
+                        <strong>Pages completed</strong>
+                        <span>
+                          {pageProgress.completed} / {pageProgress.total} ({pageProgress.percent}%)
+                        </span>
+                      </div>
+                      <progress
+                        aria-label="OCR pages completed"
+                        max={pageProgress.total}
+                        value={pageProgress.completed}
+                      />
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
               {!ingesting ? (
