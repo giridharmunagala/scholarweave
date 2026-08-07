@@ -26,12 +26,15 @@ export type IconName =
   | 'play'
   | 'stop'
   | 'save'
+  | 'copy'
   | 'close'
   | 'arrowRight'
   | 'sparkle'
   | 'inbox'
   | 'shield'
   | 'clock'
+  | 'user'
+  | 'sliders'
   | 'file';
 
 const PATHS: Record<IconName, string> = {
@@ -55,12 +58,15 @@ const PATHS: Record<IconName, string> = {
   play: 'M8 5.5v13l11-6.5-11-6.5Z',
   stop: 'M7 7h10v10H7Z',
   save: 'M5 4h11l3 3v13H5V4Zm3 0v6h8V4M8 20v-6h8v6',
+  copy: 'M8 8h11a1 1 0 0 1 1 1v11H9a1 1 0 0 1-1-1V8Zm-4 8H3V4a1 1 0 0 1 1-1h12v1',
   close: 'M6 6l12 12M18 6 6 18',
   arrowRight: 'M5 12h14m-6-6 6 6-6 6',
   sparkle: 'M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Zm6.5 9.5.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z',
   inbox: 'M4 13h4l1.5 3h5L16 13h4M4 13l2.4-7.3A1 1 0 0 1 7.3 5h9.4a1 1 0 0 1 .95.7L20 13v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-5Z',
   shield: 'M12 3.5 19 6v6c0 4.2-2.9 7.4-7 8.5-4.1-1.1-7-4.3-7-8.5V6l7-2.5Z',
   clock: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-13.5V12l3 2',
+  user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm-7 8.5a7 7 0 0 1 14 0',
+  sliders: 'M4 7h9m3 0h4M4 17h4m3 0h9M16 4.5v5M8 14.5v5',
   file: 'M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm7 0v5h5',
 };
 

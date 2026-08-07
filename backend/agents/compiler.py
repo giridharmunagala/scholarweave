@@ -23,6 +23,7 @@ from backend.agents.blueprint import (
     WebSearchToolSpec,
 )
 from backend.agents.catalog import GuardrailCatalog, ToolCatalog
+from backend.agents.instructions import with_global_agent_instructions
 from backend.agents.output import JsonSchemaOutput
 from backend.core.errors import ValidationError
 from backend.providers.errors import ProviderRuntimeError
@@ -84,7 +85,7 @@ class AgentCompiler:
             agents_by_id[spec.id] = Agent[ScholarWeaveContext](
                 name=spec.name,
                 handoff_description=spec.description,
-                instructions=spec.instructions,
+                instructions=with_global_agent_instructions(spec.instructions),
                 model=resolved.model,
                 model_settings=self._model_settings(spec.model_settings, resolved),
                 output_type=output_type,

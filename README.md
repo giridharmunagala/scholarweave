@@ -1,6 +1,6 @@
 # ScholarWeave
 
-**A local-first research workspace built directly on the OpenAI Agents SDK.**
+**A local-first autonomous research agent built directly on the OpenAI Agents SDK.**
 
 ScholarWeave combines PDF ingestion, OCR, retrieval, SDK-native agent composition, and a visual
 authoring canvas in one self-hosted application. It supports local Ollama models, OpenAI, Azure
@@ -11,10 +11,9 @@ OpenAI, Azure AI Foundry, and OpenAI-compatible endpoints.
 | Area | Capabilities |
 | --- | --- |
 | **Papers** | Upload PDFs, extract text and figures, OCR text-poor pages, index chunks, and inspect page-level quality. |
-| **Agents** | Compose SDK `Agent`, `FunctionTool`, hosted tool, `Agent.as_tool()`, handoff, guardrail, structured-output, and model-setting primitives. |
-| **Builder chat** | Create and revise validated SDK blueprints through an ordinary SDK agent with a persistent SDK session, visible stepwise TODOs, and save-receipt completion. |
-| **Tools** | Use built-in research/workspace tools or author revisioned sandboxed Python `FunctionTool` callbacks. |
-| **Runs** | Inspect SDK run items, tool calls, handoffs, guardrails, usage, interruptions, compaction, and streamed lifecycle events. |
+| **Research agent** | Work with one autonomous chat agent that chooses tools, follows evidence, persists memory, and continues until the requested research outcome is complete. |
+| **Tools** | Give the agent direct access to built-in research/workspace tools and revisioned sandboxed Python `FunctionTool` callbacks, with keyword discovery across the full available tool set. |
+| **Runs** | Inspect SDK run items, tool calls, handoffs, guardrails, usage, interruptions, and streamed lifecycle events. |
 | **Workspace** | Read and write safe local text artifacts without exposing arbitrary filesystem access. |
 
 ## Runtime model
@@ -33,16 +32,12 @@ an `AgentBlueprint`, which is compiled into real SDK objects:
 Canvas coordinates are stored separately and never affect execution. There are no generic nodes,
 ports, data-flow edges, conditions, or application-owned orchestration phases.
 
-## Sessions, context, and compaction
+## Sessions and context
 
 Model-visible conversation history is owned exclusively by the SDK `Session` contract:
 
 - Conversations use one SQLite-backed SDK session each.
-- Genuine OpenAI Responses models can use `OpenAIResponsesCompactionSession`.
-- Local and compatible models use a `Session` decorator whose compactor is itself an SDK agent.
-- Compaction replaces old history with a valid SDK assistant summary plus a protected recent tail.
-- Removed history is not retained in a hidden parallel transcript.
-- The chat UI renders a stable compaction marker when replacement occurs.
+- Session history is retained without automatic replacement or summarization.
 
 `ScholarWeaveContext` carries live repositories, IDs, services, and event sinks through
 `RunContextWrapper`. Local context is not added to model input unless instructions or a tool
@@ -58,7 +53,7 @@ flowchart LR
     SERVICES --> RUNTIME["SDK runtime"]
     RUNTIME --> SDK["OpenAI Agents SDK 0.19.4"]
     RUNTIME --> PROVIDERS["Provider model resolver"]
-    RUNTIME --> SESSIONS["SDK sessions + compaction"]
+    RUNTIME --> SESSIONS["SDK sessions"]
     RUNTIME --> TOOLS["SDK tools + guardrails"]
     REPOS --> DB[("SQLite")]
     TOOLS --> DOCS["Documents + retrieval"]
@@ -77,7 +72,7 @@ generated from FastAPI OpenAPI rather than maintained manually.
 - Python 3.12+
 - Node.js 20+
 - [Ollama](https://ollama.com/) for a local setup, or credentials for another supported provider
-- Tesseract OCR and the required language pack for scanned PDFs, or an NVIDIA GPU for Surya OCR 2
+- Docling (installed with the Python dependencies) or Tesseract with the required language pack
 
 On Ubuntu or Debian:
 
@@ -111,15 +106,9 @@ cd ..
 .venv/bin/uvicorn backend.app:app --host 127.0.0.1 --port 8000
 ```
 
-When enabling Surya on an NVIDIA system, install the CUDA PyTorch wheel that matches the host
-driver. For CUDA 13:
-
-```bash
-.venv/bin/pip install --upgrade --index-url https://download.pytorch.org/whl/cu130 torch torchvision
-```
-
 Open <http://127.0.0.1:8000>, configure provider defaults under **Settings**, ingest papers under
-**Papers**, then create an SDK blueprint under **Agents** or through **Builder chat**.
+**Papers**, then use the fixed agents under **Research chat** or create an SDK blueprint under
+**Agents** or through **Builder chat**.
 
 ## Providers
 
@@ -136,13 +125,33 @@ included in Python exports.
 
 ## OCR and retrieval
 
-PDF ingestion extracts embedded text and OCRs text-poor pages with either Tesseract or
-`datalab-to/surya-ocr-2`. Surya is loaded directly from Hugging Face in an isolated process; resident
-Ollama models can be unloaded first, and process exit releases Surya's CUDA allocation after each
-job. Optional vision models can rewrite poor pages after OCR. Documents are chunked for keyword and
-vector retrieval; agents access that data through typed SDK tools instead of implicit prompt
-injection. Surya's weights use a modified OpenRAIL-M license; review its Hugging Face model card for
-commercial-use terms.
+PDF ingestion uses Docling to preserve page layout, reading order, accurate table structure,
+formulas, and code. RapidOCR is applied to scanned or text-poor regions, while an explicit OCR run
+forces full-page recognition. Tesseract remains available as a lightweight alternative. Optional
+vision models can rewrite poor pages after OCR. Documents are chunked for keyword and vector
+retrieval; agents access that data through typed SDK tools instead of implicit prompt injection.
+
+Each successful ingestion keeps one source PDF under `local_data/documents/<document-id>/source/`
+and generates `extracted.md`, figures, and a versioned `manifest.json` under
+`local_data/artifacts/documents/<document-id>/`. The manifest provides paper metadata, exact
+page text and citations, a section outline, ordered chunks, figures, and content counts. An
+ingestion with no readable text fails instead of creating a metadata-only ready document. The
+research agent can inspect readiness, trigger embedded-text or OCR ingestion, read cited pages or
+chunks, and search indexed text.
+
+### Paper workspace notes
+
+Durable paper notes use one canonical folder per stored paper:
+
+```text
+workspace/papers/<document-id>/
+├── summary.md
+└── notes.md
+```
+
+The autonomous agent resolves this folder before writing paper-specific notes. It can update an exact
+Markdown selection or append content without regenerating the rest of a file. Workspace files also
+support searchable tags; tag metadata is managed internally and shown above the file preview.
 
 ## Local data and cutover
 
@@ -163,7 +172,6 @@ Settings can also be provided through `SCHOLARWEAVE_` environment variables, for
 
 ```bash
 SCHOLARWEAVE_OLLAMA_BASE_URL=http://127.0.0.1:11434
-SCHOLARWEAVE_AGENT_COMPACTION_THRESHOLD_ITEMS=30
 ```
 
 ## Development

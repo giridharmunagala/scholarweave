@@ -20,6 +20,10 @@ htmlcov/
 # Application runtime data and generated workspaces
 local_data/
 workspace/
+!backend/workspace/
+!backend/workspace/**
+!frontend/src/features/workspace/
+!frontend/src/features/workspace/**
 *.sqlite
 *.sqlite3
 *.db

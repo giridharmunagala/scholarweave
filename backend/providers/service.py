@@ -74,6 +74,11 @@ class ProviderService:
 
     async def discover(self, profile_id: str) -> ProviderModelsResponse:
         record = self._repository.get(profile_id)
+        existing_enabled = {
+            str(item["name"]): bool(item.get("enabled", record.kind != "azure_openai"))
+            for item in (record.models_json or [])
+            if item.get("name")
+        }
         try:
             entries = await self._runtime.discover(record)
         except ProviderDiscoveryError as exc:
@@ -84,19 +89,25 @@ class ProviderService:
                 ],
                 discovery_error=f"{type(exc).__name__}: {exc}",
             )
+        discovered_models = [
+            ProviderModel(
+                name=entry.name,
+                capabilities=entry.capabilities,
+                enabled=existing_enabled.get(
+                    entry.name,
+                    record.kind != "azure_openai",
+                ),
+            )
+            for entry in entries
+        ]
         self._repository.update(
             profile_id,
             models_json=[
                 entry.model_dump(mode="json")
-                for entry in entries
+                for entry in discovered_models
             ],
         )
-        return ProviderModelsResponse(
-            models=[
-                ProviderModel(name=entry.name, capabilities=entry.capabilities)
-                for entry in entries
-            ]
-        )
+        return ProviderModelsResponse(models=discovered_models)
 
     async def verify(
         self,
@@ -230,7 +241,13 @@ class ProviderService:
             api_key_set=bool(record.api_key),
             state=record.state,
             models=[
-                ProviderModel.model_validate(item)
+                ProviderModel.model_validate({
+                    **item,
+                    "enabled": item.get(
+                        "enabled",
+                        record.kind != "azure_openai",
+                    ),
+                })
                 for item in (record.models_json or [])
             ],
             created_at=record.created_at,

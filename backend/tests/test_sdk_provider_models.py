@@ -46,7 +46,7 @@ async def test_openai_profile_uses_responses_and_reuses_client() -> None:
     assert isinstance(first.model, OpenAIResponsesModel)
     assert isinstance(second.model, OpenAIResponsesModel)
     assert first.supports_responses is True
-    assert runtime.capabilities == ["chat", "tools"]
+    assert runtime.capabilities == ["chat", "chat"]
     assert runtime.client_calls == 1
     await pool.close()
 

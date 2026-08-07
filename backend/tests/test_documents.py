@@ -11,8 +11,53 @@ from sqlalchemy import select
 from backend.app import create_app
 from backend.bootstrap import create_services
 from backend.documents import DocumentProcessingError
+from backend.documents.paper import build_paper_manifest
 from backend.providers.ollama import OllamaError
 from backend.documents.models import Artifact, Document, DocumentChunk
+
+
+def test_paper_manifest_has_stable_reading_structure() -> None:
+    manifest = build_paper_manifest(
+        document_id="paper-1",
+        title="Structured Paper",
+        source_filename="paper.pdf",
+        content_type="application/pdf",
+        pages=[
+            {"page": 1, "text": "Abstract text", "ocr_used": False},
+            {"page": 2, "text": "Method text", "ocr_used": True},
+        ],
+        chunks=[
+            {
+                "section_title": "Method",
+                "page_start": 2,
+                "page_end": 2,
+                "citation": "p.2",
+                "text": "Method text",
+            }
+        ],
+        figures=[],
+    )
+
+    assert manifest["schema"] == "scholarweave.paper"
+    assert manifest["schema_version"] == 1
+    assert manifest["paper"]["page_count"] == 2
+    assert manifest["pages"][1]["citation"] == "p.2"
+    assert manifest["sections"] == [
+        {
+            "section_index": 0,
+            "title": "Method",
+            "citation": "p.2",
+            "page_start": 2,
+            "page_end": 2,
+            "chunk_index": 0,
+        }
+    ]
+    assert manifest["content"] == {
+        "char_count": 24,
+        "nonempty_page_count": 2,
+        "chunk_count": 1,
+        "figure_count": 0,
+    }
 
 
 def test_artifact_records_are_idempotent_by_owned_path(test_settings) -> None:
@@ -376,6 +421,50 @@ async def test_running_ingestion_can_be_stopped(
     assert document.metadata_json["ingestion"]["phase_label"] == "Ingestion stopped"
 
 
+@pytest.mark.anyio
+async def test_server_shutdown_stops_running_ingestions(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    document_id = "shutdown-document"
+    with services.session_factory() as session:
+        session.add(
+            Document(
+                id=document_id,
+                title="Shutdown",
+                source_filename="shutdown.pdf",
+                content_type="application/pdf",
+                status="uploaded",
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    started = anyio.Event()
+
+    async def blocked_ingestion(
+        _document_id: str,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        started.set()
+        await anyio.sleep_forever()
+        raise AssertionError("cancelled ingestion resumed unexpectedly")
+
+    monkeypatch.setattr(services.document_ingestion, "ingest", blocked_ingestion)
+
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(services.documents.ingest_document, document_id)
+        await started.wait()
+        await services.close()
+
+    document = services.documents.get_document(document_id)
+    assert document is not None
+    assert document.status == "uploaded"
+    assert document.metadata_json["ingestion"]["phase"] == "stopped"
+    assert "server shutdown" in document.metadata_json["ingestion"]["phase_label"]
+
+
 def test_stale_ingestion_is_recovered_for_retry(test_settings) -> None:
     services = create_services(test_settings)
     document_id = "stale-document"
@@ -420,6 +509,7 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
     pdf_path = tmp_path / "scanned.pdf"
     image.save(pdf_path, "PDF", resolution=150)
 
+    test_settings.ocr_engine = "tesseract"
     client = TestClient(create_app(test_settings))
     with pdf_path.open("rb") as pdf:
         upload = client.post(
@@ -821,6 +911,7 @@ async def test_forced_ocr_uses_embedded_text_when_tesseract_fails(
     test_settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    test_settings.ocr_engine = "tesseract"
     services = create_services(test_settings)
 
     class FakePage:

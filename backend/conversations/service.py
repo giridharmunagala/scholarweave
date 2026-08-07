@@ -9,7 +9,6 @@ from backend.conversations.models import ConversationRecord
 from backend.conversations.repository import ConversationRepository
 from backend.providers.types import ResolvedAgentModel
 from backend.runtime.serialization import to_jsonable
-from backend.runtime.compaction import COMPACTION_MARKER
 from backend.runtime.sessions import SdkSessionFactory
 
 
@@ -76,7 +75,6 @@ def _project_session_item(item: TResponseInputItem) -> dict[str, Any]:
             "type": "unknown",
             "role": None,
             "text": str(raw),
-            "is_compaction": False,
             "raw": raw,
         }
     content = raw.get("content")
@@ -92,7 +90,5 @@ def _project_session_item(item: TResponseInputItem) -> dict[str, Any]:
         "type": raw.get("type") or ("message" if raw.get("role") else "unknown"),
         "role": raw.get("role"),
         "text": text,
-        "is_compaction": bool(text and text.startswith(COMPACTION_MARKER))
-        or raw.get("type") == "compaction",
         "raw": raw,
     }

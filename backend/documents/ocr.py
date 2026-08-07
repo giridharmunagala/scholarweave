@@ -2,53 +2,34 @@ from __future__ import annotations
 
 import importlib.util
 import io
-import json
 import os
 import shutil
-import subprocess
-import sys
-import tempfile
 import time
 from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 import anyio
 from pypdf import PdfReader
 
-from backend.core.config import ROOT_DIR, Settings
+from backend.core.config import Settings
 from backend.documents.errors import (
     DocumentProcessingError,
     ProgressCallback,
     report_progress,
 )
-from backend.providers.ollama import OllamaClient, OllamaError
-
-
-class OllamaMemoryManager(Protocol):
-    async def unload_all_models(self) -> list[str]: ...
-
 
 class DocumentOCR:
-    def __init__(
-        self,
-        settings: Settings,
-        ollama: OllamaMemoryManager | None = None,
-        ollama_gpu_lock: anyio.Lock | None = None,
-    ) -> None:
+    def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.ollama = ollama or OllamaClient(settings)
-        self._ollama_gpu_lock = ollama_gpu_lock or anyio.Lock()
-        self._surya_lock = anyio.Lock()
+        self._docling_lock = anyio.Lock()
+        self._docling_converters: dict[tuple[str, str, int, int, bool], Any] = {}
 
     def available(self) -> bool:
         if importlib.util.find_spec("pypdfium2") is None:
             return False
-        if self.settings.ocr_engine == "surya":
-            return all(
-                importlib.util.find_spec(package) is not None
-                for package in ("torch", "transformers", "markdownify")
-            )
+        if self.settings.ocr_engine == "docling":
+            return importlib.util.find_spec("docling") is not None
         try:
             import pytesseract
         except ImportError:
@@ -92,23 +73,18 @@ class DocumentOCR:
         retain_page_images: bool = False,
         progress: ProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
-        if self.settings.ocr_engine == "surya":
-            with tempfile.TemporaryDirectory(
-                prefix="scholarweave-surya-pages-"
-            ) as temp:
-                return await self._extract_pages(
-                    pdf_path,
-                    force_ocr=force_ocr,
-                    retain_page_images=retain_page_images,
-                    progress=progress,
-                    surya_spool=Path(temp),
-                )
+        if self.settings.ocr_engine == "docling":
+            return await self._extract_docling_document(
+                pdf_path,
+                force_ocr=force_ocr,
+                retain_page_images=retain_page_images,
+                progress=progress,
+            )
         return await self._extract_pages(
             pdf_path,
             force_ocr=force_ocr,
             retain_page_images=retain_page_images,
             progress=progress,
-            surya_spool=None,
         )
 
     async def _extract_pages(
@@ -118,18 +94,12 @@ class DocumentOCR:
         force_ocr: bool,
         retain_page_images: bool,
         progress: ProgressCallback | None,
-        surya_spool: Path | None,
     ) -> list[dict[str, Any]]:
         reader = PdfReader(str(pdf_path))
         pages: list[dict[str, Any]] = []
-        pending_surya: list[tuple[dict[str, Any], Path, str]] = []
         total_pages = len(reader.pages)
         started_at = time.monotonic()
-        phase_label = (
-            "Preparing pages for Surya OCR"
-            if self.settings.ocr_engine == "surya"
-            else "Rendering and OCR"
-        )
+        phase_label = "Rendering and OCR"
         await report_progress(
             progress,
             {
@@ -163,12 +133,7 @@ class DocumentOCR:
                 "ocr_used": False,
                 "llm_enhanced": False,
             }
-            if needs_ocr and self.settings.ocr_engine == "surya":
-                assert surya_spool is not None
-                image_path = surya_spool / f"page-{index}.png"
-                await anyio.to_thread.run_sync(image_path.write_bytes, page_image)
-                pending_surya.append((entry, image_path, embedded_text))
-            elif needs_ocr:
+            if needs_ocr:
                 try:
                     ocr_text = await self._tesseract_image(page_image, index)
                 except DocumentProcessingError as exc:
@@ -202,61 +167,75 @@ class DocumentOCR:
                 phase_label,
             )
 
-        if pending_surya:
-            await report_progress(
-                progress,
-                {
-                    "phase": "ocr",
-                    "phase_label": f"Running Surya OCR on {len(pending_surya)} page(s)",
-                    "completed_pages": 0,
-                    "total_pages": len(pending_surya),
-                },
-            )
-            try:
-                results = await self._surya_image_paths(
-                    [image_path for _, image_path, _ in pending_surya]
+        return pages
+
+    async def _extract_docling_document(
+        self,
+        pdf_path: Path,
+        *,
+        force_ocr: bool,
+        retain_page_images: bool,
+        progress: ProgressCallback | None,
+    ) -> list[dict[str, Any]]:
+        if not self.available():
+            raise self._unavailable_error(1)
+        reader = PdfReader(str(pdf_path))
+        embedded_text = [(page.extract_text() or "").strip() for page in reader.pages]
+        total_pages = len(embedded_text)
+        await report_progress(
+            progress,
+            {
+                "phase": "ocr",
+                "phase_label": "Parsing document with Docling",
+                "completed_pages": 0,
+                "total_pages": total_pages,
+            },
+        )
+        extracted = await self._docling_pdf_pages(
+            pdf_path,
+            list(range(1, total_pages + 1)),
+            force_ocr=force_ocr,
+            progress=progress,
+        )
+        pages: list[dict[str, Any]] = []
+        for page_number, source_text in enumerate(embedded_text, start=1):
+            text = extracted.get(page_number, "").strip()
+            if not text:
+                text = source_text
+            if not text:
+                raise DocumentProcessingError(
+                    f"Docling returned no text for page {page_number}"
                 )
-            except DocumentProcessingError as exc:
-                if any(not embedded for _, _, embedded in pending_surya):
-                    raise
-                for entry, _, _ in pending_surya:
-                    entry["ocr_fallback_note"] = (
-                        "Surya OCR failed; the PDF's embedded text was used instead. "
-                        f"Details: {exc}"
-                    )
-            else:
-                for position, ((entry, _, embedded), ocr_text) in enumerate(
-                    zip(pending_surya, results, strict=True),
-                    start=1,
-                ):
-                    if ocr_text.strip():
-                        entry["raw_text"] = ocr_text.strip()
-                        entry["text"] = ocr_text.strip()
-                        entry["ocr_used"] = True
-                        entry["ocr_engine"] = "surya"
-                    elif embedded:
-                        entry["ocr_fallback_note"] = (
-                            "Surya returned no text; the PDF's embedded text was used instead."
-                        )
-                    else:
-                        raise DocumentProcessingError(
-                            f"Surya returned no text for page {entry['page']}"
-                        )
-                    await report_progress(
-                        progress,
-                        {
-                            "phase": "ocr",
-                            "phase_label": "Running Surya OCR",
-                            "completed_pages": position,
-                            "total_pages": len(pending_surya),
-                            "current_page": entry["page"],
-                        },
-                    )
+            entry: dict[str, Any] = {
+                "page": page_number,
+                "raw_text": text,
+                "text": text,
+                "ocr_used": force_ocr
+                or len(source_text) < self.settings.pdf_min_text_chars,
+                "ocr_engine": "docling",
+                "llm_enhanced": False,
+            }
+            if retain_page_images:
+                entry["_image_png"] = await anyio.to_thread.run_sync(
+                    self.render_page_png,
+                    pdf_path,
+                    page_number - 1,
+                )
+            pages.append(entry)
         return pages
 
     async def ocr_page(self, pdf_path: Path, zero_based_page_index: int) -> str:
         if not self.available():
             return ""
+        if self.settings.ocr_engine == "docling":
+            page_number = zero_based_page_index + 1
+            return (
+                await self._docling_pdf_pages(
+                    pdf_path,
+                    [page_number],
+                    force_ocr=True,
+                )
+            )[page_number]
         image_png = await anyio.to_thread.run_sync(
             self.render_page_png,
             pdf_path,
@@ -265,8 +244,10 @@ class DocumentOCR:
         return await self.ocr_image(image_png, zero_based_page_index + 1)
 
     async def ocr_image(self, image_png: bytes, page_number: int) -> str:
-        if self.settings.ocr_engine == "surya":
-            return (await self._surya_images([image_png]))[0]
+        if self.settings.ocr_engine == "docling":
+            raise DocumentProcessingError(
+                "Docling OCR requires a PDF page; standalone image OCR is unsupported."
+            )
         return await self._tesseract_image(image_png, page_number)
 
     async def _tesseract_image(self, image_png: bytes, page_number: int) -> str:
@@ -292,96 +273,103 @@ class DocumentOCR:
                 f"OCR failed for page {page_number}: {exc}"
             ) from exc
 
-    async def _surya_images(self, images: list[bytes]) -> list[str]:
-        with tempfile.TemporaryDirectory(
-            prefix="scholarweave-surya-images-"
-        ) as temp:
-            temp_dir = Path(temp)
-            image_paths = []
-            for index, image in enumerate(images, start=1):
-                image_path = temp_dir / f"page-{index}.png"
-                await anyio.to_thread.run_sync(image_path.write_bytes, image)
-                image_paths.append(image_path)
-            return await self._surya_image_paths(image_paths)
-
-    async def _surya_image_paths(self, image_paths: list[Path]) -> list[str]:
-        async with self._surya_lock:
-            async with self._ollama_gpu_lock:
-                if self.settings.surya_unload_ollama_models:
-                    try:
-                        await self.ollama.unload_all_models()
-                    except OllamaError as exc:
-                        raise DocumentProcessingError(
-                            "Could not verify that Ollama released its loaded models "
-                            f"before starting Surya: {exc}"
-                        ) from exc
-
-                with tempfile.TemporaryDirectory(prefix="scholarweave-surya-") as temp:
-                    temp_dir = Path(temp)
-                    manifest_path = temp_dir / "manifest.json"
-                    output_path = temp_dir / "output.json"
-                    manifest_path.write_text(
-                        json.dumps(
-                            {
-                                "model": self.settings.surya_model,
-                                "cache_dir": str(self.settings.surya_cache_dir),
-                                "device": self.settings.surya_device,
-                                "max_new_tokens": self.settings.surya_max_new_tokens,
-                                "max_image_width": self.settings.surya_max_image_width,
-                                "images": [str(path) for path in image_paths],
-                            }
-                        ),
-                        encoding="utf-8",
+    async def _docling_pdf_pages(
+        self,
+        pdf_path: Path,
+        page_numbers: list[int],
+        *,
+        force_ocr: bool = True,
+        progress: ProgressCallback | None = None,
+    ) -> dict[int, str]:
+        results: dict[int, str] = {}
+        batch_size = self.settings.docling_batch_size
+        async with self._docling_lock:
+            converter = self._get_docling_converter(force_ocr=force_ocr)
+            for offset in range(0, len(page_numbers), batch_size):
+                batch = page_numbers[offset : offset + batch_size]
+                try:
+                    conversion = await anyio.to_thread.run_sync(
+                        partial(
+                            converter.convert,
+                            pdf_path,
+                            page_range=(batch[0], batch[-1]),
+                        )
                     )
-                    command = [
-                        sys.executable,
-                        "-m",
-                        "backend.documents.surya_worker",
-                        "--manifest",
-                        str(manifest_path),
-                        "--output",
-                        str(output_path),
-                    ]
-                    try:
-                        with anyio.fail_after(self.settings.surya_timeout_seconds):
-                            result = await anyio.run_process(
-                                command,
-                                check=False,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                cwd=ROOT_DIR,
-                            )
-                    except TimeoutError as exc:
-                        raise DocumentProcessingError(
-                            "Surya OCR exceeded its configured timeout; its isolated "
-                            "worker was terminated to release GPU memory."
-                        ) from exc
-                    if result.returncode != 0:
-                        details = result.stderr.decode("utf-8", errors="replace").strip()
-                        raise DocumentProcessingError(
-                            f"Surya OCR worker failed: {details[-2000:] or 'unknown error'}"
-                        )
-                    if not output_path.is_file():
-                        raise DocumentProcessingError(
-                            "Surya OCR worker exited without producing a result."
-                        )
-                    payload = json.loads(output_path.read_text(encoding="utf-8"))
-                    pages = payload.get("pages")
-                    if (
-                        not isinstance(pages, list)
-                        or len(pages) != len(image_paths)
-                        or not all(isinstance(page, str) for page in pages)
-                    ):
-                        raise DocumentProcessingError(
-                            "Surya OCR worker returned an invalid result."
-                        )
-                    return pages
+                except Exception as exc:
+                    raise DocumentProcessingError(f"Docling OCR failed: {exc}") from exc
+                for page_number in batch:
+                    results[page_number] = conversion.document.export_to_markdown(
+                        page_no=page_number
+                    )
+                await report_progress(
+                    progress,
+                    {
+                        "phase": "ocr",
+                        "phase_label": "Parsing document with Docling",
+                        "completed_pages": min(offset + len(batch), len(page_numbers)),
+                        "total_pages": len(page_numbers),
+                        "current_page": batch[-1],
+                    },
+                )
+        return results
+
+    def _get_docling_converter(self, *, force_ocr: bool) -> Any:
+        signature = (
+            self.settings.docling_device,
+            self.settings.docling_ocr_backend,
+            self.settings.docling_batch_size,
+            self.settings.docling_num_threads,
+            force_ocr,
+        )
+        existing = self._docling_converters.get(signature)
+        if existing is not None:
+            return existing
+
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import (
+            AcceleratorOptions,
+            OcrMode,
+            PdfPipelineOptions,
+            RapidOcrOptions,
+            TableFormerMode,
+        )
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+
+        pipeline_options = PdfPipelineOptions(
+            accelerator_options=AcceleratorOptions(
+                device=self.settings.docling_device,
+                num_threads=self.settings.docling_num_threads,
+            ),
+            do_ocr=True,
+            do_code_enrichment=True,
+            do_formula_enrichment=True,
+            ocr_options=RapidOcrOptions(
+                backend=self.settings.docling_ocr_backend,
+                lang=["english"],
+                mode=(
+                    OcrMode.FULL_PAGE
+                    if force_ocr
+                    else OcrMode.PDF_AWARE_LAYOUT_REGIONS
+                ),
+            ),
+            ocr_batch_size=self.settings.docling_batch_size,
+            layout_batch_size=self.settings.docling_batch_size,
+            table_batch_size=self.settings.docling_batch_size,
+        )
+        pipeline_options.layout_options.engine_options.compile_model = False
+        pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
+        converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        self._docling_converters[signature] = converter
+        return converter
 
     def _unavailable_error(self, page_number: int) -> DocumentProcessingError:
-        if self.settings.ocr_engine == "surya":
+        if self.settings.ocr_engine == "docling":
             return DocumentProcessingError(
-                f"Page {page_number} requires OCR, but the Surya runtime "
-                "dependencies are unavailable."
+                f"Page {page_number} requires OCR, but Docling is unavailable."
             )
         return DocumentProcessingError(
             f"Page {page_number} requires OCR, but Tesseract and the "

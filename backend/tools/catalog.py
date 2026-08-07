@@ -26,6 +26,21 @@ def _object_schema(
 
 APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
+        "tools.search",
+        "search_available_tools",
+        "Find tools available to the autonomous agent by keyword, name, or catalog ID.",
+        _object_schema(
+            {
+                "query": {
+                    "type": ["string", "null"],
+                    "description": "Keyword to search for, or null to list every available tool.",
+                }
+            },
+            required=["query"],
+        ),
+        True,
+    ),
+    (
         "builder.todos.create",
         "create_builder_todo_plan",
         "Create the ordered TODO plan for one actionable builder request.",
@@ -79,16 +94,144 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
         True,
     ),
     (
+        "research.pages.read_all",
+        "read_all_paper_pages",
+        "Read exact extracted page text, including pages previously marked no-keep.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "start_page": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["document_id", "start_page", "limit"],
+        ),
+        True,
+    ),
+    (
+        "research.pages.read_retained",
+        "read_retained_paper_pages",
+        "Read exact page text while excluding pages marked no-keep by the paper cleaner.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "start_page": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["document_id", "start_page", "limit"],
+        ),
+        True,
+    ),
+    (
+        "research.page_decisions.save",
+        "save_paper_page_decisions",
+        "Persist keep or no-keep decisions for reviewed paper pages.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "decisions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": _object_schema(
+                        {
+                            "page_number": {"type": "integer", "minimum": 1},
+                            "decision": {"type": "string", "enum": ["keep", "no_keep"]},
+                            "reason": {"type": "string", "minLength": 1},
+                        },
+                        required=["page_number", "decision", "reason"],
+                    ),
+                },
+            },
+            required=["document_id", "decisions"],
+        ),
+        True,
+    ),
+    (
+        "research.summaries.save",
+        "save_paper_summary",
+        "Persist the fixed four-part summary for a paper.",
+        _object_schema(
+            {
+                "document_id": {"type": "string"},
+                "contribution": {"type": "string", "minLength": 1},
+                "contributions_detail": {"type": "string", "minLength": 1},
+                "experimentation_results": {"type": "string", "minLength": 1},
+                "open_areas": {
+                    "type": "array",
+                    "items": _object_schema(
+                        {
+                            "statement": {"type": "string", "minLength": 1},
+                            "citation": {"type": "string", "minLength": 1},
+                        },
+                        required=["statement", "citation"],
+                    ),
+                },
+            },
+            required=[
+                "document_id",
+                "contribution",
+                "contributions_detail",
+                "experimentation_results",
+                "open_areas",
+            ],
+        ),
+        True,
+    ),
+    (
+        "research.summaries.list",
+        "list_paper_summaries",
+        "List all saved four-part paper summaries in the repository.",
+        _object_schema({}),
+        True,
+    ),
+    (
         "documents.list",
         "list_documents",
-        "List papers",
+        "List papers and report whether each one has readable extracted content.",
         _object_schema({}),
+        True,
+    ),
+    (
+        "documents.inspect",
+        "inspect_paper",
+        "Inspect a paper's source, ingestion state, content statistics, and section outline.",
+        _object_schema(
+            {"document_id": {"type": "string", "minLength": 1}},
+            required=["document_id"],
+        ),
+        True,
+    ),
+    (
+        "documents.ingest",
+        "ingest_paper",
+        "Extract and index a paper. Use OCR mode when embedded extraction is unavailable.",
+        _object_schema(
+            {
+                "document_id": {"type": "string", "minLength": 1},
+                "mode": {"type": "string", "enum": ["embedded", "ocr"]},
+            },
+            required=["document_id", "mode"],
+        ),
+        True,
+    ),
+    (
+        "documents.read_pages",
+        "read_paper_pages",
+        "Read exact paper text by page with stable page citations.",
+        _object_schema(
+            {
+                "document_id": {"type": "string", "minLength": 1},
+                "start_page": {"type": "integer", "minimum": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["document_id", "start_page", "limit"],
+        ),
         True,
     ),
     (
         "documents.read_chunks",
         "read_document_chunks",
-        "Read ordered text chunks from a paper.",
+        "Read ordered section-aware text chunks with stable page citations.",
         _object_schema(
             {
                 "document_id": {"type": "string"},
@@ -116,8 +259,39 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
         "workspace.list",
         "list_workspace_files",
-        "List safe text, Markdown, and JSON files in the workspace.",
+        "List every indexed workspace file. Prefer workspace search for discovery in large repositories.",
         _object_schema({}),
+        True,
+    ),
+    (
+        "workspace.search",
+        "search_workspace",
+        "Search indexed notes and paper files by name, content, tags, or document kind.",
+        _object_schema(
+            {
+                "query": {"type": ["string", "null"]},
+                "kinds": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "note",
+                            "paper_summary",
+                            "paper_notes",
+                            "paper_file",
+                            "file",
+                        ],
+                    },
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            required=["query", "kinds", "tags", "limit", "offset"],
+        ),
         True,
     ),
     (
@@ -145,6 +319,116 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
                 },
             },
             required=["path", "content"],
+        ),
+        True,
+    ),
+    (
+        "workspace.markdown.replace",
+        "replace_workspace_markdown",
+        "Replace one exact Markdown selection without rewriting the rest of the file.",
+        _object_schema(
+            {
+                "path": {"type": "string", "minLength": 1},
+                "old_text": {"type": "string", "minLength": 1},
+                "new_text": {"type": "string"},
+                "replace_all": {"type": "boolean"},
+            },
+            required=["path", "old_text", "new_text", "replace_all"],
+        ),
+        True,
+    ),
+    (
+        "workspace.markdown.append",
+        "append_workspace_markdown",
+        "Append text to an existing Markdown file without rewriting its current content.",
+        _object_schema(
+            {
+                "path": {"type": "string", "minLength": 1},
+                "content": {"type": "string", "minLength": 1},
+            },
+            required=["path", "content"],
+        ),
+        True,
+    ),
+    (
+        "workspace.tags.set",
+        "set_workspace_file_tags",
+        "Replace the searchable tags associated with one workspace file.",
+        _object_schema(
+            {
+                "path": {"type": "string", "minLength": 1},
+                "tags": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            required=["path", "tags"],
+        ),
+        True,
+    ),
+    (
+        "workspace.tags.search",
+        "search_workspace_file_tags",
+        "Find workspace files that contain all requested tags.",
+        _object_schema(
+            {
+                "tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            required=["tags"],
+        ),
+        True,
+    ),
+    (
+        "workspace.note.create",
+        "create_workspace_note",
+        (
+            "Create a named generic Markdown note under notes/<server-generated-uuid>/note.md. "
+            "The server generates the ID; provide a concise human-readable name."
+        ),
+        _object_schema(
+            {
+                "name": {"type": "string", "minLength": 1, "maxLength": 300},
+                "content": {"type": "string"},
+                "tags": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            required=["name", "content", "tags"],
+        ),
+        True,
+    ),
+    (
+        "workspace.paper.ensure",
+        "ensure_paper_workspace",
+        "Create or resolve the canonical summary and notes folder for one stored paper.",
+        _object_schema(
+            {"document_id": {"type": "string", "minLength": 1}},
+            required=["document_id"],
+        ),
+        True,
+    ),
+    (
+        "workspace.paper.name.set",
+        "set_paper_workspace_name",
+        "Set the human-readable display name for a paper's canonical workspace folder.",
+        _object_schema(
+            {
+                "document_id": {"type": "string", "minLength": 1},
+                "paper_name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 300,
+                },
+            },
+            required=["document_id", "paper_name"],
         ),
         True,
     ),

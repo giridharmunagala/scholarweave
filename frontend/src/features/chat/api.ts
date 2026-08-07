@@ -8,17 +8,17 @@ export type Run = components['schemas']['RunResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
 
 export const chatApi = {
-  list: () => request<Conversation[]>('/builder/conversations'),
+  list: () => request<Conversation[]>('/agent/conversations'),
   create: (title: string, modelReference: ModelReference) =>
     request<Conversation>(
-      '/builder/conversations',
+      '/agent/conversations',
       json('POST', { title, model_reference: modelReference }),
     ),
   get: (id: string) =>
-    request<ConversationDetail>(`/builder/conversations/${encodeURIComponent(id)}`),
+    request<ConversationDetail>(`/agent/conversations/${encodeURIComponent(id)}`),
   send: (id: string, content: string) =>
     request<components['schemas']['ConversationMessageResponse']>(
-      `/builder/conversations/${encodeURIComponent(id)}/messages`,
+      `/agent/conversations/${encodeURIComponent(id)}/messages`,
       json('POST', { content }),
     ),
   remove: (id: string) =>

@@ -16,6 +16,19 @@ export interface PrimitiveNodeData extends Record<string, unknown> {
 
 export type PrimitiveNode = Node<PrimitiveNodeData, 'primitive'>;
 
+/*
+ * Default layout flows left to right: tools and guardrails feed the agent
+ * column, so relationship arrows never have to double back underneath a card.
+ */
+const SOURCE_COLUMN_X = 60;
+const AGENT_COLUMN_X = 470;
+const AGENT_GAP_X = 340;
+const ROW_GAP_Y = 170;
+/* Guardrails sit in a band above everything so their top-entry edges and
+ * labels stay in open space rather than behind a card. */
+const GUARDRAIL_ROW_Y = -150;
+const GUARDRAIL_GAP_X = 260;
+
 export function projectNodes(
   blueprint: AgentBlueprint,
   presentation: AgentPresentation,
@@ -28,7 +41,7 @@ export function projectNodes(
       agent.name,
       agent.model?.model || 'Inherited model',
       blueprint.entry_agent_id === agent.id,
-      positionFor(presentation, `agent:${agent.id}`, index, 0),
+      positionFor(presentation, `agent:${agent.id}`, AGENT_COLUMN_X + index * AGENT_GAP_X, 80),
     ),
   );
   const toolNodes = (blueprint.tools ?? []).map((tool, index) =>
@@ -39,7 +52,7 @@ export function projectNodes(
       toolTitle(tool),
       tool.kind === 'function' ? tool.catalog_id : tool.kind,
       false,
-      positionFor(presentation, `tool:${tool.id}`, index, 1),
+      positionFor(presentation, `tool:${tool.id}`, SOURCE_COLUMN_X, 80 + index * ROW_GAP_Y),
     ),
   );
   const guardrailNodes = (blueprint.guardrails ?? []).map((guardrail, index) =>
@@ -50,7 +63,12 @@ export function projectNodes(
       guardrail.id,
       guardrail.kind.split('_').join(' '),
       false,
-      positionFor(presentation, `guardrail:${guardrail.id}`, index, 2),
+      positionFor(
+        presentation,
+        `guardrail:${guardrail.id}`,
+        SOURCE_COLUMN_X + index * GUARDRAIL_GAP_X,
+        GUARDRAIL_ROW_Y,
+      ),
     ),
   );
   return [...agentNodes, ...toolNodes, ...guardrailNodes];
@@ -87,6 +105,11 @@ export function projectEdges(blueprint: AgentBlueprint): Edge[] {
       source: `agent:${relation.delegate_agent_id}`,
       target: `agent:${relation.owner_agent_id}`,
       label: relation.tool_name,
+      // Routed below the cards through the secondary handles so an as_tool edge
+      // stays readable when a handoff runs the opposite way between the same
+      // two agents.
+      sourceHandle: 'out-alt',
+      targetHandle: 'in-alt',
       className: 'edge-agent-tool',
       data: { relation: 'agent_tool', relationId: relation.id },
     });
@@ -138,6 +161,8 @@ function guardrailEdge(
     id: `${relation}:${guardrailId}:${owner}`,
     source: `guardrail:${guardrailId}`,
     target,
+    // Guardrails enter from the top so they never collide with tool arrows.
+    targetHandle: 'in-top',
     label: relation.split('_').join(' '),
     className: 'edge-guardrail',
     data: { relation, guardrailId, owner },
@@ -147,13 +172,10 @@ function guardrailEdge(
 function positionFor(
   presentation: AgentPresentation,
   key: string,
-  index: number,
-  row: number,
+  x: number,
+  y: number,
 ) {
-  return presentation.positions[key] ?? {
-    x: 70 + index * 260,
-    y: 80 + row * 210,
-  };
+  return presentation.positions[key] ?? { x, y };
 }
 
 function toolTitle(tool: ToolSpec): string {

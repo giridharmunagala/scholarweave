@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { RUN_EVENT_TYPES, subscribeToRun, type RunStreamEvent } from './events';
 
 describe('SDK run event subscription', () => {
-  it('subscribes to interruption, guardrail, and compaction lifecycle events', () => {
+  it('subscribes to interruption and guardrail lifecycle events', () => {
     expect(RUN_EVENT_TYPES).toEqual(
       expect.arrayContaining([
         'run.paused',
@@ -11,9 +11,6 @@ describe('SDK run event subscription', () => {
         'guardrail.tripwire',
         'approval.requested',
         'approval.resolved',
-        'compaction.started',
-        'compaction.completed',
-        'compaction.failed',
       ]),
     );
   });

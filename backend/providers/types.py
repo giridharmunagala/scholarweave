@@ -30,7 +30,6 @@ class AgentModelDefaults:
     chat: ModelReference | None = None
     embedding: ModelReference | None = None
     vision: ModelReference | None = None
-    tools: ModelReference | None = None
 
 
 @dataclass(frozen=True, slots=True)

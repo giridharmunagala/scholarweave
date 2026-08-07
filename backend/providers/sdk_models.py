@@ -60,7 +60,7 @@ class ProfileModelResolver:
         require_tools: bool = False,
     ) -> ResolvedAgentModel:
         resolved = self._runtime.resolve(
-            "tools" if require_tools else "chat",
+            "chat",
             model_reference=ModelReference(
                 provider_profile_id=reference.provider_profile_id,
                 model=reference.model,

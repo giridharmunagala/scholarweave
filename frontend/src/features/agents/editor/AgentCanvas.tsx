@@ -1,14 +1,16 @@
 import {
   Background,
   Controls,
+  MarkerType,
   MiniMap,
+  Panel,
   ReactFlow,
   type Connection,
   type Edge,
   type EdgeMouseHandler,
   type NodeMouseHandler,
 } from '@xyflow/react';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { projectEdges, projectNodes, type PrimitiveNode } from './canvasProjection';
 import { PrimitiveCard } from './PrimitiveCard';
 import { useTheme } from '../../../shared/theme/ThemeProvider';
@@ -39,6 +41,7 @@ export function AgentCanvas({
   onDeleteEdge: (edge: Edge) => void;
 }) {
   const { theme } = useTheme();
+  const [connecting, setConnecting] = useState(false);
   const nodes = useMemo(
     () =>
       projectNodes(blueprint, presentation).map((node) => ({
@@ -48,10 +51,6 @@ export function AgentCanvas({
     [blueprint, presentation, selectedId],
   );
   const edges = useMemo(() => projectEdges(blueprint), [blueprint]);
-  const displayedEdges = useMemo(
-    () => edges.map((edge) => ({ ...edge, selected: edge.id === selectedId })),
-    [edges, selectedId],
-  );
   const nodeTypes = useMemo(() => ({ primitive: PrimitiveCard }), []);
   const palette = useMemo(
     () => ({
@@ -63,11 +62,39 @@ export function AgentCanvas({
     // The token values change with the theme, so re-read them whenever it does.
     [theme],
   );
+  // Markers live in shared SVG defs, so their colour cannot come from CSS classes.
+  const edgeColors = useMemo<Record<string, string>>(
+    () => ({
+      'edge-tool': token('--tool', '#4fd0a0'),
+      'edge-handoff': token('--handoff', '#f2c25c'),
+      'edge-agent-tool': token('--agent', '#6f8dff'),
+      'edge-guardrail': token('--guardrail', '#ff7686'),
+    }),
+    [theme],
+  );
+  const displayedEdges = useMemo(
+    () =>
+      edges.map((edge) => {
+        const color = edgeColors[edge.className ?? ''] ?? palette.muted;
+        return {
+          ...edge,
+          selected: edge.id === selectedId,
+          style: { ...edge.style, stroke: color, strokeWidth: edge.id === selectedId ? 3 : 1.8 },
+          markerEnd: {
+            type: MarkerType.ArrowClosed,
+            width: 18,
+            height: 18,
+            color,
+          },
+        };
+      }),
+    [edges, edgeColors, palette.muted, selectedId],
+  );
   const selectNode: NodeMouseHandler<PrimitiveNode> = (_event, node) => onSelect(node.id);
   const selectEdge: EdgeMouseHandler = (_event, edge) => onSelect(edge.id);
 
   return (
-    <div className="agent-canvas" aria-label="SDK primitive canvas">
+    <div className={`agent-canvas ${connecting ? 'is-connecting' : ''}`} aria-label="SDK primitive canvas">
       <ReactFlow
         nodes={nodes}
         edges={displayedEdges}
@@ -79,11 +106,21 @@ export function AgentCanvas({
         onEdgeClick={selectEdge}
         onPaneClick={() => onSelect(null)}
         onConnect={onConnect}
+        onConnectStart={() => setConnecting(true)}
+        onConnectEnd={() => setConnecting(false)}
+        connectOnClick
+        connectionRadius={32}
+        connectionLineStyle={{ stroke: palette.accent, strokeWidth: 2.5 }}
+        defaultEdgeOptions={{ interactionWidth: 30 }}
         onNodeDragStop={(_event, node) => onMove(node.id, node.position)}
         onEdgesDelete={(deleted) => deleted.forEach(onDeleteEdge)}
         deleteKeyCode={['Backspace', 'Delete']}
         proOptions={{ hideAttribution: false }}
       >
+        <Panel position="top-left" className="connection-help">
+          <strong>Connect nodes</strong>
+          <span>Drag or click <b>OUT</b>, then choose an <b>IN</b> handle.</span>
+        </Panel>
         <Background color={palette.grid} gap={22} size={1.2} />
         <Controls showInteractive={false} />
         <MiniMap

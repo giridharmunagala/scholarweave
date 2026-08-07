@@ -12,25 +12,18 @@ interface NavEntry {
 
 const NAV_GROUPS: Array<{ title: string; items: NavEntry[] }> = [
   {
-    title: 'Workspace',
+    title: 'Research',
     items: [
-      { to: '/', label: 'Overview', icon: 'overview' },
-      { to: '/chat', label: 'Builder', icon: 'builder' },
+      { to: '/', label: 'Agent', icon: 'agents' },
       { to: '/papers', label: 'Papers', icon: 'papers' },
-    ],
-  },
-  {
-    title: 'Compose',
-    items: [
-      { to: '/agents', label: 'Agents', icon: 'agents' },
       { to: '/tools', label: 'Tools', icon: 'tools' },
+      { to: '/workspace', label: 'Files', icon: 'workspace' },
     ],
   },
   {
     title: 'Operate',
     items: [
       { to: '/runs', label: 'Runs', icon: 'runs' },
-      { to: '/workspace', label: 'Files', icon: 'workspace' },
       { to: '/settings', label: 'Settings', icon: 'settings' },
     ],
   },
@@ -39,8 +32,7 @@ const NAV_GROUPS: Array<{ title: string; items: NavEntry[] }> = [
 const COMPACT_KEY = 'scholarweave-sidebar-compact';
 
 const TITLES: Array<[string, string]> = [
-  ['/chat', 'Builder'],
-  ['/agents', 'Agents'],
+  ['/', 'Research agent'],
   ['/tools', 'Tools'],
   ['/runs', 'Runs'],
   ['/papers', 'Papers'],
@@ -50,7 +42,7 @@ const TITLES: Array<[string, string]> = [
 
 function currentTitle(pathname: string): string {
   const match = TITLES.find(([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`));
-  return match ? match[1] : 'Overview';
+  return match ? match[1] : 'Research agent';
 }
 
 export function AppShell({ children }: { children: ReactNode }) {

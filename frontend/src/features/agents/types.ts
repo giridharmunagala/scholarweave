@@ -32,12 +32,7 @@ export function blankBlueprint(): AgentBlueprint {
     agent_tools: [],
     guardrails: [],
     run: { max_turns: 10, max_tool_concurrency: null, tracing_enabled: false },
-    session: {
-      strategy: 'auto',
-      compaction_enabled: true,
-      compaction_threshold_items: 20,
-      recent_items_to_keep: 8,
-    },
+    session: {},
   };
 }
 
@@ -72,14 +67,7 @@ export function normalizeBlueprint(value: AgentBlueprintOutput): AgentBlueprint 
     agent_tools: value.agent_tools ?? [],
     guardrails: value.guardrails ?? [],
     run: value.run ?? { max_turns: 10, max_tool_concurrency: null, tracing_enabled: false },
-    session:
-      value.session ??
-      ({
-        strategy: 'auto',
-        compaction_enabled: true,
-        compaction_threshold_items: 20,
-        recent_items_to_keep: 8,
-      } as const),
+    session: value.session ?? {},
   };
 }
 

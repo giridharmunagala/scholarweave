@@ -30,7 +30,6 @@ def test_required_sdk_primitives_are_public() -> None:
         "ToolInputGuardrail",
         "ToolOutputGuardrail",
         "SQLiteSession",
-        "OpenAIResponsesCompactionSession",
         "Session",
         "SessionSettings",
         "ModelProvider",
@@ -60,7 +59,6 @@ def test_run_item_union_contains_semantic_items() -> None:
         "HandoffCallItem",
         "HandoffOutputItem",
         "ReasoningItem",
-        "CompactionItem",
         "ToolApprovalItem",
     }
     assert required <= set(dir(agents))

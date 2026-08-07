@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from '../../../app/router';
 import { Icon } from '../../../shared/components/Icons';
 import { ErrorNotice, Loading, PageHeader, Panel } from '../../../shared/components/Ui';
 import { AgentCanvas } from './AgentCanvas';
+import { AddNodeMenu } from './AddNodeMenu';
 import { PrimitiveInspector } from './PrimitiveInspector';
 import { useAgentEditor } from './useAgentEditor';
 import { agentsApi } from '../api';
@@ -14,8 +15,6 @@ export default function AgentEditorPage() {
   const segment = pathname.split('/').filter(Boolean)[1];
   const agentId = segment && segment !== 'new' ? segment : null;
   const editor = useAgentEditor(agentId);
-  const [toolChoice, setToolChoice] = useState('');
-  const [guardrailChoice, setGuardrailChoice] = useState('');
   const [runInput, setRunInput] = useState('');
   const [running, setRunning] = useState(false);
 
@@ -64,29 +63,13 @@ export default function AgentEditorPage() {
       <Panel className="editor-toolbar">
         <div className="toolbar">
           <div className="toolbar-group">
-            <button className="button secondary" type="button" onClick={editor.addAgent}>
-              <Icon name="plus" size={15} />
-              Add Agent
-            </button>
-            <select value={toolChoice} onChange={(event) => setToolChoice(event.target.value)}>
-              <option value="">Choose FunctionTool…</option>
-              {editor.catalog?.function_tools.map((tool) => <option key={tool.catalog_id} value={tool.catalog_id}>{tool.label}</option>)}
-            </select>
-            <button className="button secondary" type="button" disabled={!toolChoice} onClick={() => { editor.addFunctionTool(toolChoice); setToolChoice(''); }}>Add tool</button>
-          </div>
-          <div className="toolbar-group">
-            <select value={guardrailChoice} onChange={(event) => setGuardrailChoice(event.target.value)}>
-              <option value="">Choose guardrail…</option>
-              {editor.catalog?.guardrails.map((guardrail) => <option key={`${guardrail.kind}:${guardrail.catalog_id}`} value={`${guardrail.kind}:${guardrail.catalog_id}`}>{guardrail.label} · {guardrail.kind.split('_').join(' ')}</option>)}
-            </select>
-            <button className="button secondary" type="button" disabled={!guardrailChoice} onClick={() => {
-              const separator = guardrailChoice.indexOf(':');
-              editor.addGuardrail(
-                guardrailChoice.slice(0, separator) as 'input' | 'output' | 'tool_input' | 'tool_output',
-                guardrailChoice.slice(separator + 1),
-              );
-              setGuardrailChoice('');
-            }}>Add guardrail</button>
+            <AddNodeMenu
+              catalog={editor.catalog}
+              onAddAgent={editor.addAgent}
+              onAddFunctionTool={editor.addFunctionTool}
+              onAddGuardrail={editor.addGuardrail}
+            />
+            <span className="toolbar-hint">Add a node, then connect its handles on the canvas.</span>
           </div>
           <div className="toolbar-group run-inline">
             <input placeholder="Run input" value={runInput} onChange={(event) => setRunInput(event.target.value)} />
@@ -119,6 +102,7 @@ export default function AgentEditorPage() {
           <PrimitiveInspector
             blueprint={editor.blueprint}
             setBlueprint={editor.setBlueprint}
+            providers={editor.providers}
             selected={editor.selected}
             onRemove={editor.removeSelected}
           />

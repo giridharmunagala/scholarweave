@@ -13,7 +13,7 @@ from backend.providers.errors import ProviderRuntimeError
 from backend.providers.ollama import OllamaClient
 from backend.providers.repository import ProviderRepository
 from backend.providers.runtime import ResolvedModel
-from backend.providers.schemas import ProviderCreate
+from backend.providers.schemas import ProviderCreate, ProviderModel
 from backend.providers.types import AgentModelDefaults, ModelReference
 
 
@@ -38,10 +38,21 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     profile_id = body["id"]
     updated = client.put(
         f"/api/providers/{profile_id}",
-        json={"name": "Renamed gateway", "models": [{"name": "embed-1", "capabilities": ["embedding"]}]},
+        json={
+            "name": "Renamed gateway",
+            "models": [
+                {
+                    "name": "embed-1",
+                    "capabilities": ["embedding"],
+                    "enabled": False,
+                }
+            ],
+        },
     )
     assert updated.status_code == 200
-    assert updated.json()["models"] == [{"name": "embed-1", "capabilities": ["embedding"]}]
+    assert updated.json()["models"] == [
+        {"name": "embed-1", "capabilities": ["embedding"], "enabled": False}
+    ]
 
     restarted = TestClient(
         create_app(
@@ -52,7 +63,11 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
             )
         )
     )
-    assert restarted.get(f"/api/providers/{profile_id}").json()["api_key_set"] is True
+    restarted_profile = restarted.get(f"/api/providers/{profile_id}").json()
+    assert restarted_profile["api_key_set"] is True
+    assert restarted_profile["models"] == [
+        {"name": "embed-1", "capabilities": ["embedding"], "enabled": False}
+    ]
     archived = restarted.delete(f"/api/providers/{profile_id}")
     assert archived.status_code == 200
     assert archived.json()["state"] == "archived"
@@ -87,6 +102,61 @@ def test_default_model_references_resolve_through_default_ollama_profile(test_se
     }
     assert services.model_runtime.resolve("chat").model == "local-chat"
     assert services.model_runtime.resolve("embedding").model == "local-embed"
+
+
+def test_disabled_provider_model_cannot_be_resolved(test_settings) -> None:
+    services = create_services(test_settings)
+    profile = services.providers.create(
+        ProviderCreate(
+            name="Selectable models",
+            kind="openai_compatible",
+            base_url="https://models.example.test/v1",
+            models=[ProviderModel(name="disabled-chat", enabled=False)],
+        )
+    )
+
+    with pytest.raises(ProviderRuntimeError, match="disabled"):
+        services.model_runtime.resolve(
+            "chat",
+            model_reference=ModelReference(
+                provider_profile_id=profile.id,
+                model="disabled-chat",
+            ),
+        )
+
+
+@pytest.mark.anyio
+async def test_azure_discovery_requires_models_to_be_enabled(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+    profile = services.providers.create(
+        ProviderCreate(
+            name="Azure catalog",
+            kind="azure_openai",
+            base_url="https://azure.example.test/openai",
+            api_key="test-key",
+            models=[
+                ProviderModel(name="already-selected", enabled=True),
+            ],
+        )
+    )
+
+    async def discover(_profile) -> list[ProviderModel]:
+        return [
+            ProviderModel(name="already-selected"),
+            ProviderModel(name="newly-discovered"),
+        ]
+
+    monkeypatch.setattr(services.model_runtime, "discover", discover)
+
+    result = await services.providers.discover(profile.id)
+
+    assert {model.name: model.enabled for model in result.models} == {
+        "already-selected": True,
+        "newly-discovered": False,
+    }
 
 
 def test_compatible_discovery_and_model_resolution(test_settings, stub_provider) -> None:

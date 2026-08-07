@@ -57,12 +57,6 @@ class ReasoningRunItem(RunSchema):
     raw_item: Any
 
 
-class CompactionRunItem(RunSchema):
-    type: Literal["compaction_item"]
-    agent_name: str
-    raw_item: Any
-
-
 class ToolApprovalRunItem(RunSchema):
     type: Literal["tool_approval_item"]
     agent_name: str
@@ -109,7 +103,6 @@ RunItemResponse = Annotated[
     | HandoffCallRunItem
     | HandoffOutputRunItem
     | ReasoningRunItem
-    | CompactionRunItem
     | ToolApprovalRunItem
     | ToolSearchCallRunItem
     | ToolSearchOutputRunItem

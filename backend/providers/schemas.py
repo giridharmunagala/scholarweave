@@ -22,6 +22,7 @@ class ProviderSchema(BaseModel):
 class ProviderModel(ProviderSchema):
     name: str = Field(min_length=1, max_length=255)
     capabilities: set[ModelCapability] = Field(default_factory=set)
+    enabled: bool = True
 
 
 class ProviderCreate(ProviderSchema):

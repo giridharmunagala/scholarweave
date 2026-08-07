@@ -127,16 +127,8 @@ class RunSettingsSpec(BlueprintModel):
 
 
 class SessionPolicySpec(BlueprintModel):
-    strategy: Literal["auto", "openai_responses", "local"] = "auto"
-    compaction_enabled: bool = True
-    compaction_threshold_items: int = Field(default=20, ge=4, le=10_000)
-    recent_items_to_keep: int = Field(default=8, ge=2, le=1_000)
-
-    @model_validator(mode="after")
-    def validate_compaction_window(self) -> "SessionPolicySpec":
-        if self.recent_items_to_keep >= self.compaction_threshold_items:
-            raise ValueError("recent_items_to_keep must be smaller than compaction_threshold_items.")
-        return self
+    # Accept persisted pre-removal policy fields without exposing or using them.
+    model_config = ConfigDict(extra="ignore")
 
 
 class AgentBlueprint(BlueprintModel):

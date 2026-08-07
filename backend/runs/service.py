@@ -23,7 +23,6 @@ from backend.runs.events import PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
 from backend.runs.repository import RunRepository
 from backend.runtime.context import ScholarWeaveContext, ToolRuntime
-from backend.runtime.compaction_events import observe_compaction
 from backend.runtime.hooks import ScholarWeaveRunHooks
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
@@ -65,6 +64,7 @@ class RunService:
         *,
         agent_revision_id: str | None,
         conversation_id: str | None,
+        runtime_metadata: dict[str, Any] | None = None,
     ):
         record = self._repository.create(
             agent_revision_id=agent_revision_id,
@@ -79,6 +79,7 @@ class RunService:
                 compiled,
                 input_value,
                 conversation_id=conversation_id,
+                runtime_metadata=runtime_metadata,
             )
         )
         self._tasks[record.id] = task
@@ -119,6 +120,23 @@ class RunService:
         if stream is not None:
             stream.cancel("immediate")
         return self._repository.get(run_id)
+
+    async def cancel_conversation_runs(self, conversation_id: str) -> None:
+        active = [
+            record
+            for record in self._repository.list()
+            if record.conversation_id == conversation_id
+            and record.status in {"pending", "running"}
+        ]
+        for record in active:
+            await self.cancel(record.id)
+        tasks = [
+            self._tasks[record.id]
+            for record in active
+            if record.id in self._tasks
+        ]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def resolve_interruption(
         self,
@@ -213,15 +231,17 @@ class RunService:
         *,
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
     ) -> None:
         sink = PersistedRunEventSink(run_id, self._repository, self._broker)
         if isinstance(input_value, RunState) and runtime_context is None:
             raise ValueError("Resuming an SDK RunState requires restored live context.")
         context = runtime_context or ScholarWeaveContext(
-                run_id=run_id,
-                conversation_id=conversation_id,
-                tool_runtime=self._tool_runtime,
-                event_sink=sink,
+            run_id=run_id,
+            conversation_id=conversation_id,
+            tool_runtime=self._tool_runtime,
+            event_sink=sink,
+            metadata=dict(runtime_metadata or {}),
         )
         context.event_sink = sink
         hooks = ScholarWeaveRunHooks()
@@ -243,7 +263,8 @@ class RunService:
             {"agent_name": compiled.blueprint.name},
         )
         try:
-            async with lock, observe_compaction(sink.emit):
+            async with lock:
+                session_snapshot = await session.get_items() if session is not None else None
                 stream = Runner.run_streamed(
                     compiled.entry_agent,
                     input_value,
@@ -265,6 +286,8 @@ class RunService:
                     compiled=compiled,
                     context=context,
                     persisted_item_count=persisted_item_count,
+                    session=session,
+                    session_snapshot=session_snapshot,
                 )
         except asyncio.CancelledError:
             self._repository.cancel(run_id)
@@ -303,6 +326,8 @@ class RunService:
         compiled: CompiledAgent,
         context: ScholarWeaveContext,
         persisted_item_count: int,
+        session: Any,
+        session_snapshot: list[TResponseInputItem] | None,
     ) -> None:
         projected_items = [
             project_run_item(item)
@@ -346,7 +371,14 @@ class RunService:
             return
         usage = to_jsonable(result.context_wrapper.usage)
         if compiled.completion_validator is not None:
-            compiled.completion_validator(context)
+            try:
+                compiled.completion_validator(context)
+            except Exception:
+                if session is not None and session_snapshot is not None:
+                    await session.clear_session()
+                    if session_snapshot:
+                        await session.add_items(session_snapshot)
+                raise
         self._repository.complete(
             run_id,
             final_output=to_jsonable(result.final_output),

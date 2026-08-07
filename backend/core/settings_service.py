@@ -15,24 +15,29 @@ PERSISTED_SETTING_KEYS = {
     "default_model_references",
     "request_timeout_seconds",
     "agent_tracing_enabled",
-    "agent_compaction_threshold_items",
-    "agent_compaction_recent_items",
     "python_tool_enabled",
     "python_tool_timeout_seconds",
     "python_tool_memory_mb",
     "python_tool_allowed_imports",
     "retrieval_max_context_chars",
     "ocr_engine",
-    "surya_model",
-    "surya_device",
-    "surya_max_new_tokens",
-    "surya_max_image_width",
-    "surya_timeout_seconds",
-    "surya_unload_ollama_models",
+    "docling_device",
+    "docling_ocr_backend",
+    "docling_batch_size",
+    "docling_num_threads",
     "ocr_llm_enhancement_enabled",
     "ocr_llm_model",
     "ocr_llm_triage_model",
 }
+MODEL_DEFAULT_CAPABILITIES = {"chat", "embedding", "vision"}
+
+
+def _normalize_model_references(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        capability: reference
+        for capability, reference in value.items()
+        if capability in MODEL_DEFAULT_CAPABILITIES
+    }
 
 
 class SettingsSchema(BaseModel):
@@ -49,20 +54,16 @@ class SettingsResponse(SettingsSchema):
     default_model_references: dict[str, ModelReferenceSpec]
     request_timeout_seconds: float
     agent_tracing_enabled: bool
-    agent_compaction_threshold_items: int
-    agent_compaction_recent_items: int
     python_tool_enabled: bool
     python_tool_timeout_seconds: float
     python_tool_memory_mb: int
     python_tool_allowed_imports: list[str]
     retrieval_max_context_chars: int
-    ocr_engine: Literal["tesseract", "surya"]
-    surya_model: str
-    surya_device: Literal["auto", "cuda", "cpu"]
-    surya_max_new_tokens: int
-    surya_max_image_width: int
-    surya_timeout_seconds: float
-    surya_unload_ollama_models: bool
+    ocr_engine: Literal["tesseract", "docling"]
+    docling_device: Literal["auto", "cuda", "cpu"]
+    docling_ocr_backend: Literal["onnxruntime", "torch"]
+    docling_batch_size: int
+    docling_num_threads: int
     ocr_llm_enhancement_enabled: bool
     ocr_llm_model: str | None
     ocr_llm_triage_model: str | None
@@ -73,20 +74,16 @@ class SettingsUpdate(SettingsSchema):
     default_model_references: dict[str, ModelReferenceSpec] | None = None
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     agent_tracing_enabled: bool | None = None
-    agent_compaction_threshold_items: int | None = Field(default=None, ge=4, le=10_000)
-    agent_compaction_recent_items: int | None = Field(default=None, ge=2, le=1_000)
     python_tool_enabled: bool | None = None
     python_tool_timeout_seconds: float | None = Field(default=None, gt=0, le=300)
     python_tool_memory_mb: int | None = Field(default=None, ge=32, le=8192)
     python_tool_allowed_imports: list[str] | None = None
     retrieval_max_context_chars: int | None = Field(default=None, ge=1_000, le=1_000_000)
-    ocr_engine: Literal["tesseract", "surya"] | None = None
-    surya_model: str | None = None
-    surya_device: Literal["auto", "cuda", "cpu"] | None = None
-    surya_max_new_tokens: int | None = Field(default=None, ge=512, le=32768)
-    surya_max_image_width: int | None = Field(default=None, ge=512, le=4096)
-    surya_timeout_seconds: float | None = Field(default=None, ge=30, le=7200)
-    surya_unload_ollama_models: bool | None = None
+    ocr_engine: Literal["tesseract", "docling"] | None = None
+    docling_device: Literal["auto", "cuda", "cpu"] | None = None
+    docling_ocr_backend: Literal["onnxruntime", "torch"] | None = None
+    docling_batch_size: int | None = Field(default=None, ge=1, le=32)
+    docling_num_threads: int | None = Field(default=None, ge=1, le=64)
     ocr_llm_enhancement_enabled: bool | None = None
     ocr_llm_model: str | None = None
     ocr_llm_triage_model: str | None = None
@@ -106,7 +103,15 @@ class SettingsService:
             for key in PERSISTED_SETTING_KEYS:
                 record = session.get(AppSetting, key)
                 if record is not None:
-                    setattr(self.settings, key, record.value_json)
+                    value = record.value_json
+                    if key == "ocr_engine" and value == "surya":
+                        value = "docling"
+                        record.value_json = value
+                    if key == "default_model_references":
+                        value = _normalize_model_references(value)
+                        record.value_json = value
+                    setattr(self.settings, key, value)
+            session.commit()
 
     def response(self) -> SettingsResponse:
         return SettingsResponse(
@@ -122,20 +127,16 @@ class SettingsService:
             },
             request_timeout_seconds=self.settings.request_timeout_seconds,
             agent_tracing_enabled=self.settings.agent_tracing_enabled,
-            agent_compaction_threshold_items=self.settings.agent_compaction_threshold_items,
-            agent_compaction_recent_items=self.settings.agent_compaction_recent_items,
             python_tool_enabled=self.settings.python_tool_enabled,
             python_tool_timeout_seconds=self.settings.python_tool_timeout_seconds,
             python_tool_memory_mb=self.settings.python_tool_memory_mb,
             python_tool_allowed_imports=self.settings.python_tool_allowed_imports,
             retrieval_max_context_chars=self.settings.retrieval_max_context_chars,
             ocr_engine=self.settings.ocr_engine,
-            surya_model=self.settings.surya_model,
-            surya_device=self.settings.surya_device,
-            surya_max_new_tokens=self.settings.surya_max_new_tokens,
-            surya_max_image_width=self.settings.surya_max_image_width,
-            surya_timeout_seconds=self.settings.surya_timeout_seconds,
-            surya_unload_ollama_models=self.settings.surya_unload_ollama_models,
+            docling_device=self.settings.docling_device,
+            docling_ocr_backend=self.settings.docling_ocr_backend,
+            docling_batch_size=self.settings.docling_batch_size,
+            docling_num_threads=self.settings.docling_num_threads,
             ocr_llm_enhancement_enabled=self.settings.ocr_llm_enhancement_enabled,
             ocr_llm_model=self.settings.ocr_llm_model,
             ocr_llm_triage_model=self.settings.ocr_llm_triage_model,
@@ -152,19 +153,8 @@ class SettingsService:
                     else reference
                     for capability, reference in value.items()
                 }
+                value = _normalize_model_references(value)
             normalized[key] = value
-        recent = normalized.get(
-            "agent_compaction_recent_items",
-            self.settings.agent_compaction_recent_items,
-        )
-        threshold = normalized.get(
-            "agent_compaction_threshold_items",
-            self.settings.agent_compaction_threshold_items,
-        )
-        if recent >= threshold:
-            raise ValueError(
-                "agent_compaction_recent_items must be smaller than the compaction threshold."
-            )
         with self._sessions() as session:
             for key, value in normalized.items():
                 setattr(self.settings, key, value)

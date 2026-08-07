@@ -17,7 +17,6 @@ class SessionItemResponse(ConversationSchema):
     type: str
     role: str | None
     text: str | None
-    is_compaction: bool
     raw: Any
 
 
@@ -34,7 +33,7 @@ class BuilderConversationCreateRequest(ConversationSchema):
 class ConversationResponse(ConversationSchema):
     id: str
     title: str
-    kind: Literal["agent", "builder"]
+    kind: Literal["agent", "autonomous", "builder", "direct_agent"]
     agent_revision_id: str | None
     model_reference: ModelReferenceSpec
     session_policy: SessionPolicySpec

@@ -10,6 +10,7 @@ from backend.agents.compiler import AgentCompiler
 from backend.agents.guardrails import create_guardrail_catalog
 from backend.agents.repository import AgentRepository
 from backend.agents.service import AgentService
+from backend.autonomous import AutonomousAgentService
 from backend.builder.service import BuilderService
 from backend.core.config import Settings
 from backend.conversations.repository import ConversationRepository
@@ -22,6 +23,8 @@ from backend.documents.ingestion import DocumentIngestion
 from backend.documents.ocr import DocumentOCR
 from backend.documents.repository import DocumentRepository
 from backend.documents.vision import VisionEnhancer
+from backend.direct_agents import DirectAgentService
+from backend.direct_agents.repository import DirectAgentRepository
 from backend.runs.broker import EventBroker
 from backend.providers.ollama import OllamaClient
 from backend.persistence import create_session_factory
@@ -40,6 +43,7 @@ from backend.tools.repository import FunctionToolRepository
 from backend.tools.runtime import ApplicationToolRuntime
 from backend.tools.service import FunctionToolService
 from backend.workspace.service import WorkspaceService
+from backend.workspace.repository import WorkspaceRepository
 
 
 @dataclass(slots=True)
@@ -72,9 +76,12 @@ class ApplicationServices:
     events: EventBroker
     runs: RunService
     builder: BuilderService
+    autonomous: AutonomousAgentService
+    direct_agents: DirectAgentService
     sdk_version: str = SUPPORTED_SDK_VERSION
 
     async def close(self) -> None:
+        await self.documents.close()
         await self.runs.close()
         await self.sdk_clients.close()
         engine = self.session_factory.kw.get("bind")
@@ -104,15 +111,11 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     model_resolver = ProfileModelResolver(model_runtime, sdk_clients)
 
     storage = SafeStorage(resolved)
-    workspace = WorkspaceService(storage)
+    workspace = WorkspaceService(storage, WorkspaceRepository(session_factory))
     retrieval = RetrievalService(session_factory, resolved)
     document_repository = DocumentRepository(session_factory, resolved, storage)
     document_repository.recover_stale_ingestions()
-    document_ocr = DocumentOCR(
-        resolved,
-        ollama=OllamaClient(resolved),
-        ollama_gpu_lock=ollama_gpu_lock,
-    )
+    document_ocr = DocumentOCR(resolved)
     document_formatter = DocumentFormatter(resolved)
     document_vision = VisionEnhancer(
         resolved,
@@ -156,6 +159,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         ConversationRepository(session_factory),
         sdk_sessions,
     )
+    direct_agent_repository = DirectAgentRepository(session_factory)
     events = EventBroker()
     tool_runtime = ApplicationToolRuntime(
         settings=resolved,
@@ -166,6 +170,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         agent_service=agents,
         function_tool_service=function_tools,
         tool_catalog=tool_catalog,
+        direct_agent_repository=direct_agent_repository,
     )
     runs = RunService(
         RunRepository(session_factory),
@@ -174,6 +179,14 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         events,
     )
     builder = BuilderService(compiler, conversations, runs)
+    autonomous = AutonomousAgentService(compiler, conversations, runs, function_tools)
+    direct_agents = DirectAgentService(
+        direct_agent_repository,
+        conversations,
+        compiler,
+        documents,
+        workspace,
+    )
     providers = ProviderService(
         provider_repository,
         model_runtime,
@@ -209,4 +222,6 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         events=events,
         runs=runs,
         builder=builder,
+        autonomous=autonomous,
+        direct_agents=direct_agents,
     )
