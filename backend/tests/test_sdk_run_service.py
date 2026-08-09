@@ -47,6 +47,11 @@ class ToolRuntime:
         return [{"id": "paper-1", "title": "Paper"}]
 
 
+class FailingToolRuntime:
+    async def invoke(self, catalog_id, arguments, context):
+        raise RuntimeError("Remote page returned HTTP 503.")
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
@@ -112,6 +117,70 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     assert any(item.item_type == "tool_call_output_item" for item in run.items)
     assert any(event.event_type == "run.completed" for event in run.events)
     assert tool_runtime.calls == [("documents.list", {})]
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_tool_failure_is_returned_to_model_without_failing_run(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.call_tool = "download_web_page"
+    stub_provider.tool_arguments = {"url": "https://example.com/unavailable"}
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Web researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Download the page, recover from failure, then answer.",
+                        "tool_ids": ["web-page"],
+                    }
+                ],
+                "tools": [
+                    {
+                        "id": "web-page",
+                        "kind": "function",
+                        "catalog_id": "webpage.download",
+                    }
+                ],
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    repository = RunRepository(create_session_factory(settings))
+    service = RunService(
+        repository,
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        FailingToolRuntime(),
+        EventBroker(),
+    )
+
+    run = await service.run_now(compiled, "Read this web page.")
+
+    assert run.status == "completed"
+    tool_outputs = [
+        item.item_json["output"]
+        for item in run.items
+        if item.item_type == "tool_call_output_item"
+    ]
+    assert len(tool_outputs) == 1
+    assert "try a different tool or source" in tool_outputs[0]
+    assert any(event.event_type == "tool.failed" for event in run.events)
+    assert not any(event.event_type == "run.failed" for event in run.events)
     await client.close()
 
 

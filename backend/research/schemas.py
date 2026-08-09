@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -60,3 +60,37 @@ class IngestionOptionsResponse(ResearchSchema):
 class ArtifactContentResponse(ResearchSchema):
     artifact: ArtifactResponse
     content: Any
+
+
+class RemotePdfDownloadRequest(ResearchSchema):
+    url: str = Field(min_length=1, max_length=2048)
+    title: str | None = Field(default=None, max_length=300)
+
+
+class WebSourceCreateRequest(ResearchSchema):
+    url: str = Field(min_length=1, max_length=2048)
+
+
+class WebSourceNoteRequest(ResearchSchema):
+    name: str = Field(min_length=1, max_length=300)
+    content: str = Field(min_length=1, max_length=200_000)
+    tags: list[Annotated[str, Field(min_length=1, max_length=64)]] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+
+
+class WebSourceResponse(ResearchSchema):
+    id: str
+    url: str
+    title: str
+    text: str | None = None
+    chunk_count: int
+    created_at: datetime
+    expires_at: datetime
+
+
+class SavedWebSourceNoteResponse(ResearchSchema):
+    path: str
+    note_id: str | None
+    name: str | None

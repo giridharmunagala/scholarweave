@@ -43,6 +43,21 @@ class DocumentService:
     ) -> Document:
         return await self.repository.create_from_upload(upload, title)
 
+    def create_document_from_bytes(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        title: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Document:
+        return self.repository.create_from_bytes(
+            content,
+            filename=filename,
+            title=title,
+            metadata=metadata,
+        )
+
     def create_artifact_record(
         self,
         *,

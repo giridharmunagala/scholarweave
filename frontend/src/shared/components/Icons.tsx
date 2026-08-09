@@ -21,6 +21,7 @@ export type IconName =
   | 'palette'
   | 'plus'
   | 'upload'
+  | 'download'
   | 'scan'
   | 'trash'
   | 'play'
@@ -53,6 +54,7 @@ const PATHS: Record<IconName, string> = {
   palette: 'M12 21a9 9 0 1 1 9-9c0 2-1.6 2.6-3 2.6h-1.6a2 2 0 0 0-1.4 3.4 1.6 1.6 0 0 1-1.2 3H12Zm-4.5-9.5h.01M10.5 8h.01M15 8h.01',
   plus: 'M12 5v14M5 12h14',
   upload: 'M12 16V4m-4.5 4L12 3.5 16.5 8M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3',
+  download: 'M12 4v12m-4.5-4L12 16.5l4.5-4.5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3',
   scan: 'M4 8V5a1 1 0 0 1 1-1h3m8 0h3a1 1 0 0 1 1 1v3M4 16v3a1 1 0 0 0 1 1h3m8 0h3a1 1 0 0 0 1-1v-3M7 12h10',
   trash: 'M4 7h16M9.5 7V5h5v2m-8 0 .8 13a1 1 0 0 0 1 1h6.4a1 1 0 0 0 1-1L16.5 7',
   play: 'M8 5.5v13l11-6.5-11-6.5Z',

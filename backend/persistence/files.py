@@ -61,6 +61,14 @@ class SafeStorage:
     def write_bytes(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
         if len(content) > self.settings.max_artifact_bytes:
             raise StorageError("Artifact exceeds maximum allowed size")
+        return self._write_bytes(base_dir, relative_path, content)
+
+    def write_document_bytes(self, relative_path: str, content: bytes) -> StoredFile:
+        if len(content) > self.settings.max_upload_bytes:
+            raise StorageError("Document exceeds maximum allowed size")
+        return self._write_bytes(self.settings.documents_dir, relative_path, content)
+
+    def _write_bytes(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
         absolute = self._safe_path(base_dir, relative_path)
         absolute.parent.mkdir(parents=True, exist_ok=True)
         absolute.write_bytes(content)
@@ -84,7 +92,7 @@ class SafeStorage:
         if len(content) > self.settings.max_upload_bytes:
             raise StorageError("Upload exceeds maximum allowed size")
         relative_path = str(Path(relative_dir) / filename)
-        return self.write_bytes(self.settings.documents_dir, relative_path, content)
+        return self.write_document_bytes(relative_path, content)
 
     def read_workspace_file(self, relative_path: str) -> tuple[str, Any]:
         allowed = {".txt", ".md", ".json"}

@@ -9,13 +9,11 @@
 venv/
 env/
 .direnv/
-__pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
-*.py[cod]
 
 # Application runtime data and generated workspaces
 local_data/
@@ -24,6 +22,8 @@ workspace/
 !backend/workspace/**
 !frontend/src/features/workspace/
 !frontend/src/features/workspace/**
+__pycache__/
+*.py[cod]
 *.sqlite
 *.sqlite3
 *.db

@@ -9,6 +9,57 @@
 .upload-button { position: relative; overflow: hidden; }
 .upload-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
+.source-import-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+.source-form { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.source-form input { min-width: min(100%, 18rem); flex: 1 1 14rem; }
+.temporary-source-list {
+  display: grid;
+  gap: var(--space-1);
+  max-height: 12rem;
+  overflow: auto;
+  margin-top: var(--space-3);
+}
+.temporary-source-detail {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.temporary-source-detail > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.temporary-source-detail > header a {
+  overflow: hidden;
+  color: var(--accent-strong);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.temporary-source-detail pre {
+  max-height: 15rem;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  color: var(--text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}
+.web-note-form { display: grid; gap: var(--space-2); }
+.web-note-form textarea { resize: vertical; }
+.web-note-form .button { justify-self: start; }
+.web-note-form small { color: var(--muted); }
+
 .paper-row {
   display: flex;
   align-items: center;
@@ -120,4 +171,7 @@
   }
 }
 
-@media (max-width: 900px) { .papers-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 900px) {
+  .papers-layout,
+  .source-import-grid { grid-template-columns: minmax(0, 1fr); }
+}

@@ -14,6 +14,7 @@ from backend.agents.blueprint import FunctionToolSpec
 from backend.core.config import Settings
 from backend.core.errors import ValidationError
 from backend.runtime.context import ScholarWeaveContext
+from backend.tools.failures import recoverable_tool_invoker
 from backend.tools.sandbox import SandboxError, SandboxLimits, run_python
 from backend.tools.models import FunctionToolRecord, FunctionToolRevision
 from backend.tools.repository import FunctionToolRepository
@@ -120,11 +121,12 @@ class FunctionToolService:
                 self._validate_value(revision.output_schema_json, output, "output")
             return output
 
+        tool_name = spec.name or definition.name
         return FunctionTool(
-            name=spec.name or definition.name,
+            name=tool_name,
             description=spec.description or revision.description,
             params_json_schema=revision.parameters_schema_json,
-            on_invoke_tool=invoke,
+            on_invoke_tool=recoverable_tool_invoker(tool_name, invoke),
             strict_json_schema=True,
             needs_approval=spec.needs_approval or revision.requires_approval,
             output_json_schema=revision.output_schema_json,

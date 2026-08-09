@@ -221,6 +221,7 @@ class AgentCompiler:
             truncation=spec.truncation,
             max_tokens=spec.max_tokens,
             verbosity=spec.verbosity,
+            include_usage=True,
         )
 
     @staticmethod

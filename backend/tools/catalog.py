@@ -9,6 +9,7 @@ from agents.tool_context import ToolContext
 from backend.agents.blueprint import FunctionToolSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.runtime.context import ScholarWeaveContext
+from backend.tools.failures import recoverable_tool_invoker
 
 
 def _object_schema(
@@ -253,6 +254,122 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
                 "top_k": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
             },
             required=["query", "document_id", "top_k"],
+        ),
+        True,
+    ),
+    (
+        "documents.download",
+        "download_paper",
+        "Download a public PDF URL, extract and index it, and add it to the paper library.",
+        _object_schema(
+            {
+                "pdf_url": {"type": "string", "minLength": 1},
+                "title": {"type": ["string", "null"], "maxLength": 300},
+            },
+            required=["pdf_url", "title"],
+        ),
+        True,
+    ),
+    (
+        "webpage.download",
+        "download_web_page",
+        "Temporarily download and extract a public HTML page for chat Q&A.",
+        _object_schema(
+            {"url": {"type": "string", "minLength": 1}},
+            required=["url"],
+        ),
+        True,
+    ),
+    (
+        "webpage.list",
+        "list_downloaded_web_pages",
+        "List HTML pages currently available in temporary chat storage.",
+        _object_schema({}),
+        True,
+    ),
+    (
+        "webpage.read",
+        "read_downloaded_web_page",
+        "Read ordered extracted chunks from a temporarily downloaded HTML page.",
+        _object_schema(
+            {
+                "source_id": {"type": "string", "minLength": 1},
+                "start": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            required=["source_id", "start", "limit"],
+        ),
+        True,
+    ),
+    (
+        "webpage.search",
+        "search_downloaded_web_page",
+        "Search one temporarily downloaded HTML page for relevant extracted text.",
+        _object_schema(
+            {
+                "source_id": {"type": "string", "minLength": 1},
+                "query": {"type": "string", "minLength": 1},
+                "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
+            },
+            required=["source_id", "query", "top_k"],
+        ),
+        True,
+    ),
+    (
+        "webpage.notes.save",
+        "save_web_page_note",
+        "Persist a Markdown note with the temporary page's title and source URL.",
+        _object_schema(
+            {
+                "source_id": {"type": "string", "minLength": 1},
+                "name": {"type": "string", "minLength": 1, "maxLength": 300},
+                "content": {"type": "string", "minLength": 1, "maxLength": 200000},
+                "tags": {
+                    "type": "array",
+                    "maxItems": 32,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            required=["source_id", "name", "content", "tags"],
+        ),
+        True,
+    ),
+    (
+        "web.search",
+        "search_web",
+        "Search the web through a configured open-source SearXNG instance.",
+        _object_schema(
+            {
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["query", "limit"],
+        ),
+        True,
+    ),
+    (
+        "arxiv.search",
+        "search_arxiv",
+        "Search arXiv papers and return metadata, abstracts, and source URLs.",
+        _object_schema(
+            {
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["query", "limit"],
+        ),
+        True,
+    ),
+    (
+        "wikipedia.search",
+        "search_wikipedia",
+        "Search Wikipedia and return introductory extracts with article URLs.",
+        _object_schema(
+            {
+                "query": {"type": "string", "minLength": 1},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["query", "limit"],
         ),
         True,
     ),
@@ -573,11 +690,12 @@ def _factory(
                 context.context,
             )
 
+        tool_name = spec.name or default_name
         return FunctionTool(
-            name=spec.name or default_name,
+            name=tool_name,
             description=spec.description or default_description,
             params_json_schema=parameters_schema,
-            on_invoke_tool=invoke,
+            on_invoke_tool=recoverable_tool_invoker(tool_name, invoke),
             strict_json_schema=strict_json_schema,
             needs_approval=spec.needs_approval,
         )

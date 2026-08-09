@@ -94,6 +94,7 @@
 .nav-link .nav-label { overflow: hidden; text-overflow: ellipsis; }
 
 .sidebar-foot { display: grid; gap: var(--space-2); margin-top: auto; }
+.sidebar-foot .sidebar-toggle { justify-self: end; }
 .sdk-status {
   display: flex;
   align-items: center;
@@ -122,6 +123,7 @@
 .app-shell[data-compact='true'] .sidebar nav { width: 100%; }
 .app-shell[data-compact='true'] .nav-link { justify-content: center; padding: .55rem; }
 .app-shell[data-compact='true'] .sdk-status { justify-content: center; }
+.app-shell[data-compact='true'] .sidebar-foot .sidebar-toggle { justify-self: center; }
 
 /* --------------------------------------------------------------- Topbar --- */
 

@@ -57,6 +57,45 @@ class DocumentRepository:
             session.refresh(document)
             return document
 
+    def create_from_bytes(
+        self,
+        content: bytes,
+        *,
+        filename: str,
+        title: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Document:
+        document = Document(
+            id=str(uuid.uuid4()),
+            title=title,
+            source_filename=clean_filename(filename),
+            content_type="application/pdf",
+            status="uploaded",
+            metadata_json=metadata or {},
+        )
+        stored = self.storage.write_document_bytes(
+            f"{document.id}/source/{document.source_filename}",
+            content,
+        )
+        with self.session_factory() as session:
+            session.add(document)
+            session.flush()
+            session.add(
+                Artifact(
+                    document_id=document.id,
+                    owner_type="document",
+                    kind="source_pdf",
+                    relative_path=stored.relative_path,
+                    media_type=document.content_type,
+                    size_bytes=stored.size_bytes,
+                    sha256=stored.sha256,
+                    metadata_json={"storage_area": "documents"},
+                )
+            )
+            session.commit()
+            session.refresh(document)
+            return document
+
     def create_artifact(
         self,
         *,
@@ -278,9 +317,15 @@ class DocumentRepository:
             document = session.get(Document, document_id)
             if document is None:
                 raise ValueError(f"Unknown document {document_id}")
+            existing_metadata = (
+                document.metadata_json
+                if isinstance(document.metadata_json, dict)
+                else {}
+            )
             document.status = "ready"
             document.page_count = page_count
             document.metadata_json = {
+                **existing_metadata,
                 **metadata,
                 "ingestion": {
                     "phase": "complete",

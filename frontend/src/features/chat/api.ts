@@ -23,5 +23,7 @@ export const chatApi = {
     ),
   remove: (id: string) =>
     request<void>(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  runs: (conversationId: string) =>
+    request<Run[]>(`/runs?conversation_id=${encodeURIComponent(conversationId)}`),
   run: (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}`),
 };

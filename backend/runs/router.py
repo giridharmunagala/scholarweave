@@ -27,8 +27,14 @@ def run_service(container=Depends(services)) -> RunService:
 
 
 @router.get("", response_model=list[RunResponse])
-def list_runs(service: RunService = Depends(run_service)) -> list[RunResponse]:
-    return [run_response(record) for record in service.list()]
+def list_runs(
+    conversation_id: str | None = Query(default=None),
+    service: RunService = Depends(run_service),
+) -> list[RunResponse]:
+    return [
+        run_response(record)
+        for record in service.list(conversation_id=conversation_id)
+    ]
 
 
 @router.post("", response_model=RunResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -117,6 +123,12 @@ async def stream_events(
                     event.event_type,
                     event.payload_json,
                 )
+            for event in await container.events.events_after(run_id, cursor):
+                sequence = int(event["sequence"])
+                if sequence <= cursor:
+                    continue
+                cursor = sequence
+                yield _sse(sequence, event["event_type"], event["payload"])
             while True:
                 record = container.runs.get(run_id)
                 if record.status in TERMINAL_STATUSES:

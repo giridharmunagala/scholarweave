@@ -1,9 +1,9 @@
-"""In-process fan-out for persisted SDK run events."""
+"""In-process fan-out and short replay history for SDK run events."""
 
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -12,13 +12,34 @@ from typing import Any
 class EventBroker:
     def __init__(self) -> None:
         self._queues: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+        self._history: dict[str, deque[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
 
     async def publish(self, run_id: str, event: dict[str, Any]) -> None:
         async with self._lock:
+            history = self._history.setdefault(run_id, deque(maxlen=512))
+            history.append(event)
             queues = list(self._queues.get(run_id, set()))
+            if event.get("event_type") in {
+                "run.completed",
+                "run.failed",
+                "run.cancelled",
+            }:
+                self._history.pop(run_id, None)
         for queue in queues:
             await queue.put(event)
+
+    async def events_after(
+        self,
+        run_id: str,
+        sequence: int,
+    ) -> list[dict[str, Any]]:
+        async with self._lock:
+            return [
+                event
+                for event in self._history.get(run_id, ())
+                if int(event["sequence"]) > sequence
+            ]
 
     @asynccontextmanager
     async def subscribe(self, run_id: str) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:

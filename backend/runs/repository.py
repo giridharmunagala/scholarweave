@@ -41,10 +41,15 @@ class RunRepository:
             session.refresh(record)
             return record
 
-    def list(self) -> list[AgentRunRecord]:
+    def list(self, *, conversation_id: str | None = None) -> list[AgentRunRecord]:
         with self._sessions() as session:
+            statement = select(AgentRunRecord)
+            if conversation_id is not None:
+                statement = statement.where(
+                    AgentRunRecord.conversation_id == conversation_id
+                )
             records = list(
-                session.scalars(select(AgentRunRecord).order_by(AgentRunRecord.created_at.desc()))
+                session.scalars(statement.order_by(AgentRunRecord.created_at.desc()))
             )
             for record in records:
                 self._load_relations(record)
@@ -127,24 +132,58 @@ class RunRepository:
                 )
             session.commit()
 
-    def add_event(self, run_id: str, event_type: str, payload: dict[str, Any]) -> AgentRunEventRecord:
+    def next_event_sequence(self, run_id: str) -> int:
         with self._sessions() as session:
             maximum = session.scalar(
                 select(func.max(AgentRunEventRecord.sequence)).where(
                     AgentRunEventRecord.run_id == run_id
                 )
             )
-            sequence = (maximum if maximum is not None else -1) + 1
-            event = AgentRunEventRecord(
-                run_id=run_id,
-                sequence=sequence,
-                event_type=event_type,
-                payload_json=payload,
-            )
-            session.add(event)
+            return (maximum if maximum is not None else -1) + 1
+
+    def add_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        *,
+        sequence: int | None = None,
+    ) -> AgentRunEventRecord:
+        return self.add_events(
+            run_id,
+            [(event_type, payload)],
+            start_sequence=sequence,
+        )[0]
+
+    def add_events(
+        self,
+        run_id: str,
+        events: list[tuple[str, dict[str, Any]]],
+        *,
+        start_sequence: int | None = None,
+    ) -> list[AgentRunEventRecord]:
+        if not events:
+            return []
+        with self._sessions() as session:
+            if start_sequence is None:
+                maximum = session.scalar(
+                    select(func.max(AgentRunEventRecord.sequence)).where(
+                        AgentRunEventRecord.run_id == run_id
+                    )
+                )
+                start_sequence = (maximum if maximum is not None else -1) + 1
+            records = [
+                AgentRunEventRecord(
+                    run_id=run_id,
+                    sequence=start_sequence + offset,
+                    event_type=event_type,
+                    payload_json=payload,
+                )
+                for offset, (event_type, payload) in enumerate(events)
+            ]
+            session.add_all(records)
             session.commit()
-            session.refresh(event)
-            return event
+            return records
 
     def events_after(self, run_id: str, sequence: int = -1) -> list[AgentRunEventRecord]:
         with self._sessions() as session:

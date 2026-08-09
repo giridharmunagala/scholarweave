@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 from agents import FunctionTool, Model, ModelResponse, ModelSettings, TResponseInputItem, Usage
@@ -10,7 +11,10 @@ from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.agents.compiler import AgentCompiler
 from backend.agents.export import export_agent
 from backend.agents.guardrails import create_guardrail_catalog
-from backend.agents.instructions import GLOBAL_AGENT_INSTRUCTIONS
+from backend.agents.instructions import (
+    GLOBAL_AGENT_INSTRUCTIONS,
+    with_global_agent_instructions,
+)
 from backend.core.errors import ValidationError
 from backend.providers.types import ModelReference, ResolvedAgentModel
 
@@ -146,7 +150,20 @@ def test_compiler_builds_real_sdk_topology() -> None:
     assert compiled.agents_by_id["researcher"].output_type is not None
     assert GLOBAL_AGENT_INSTRUCTIONS in compiled.entry_agent.instructions
     assert GLOBAL_AGENT_INSTRUCTIONS in compiled.agents_by_id["researcher"].instructions
+    assert "System information:\nCurrent date:" in compiled.entry_agent.instructions
+    assert "\nCurrent time:" in compiled.entry_agent.instructions
+    assert compiled.entry_agent.model_settings.include_usage is True
     assert compiled.max_turns == 10
+
+
+def test_global_instructions_include_current_date_and_time() -> None:
+    instructions = with_global_agent_instructions(
+        "Research carefully.",
+        at=datetime(2026, 8, 9, 1, 29, 15, tzinfo=UTC),
+    )
+
+    assert "Current date: 2026-08-09" in instructions
+    assert "Current time: 01:29:15 UTC (UTC+00:00)" in instructions
 
 
 def test_compiler_rejects_missing_references() -> None:

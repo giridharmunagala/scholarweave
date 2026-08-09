@@ -14,6 +14,15 @@ AUTONOMOUS_TOOL_IDS = (
     ("read-paper-pages", "documents.read_pages"),
     ("read-document-chunks", "documents.read_chunks"),
     ("search-papers", "retrieval.keyword_search"),
+    ("search-web", "web.search"),
+    ("search-arxiv", "arxiv.search"),
+    ("search-wikipedia", "wikipedia.search"),
+    ("download-paper", "documents.download"),
+    ("download-web-page", "webpage.download"),
+    ("list-web-pages", "webpage.list"),
+    ("read-web-page", "webpage.read"),
+    ("search-web-page", "webpage.search"),
+    ("save-web-page-note", "webpage.notes.save"),
     ("list-workspace", "workspace.list"),
     ("search-workspace", "workspace.search"),
     ("read-workspace", "workspace.read"),
@@ -145,7 +154,17 @@ def autonomous_blueprint(
                     "describing steps. Every tool listed in your tool definitions is directly available "
                     "to you. Choose when to invoke each tool, evaluate its result, and continue the "
                     "tool-use loop until the request is complete or a concrete blocker makes completion "
-                    "impossible. Use search_available_tools when a keyword search would help you discover "
+                    "impossible. For external research, decompose broad questions into focused searches, "
+                    "use arXiv for primary papers, Wikipedia for background and terminology, and SearXNG "
+                    "web search for wider coverage. Recursively refine queries from useful names, citations, "
+                    "and gaps in earlier results, cross-check important claims across independent sources, "
+                    "and stop searching once the evidence is sufficient for the requested outcome. Include "
+                    "the returned source URLs when citing external evidence. Download an arXiv result with "
+                    "download_paper when the user requests it or full-paper evidence is needed. Download an "
+                    "HTML page before answering questions about its full content; temporary pages expire, "
+                    "but notes saved with save_web_page_note persist with their source URL. Use "
+                    "search_available_tools when "
+                    "a keyword search would help you discover "
                     "a capability; it is an index of your tools, not a proxy for calling them. Prefer "
                     "primary paper evidence and cite page or chunk citations returned by tools. Inspect "
                     "a paper before reading it; if its source exists but extracted content is unavailable, "

@@ -175,3 +175,7 @@ def test_tool_conversation_and_run_repositories(tmp_path) -> None:
     assert saved.final_output_json == "Done"
     assert saved.items[0].item_type == "message_output_item"
     assert saved.events[0].event_type == "run.started"
+    assert [record.id for record in runs.list(conversation_id=conversation.id)] == [
+        run.id
+    ]
+    assert runs.list(conversation_id="another-conversation") == []

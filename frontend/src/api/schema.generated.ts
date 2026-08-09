@@ -335,6 +335,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/download": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Download Document */
+        post: operations["download_document_api_documents_download_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}": {
         parameters: {
             query?: never;
@@ -765,6 +782,59 @@ export interface paths {
         put?: never;
         /** Archive Tool */
         post: operations["archive_tool_api_tools__definition_id__archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/web-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Web Sources */
+        get: operations["list_web_sources_api_web_sources_get"];
+        put?: never;
+        /** Download Web Source */
+        post: operations["download_web_source_api_web_sources_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/web-sources/{source_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Web Source */
+        get: operations["get_web_source_api_web_sources__source_id__get"];
+        put?: never;
+        post?: never;
+        /** Delete Web Source */
+        delete: operations["delete_web_source_api_web_sources__source_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/web-sources/{source_id}/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Save Web Source Note */
+        post: operations["save_web_source_note_api_web_sources__source_id__notes_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1825,6 +1895,13 @@ export interface components {
              */
             type: "reasoning_item";
         };
+        /** RemotePdfDownloadRequest */
+        RemotePdfDownloadRequest: {
+            /** Title */
+            title?: string | null;
+            /** Url */
+            url: string;
+        };
         /** RunCreateRequest */
         RunCreateRequest: {
             /** Agent Revision Id */
@@ -1938,6 +2015,15 @@ export interface components {
              * @default false
              */
             tracing_enabled: boolean;
+        };
+        /** SavedWebSourceNoteResponse */
+        SavedWebSourceNoteResponse: {
+            /** Name */
+            name: string | null;
+            /** Note Id */
+            note_id: string | null;
+            /** Path */
+            path: string;
         };
         /** SdkCatalogResponse */
         SdkCatalogResponse: {
@@ -2168,6 +2254,43 @@ export interface components {
              * @enum {string}
              */
             search_context_size: "low" | "medium" | "high";
+        };
+        /** WebSourceCreateRequest */
+        WebSourceCreateRequest: {
+            /** Url */
+            url: string;
+        };
+        /** WebSourceNoteRequest */
+        WebSourceNoteRequest: {
+            /** Content */
+            content: string;
+            /** Name */
+            name: string;
+            /** Tags */
+            tags?: string[];
+        };
+        /** WebSourceResponse */
+        WebSourceResponse: {
+            /** Chunk Count */
+            chunk_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * Format: date-time
+             */
+            expires_at: string;
+            /** Id */
+            id: string;
+            /** Text */
+            text?: string | null;
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
         };
         /** WorkspaceFileContentResponse */
         WorkspaceFileContentResponse: {
@@ -3054,6 +3177,39 @@ export interface operations {
             };
         };
     };
+    download_document_api_documents_download_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemotePdfDownloadRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_document_api_documents__document_id__get: {
         parameters: {
             query?: never;
@@ -3657,7 +3813,9 @@ export interface operations {
     };
     list_runs_api_runs_get: {
         parameters: {
-            query?: never;
+            query?: {
+                conversation_id?: string | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3671,6 +3829,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4111,6 +4278,154 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FunctionToolResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_web_sources_api_web_sources_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSourceResponse"][];
+                };
+            };
+        };
+    };
+    download_web_source_api_web_sources_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebSourceCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_web_source_api_web_sources__source_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSourceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_web_source_api_web_sources__source_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_web_source_note_api_web_sources__source_id__notes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                source_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebSourceNoteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedWebSourceNoteResponse"];
                 };
             };
             /** @description Validation Error */

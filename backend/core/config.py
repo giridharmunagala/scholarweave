@@ -28,6 +28,20 @@ class Settings(BaseSettings):
     default_model_references: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
 
+    searxng_base_url: str = "http://127.0.0.1:8888"
+    arxiv_api_url: str = "https://export.arxiv.org/api/query"
+    wikipedia_api_url: str = "https://en.wikipedia.org/w/api.php"
+    search_user_agent: str = (
+        "ScholarWeave/0.1 (+https://github.com/giridharmunagala/scholarweave)"
+    )
+    search_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    web_search_requests_per_minute: int = Field(default=30, ge=1, le=600)
+    arxiv_search_requests_per_minute: int = Field(default=20, ge=1, le=20)
+    wikipedia_search_requests_per_minute: int = Field(default=60, ge=1, le=600)
+    web_source_ttl_minutes: int = Field(default=240, ge=5, le=1440)
+    max_web_source_bytes: int = 5 * 1024 * 1024
+    max_temporary_web_sources: int = Field(default=20, ge=1, le=100)
+
     agent_tracing_enabled: bool = False
 
     python_tool_enabled: bool = True

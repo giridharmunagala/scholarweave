@@ -21,6 +21,8 @@ from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
 from backend.persistence.files import SafeStorage
+from backend.research.search import ResearchSearchService
+from backend.research.sources import SourceDownloadService
 from backend.tools.service import FunctionToolService
 from backend.core.json import dumps_json
 from backend.workspace.service import WorkspaceService
@@ -35,6 +37,8 @@ class ApplicationToolRuntime:
         retrieval: RetrievalService,
         storage: SafeStorage,
         workspace: WorkspaceService,
+        research_search: ResearchSearchService,
+        source_downloads: SourceDownloadService,
         agent_service: AgentService | None = None,
         function_tool_service: FunctionToolService | None = None,
         tool_catalog: ToolCatalog | None = None,
@@ -45,6 +49,8 @@ class ApplicationToolRuntime:
         self._retrieval = retrieval
         self._storage = storage
         self._workspace = workspace
+        self._research_search = research_search
+        self._source_downloads = source_downloads
         self._agents = agent_service
         self._function_tools = function_tool_service
         self._catalog = tool_catalog
@@ -72,6 +78,15 @@ class ApplicationToolRuntime:
             "documents.read_pages": self._read_paper_pages,
             "documents.read_chunks": self._read_document_chunks,
             "retrieval.keyword_search": self._keyword_search,
+            "documents.download": self._download_paper,
+            "webpage.download": self._download_web_page,
+            "webpage.list": self._list_web_pages,
+            "webpage.read": self._read_web_page,
+            "webpage.search": self._search_web_page,
+            "webpage.notes.save": self._save_web_page_note,
+            "web.search": self._search_web,
+            "arxiv.search": self._search_arxiv,
+            "wikipedia.search": self._search_wikipedia,
             "workspace.list": self._list_workspace,
             "workspace.search": self._search_workspace,
             "workspace.read": self._read_workspace,
@@ -473,6 +488,130 @@ class ApplicationToolRuntime:
             document_id=arguments.get("document_id"),
             top_k=int(arguments.get("top_k") or 5),
         )
+
+    async def _download_paper(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document = await self._source_downloads.download_pdf(
+            str(arguments["pdf_url"]),
+            title=str(arguments["title"]) if arguments.get("title") else None,
+            arxiv_only=True,
+        )
+        return self._inspect_paper({"document_id": document.id}, context)
+
+    async def _download_web_page(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        source = await self._source_downloads.download_web_page(str(arguments["url"]))
+        return self._web_source_result(source)
+
+    async def _list_web_pages(
+        self,
+        _arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> list[dict[str, Any]]:
+        return [
+            self._web_source_result(source)
+            for source in await self._source_downloads.list_web_sources()
+        ]
+
+    async def _read_web_page(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        source = await self._source_downloads.get_web_source(str(arguments["source_id"]))
+        start = int(arguments["start"])
+        limit = int(arguments["limit"])
+        selected = source.chunks[start : start + limit]
+        return {
+            **self._web_source_result(source),
+            "chunks": [
+                {
+                    "chunk_index": start + offset,
+                    "citation": source.url,
+                    "text": text,
+                }
+                for offset, text in enumerate(selected)
+            ],
+            "has_more": start + len(selected) < len(source.chunks),
+            "next_start": start + len(selected),
+        }
+
+    async def _search_web_page(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> list[dict[str, Any]]:
+        return await self._source_downloads.search_web_source(
+            str(arguments["source_id"]),
+            str(arguments["query"]),
+            top_k=int(arguments["top_k"]),
+        )
+
+    async def _save_web_page_note(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document = await self._source_downloads.save_web_note(
+            str(arguments["source_id"]),
+            name=str(arguments["name"]),
+            content=str(arguments["content"]),
+            tags=list(arguments["tags"]),
+        )
+        self._append_workspace_receipt(context, document, "Created")
+        return {
+            **self._workspace_result(document),
+            "note_id": document.note_id,
+            "name": document.note_name,
+            "kind": document.kind,
+        }
+
+    async def _search_web(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return await self._research_search.search_web(
+            str(arguments["query"]),
+            int(arguments["limit"]),
+        )
+
+    async def _search_arxiv(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return await self._research_search.search_arxiv(
+            str(arguments["query"]),
+            int(arguments["limit"]),
+        )
+
+    async def _search_wikipedia(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return await self._research_search.search_wikipedia(
+            str(arguments["query"]),
+            int(arguments["limit"]),
+        )
+
+    @staticmethod
+    def _web_source_result(source) -> dict[str, Any]:
+        return {
+            "source_id": source.id,
+            "title": source.title,
+            "url": source.url,
+            "chunk_count": len(source.chunks),
+            "created_at": source.created_at.isoformat(),
+            "expires_at": source.expires_at.isoformat(),
+        }
 
     def _list_workspace(
         self,

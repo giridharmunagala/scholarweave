@@ -95,6 +95,15 @@ export function AppShell({ children }: { children: ReactNode }) {
           ))}
         </nav>
         <div className="sidebar-foot">
+          <button
+            type="button"
+            className="button ghost icon sidebar-toggle"
+            aria-label={compact ? 'Expand sidebar' : 'Collapse sidebar'}
+            title={compact ? 'Expand sidebar' : 'Collapse sidebar'}
+            onClick={() => setCompact((value) => !value)}
+          >
+            <Icon name="sidebar" />
+          </button>
           <div className="sdk-status" title="OpenAI Agents SDK 0.19.4">
             <span className="sdk-dot" />
             <span>OpenAI Agents SDK 0.19.4</span>
@@ -113,15 +122,6 @@ export function AppShell({ children }: { children: ReactNode }) {
             onClick={() => setDrawer((value) => !value)}
           >
             <Icon name="menu" />
-          </button>
-          <button
-            type="button"
-            className="button ghost icon sidebar-toggle"
-            aria-label={compact ? 'Expand sidebar' : 'Collapse sidebar'}
-            title={compact ? 'Expand sidebar' : 'Collapse sidebar'}
-            onClick={() => setCompact((value) => !value)}
-          >
-            <Icon name="sidebar" />
           </button>
           <nav className="breadcrumb" aria-label="Breadcrumb">
             <strong>{title}</strong>

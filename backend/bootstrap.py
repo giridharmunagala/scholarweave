@@ -32,6 +32,7 @@ from backend.providers.runtime import ModelRuntime
 from backend.providers.repository import ProviderRepository
 from backend.providers.sdk_models import ProfileModelResolver, SdkClientPool
 from backend.providers.service import ProviderService
+from backend.research import ResearchSearchService, SourceDownloadService
 from backend.documents.retrieval import RetrievalService
 from backend.runs.repository import RunRepository
 from backend.runs.service import RunService
@@ -58,6 +59,8 @@ class ApplicationServices:
     model_resolver: ProfileModelResolver
     providers: ProviderService
     retrieval: RetrievalService
+    research_search: ResearchSearchService
+    source_downloads: SourceDownloadService
     document_repository: DocumentRepository
     document_ocr: DocumentOCR
     document_vision: VisionEnhancer
@@ -83,6 +86,8 @@ class ApplicationServices:
     async def close(self) -> None:
         await self.documents.close()
         await self.runs.close()
+        await self.research_search.close()
+        await self.source_downloads.close()
         await self.sdk_clients.close()
         engine = self.session_factory.kw.get("bind")
         if engine is not None:
@@ -113,6 +118,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     storage = SafeStorage(resolved)
     workspace = WorkspaceService(storage, WorkspaceRepository(session_factory))
     retrieval = RetrievalService(session_factory, resolved)
+    research_search = ResearchSearchService(resolved)
     document_repository = DocumentRepository(session_factory, resolved, storage)
     document_repository.recover_stale_ingestions()
     document_ocr = DocumentOCR(resolved)
@@ -143,6 +149,11 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         document_ingestion,
         document_ocr,
     )
+    source_downloads = SourceDownloadService(
+        resolved,
+        documents,
+        workspace,
+    )
 
     tool_catalog = create_tool_catalog()
     function_tools = FunctionToolService(
@@ -166,6 +177,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         documents=documents,
         workspace=workspace,
         retrieval=retrieval,
+        research_search=research_search,
+        source_downloads=source_downloads,
         storage=storage,
         agent_service=agents,
         function_tool_service=function_tools,
@@ -204,6 +217,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         model_resolver=model_resolver,
         providers=providers,
         retrieval=retrieval,
+        research_search=research_search,
+        source_downloads=source_downloads,
         document_repository=document_repository,
         document_ocr=document_ocr,
         document_vision=document_vision,

@@ -16,6 +16,11 @@ from backend.research.schemas import (
     DocumentChunkResponse,
     DocumentResponse,
     IngestionOptionsResponse,
+    RemotePdfDownloadRequest,
+    SavedWebSourceNoteResponse,
+    WebSourceCreateRequest,
+    WebSourceNoteRequest,
+    WebSourceResponse,
 )
 
 router = APIRouter(tags=["research"])
@@ -43,6 +48,94 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported.")
     document = await container.documents.create_document_from_upload(file, title=title)
     return _document_response(container, document.id)
+
+
+@router.post(
+    "/documents/download",
+    response_model=DocumentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def download_document(
+    payload: RemotePdfDownloadRequest,
+    container=Depends(services),
+) -> DocumentResponse:
+    try:
+        document = await container.source_downloads.download_pdf(
+            payload.url,
+            title=payload.title,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _document_response(container, document.id)
+
+
+@router.get("/web-sources", response_model=list[WebSourceResponse])
+async def list_web_sources(container=Depends(services)) -> list[WebSourceResponse]:
+    return [_web_source_response(source) for source in await container.source_downloads.list_web_sources()]
+
+
+@router.post(
+    "/web-sources",
+    response_model=WebSourceResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def download_web_source(
+    payload: WebSourceCreateRequest,
+    container=Depends(services),
+) -> WebSourceResponse:
+    try:
+        source = await container.source_downloads.download_web_page(payload.url)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _web_source_response(source, include_text=True)
+
+
+@router.get("/web-sources/{source_id}", response_model=WebSourceResponse)
+async def get_web_source(
+    source_id: str,
+    container=Depends(services),
+) -> WebSourceResponse:
+    try:
+        source = await container.source_downloads.get_web_source(source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _web_source_response(source, include_text=True)
+
+
+@router.delete("/web-sources/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_web_source(
+    source_id: str,
+    container=Depends(services),
+) -> Response:
+    if not await container.source_downloads.delete_web_source(source_id):
+        raise HTTPException(status_code=404, detail="Temporary web page was not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/web-sources/{source_id}/notes",
+    response_model=SavedWebSourceNoteResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def save_web_source_note(
+    source_id: str,
+    payload: WebSourceNoteRequest,
+    container=Depends(services),
+) -> SavedWebSourceNoteResponse:
+    try:
+        note = await container.source_downloads.save_web_note(
+            source_id,
+            name=payload.name,
+            content=payload.content,
+            tags=payload.tags,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return SavedWebSourceNoteResponse(
+        path=note.path,
+        note_id=note.note_id,
+        name=note.note_name,
+    )
 
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
@@ -210,4 +303,16 @@ def _artifact_response(artifact) -> ArtifactResponse:
         sha256=artifact.sha256,
         metadata=artifact.metadata_json or {},
         created_at=artifact.created_at,
+    )
+
+
+def _web_source_response(source, *, include_text: bool = False) -> WebSourceResponse:
+    return WebSourceResponse(
+        id=source.id,
+        url=source.url,
+        title=source.title,
+        text=source.text if include_text else None,
+        chunk_count=len(source.chunks),
+        created_at=source.created_at,
+        expires_at=source.expires_at,
     )

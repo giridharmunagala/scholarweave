@@ -19,7 +19,7 @@ from agents import (
 
 from backend.agents.compiler import CompiledAgent
 from backend.runs.broker import EventBroker
-from backend.runs.events import PersistedRunEventSink
+from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
 from backend.runs.repository import RunRepository
 from backend.runtime.context import ScholarWeaveContext, ToolRuntime
@@ -51,8 +51,8 @@ class RunService:
         self._active_streams: dict[str, RunResultStreaming] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
-    def list(self):
-        return self._repository.list()
+    def list(self, *, conversation_id: str | None = None):
+        return self._repository.list(conversation_id=conversation_id)
 
     def get(self, run_id: str):
         return self._repository.get(run_id)
@@ -256,12 +256,22 @@ class RunService:
             if conversation_id is not None
             else _null_async_context()
         )
-        persisted_item_count = len(self._repository.get(run_id).items)
+        existing_record = self._repository.get(run_id)
+        persisted_item_count = len(existing_record.items)
+        initial_reasoning, initial_assistant = _persisted_stream_text(
+            existing_record.events
+        )
         self._repository.mark_running(run_id)
         await sink.emit(
             "run.resumed" if isinstance(input_value, RunState) else "run.started",
             {"agent_name": compiled.blueprint.name},
         )
+        stream_sink = BufferedRunEventSink(
+            sink,
+            initial_reasoning=initial_reasoning,
+            initial_assistant=initial_assistant,
+        )
+        context.event_sink = stream_sink
         try:
             async with lock:
                 session_snapshot = await session.get_items() if session is not None else None
@@ -275,14 +285,23 @@ class RunService:
                     session=session,
                 )
                 self._active_streams[run_id] = stream
-                async for event in stream.stream_events():
-                    projected = project_stream_event(event)
-                    if projected is not None:
-                        await sink.emit(*projected)
+                try:
+                    async for event in stream.stream_events():
+                        projected = project_stream_event(event)
+                        if projected is not None:
+                            await stream_sink.emit(*projected)
+                finally:
+                    flush_task = asyncio.create_task(stream_sink.flush())
+                    try:
+                        await asyncio.shield(flush_task)
+                    except asyncio.CancelledError:
+                        await flush_task
+                        raise
                 await self._finish_result(
                     run_id,
                     stream,
                     sink,
+                    performance=stream_sink.performance(),
                     compiled=compiled,
                     context=context,
                     persisted_item_count=persisted_item_count,
@@ -323,6 +342,7 @@ class RunService:
         result: RunResult | RunResultStreaming,
         sink: PersistedRunEventSink,
         *,
+        performance: dict[str, Any],
         compiled: CompiledAgent,
         context: ScholarWeaveContext,
         persisted_item_count: int,
@@ -370,6 +390,7 @@ class RunService:
             await sink.emit("run.cancelled", {})
             return
         usage = to_jsonable(result.context_wrapper.usage)
+        usage["performance"] = performance
         if compiled.completion_validator is not None:
             try:
                 compiled.completion_validator(context)
@@ -442,3 +463,25 @@ def _tripwire_payload(exc: GuardrailTripwire) -> dict[str, Any]:
         "output_info": to_jsonable(output.output_info),
         "behavior": to_jsonable(output.behavior),
     }
+
+
+def _persisted_stream_text(events: list[Any]) -> tuple[str, str]:
+    reasoning = ""
+    assistant = ""
+    for event in events:
+        if event.event_type != "model.stream":
+            continue
+        payload = event.payload_json
+        raw_type = str(payload.get("raw_type") or "")
+        delta = payload.get("delta")
+        if not isinstance(delta, str):
+            continue
+        snapshot = payload.get("snapshot") is True
+        if raw_type in {
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta",
+        }:
+            reasoning = delta if snapshot else reasoning + delta
+        elif raw_type == "response.output_text.delta":
+            assistant = delta if snapshot else assistant + delta
+    return reasoning, assistant

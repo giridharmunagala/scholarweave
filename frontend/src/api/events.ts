@@ -22,6 +22,7 @@ export const RUN_EVENT_TYPES = [
   'model.completed',
   'tool.started',
   'tool.completed',
+  'tool.failed',
   'builder.todos.updated',
   'handoff.completed',
   'guardrail.result',
