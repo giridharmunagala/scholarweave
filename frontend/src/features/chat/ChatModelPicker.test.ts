@@ -5,6 +5,7 @@ import {
   chatModelOptions,
   decodeModelReference,
   encodeModelReference,
+  preferredChatModel,
 } from './ChatModelPicker';
 
 describe('builder chat model picker', () => {
@@ -33,5 +34,36 @@ describe('builder chat model picker', () => {
 
     expect(decodeModelReference(encodeModelReference(reference))).toEqual(reference);
     expect(decodeModelReference('')).toEqual({});
+  });
+
+  it('uses the last selected chat model ahead of the workspace default', () => {
+    const settings = {
+      default_model_references: {
+        chat: { provider_profile_id: 'provider-1', model: 'default-model' },
+      },
+      last_chat_model_reference: {
+        provider_profile_id: 'provider-2',
+        model: 'last-model',
+      },
+    };
+
+    expect(preferredChatModel(settings)).toEqual({
+      provider_profile_id: 'provider-2',
+      model: 'last-model',
+    });
+  });
+
+  it('falls back to the workspace default before a model has been selected', () => {
+    const settings = {
+      default_model_references: {
+        chat: { provider_profile_id: 'provider-1', model: 'default-model' },
+      },
+      last_chat_model_reference: {},
+    };
+
+    expect(preferredChatModel(settings)).toEqual({
+      provider_profile_id: 'provider-1',
+      model: 'default-model',
+    });
   });
 });

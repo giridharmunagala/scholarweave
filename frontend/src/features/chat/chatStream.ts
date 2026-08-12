@@ -10,15 +10,25 @@ export interface ChatStreamState {
   reasoning: string;
   assistant: string;
   tools: LiveToolActivity[];
+  /** Kept so the turn timeline can be rebuilt identically while streaming and after a reload. */
+  events: RunStreamEvent[];
 }
 
 export const emptyChatStream: ChatStreamState = {
   reasoning: '',
   assistant: '',
   tools: [],
+  events: [],
 };
 
 export function applyChatStreamEvent(
+  state: ChatStreamState,
+  event: RunStreamEvent,
+): ChatStreamState {
+  return { ...applyStreamText(state, event), events: [...state.events, event] };
+}
+
+function applyStreamText(
   state: ChatStreamState,
   event: RunStreamEvent,
 ): ChatStreamState {
@@ -98,8 +108,4 @@ export function restoreChatStream(events: RunStreamEvent[]): ChatStreamState {
   return [...events]
     .sort((left, right) => left.sequence - right.sequence)
     .reduce(applyChatStreamEvent, emptyChatStream);
-}
-
-export function reasoningFromEvents(events: RunStreamEvent[]): string {
-  return restoreChatStream(events).reasoning;
 }

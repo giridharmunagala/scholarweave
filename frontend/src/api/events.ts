@@ -4,6 +4,7 @@ export interface RunStreamEvent {
   sequence: number;
   event_type: string;
   payload: Record<string, unknown>;
+  created_at?: string | null;
 }
 
 export const RUN_EVENT_TYPES = [

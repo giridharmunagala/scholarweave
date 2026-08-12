@@ -1,12 +1,13 @@
-import { useState, type ComponentPropsWithoutRef } from 'react';
+import { useEffect, useRef, useState, type ComponentPropsWithoutRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
+import { Icon } from './Icons';
 
-const MARKDOWN_COMPONENTS: Components = { img: MarkdownImage };
+const MARKDOWN_COMPONENTS: Components = { img: MarkdownImage, table: MarkdownTable };
 
 export function MarkdownViewer({ content }: { content: string }) {
   return (
@@ -74,6 +75,115 @@ function looksLikeLatex(value: string): boolean {
 }
 
 type MarkdownImageProps = ComponentPropsWithoutRef<'img'> & { node?: unknown };
+
+type MarkdownTableProps = ComponentPropsWithoutRef<'table'> & { node?: unknown };
+
+/**
+ * Model answers lean on tables for their numbers, so a table is framed as an artefact: it can be
+ * lifted out as-is (copy), taken away (CSV), or opened up when it is wider than the transcript.
+ */
+function MarkdownTable({ children, node: _node, ...props }: MarkdownTableProps) {
+  const tableRef = useRef<HTMLTableElement>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [expanded]);
+
+  const copy = async () => {
+    const text = tableRows(tableRef.current)
+      .map((row) => row.join('\t'))
+      .join('\n');
+    try {
+      await writeClipboard(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const download = () => {
+    const csv = tableRows(tableRef.current)
+      .map((row) => row.map(csvCell).join(','))
+      .join('\n');
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'table.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className={`markdown-table-card${expanded ? ' expanded' : ''}`}>
+      {expanded ? (
+        <button
+          type="button"
+          className="markdown-table-scrim"
+          aria-label="Close expanded table"
+          onClick={() => setExpanded(false)}
+        />
+      ) : null}
+      <div className="markdown-table-frame">
+        <div className="markdown-table-actions">
+          <button type="button" title={copied ? 'Copied' : 'Copy table'} aria-label="Copy table" onClick={() => void copy()}>
+            <Icon name={copied ? 'check' : 'copy'} size={15} />
+          </button>
+          <button type="button" title="Download CSV" aria-label="Download table as CSV" onClick={download}>
+            <Icon name="download" size={15} />
+          </button>
+          <button
+            type="button"
+            title={expanded ? 'Close' : 'Expand table'}
+            aria-label={expanded ? 'Close expanded table' : 'Expand table'}
+            onClick={() => setExpanded((value) => !value)}
+          >
+            <Icon name={expanded ? 'close' : 'expand'} size={15} />
+          </button>
+        </div>
+        <div className="markdown-table-scroll">
+          <table {...props} ref={tableRef}>
+            {children}
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function tableRows(table: HTMLTableElement | null): string[][] {
+  if (!table) return [];
+  return [...table.querySelectorAll('tr')].map((row) =>
+    [...row.querySelectorAll('th, td')].map((cell) => (cell.textContent ?? '').trim()),
+  );
+}
+
+function csvCell(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+async function writeClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('The browser denied clipboard access.');
+}
 
 function MarkdownImage({ src, alt, node: _node, ...props }: MarkdownImageProps) {
   const [failed, setFailed] = useState(false);

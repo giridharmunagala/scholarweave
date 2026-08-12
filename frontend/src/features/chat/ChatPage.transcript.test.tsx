@@ -6,7 +6,7 @@ import { createRoot, type Root } from 'react-dom/client';
 /**
  * Long research turns emit several assistant messages and a burst of tool calls, and later
  * turns often use no tools at all. This drives the real ChatPage through that shape to make
- * sure reasoning cards and tool activity stay attached to their own turn instead of being
+ * sure the inline trace and its sources stay attached to their own turn instead of being
  * wiped out by whatever the newest run happens to look like.
  */
 
@@ -31,15 +31,74 @@ function buildTurn(turn: Turn, runId: string) {
   const events: Record<string, unknown>[] = [];
   const items: Record<string, unknown>[] = [];
   let sequence = 0;
+  let clock = Date.parse('2024-05-01T10:00:00.000Z');
   const push = (event_type: string, payload: Record<string, unknown>) => {
     sequence += 1;
+    clock += 1500;
     events.push({
       id: `${runId}-e${sequence}`,
       run_id: runId,
       sequence,
       event_type,
       payload,
-      created_at: new Date().toISOString(),
+      created_at: new Date(clock).toISOString(),
+    });
+  };
+
+  /** Emit the full call/output pair the runtime produces for one tool. */
+  const emitTool = (toolName: string, key: string) => {
+    const callId = `${runId}-${key}`;
+    push('run.item', {
+      name: 'tool_called',
+      item: {
+        type: 'tool_call_item',
+        agent_name: 'ScholarWeave autonomous agent',
+        title: toolName,
+        description: `called ${toolName}`,
+        raw_item: {
+          name: toolName,
+          call_id: callId,
+          arguments: JSON.stringify({ query: 'retrieval augmented generation' }),
+        },
+      },
+    });
+    push('tool.started', { tool_name: toolName });
+    push('tool.completed', { tool_name: toolName });
+    push('run.item', {
+      name: 'tool_output',
+      item: {
+        type: 'tool_call_output_item',
+        agent_name: 'ScholarWeave autonomous agent',
+        raw_item: { call_id: callId },
+        output: {
+          results: [
+            { title: 'Dense retrieval survey', url: 'https://arxiv.org/abs/2401.00001' },
+            { title: 'RAG benchmarks', url: 'https://openreview.net/forum?id=abc' },
+          ],
+        },
+      },
+    });
+    items.push({
+      id: `${runId}-t${key}`,
+      run_id: runId,
+      type: 'tool_call_item',
+      role: null,
+      title: toolName,
+      description: `called ${toolName}`,
+      text: null,
+      payload: {},
+      created_at: new Date(clock).toISOString(),
+    });
+    items.push({
+      id: `${runId}-o${key}`,
+      run_id: runId,
+      type: 'tool_call_output_item',
+      role: null,
+      title: `${toolName} result`,
+      description: null,
+      text: 'ok',
+      payload: {},
+      created_at: new Date(clock).toISOString(),
     });
   };
 
@@ -52,32 +111,7 @@ function buildTurn(turn: Turn, runId: string) {
       snapshot: true,
     });
     const toolName = turn.toolNames[replyIndex];
-    if (toolName) {
-      push('tool.started', { tool_name: toolName });
-      push('tool.completed', { tool_name: toolName });
-      items.push({
-        id: `${runId}-t${replyIndex}`,
-        run_id: runId,
-        type: 'tool_call_item',
-        role: null,
-        title: toolName,
-        description: `called ${toolName}`,
-        text: null,
-        payload: {},
-        created_at: new Date().toISOString(),
-      });
-      items.push({
-        id: `${runId}-o${replyIndex}`,
-        run_id: runId,
-        type: 'tool_call_output_item',
-        role: null,
-        title: `${toolName} result`,
-        description: null,
-        text: 'ok',
-        payload: {},
-        created_at: new Date().toISOString(),
-      });
-    }
+    if (toolName) emitTool(toolName, String(replyIndex));
     push('model.stream', { raw_type: 'response.output_text.delta', delta: reply, snapshot: true });
     items.push({
       id: `${runId}-m${replyIndex}`,
@@ -88,34 +122,22 @@ function buildTurn(turn: Turn, runId: string) {
       description: null,
       text: reply,
       payload: {},
-      created_at: new Date().toISOString(),
+      created_at: new Date(clock).toISOString(),
     });
   });
   // Tools beyond the reply count still belong to the turn, mirroring multi-call research runs.
   turn.toolNames.slice(turn.replies.length).forEach((toolName, offset) => {
-    push('tool.started', { tool_name: toolName });
-    push('tool.completed', { tool_name: toolName });
-    items.push({
-      id: `${runId}-x${offset}`,
-      run_id: runId,
-      type: 'tool_call_item',
-      role: null,
-      title: toolName,
-      description: `called ${toolName}`,
-      text: null,
-      payload: {},
-      created_at: new Date().toISOString(),
-    });
+    emitTool(toolName, `x${offset}`);
   });
 
   const sessionItems = [
-    { id: `${runId}-u`, type: 'message', role: 'user', text: turn.input, created_at: new Date().toISOString() },
+    { id: `${runId}-u`, type: 'message', role: 'user', text: turn.input, created_at: new Date(clock).toISOString() },
     ...turn.replies.map((reply, index) => ({
       id: `${runId}-s${index}`,
       type: 'message',
       role: 'assistant',
       text: reply,
-      created_at: new Date().toISOString(),
+      created_at: new Date(clock).toISOString(),
     })),
   ];
 
@@ -272,6 +294,10 @@ async function flush(times = 6) {
   }
 }
 
+function text(node: Element | null) {
+  return node?.textContent ?? '';
+}
+
 describe('chat transcript detail', () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -299,14 +325,14 @@ describe('chat transcript detail', () => {
     await flush();
   };
 
-  const send = async (text: string) => {
+  const send = async (value: string) => {
     const textarea = container.querySelector('textarea')!;
     const setter = Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement.prototype,
       'value',
     )!.set!;
     await act(async () => {
-      setter.call(textarea, text);
+      setter.call(textarea, value);
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => {
@@ -317,60 +343,79 @@ describe('chat transcript detail', () => {
     await flush(2);
   };
 
-  it('keeps every turn reasoning card and tool chip as the thread grows', async () => {
-    const { default: ChatPage } = await import('./ChatPage');
-    await mount(ChatPage as () => JSX.Element);
-
-    for (let turn = 0; turn < TURNS.length; turn += 1) {
-      await send(TURNS[turn].input);
-
-      const runId = `run-${turn + 1}`;
-      const source = server.listeners.get(runId);
+  /** Play one turn end to end: stream its events, then persist and close the run. */
+  const runTurn = async (turn: number, { stream = true } = {}) => {
+    await send(TURNS[turn].input);
+    const runId = `run-${turn + 1}`;
+    const source = server.listeners.get(runId);
+    if (stream) {
       for (const event of BUILT[turn].events) {
         await act(async () => {
           source?.deliver(event);
         });
       }
-      server.completeRun(runId, turn);
-      await act(async () => {
-        server.listeners.get(runId)?.deliver({ sequence: 9999, event_type: 'run.completed', payload: {} });
-      });
-      await flush();
-
-      // Every settled turn keeps a chip, because every turn reasoned even when it used no tools.
-      expect(container.querySelectorAll('.turn-activity-chip')).toHaveLength(turn + 1);
-      // Reasoning has moved to the panel, so nothing lingers inline once a turn is done.
-      expect(container.querySelectorAll('.reasoning-live')).toHaveLength(0);
-      expect(container.querySelector('.activity-toggle')).not.toBeNull();
     }
+    server.completeRun(runId, turn);
+    await act(async () => {
+      server.listeners.get(runId)?.deliver({ sequence: 9999, event_type: 'run.completed', payload: {} });
+    });
+    await flush();
+  };
+
+  it('keeps every turn trace inline as the thread grows', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+
+    for (let turn = 0; turn < TURNS.length; turn += 1) {
+      await runTurn(turn);
+
+      // Every settled turn keeps its own trace, because every turn reasoned even without tools.
+      expect(container.querySelectorAll('.turn-timeline')).toHaveLength(turn + 1);
+      // Traces collapse once the turn is done, so the transcript stays answer-first.
+      expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
+      expect(container.querySelectorAll('.timeline-row.live')).toHaveLength(0);
+    }
+
+    const traces = container.querySelectorAll('.turn-timeline');
+    // The tool-heavy first turn shows its calls; the tool-free last turn shows thinking only.
+    expect(text(traces[0])).toContain('Searched');
+    expect(text(traces[0])).toContain('tool calls');
+    expect(text(traces[TURNS.length - 1])).toContain('Thought for');
+    expect(text(traces[TURNS.length - 1])).not.toContain('Used tool');
 
     // A reload must rebuild the same detail purely from persisted runs.
     act(() => root.unmount());
     await mount(ChatPage as () => JSX.Element);
 
-    expect(container.querySelectorAll('.turn-activity-chip')).toHaveLength(TURNS.length);
-    expect(container.querySelectorAll('.reasoning-live')).toHaveLength(0);
-    expect(container.querySelector('.activity-toggle')).not.toBeNull();
+    expect(container.querySelectorAll('.turn-timeline')).toHaveLength(TURNS.length);
+    expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
+    expect(text(container.querySelectorAll('.turn-timeline')[0])).toContain('Searched');
   });
 
-  it('shows reasoning inline while thinking and hands it to the panel when done', async () => {
+  it('streams the trace live and keeps it expandable once settled', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     await send(TURNS[0].input);
 
     const source = server.listeners.get('run-1');
-    for (const event of BUILT[0].events) {
+    // Watch the very first reasoning burst, before any tool has interrupted it.
+    await act(async () => {
+      source?.deliver(BUILT[0].events[0]);
+    });
+    await flush(2);
+
+    // Mid-run the reader watches thinking unfold in place, already expanded.
+    const live = container.querySelector('.timeline-row.live');
+    expect(live).not.toBeNull();
+    expect(text(live)).toContain('Thinking');
+    expect(text(container.querySelector('.timeline-detail.reasoning'))).toContain('weighing the evidence');
+
+    for (const event of BUILT[0].events.slice(1)) {
       await act(async () => {
         source?.deliver(event);
       });
     }
     await flush(3);
-
-    // Mid-run the reader watches the trace directly in the transcript.
-    const liveTrace = container.querySelector('.reasoning-live');
-    expect(liveTrace).not.toBeNull();
-    expect(liveTrace!.textContent).toContain('Thinking');
-    expect(liveTrace!.textContent).toContain('weighing the evidence');
 
     server.completeRun('run-1', 0);
     await act(async () => {
@@ -378,58 +423,57 @@ describe('chat transcript detail', () => {
     });
     await flush();
 
-    // Once settled the transcript is answers only and the trace is behind the turn chip.
-    expect(container.querySelector('.reasoning-live')).toBeNull();
-    const chip = container.querySelector('.turn-activity-chip');
-    expect(chip).not.toBeNull();
-    expect(chip!.textContent).toContain('Reasoning');
+    // Settled turns collapse to one-line summaries that carry their own duration.
+    expect(container.querySelector('.timeline-row.live')).toBeNull();
+    expect(container.querySelector('.timeline-detail')).toBeNull();
+    const rows = container.querySelectorAll('.turn-timeline .timeline-row');
+    expect(rows.length).toBeGreaterThan(1);
+    expect(text(rows[0])).toMatch(/Thought for \d/);
 
-    // The panel auto-opened for this turn, and it now carries the trace the transcript dropped.
-    expect(container.querySelector('.tool-panel')!.textContent).toContain('weighing the evidence');
-
-    // Clicking the chip of the turn already on screen toggles the panel shut, then back open.
+    // The trace is still there on demand, reasoning text and all.
     await act(async () => {
-      chip!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      rows[0].querySelector('.timeline-head')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flush(1);
-    expect(container.querySelector('.tool-panel')).toBeNull();
-
-    await act(async () => {
-      container
-        .querySelector('.turn-activity-chip')!
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flush(1);
-    expect(container.querySelector('.tool-panel')!.textContent).toContain('weighing the evidence');
+    expect(text(container.querySelector('.timeline-detail.reasoning'))).toContain('Step 1: weighing the evidence.');
   });
 
-  it('opens the panel for the turn whose chip was clicked', async () => {
+  it('names the tool it ran and exposes the sources it found', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await runTurn(0);
+
+    const toolRow = [...container.querySelectorAll('.timeline-row')].find((row) =>
+      text(row).includes('Searched'),
+    );
+    expect(toolRow).toBeDefined();
+    // The row states what was searched rather than the raw function name.
+    expect(text(toolRow!)).toContain('retrieval augmented generation');
+
+    await act(async () => {
+      toolRow!.querySelector('.timeline-head')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush(1);
+    const detail = container.querySelector('.timeline-detail.tool');
+    expect(text(detail)).toContain('Dense retrieval survey');
+
+    // The answer itself lists the references the turn actually consulted.
+    const answerSources = container.querySelector('.message.role-assistant .source-chips');
+    expect(answerSources).not.toBeNull();
+    const links = [...answerSources!.querySelectorAll('a')].map((link) => link.getAttribute('href'));
+    expect(links).toContain('https://arxiv.org/abs/2401.00001');
+    expect(links).toContain('https://openreview.net/forum?id=abc');
+  });
+
+  it('rebuilds the trace for turns whose live stream was never seen', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
-    for (let turn = 0; turn < TURNS.length; turn += 1) {
-      await send(TURNS[turn].input);
-      server.completeRun(`run-${turn + 1}`, turn);
-      await act(async () => {
-        server.listeners
-          .get(`run-${turn + 1}`)
-          ?.deliver({ sequence: 9999, event_type: 'run.completed', payload: {} });
-      });
-      await flush();
-    }
+    for (let turn = 0; turn < TURNS.length; turn += 1) await runTurn(turn, { stream: false });
 
-    const chips = container.querySelectorAll('.turn-activity-chip');
-    expect(chips).toHaveLength(TURNS.length);
-    await act(async () => {
-      chips[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    await flush(1);
-
-    const panel = container.querySelector('.tool-panel');
-    expect(panel).not.toBeNull();
-    expect(panel!.textContent).toContain('Turn 1 details');
-    expect(panel!.textContent).toContain('Search papers');
-    // The finished trace now lives in the panel rather than the transcript.
-    expect(panel!.textContent).toContain('Step 1: weighing the evidence.');
+    const traces = container.querySelectorAll('.turn-timeline');
+    expect(traces).toHaveLength(TURNS.length);
+    expect(text(traces[0])).toContain('Searched');
+    expect(text(traces[0])).toContain('Thought for');
   });
 });

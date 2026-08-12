@@ -4,6 +4,7 @@ import asyncio
 import math
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from backend.runs.broker import EventBroker
@@ -99,6 +100,7 @@ class PersistedRunEventSink:
             "sequence": sequence,
             "event_type": event_type,
             "payload": payload,
+            "created_at": datetime.now(UTC).isoformat(),
         }
 
 

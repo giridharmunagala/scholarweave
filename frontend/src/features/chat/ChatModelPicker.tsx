@@ -87,3 +87,12 @@ export function modelReferenceLabel(reference: ModelReference, providers: Provid
   const provider = providers.find((item) => item.id === reference.provider_profile_id);
   return `${provider?.name ?? 'Unknown provider'} / ${reference.model}`;
 }
+
+export function preferredChatModel(
+  settings: Pick<Settings, 'default_model_references' | 'last_chat_model_reference'>,
+): ModelReference {
+  const preferred = settings.last_chat_model_reference ?? {};
+  return preferred.provider_profile_id && preferred.model
+    ? preferred
+    : settings.default_model_references.chat ?? {};
+}

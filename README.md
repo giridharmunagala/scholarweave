@@ -116,8 +116,10 @@ instructions deliberately expose it. Pause and resume use serialized SDK `RunSta
 
 ### Research agent
 
-Streaming transcript with per-turn reasoning, tool steps, and token/throughput accounting. The
-chat model is selectable per conversation from any enabled provider model.
+Streaming transcript with an inline per-turn trace — each thought and tool call appears in order
+between the question and the answer, expandable to its request and result — plus the sources the
+turn consulted and token/throughput accounting. The chat model is selectable per conversation from
+any enabled provider model.
 
 ![Research agent](docs/screenshots/research-chat.png)
 

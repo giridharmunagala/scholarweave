@@ -3313,6 +3313,9 @@
             "title": "Documents Dir",
             "type": "string"
           },
+          "last_chat_model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
           "ocr_engine": {
             "enum": [
               "tesseract",
@@ -3391,6 +3394,7 @@
           "database_path",
           "ollama_base_url",
           "default_model_references",
+          "last_chat_model_reference",
           "request_timeout_seconds",
           "agent_tracing_enabled",
           "python_tool_enabled",
@@ -3494,6 +3498,16 @@
               }
             ],
             "title": "Docling Ocr Backend"
+          },
+          "last_chat_model_reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelReferenceSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ocr_engine": {
             "anyOf": [

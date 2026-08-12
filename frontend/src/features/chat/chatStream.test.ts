@@ -99,12 +99,12 @@ describe('builder chat streaming', () => {
       }),
     ]);
 
-    expect(restored).toEqual({
-      reasoning: 'Searching the library.',
-      assistant: 'Found the answer.',
-      tools: [
-        { sequence: 2, toolName: 'search_papers', status: 'completed' },
-      ],
-    });
+    expect(restored.reasoning).toBe('Searching the library.');
+    expect(restored.assistant).toBe('Found the answer.');
+    expect(restored.tools).toEqual([
+      { sequence: 2, toolName: 'search_papers', status: 'completed' },
+    ]);
+    // Events are retained in order so the turn timeline can be rebuilt from them.
+    expect(restored.events.map((candidate) => candidate.sequence)).toEqual([1, 2, 3, 4]);
   });
 });

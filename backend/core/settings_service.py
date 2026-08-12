@@ -13,6 +13,7 @@ from backend.core.time import utcnow
 PERSISTED_SETTING_KEYS = {
     "ollama_base_url",
     "default_model_references",
+    "last_chat_model_reference",
     "request_timeout_seconds",
     "agent_tracing_enabled",
     "python_tool_enabled",
@@ -52,6 +53,7 @@ class SettingsResponse(SettingsSchema):
     database_path: str
     ollama_base_url: str
     default_model_references: dict[str, ModelReferenceSpec]
+    last_chat_model_reference: ModelReferenceSpec
     request_timeout_seconds: float
     agent_tracing_enabled: bool
     python_tool_enabled: bool
@@ -72,6 +74,7 @@ class SettingsResponse(SettingsSchema):
 class SettingsUpdate(SettingsSchema):
     ollama_base_url: str | None = None
     default_model_references: dict[str, ModelReferenceSpec] | None = None
+    last_chat_model_reference: ModelReferenceSpec | None = None
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     agent_tracing_enabled: bool | None = None
     python_tool_enabled: bool | None = None
@@ -110,6 +113,9 @@ class SettingsService:
                     if key == "default_model_references":
                         value = _normalize_model_references(value)
                         record.value_json = value
+                    if key == "last_chat_model_reference":
+                        value = ModelReferenceSpec.model_validate(value).model_dump(mode="json")
+                        record.value_json = value
                     setattr(self.settings, key, value)
             session.commit()
 
@@ -125,6 +131,9 @@ class SettingsService:
                 key: ModelReferenceSpec.model_validate(value)
                 for key, value in self.settings.default_model_references.items()
             },
+            last_chat_model_reference=ModelReferenceSpec.model_validate(
+                self.settings.last_chat_model_reference
+            ),
             request_timeout_seconds=self.settings.request_timeout_seconds,
             agent_tracing_enabled=self.settings.agent_tracing_enabled,
             python_tool_enabled=self.settings.python_tool_enabled,
@@ -154,6 +163,10 @@ class SettingsService:
                     for capability, reference in value.items()
                 }
                 value = _normalize_model_references(value)
+            if key == "last_chat_model_reference" and isinstance(
+                value, ModelReferenceSpec
+            ):
+                value = value.model_dump(mode="json")
             normalized[key] = value
         with self._sessions() as session:
             for key, value in normalized.items():

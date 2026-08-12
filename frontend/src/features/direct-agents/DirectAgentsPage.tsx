@@ -9,7 +9,7 @@ import {
   PageHeader,
   StatusPill,
 } from '../../shared/components/Ui';
-import { ChatModelPicker } from '../chat/ChatModelPicker';
+import { ChatModelPicker, preferredChatModel } from '../chat/ChatModelPicker';
 import {
   applyChatStreamEvent,
   emptyChatStream,
@@ -37,6 +37,7 @@ export default function DirectAgentsPage() {
   const [selectedAgentKey, setSelectedAgentKey] = useState<DirectAgent['key']>('summary');
   const [selectedDocumentId, setSelectedDocumentId] = useState('');
   const [modelReference, setModelReference] = useState<ModelReference>({});
+  const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [current, setCurrent] = useState<DirectConversationDetail | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
@@ -75,7 +76,9 @@ export default function DirectAgentsPage() {
         setDocuments(nextDocuments);
         setProviders(nextProviders);
         setSettings(nextSettings);
-        setModelReference(defaultAgentModel(nextSettings));
+        const preferredModel = preferredChatModel(nextSettings);
+        setPreferredModelReference(preferredModel);
+        setModelReference(preferredModel);
         const firstReady = nextDocuments.find((document) => document.status === 'ready');
         setSelectedDocumentId(firstReady?.id ?? '');
         if (nextConversations[0]) await open(nextConversations[0].id);
@@ -124,7 +127,16 @@ export default function DirectAgentsPage() {
     setRun(null);
     setStream(emptyChatStream);
     setOptimisticUser(null);
-    if (settings) setModelReference(defaultAgentModel(settings));
+    setModelReference(preferredModelReference);
+  };
+
+  const selectModel = (reference: ModelReference) => {
+    setModelReference(reference);
+    setPreferredModelReference(reference);
+    void providersApi
+      .updateSettings({ last_chat_model_reference: reference })
+      .then(setSettings)
+      .catch(setError);
   };
 
   const selectAgent = (key: DirectAgent['key']) => {
@@ -360,7 +372,7 @@ export default function DirectAgentsPage() {
                   settings={settings}
                   value={modelReference}
                   disabled={sending || Boolean(current)}
-                  onChange={setModelReference}
+                  onChange={selectModel}
                 />
                 <span className="composer-hint">
                   <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline
@@ -385,10 +397,6 @@ export default function DirectAgentsPage() {
       </div>
     </div>
   );
-}
-
-function defaultAgentModel(settings: Settings): ModelReference {
-  return settings.default_model_references.chat ?? {};
 }
 
 function agentName(agents: DirectAgent[], key: DirectAgent['key']): string {

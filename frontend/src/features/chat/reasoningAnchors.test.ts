@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { anchorRunsToItems, turnMetrics } from './ChatPage';
-import { reasoningFromEvents } from './chatStream';
+import { restoreChatStream } from './chatStream';
 import type { ConversationDetail, Run } from './api';
 
 function item(role: string, text: string): ConversationDetail['items'][number] {
@@ -60,7 +60,7 @@ describe('anchorRunsToItems', () => {
     expect(anchors.responseByIndex.get(1)?.id).toBe('run-1');
     expect(anchors.responseByIndex.get(3)?.id).toBe('run-2');
     expect(anchors.anchored).toEqual(new Set(['run-1', 'run-2']));
-    expect(reasoningFromEvents(anchors.byIndex.get(0)!.events)).toBe(
+    expect(restoreChatStream(anchors.byIndex.get(0)!.events).reasoning).toBe(
       'Thought about the first question.',
     );
   });

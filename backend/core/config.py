@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     default_model_references: dict[str, dict[str, str | None]] = Field(default_factory=dict)
+    last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
 
     searxng_base_url: str = "http://127.0.0.1:8888"

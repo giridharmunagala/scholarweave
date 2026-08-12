@@ -322,7 +322,58 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   background: var(--surface-2);
   white-space: pre;
 }
-.markdown-viewer table { display: block; overflow-x: auto; margin: var(--space-4) 0; }
+.markdown-viewer table { width: 100%; margin: 0; }
+
+/* A table in an answer is an artefact: framed, liftable, and openable when it outgrows the column. */
+.markdown-table-card { margin: var(--space-4) 0; }
+.markdown-table-frame {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  overflow: hidden;
+}
+.markdown-table-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: .15rem;
+  padding: .3rem .35rem;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 60%, var(--surface));
+}
+.markdown-table-actions button {
+  display: inline-grid;
+  width: 1.75rem;
+  height: 1.75rem;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.markdown-table-actions button:hover { background: var(--surface-3); color: var(--text); }
+.markdown-table-scroll { overflow-x: auto; }
+.markdown-table-scroll th { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); font-weight: 650; }
+.markdown-table-card.expanded .markdown-table-frame {
+  position: fixed;
+  inset: 4vh 4vw;
+  z-index: 60;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  box-shadow: var(--shadow-lg);
+}
+.markdown-table-card.expanded .markdown-table-scroll { overflow: auto; }
+.markdown-table-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 59;
+  padding: 0;
+  border: 0;
+  background: var(--scrim);
+  cursor: pointer;
+}
 .markdown-image {
   display: grid;
   gap: var(--space-2);

@@ -2079,6 +2079,7 @@ export interface components {
             docling_ocr_backend: "onnxruntime" | "torch";
             /** Documents Dir */
             documents_dir: string;
+            last_chat_model_reference: components["schemas"]["ModelReferenceSpec"];
             /**
              * Ocr Engine
              * @enum {string}
@@ -2123,6 +2124,7 @@ export interface components {
             docling_num_threads?: number | null;
             /** Docling Ocr Backend */
             docling_ocr_backend?: ("onnxruntime" | "torch") | null;
+            last_chat_model_reference?: components["schemas"]["ModelReferenceSpec"] | null;
             /** Ocr Engine */
             ocr_engine?: ("tesseract" | "docling") | null;
             /** Ocr Llm Enhancement Enabled */

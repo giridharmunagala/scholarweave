@@ -7,7 +7,6 @@ import {
   useState,
 } from 'react';
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
-import { Link } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, Loading, StatusPill } from '../../shared/components/Ui';
@@ -19,14 +18,24 @@ import {
   type ModelReference,
   type Run,
 } from './api';
-import { ChatModelPicker, modelReferenceLabel } from './ChatModelPicker';
+import {
+  ChatModelPicker,
+  modelReferenceLabel,
+  preferredChatModel,
+} from './ChatModelPicker';
 import {
   applyChatStreamEvent,
   emptyChatStream,
-  reasoningFromEvents,
   restoreChatStream,
   type ChatStreamState,
 } from './chatStream';
+import {
+  buildTurnTimeline,
+  emptyTurnTimeline,
+  type TimelineSource,
+  type TurnTimeline,
+} from './chatTimeline';
+import { SourceChips, TurnTimelineView } from './TurnTimeline';
 import './chat.css';
 
 const SUGGESTIONS = [
@@ -42,6 +51,7 @@ export default function ChatPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
   const [modelReference, setModelReference] = useState<ModelReference>({});
+  const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
@@ -52,12 +62,9 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [activityOpen, setActivityOpen] = useState(false);
-  const [activityRunId, setActivityRunId] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const autoOpenedActivityRunRef = useRef<string | null>(null);
   const openRequestRef = useRef(0);
 
   const refreshList = () => chatApi.list().then(setConversations);
@@ -69,9 +76,6 @@ export default function ChatPage() {
     setOptimisticUser(null);
     setSending(false);
     setPinnedToBottom(true);
-    setActivityOpen(false);
-    setActivityRunId(null);
-    autoOpenedActivityRunRef.current = null;
     const [conversationResult, runsResult] = await Promise.allSettled([
       chatApi.get(id),
       chatApi.runs(id),
@@ -106,7 +110,9 @@ export default function ChatPage() {
         setConversations(items);
         setProviders(nextProviders);
         setSettings(nextSettings);
-        setModelReference(defaultBuilderModel(nextSettings));
+        const preferredModel = preferredChatModel(nextSettings);
+        setPreferredModelReference(preferredModel);
+        setModelReference(preferredModel);
         if (items[0]) await open(items[0].id);
       })
       .catch(setError)
@@ -125,7 +131,6 @@ export default function ChatPage() {
     stream.assistant,
     stream.tools.length,
     run?.status,
-    activityOpen,
     pinnedToBottom,
   ]);
 
@@ -245,16 +250,26 @@ export default function ChatPage() {
     setOptimisticUser(null);
     setSending(false);
     setPinnedToBottom(true);
-    setActivityOpen(false);
-    setActivityRunId(null);
-    autoOpenedActivityRunRef.current = null;
   };
 
   const create = () => {
     setCurrent(null);
-    if (settings) setModelReference(defaultBuilderModel(settings));
+    setModelReference(preferredModelReference);
     resetThread();
     composerRef.current?.focus();
+  };
+
+  const selectModel = (reference: ModelReference) => {
+    setModelReference(reference);
+    setPreferredModelReference(reference);
+    void providersApi
+      .updateSettings({ last_chat_model_reference: reference })
+      .then(setSettings)
+      .catch(setError);
+    if (current) {
+      setCurrent(null);
+      resetThread();
+    }
   };
 
   const remove = async (id: string) => {
@@ -319,61 +334,35 @@ export default function ChatPage() {
     );
   }, [conversations, query]);
 
-  const persistedActivityCount = run?.items.filter(isVisibleActivityItem).length ?? 0;
-  const reasoningActive = run?.status === 'pending' || run?.status === 'running';
-
-  // Reasoning and tool activity are stored per run, so every turn keeps its own detail.
-  const persistedActivity = useMemo(() => {
-    const activity = new Map<string, TurnActivity>();
+  // Every run keeps its own trace, so an older turn never borrows the newest turn's activity.
+  const persistedTimelines = useMemo(() => {
+    const timelines = new Map<string, TurnTimeline>();
     for (const candidate of runs) {
-      const restored = restoreChatStream(candidate.events);
-      activity.set(candidate.id, {
-        tools: restored.tools,
-        items: candidate.items.filter(isVisibleActivityItem),
-        reasoning: restored.reasoning,
-      });
+      timelines.set(
+        candidate.id,
+        buildTurnTimeline(candidate.events, { settled: isTerminalRun(candidate) }),
+      );
     }
-    return activity;
+    return timelines;
   }, [runs]);
 
-  // Every run is anchored, so a turn without reasoning still keeps its tool activity in place.
+  // The active run is rebuilt from the events seen so far so the trace grows as it happens.
+  const liveTimeline = useMemo(
+    () => buildTurnTimeline(stream.events, { settled: Boolean(run && isTerminalRun(run)) }),
+    [stream.events, run?.status],
+  );
+
+  const timelineFor = (candidate: Run): TurnTimeline => {
+    const persisted = persistedTimelines.get(candidate.id) ?? emptyTurnTimeline;
+    if (candidate.id !== run?.id) return persisted;
+    return liveTimeline.steps.length >= persisted.steps.length ? liveTimeline : persisted;
+  };
+
+  // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
     () => anchorRunsToItems(current?.items ?? [], runs),
     [current?.items, runs],
   );
-
-  const activityFor = (candidate: Run): TurnActivity => {
-    const persisted = persistedActivity.get(candidate.id);
-    const isCurrentRun = candidate.id === run?.id;
-    const items = persisted?.items.length
-      ? persisted.items
-      : candidate.items.filter(isVisibleActivityItem);
-    const live = isCurrentRun && stream.tools.length ? stream.tools : null;
-    // A still-thinking turn shows its trace inline instead, so the panel would only duplicate it.
-    const settled = persisted?.reasoning || (isCurrentRun ? stream.reasoning : '');
-    return {
-      tools: live ?? persisted?.tools ?? [],
-      items,
-      reasoning: isCurrentRun && reasoningActive ? '' : settled,
-    };
-  };
-
-  // The panel keeps showing the newest turn that produced detail, so history never vanishes.
-  const activityRun =
-    (activityRunId ? runs.find((candidate) => candidate.id === activityRunId) : null)
-    ?? [...runs].reverse().find((candidate) => hasTurnDetail(activityFor(candidate)))
-    ?? null;
-  const panelActivity = activityRun ? activityFor(activityRun) : null;
-  const hasActivity = Boolean(panelActivity && hasTurnDetail(panelActivity));
-
-  useEffect(() => {
-    if (!run) return;
-    const count = stream.tools.length || persistedActivityCount;
-    if (!count || autoOpenedActivityRunRef.current === run.id) return;
-    autoOpenedActivityRunRef.current = run.id;
-    setActivityRunId(run.id);
-    setActivityOpen(true);
-  }, [run?.id, stream.tools.length, persistedActivityCount]);
 
   if (loading || !settings) return <Loading label="Loading agent conversations…" />;
 
@@ -383,23 +372,15 @@ export default function ChatPage() {
     || 'No model configured';
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
-  // Reasoning is only shown inline while the agent is still thinking. Once the turn settles it
-  // moves into the side panel next to that turn's tool calls, keeping the transcript to answers.
-  const liveReasoning = reasoningActive ? stream.reasoning : '';
-
-  /** Chips toggle the panel so a second click on the open turn closes it again. */
-  const showTurnDetail = (runId: string | null) => {
-    if (activityOpen && activityRun?.id === runId) {
-      setActivityOpen(false);
-      return;
-    }
-    setActivityRunId(runId);
-    setActivityOpen(true);
-  };
-
-  // The active turn has no persisted user message yet, so its detail renders after the optimistic one.
+  // The active turn has no persisted user message yet, so its trace renders after the optimistic one.
   const pendingRun = run && !reasoningAnchors.anchored.has(run.id) ? run : null;
-  const pendingActivity = pendingRun && !reasoningActive ? activityFor(pendingRun) : null;
+  const pendingTimeline = pendingRun ? timelineFor(pendingRun) : null;
+
+  /** Re-asking is the only way to redo a turn, since the transcript itself is append-only. */
+  const retry = (prompt: string) => {
+    if (sending || !prompt.trim()) return;
+    void send(prompt);
+  };
 
   return (
     <div className="page page-wide chat-page">
@@ -480,20 +461,6 @@ export default function ChatPage() {
                 </small>
               </div>
               <div className="chat-header-meta">
-                {hasActivity ? (
-                  <button
-                    type="button"
-                    className={`activity-toggle${activityOpen ? ' active' : ''}`}
-                    aria-expanded={activityOpen}
-                    aria-controls="chat-tool-activity"
-                    title={activityOpen ? 'Hide tool activity' : 'Show tool activity'}
-                    onClick={() => setActivityOpen((value) => !value)}
-                  >
-                    <Icon name="tools" size={14} />
-                    <span>Tools</span>
-                    <strong>{activityCount(panelActivity!)}</strong>
-                  </button>
-                ) : null}
                 {sending ? (
                   <span className="chat-working">
                     <span className="spinner tiny" aria-hidden="true" />
@@ -504,7 +471,7 @@ export default function ChatPage() {
               </div>
             </div>
           </header>
-          <div className={`chat-workspace${activityOpen && hasActivity ? ' activity-open' : ''}`}>
+          <div className="chat-workspace">
             <div className="chat-thread">
               <div
                 className="message-list"
@@ -540,40 +507,29 @@ export default function ChatPage() {
                 ) : null}
                 {current?.items.map((item, index) => {
                   if (!item.text?.trim()) return null;
+                  const role = item.role ?? item.type;
                   const turnRun = reasoningAnchors.byIndex.get(index) ?? null;
-                  const turnActivity = turnRun ? activityFor(turnRun) : null;
                   const responseRun = reasoningAnchors.responseByIndex.get(index) ?? null;
-                  const showChip =
-                    turnRun && turnActivity && hasTurnDetail(turnActivity)
-                    && !(turnRun.id === run?.id && reasoningActive);
+                  // The trace sits between the question and the answer, where it happened.
+                  const timeline = turnRun ? timelineFor(turnRun) : null;
                   return (
                     <Fragment key={index}>
                       <Message
-                        role={item.role ?? item.type}
+                        role={role}
                         text={item.text}
                         metrics={responseRun ? turnMetrics(responseRun) : null}
+                        sources={responseRun ? timelineFor(responseRun).sources : null}
+                        onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
+                        canRetry={!sending}
                       />
-                      {showChip ? (
-                        <TurnActivityChip
-                          activity={turnActivity!}
-                          active={activityOpen && activityRun?.id === turnRun!.id}
-                          onOpen={() => showTurnDetail(turnRun!.id)}
-                        />
-                      ) : null}
+                      {timeline ? <TurnTimelineView timeline={timeline} /> : null}
                     </Fragment>
                   );
                 })}
                 {optimisticUser ? (
                   <Message role="user" text={optimisticUser} className="optimistic" />
                 ) : null}
-                {pendingActivity && hasTurnDetail(pendingActivity) ? (
-                  <TurnActivityChip
-                    activity={pendingActivity}
-                    active={activityOpen && activityRun?.id === run?.id}
-                    onOpen={() => showTurnDetail(run?.id ?? null)}
-                  />
-                ) : null}
-                {liveReasoning ? <LiveReasoning content={liveReasoning} /> : null}
+                {pendingTimeline ? <TurnTimelineView timeline={pendingTimeline} /> : null}
                 {stream.assistant ? (
                   <Message
                     role="assistant"
@@ -581,9 +537,10 @@ export default function ChatPage() {
                     className="streaming"
                     streaming
                     metrics={run ? turnMetrics(run) : null}
+                    sources={liveTimeline.sources}
                   />
                 ) : null}
-                {sending && !stream.assistant && !stream.reasoning ? (
+                {sending && !stream.assistant && !stream.reasoning && !liveTimeline.steps.length ? (
                   <div className="thinking-bubble" role="status" aria-label="The agent is thinking">
                     <span /> <span /> <span />
                   </div>
@@ -646,13 +603,7 @@ export default function ChatPage() {
                         settings={settings}
                         value={modelReference}
                         disabled={sending}
-                        onChange={(reference) => {
-                          setModelReference(reference);
-                          if (current) {
-                            setCurrent(null);
-                            resetThread();
-                          }
-                        }}
+                        onChange={selectModel}
                       />
                     </div>
                     <span className="composer-hint">
@@ -662,212 +613,10 @@ export default function ChatPage() {
                 </div>
               </div>
             </div>
-            {activityOpen && hasActivity && activityRun && panelActivity ? (
-              <>
-                <button
-                  type="button"
-                  className="tool-panel-scrim"
-                  aria-label="Hide tool activity"
-                  onClick={() => setActivityOpen(false)}
-                />
-                <ToolActivityPanel
-                  run={activityRun}
-                  activity={panelActivity}
-                  turn={runTurnLabel(runs, activityRun)}
-                  onClose={() => setActivityOpen(false)}
-                />
-              </>
-            ) : null}
           </div>
         </section>
       </div>
     </div>
-  );
-}
-
-/**
- * While a turn is running the reader watches the agent think, so the trace is plain and always
- * visible - no disclosure to collapse. Once the run settles this unmounts and the trace is
- * reachable from that turn's chip in the side panel.
- */
-function LiveReasoning({ content }: { content: string }) {
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const followTailRef = useRef(true);
-
-  // Follow the streaming tail only while the reader is already at the bottom of the trace.
-  useLayoutEffect(() => {
-    const element = bodyRef.current;
-    if (!element || !followTailRef.current) return;
-    element.scrollTop = element.scrollHeight;
-  }, [content]);
-
-  return (
-    <section className="reasoning-live" aria-label="Agent reasoning">
-      <header className="reasoning-live-header">
-        <span className="reasoning-card-icon">
-          <span className="spinner tiny" aria-hidden="true" />
-        </span>
-        <span className="reasoning-card-label">
-          <strong>Thinking</strong>
-          <small>Moves to the turn details when this answer is done</small>
-        </span>
-        <span className="activity-live">Live</span>
-      </header>
-      <div
-        className="reasoning-content"
-        ref={bodyRef}
-        tabIndex={0}
-        role="region"
-        aria-label="Reasoning trace"
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          followTailRef.current =
-            element.scrollHeight - element.scrollTop - element.clientHeight < 24;
-        }}
-      >
-        <MarkdownViewer content={content} />
-        <i className="stream-cursor" aria-hidden="true" />
-      </div>
-    </section>
-  );
-}
-
-function TurnActivityChip({
-  activity,
-  active,
-  onOpen,
-}: {
-  activity: TurnActivity;
-  active: boolean;
-  onOpen: () => void;
-}) {
-  const count = activityCount(activity);
-  const failed = activity.tools.some((tool) => tool.status === 'failed');
-  const names = activity.tools.length
-    ? activity.tools.map((tool) => humanize(tool.toolName))
-    : activity.items
-      .filter((item) => item.type === 'tool_call_item')
-      .map((item) => item.title || item.description || 'Tool');
-  const preview = Array.from(new Set(names)).slice(0, 3).join(' · ');
-  const label = [
-    activity.reasoning ? 'Reasoning' : '',
-    count ? `${count} ${count === 1 ? 'tool step' : 'tool steps'}` : '',
-  ].filter(Boolean).join(' · ');
-  return (
-    <button
-      type="button"
-      className={`turn-activity-chip${active ? ' active' : ''}${failed ? ' failed' : ''}`}
-      aria-expanded={active}
-      aria-controls="chat-tool-activity"
-      onClick={onOpen}
-    >
-      <span className="activity-icon tool">
-        <Icon name={count ? 'tools' : 'sparkle'} size={14} />
-      </span>
-      <span className="turn-activity-label">
-        <strong>{label || 'Turn details'}</strong>
-        <small>{preview || 'Review how the agent reached this answer'}</small>
-      </span>
-      <Icon className="activity-chevron" name="arrowRight" size={13} />
-    </button>
-  );
-}
-
-function ToolActivityPanel({
-  run,
-  activity,
-  turn,
-  onClose,
-}: {
-  run: Run;
-  activity: TurnActivity;
-  turn: string;
-  onClose: () => void;
-}) {
-  const { tools, items, reasoning } = activity;
-  const count = activityCount(activity);
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useLayoutEffect(() => {
-    const element = scrollRef.current;
-    if (element) element.scrollTop = 0;
-  }, [run.id]);
-
-  const summary = [
-    runActivityTitle(run.status),
-    reasoning ? 'reasoning' : '',
-    count ? `${count} ${count === 1 ? 'tool step' : 'tool steps'}` : '',
-  ].filter(Boolean).join(' · ');
-
-  return (
-    <aside className="tool-panel" id="chat-tool-activity" aria-label="Turn details">
-      <header className="tool-panel-header">
-        <span className="tool-panel-title-icon"><Icon name="tools" size={15} /></span>
-        <span className="tool-panel-title">
-          <strong>{turn}</strong>
-          <small>{summary}</small>
-        </span>
-        <button
-          type="button"
-          className="button ghost icon"
-          aria-label="Hide turn details"
-          onClick={onClose}
-        >
-          <Icon name="close" size={15} />
-        </button>
-      </header>
-      <div className="tool-panel-scroll" ref={scrollRef}>
-        {reasoning ? (
-          <section className="activity-section">
-            <h3>Reasoning</h3>
-            <div className="panel-reasoning">
-              <MarkdownViewer content={reasoning} />
-            </div>
-          </section>
-        ) : null}
-        {tools.length ? (
-          <section className="activity-section">
-            <h3>Tool calls</h3>
-            <div className="live-tools" aria-live="polite">
-              {tools.map((tool) => (
-                <div className="live-tool" key={tool.sequence}>
-                  <span className="activity-icon tool"><Icon name="tools" size={14} /></span>
-                  <span className="live-tool-body">
-                    <strong>{humanize(tool.toolName)}</strong>
-                    <small>
-                      {tool.status === 'running'
-                        ? 'Using tool…'
-                        : tool.status === 'failed'
-                          ? 'Tool failed; agent can recover'
-                          : 'Tool finished'}
-                    </small>
-                  </span>
-                  <span className={`tool-status ${tool.status}`}>
-                    {tool.status === 'running'
-                      ? <span className="spinner tiny" aria-hidden="true" />
-                      : <Icon name={tool.status === 'failed' ? 'close' : 'check'} size={13} />}
-                    {tool.status === 'running'
-                      ? 'Running'
-                      : tool.status === 'failed'
-                        ? 'Failed'
-                        : 'Done'}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-        {items.length ? (
-          <section className="activity-section">
-            <h3>{tools.length ? 'Run details' : 'Calls and results'}</h3>
-            <div className="activity-items">
-              {items.map((item, index) => <RunActivityItem item={item} key={index} />)}
-            </div>
-          </section>
-        ) : null}
-        {run.error ? <div className="notice error">{run.error}</div> : null}
-      </div>
-    </aside>
   );
 }
 
@@ -877,89 +626,126 @@ function Message({
   className = '',
   streaming = false,
   metrics = null,
+  sources = null,
+  onRetry = null,
+  canRetry = true,
 }: {
   role: string;
   text: string;
   className?: string;
   streaming?: boolean;
   metrics?: TurnMetrics | null;
+  sources?: TimelineSource[] | null;
+  onRetry?: (() => void) | null;
+  canRetry?: boolean;
 }) {
+  const isAssistant = role === 'assistant';
   return (
     <article className={`message role-${role} ${className}`.trim()}>
       <span className="message-avatar" aria-hidden="true">
         <Icon name={role === 'user' ? 'user' : 'sparkle'} size={14} />
       </span>
       <div className="message-body">
-        <MessageHeader label={streaming ? `${role} · streaming` : role} content={text} />
+        <MessageHeader
+          label={streaming ? `${role} · streaming` : role}
+          content={text}
+          showCopy={!isAssistant}
+        />
         <MarkdownViewer content={text} />
         {streaming ? <i className="stream-cursor" aria-hidden="true" /> : null}
-        {role === 'assistant' && metrics ? <TurnMetadata metrics={metrics} /> : null}
+        {isAssistant && sources?.length ? <SourceChips sources={sources} /> : null}
+        {isAssistant ? (
+          <MessageActions
+            content={text}
+            metrics={metrics}
+            onRetry={onRetry}
+            canRetry={canRetry}
+          />
+        ) : null}
       </div>
     </article>
   );
 }
 
-function format(value: unknown): string {
-  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
-}
+/** The answer's footer: what you can do with it, and what it cost, on one line. */
+function MessageActions({
+  content,
+  metrics,
+  onRetry,
+  canRetry,
+}: {
+  content: string;
+  metrics: TurnMetrics | null;
+  onRetry: (() => void) | null;
+  canRetry: boolean;
+}) {
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
+  const [speaking, setSpeaking] = useState(false);
+  const speech = typeof window !== 'undefined' ? window.speechSynthesis : undefined;
 
-function savedAgentId(item: Run['items'][number]): string | null {
-  if (item.type !== 'tool_call_output_item' || typeof item.output !== 'object' || item.output === null) return null;
-  const agentId = (item.output as Record<string, unknown>).agent_id;
-  return typeof agentId === 'string' ? agentId : null;
-}
+  useEffect(() => () => speech?.cancel(), [speech]);
 
-function RunActivityItem({ item }: { item: Run['items'][number] }) {
-  const savedId = savedAgentId(item);
-  const isToolCall = item.type === 'tool_call_item';
-  const isToolOutput = item.type === 'tool_call_output_item';
-  const isHandoff = item.type === 'handoff_output_item';
-  const title = isToolCall
-    ? item.title || item.description || 'Tool requested'
-    : isToolOutput
-      ? 'Tool result'
-      : isHandoff
-        ? `Handed off to ${item.target_agent}`
-        : humanize(item.type);
-  const detail = isToolOutput
-    ? item.output
-    : isHandoff
-      ? `${item.source_agent} → ${item.target_agent}`
-      : isToolCall
-        ? item.description
-        : null;
+  const copy = async () => {
+    try {
+      await copyToClipboard(content);
+      setCopyStatus('copied');
+      window.setTimeout(() => setCopyStatus('idle'), 1800);
+    } catch {
+      setCopyStatus('failed');
+    }
+  };
 
-  if (detail == null && !savedId) {
-    return (
-      <div className="activity-item compact">
-        <span className="activity-icon tool"><Icon name={isHandoff ? 'agents' : 'tools'} size={14} /></span>
-        <span className="activity-item-title"><strong>{title}</strong><small>{item.agent_name}</small></span>
-        <Icon name="check" size={14} />
-      </div>
-    );
-  }
+  const speak = () => {
+    if (!speech) return;
+    if (speaking) {
+      speech.cancel();
+      setSpeaking(false);
+      return;
+    }
+    const utterance = new SpeechSynthesisUtterance(content.slice(0, 4000));
+    utterance.onend = () => setSpeaking(false);
+    utterance.onerror = () => setSpeaking(false);
+    speech.cancel();
+    speech.speak(utterance);
+    setSpeaking(true);
+  };
 
   return (
-    <details className="activity-item">
-      <summary>
-        <span className="activity-icon tool"><Icon name={isHandoff ? 'agents' : 'tools'} size={14} /></span>
-        <span className="activity-item-title"><strong>{title}</strong><small>{item.agent_name}</small></span>
-        <Icon className="activity-chevron" name="arrowRight" size={13} />
-      </summary>
-      <div className="activity-item-detail">
-        {detail != null ? <pre>{format(detail)}</pre> : null}
-        {savedId ? (
-          <Link className="button secondary small" to={`/agents/${savedId}`}>
-            Open saved agent
-          </Link>
-        ) : null}
-      </div>
-    </details>
+    <div className="message-actions">
+      <button
+        type="button"
+        className={copyStatus === 'failed' ? 'failed' : ''}
+        title={copyStatus === 'copied' ? 'Copied' : 'Copy answer'}
+        aria-label={copyStatus === 'copied' ? 'Copied' : 'Copy answer'}
+        onClick={() => void copy()}
+      >
+        <Icon name={copyStatus === 'copied' ? 'check' : 'copy'} size={14} />
+      </button>
+      {onRetry ? (
+        <button
+          type="button"
+          title="Ask again"
+          aria-label="Ask again"
+          disabled={!canRetry}
+          onClick={onRetry}
+        >
+          <Icon name="refresh" size={14} />
+        </button>
+      ) : null}
+      {speech ? (
+        <button
+          type="button"
+          className={speaking ? 'active' : ''}
+          title={speaking ? 'Stop reading' : 'Read aloud'}
+          aria-label={speaking ? 'Stop reading' : 'Read aloud'}
+          onClick={speak}
+        >
+          <Icon name={speaking ? 'stop' : 'speaker'} size={14} />
+        </button>
+      ) : null}
+      {metrics ? <TurnMetadata metrics={metrics} /> : null}
+    </div>
   );
-}
-
-function isVisibleActivityItem(item: Run['items'][number]): boolean {
-  return item.type !== 'message_output_item' && item.type !== 'reasoning_item';
 }
 
 function isTerminalRun(run: Run): boolean {
@@ -998,29 +784,13 @@ function missingRunInput(conversation: ConversationDetail, run: Run): string | n
   return latestUserMessage?.text === run.input ? null : run.input;
 }
 
-/** Everything one turn produced on the way to its answer, rebuilt from that run alone. */
-interface TurnActivity {
-  tools: ChatStreamState['tools'];
-  items: Run['items'];
-  reasoning: string;
-}
-
-function activityCount(activity: TurnActivity): number {
-  return (
-    activity.tools.length
-    || activity.items.filter((item) => item.type === 'tool_call_item').length
-  );
-}
-
-/** A turn is worth opening if it reasoned or called anything, not just if it used tools. */
-function hasTurnDetail(activity: TurnActivity): boolean {
-  return activity.items.length > 0 || activity.tools.length > 0 || Boolean(activity.reasoning);
-}
-
-/** Turns are labelled by position so a reopened panel says which turn it belongs to. */
-function runTurnLabel(runs: Run[], run: Run): string {
-  const index = runs.findIndex((candidate) => candidate.id === run.id);
-  return index >= 0 ? `Turn ${index + 1} details` : 'Turn details';
+/** Retrying an answer means re-asking the question that produced it. */
+function promptFor(items: ConversationDetail['items'], index: number): string {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const item = items[cursor];
+    if ((item.role ?? item.type) === 'user' && item.text?.trim()) return item.text;
+  }
+  return '';
 }
 
 interface ReasoningAnchors {
@@ -1164,19 +934,6 @@ function formatDuration(value: number): string {
   return `${Math.floor(value / 60)}m ${Math.round(value % 60)}s`;
 }
 
-function runActivityTitle(status: Run['status']): string {
-  if (status === 'completed') return 'Work completed';
-  if (status === 'failed') return 'Run failed';
-  if (status === 'cancelled') return 'Run cancelled';
-  if (status === 'paused') return 'Waiting for approval';
-  return 'Working on your request';
-}
-
-function humanize(value: string): string {
-  const words = value.replace(/[_-]+/g, ' ').trim();
-  return words ? words.charAt(0).toLocaleUpperCase() + words.slice(1) : 'Tool';
-}
-
 export function relativeTime(value: string): string {
   const timestamp = new Date(value).getTime();
   if (Number.isNaN(timestamp)) return '';
@@ -1188,7 +945,15 @@ export function relativeTime(value: string): string {
   return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
-function MessageHeader({ label, content }: { label: string; content: string }) {
+function MessageHeader({
+  label,
+  content,
+  showCopy = true,
+}: {
+  label: string;
+  content: string;
+  showCopy?: boolean;
+}) {
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
 
   const copy = async () => {
@@ -1205,16 +970,18 @@ function MessageHeader({ label, content }: { label: string; content: string }) {
   return (
     <div className="message-header">
       <span>{label}</span>
-      <button
-        type="button"
-        className={`message-copy${copyStatus === 'failed' ? ' failed' : ''}`}
-        aria-label={statusLabel}
-        title={statusLabel}
-        onClick={() => void copy()}
-      >
-        <Icon name={copyStatus === 'copied' ? 'check' : 'copy'} size={14} />
-        <span>{copyStatus === 'idle' ? 'Copy' : statusLabel}</span>
-      </button>
+      {showCopy ? (
+        <button
+          type="button"
+          className={`message-copy${copyStatus === 'failed' ? ' failed' : ''}`}
+          aria-label={statusLabel}
+          title={statusLabel}
+          onClick={() => void copy()}
+        >
+          <Icon name={copyStatus === 'copied' ? 'check' : 'copy'} size={14} />
+          <span>{copyStatus === 'idle' ? 'Copy' : statusLabel}</span>
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1235,8 +1002,4 @@ async function copyToClipboard(content: string): Promise<void> {
   const copied = document.execCommand('copy');
   textarea.remove();
   if (!copied) throw new Error('The browser denied clipboard access.');
-}
-
-function defaultBuilderModel(settings: Settings): ModelReference {
-  return settings.default_model_references.chat ?? {};
 }

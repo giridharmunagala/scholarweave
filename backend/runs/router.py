@@ -122,13 +122,19 @@ async def stream_events(
                     event.sequence,
                     event.event_type,
                     event.payload_json,
+                    event.created_at.isoformat(),
                 )
             for event in await container.events.events_after(run_id, cursor):
                 sequence = int(event["sequence"])
                 if sequence <= cursor:
                     continue
                 cursor = sequence
-                yield _sse(sequence, event["event_type"], event["payload"])
+                yield _sse(
+                    sequence,
+                    event["event_type"],
+                    event["payload"],
+                    event.get("created_at"),
+                )
             while True:
                 record = container.runs.get(run_id)
                 if record.status in TERMINAL_STATUSES:
@@ -142,7 +148,12 @@ async def stream_events(
                 if sequence <= cursor:
                     continue
                 cursor = sequence
-                yield _sse(sequence, event["event_type"], event["payload"])
+                yield _sse(
+                    sequence,
+                    event["event_type"],
+                    event["payload"],
+                    event.get("created_at"),
+                )
 
     return StreamingResponse(
         events(),
@@ -154,12 +165,18 @@ async def stream_events(
     )
 
 
-def _sse(sequence: int, event_type: str, payload: dict) -> str:
+def _sse(
+    sequence: int,
+    event_type: str,
+    payload: dict,
+    created_at: str | None = None,
+) -> str:
     data = json.dumps(
         {
             "sequence": sequence,
             "event_type": event_type,
             "payload": payload,
+            "created_at": created_at,
         },
         ensure_ascii=True,
     )

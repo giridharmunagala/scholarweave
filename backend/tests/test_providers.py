@@ -74,6 +74,33 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     assert profile_id not in {profile["id"] for profile in restarted.get("/api/providers").json()}
 
 
+def test_last_chat_model_reference_persists_across_restarts(test_settings) -> None:
+    client = TestClient(create_app(test_settings))
+    reference = {
+        "provider_profile_id": "provider-1",
+        "model": "research-model",
+    }
+
+    updated = client.put(
+        "/api/settings",
+        json={"last_chat_model_reference": reference},
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["last_chat_model_reference"] == reference
+
+    restarted = TestClient(
+        create_app(
+            Settings(
+                data_dir=test_settings.data_dir,
+                workspace_dir=test_settings.workspace_dir,
+                frontend_dist_dir=test_settings.frontend_dist_dir,
+            )
+        )
+    )
+    assert restarted.get("/api/settings").json()["last_chat_model_reference"] == reference
+
+
 def test_provider_validation_does_not_reflect_api_keys(test_settings) -> None:
     client = TestClient(create_app(test_settings))
     secret = "never-reflect-this-key"
