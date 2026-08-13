@@ -274,7 +274,7 @@ export function SourceImages({ sources }: { sources: TimelineSource[] }) {
   if (!images.length) return null;
 
   return (
-    <div className="source-images" aria-label="Images from search results">
+    <div className="source-images" aria-label="Images from search results" tabIndex={images.length > 3 ? 0 : undefined}>
       {images.map((source) => <SourceImage key={`${source.url}:${source.imageUrl}`} source={source} />)}
     </div>
   );

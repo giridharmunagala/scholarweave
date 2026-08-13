@@ -1,7 +1,14 @@
+import { useEffect, useState } from 'react';
 import { Icon } from '../../shared/components/Icons';
 import { ModelSelect, type ModelOption } from '../../shared/components/ModelSelect';
 import { Panel } from '../../shared/components/Ui';
-import { modelIsEnabled, type Provider, type Settings } from './api';
+import {
+  modelIsEnabled,
+  providersApi,
+  type BuiltInSpeechStatus,
+  type Provider,
+  type Settings,
+} from './api';
 
 const CAPABILITIES = [
   {
@@ -22,6 +29,12 @@ const CAPABILITIES = [
     icon: 'scan',
     description: 'Cleans up OCR output on scanned or text-poor pages.',
   },
+  {
+    key: 'speech',
+    label: 'Speech recognition',
+    icon: 'microphone',
+    description: 'Transcribes microphone recordings into chat prompts.',
+  },
 ] as const;
 
 export function ModelDefaultsPanel({
@@ -33,6 +46,51 @@ export function ModelDefaultsPanel({
   providers: Provider[];
   onChange: (settings: Settings) => void;
 }) {
+  const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
+  const [speechBusy, setSpeechBusy] = useState(false);
+  const [confirmSpeechDelete, setConfirmSpeechDelete] = useState(false);
+  const [speechError, setSpeechError] = useState<string | null>(null);
+
+  useEffect(() => {
+    providersApi.builtInSpeechStatus()
+      .then(setBuiltInSpeech)
+      .catch((error) => setSpeechError(String(error)));
+  }, []);
+
+  useEffect(() => {
+    if (builtInSpeech?.state !== 'installing') return;
+    const timer = window.setInterval(() => {
+      void providersApi.builtInSpeechStatus()
+        .then(setBuiltInSpeech)
+        .catch((error) => setSpeechError(String(error)));
+    }, 750);
+    return () => window.clearInterval(timer);
+  }, [builtInSpeech?.state]);
+
+  const installSpeech = async () => {
+    setSpeechBusy(true);
+    setSpeechError(null);
+    try {
+      setBuiltInSpeech(await providersApi.installBuiltInSpeech());
+    } catch (error) {
+      setSpeechError(String(error));
+    } finally {
+      setSpeechBusy(false);
+    }
+  };
+
+  const uninstallSpeech = async () => {
+    setSpeechBusy(true);
+    setSpeechError(null);
+    try {
+      setBuiltInSpeech(await providersApi.uninstallBuiltInSpeech());
+      setConfirmSpeechDelete(false);
+    } catch (error) {
+      setSpeechError(String(error));
+    } finally {
+      setSpeechBusy(false);
+    }
+  };
   const setReference = (capability: string, reference: { provider_profile_id?: string | null; model?: string | null }) => {
     const references = { ...settings.default_model_references };
     if (!reference.provider_profile_id || !reference.model) delete references[capability];
@@ -51,6 +109,87 @@ export function ModelDefaultsPanel({
       description="Inherited whenever an agent, chat, or pipeline does not select an explicit provider and model."
       actions={<span className="tag">{totalModels} enabled models</span>}
     >
+      <div className="builtin-speech-card">
+        <span className="default-model-icon">
+          <Icon name="microphone" size={16} />
+        </span>
+        <div className="builtin-speech-copy">
+          <strong>Built-in speech recognition</strong>
+          <small>
+            Nemotron ASR Streaming 0.6B runs locally with English-only transcription.
+          </small>
+          {builtInSpeech?.state === 'installing' ? (
+            <progress
+              max={builtInSpeech.total_bytes}
+              value={builtInSpeech.downloaded_bytes}
+              aria-label="Downloading built-in speech model"
+            />
+          ) : null}
+          {speechError || builtInSpeech?.error ? (
+            <small className="field-error">{speechError || builtInSpeech?.error}</small>
+          ) : null}
+        </div>
+        <div className="button-row builtin-speech-actions">
+          {builtInSpeech && !builtInSpeech.available ? (
+            <span className="tag">Unavailable</span>
+          ) : builtInSpeech?.state === 'error' ? (
+            <button
+              className="button secondary small"
+              type="button"
+              disabled={speechBusy}
+              onClick={() => void installSpeech()}
+            >
+              Retry install
+            </button>
+          ) : builtInSpeech?.state === 'ready' || builtInSpeech?.state === 'running' ? (
+            confirmSpeechDelete ? (
+              <>
+                <button
+                  className="button danger small"
+                  type="button"
+                  disabled={speechBusy}
+                  onClick={() => void uninstallSpeech()}
+                >
+                  Delete files
+                </button>
+                <button
+                  className="button ghost small"
+                  type="button"
+                  disabled={speechBusy}
+                  onClick={() => setConfirmSpeechDelete(false)}
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="tag">{builtInSpeech.running ? 'Running' : 'Installed'}</span>
+                <button
+                  className="button danger small"
+                  type="button"
+                  disabled={speechBusy}
+                  onClick={() => setConfirmSpeechDelete(true)}
+                >
+                  Delete model
+                </button>
+              </>
+            )
+          ) : (
+            <button
+              className="button secondary small"
+              type="button"
+              disabled={
+                speechBusy
+                || builtInSpeech?.state === 'installing'
+                || builtInSpeech?.available === false
+              }
+              onClick={() => void installSpeech()}
+            >
+              {builtInSpeech?.state === 'installing' ? 'Downloading…' : 'Install built-in model'}
+            </button>
+          )}
+        </div>
+      </div>
       <div className="default-model-grid">
         {CAPABILITIES.map((capability) => {
           const current = settings.default_model_references[capability.key] ?? {};
@@ -88,7 +227,7 @@ export function ModelDefaultsPanel({
   );
 }
 
-export type ModelCapability = 'chat' | 'embedding' | 'vision' | 'tools';
+export type ModelCapability = 'chat' | 'embedding' | 'vision' | 'tools' | 'speech';
 
 export function capabilityOptions(providers: Provider[], capability: ModelCapability): ModelOption[] {
   return providers.flatMap((provider) =>
@@ -96,7 +235,11 @@ export function capabilityOptions(providers: Provider[], capability: ModelCapabi
       .filter(
         (model) =>
           modelIsEnabled(model)
-          && (!model.capabilities?.length || model.capabilities.includes(capability)),
+          && (
+            capability === 'speech'
+              ? model.capabilities?.includes('speech')
+              : !model.capabilities?.length || model.capabilities.includes(capability)
+          ),
       )
       .map((model) => ({
         providerId: provider.id,

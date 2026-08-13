@@ -72,6 +72,22 @@ class ProviderService:
         self._clients.invalidate_profile(profile_id)
         return self._response(record)
 
+    async def transcribe(
+        self,
+        model_reference: ModelReference,
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> str:
+        resolved = self._runtime.resolve("speech", model_reference=model_reference)
+        return await self._runtime.transcribe(
+            resolved,
+            filename=filename,
+            content=content,
+            content_type=content_type,
+        )
+
     async def discover(self, profile_id: str) -> ProviderModelsResponse:
         record = self._repository.get(profile_id)
         existing_enabled = {

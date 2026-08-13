@@ -1,7 +1,7 @@
 import type { components } from '../../api/schema.generated';
 
-export type AgentBlueprint = components['schemas']['AgentBlueprint-Input'];
-export type AgentBlueprintOutput = components['schemas']['AgentBlueprint-Output'];
+export type AgentBlueprint = components['schemas']['AgentBlueprint'];
+export type AgentBlueprintOutput = components['schemas']['AgentBlueprint'];
 export type AgentSpec = components['schemas']['AgentSpec'];
 export type ToolSpec =
   | components['schemas']['FunctionToolSpec']

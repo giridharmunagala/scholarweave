@@ -44,6 +44,12 @@ export function apiUrl(path: string): string {
   return `${API_BASE}${path}`;
 }
 
+export function apiWebSocketUrl(path: string): string {
+  const url = new URL(`${API_BASE}${path}`, window.location.href);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.toString();
+}
+
 async function readError(response: Response): Promise<unknown> {
   try {
     return await response.json();

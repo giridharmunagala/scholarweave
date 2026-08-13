@@ -32,6 +32,7 @@ from backend.providers.runtime import ModelRuntime
 from backend.providers.repository import ProviderRepository
 from backend.providers.sdk_models import ProfileModelResolver, SdkClientPool
 from backend.providers.service import ProviderService
+from backend.providers.builtin_speech import BuiltInSpeechRuntime
 from backend.research import ResearchSearchService, SourceDownloadService
 from backend.documents.retrieval import RetrievalService
 from backend.runs.repository import RunRepository
@@ -58,6 +59,7 @@ class ApplicationServices:
     sdk_clients: SdkClientPool
     model_resolver: ProfileModelResolver
     providers: ProviderService
+    builtin_speech: BuiltInSpeechRuntime
     retrieval: RetrievalService
     research_search: ResearchSearchService
     source_downloads: SourceDownloadService
@@ -84,6 +86,7 @@ class ApplicationServices:
     sdk_version: str = SUPPORTED_SDK_VERSION
 
     async def close(self) -> None:
+        await self.builtin_speech.close()
         await self.documents.close()
         await self.runs.close()
         await self.research_search.close()
@@ -206,6 +209,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         model_resolver,
         sdk_clients,
     )
+    builtin_speech = BuiltInSpeechRuntime(resolved)
     return ApplicationServices(
         settings=resolved,
         session_factory=session_factory,
@@ -216,6 +220,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         sdk_clients=sdk_clients,
         model_resolver=model_resolver,
         providers=providers,
+        builtin_speech=builtin_speech,
         retrieval=retrieval,
         research_search=research_search,
         source_downloads=source_downloads,

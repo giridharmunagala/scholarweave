@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
 
-    searxng_base_url: str = "http://127.0.0.1:8888"
+    searxng_base_url: str = "http://127.0.0.1:32768"
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
     wikipedia_api_url: str = "https://en.wikipedia.org/w/api.php"
     search_user_agent: str = (

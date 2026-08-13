@@ -23,6 +23,7 @@ dependencies = [
   "pypdfium2>=4.30,<5",
   "pytesseract>=0.3.13,<1",
   "python-multipart>=0.0.9,<1",
+  "sherpa-onnx==1.13.5",
   "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.30,<1"
 ]

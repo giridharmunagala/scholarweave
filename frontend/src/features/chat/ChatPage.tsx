@@ -9,8 +9,15 @@ import {
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
+import { ModelSelect } from '../../shared/components/ModelSelect';
 import { EmptyState, ErrorNotice, Loading, StatusPill } from '../../shared/components/Ui';
-import { providersApi, type Provider, type Settings } from '../providers/api';
+import { capabilityOptions } from '../providers/ModelDefaultsPanel';
+import {
+  providersApi,
+  type BuiltInSpeechStatus,
+  type Provider,
+  type Settings,
+} from '../providers/api';
 import {
   chatApi,
   type Conversation,
@@ -45,6 +52,14 @@ const SUGGESTIONS = [
   'Draft research notes with citations for my current topic.',
 ];
 
+export const PROVIDER_TRANSCRIPTION_INTERVAL_MS = 750;
+
+interface BuiltInSpeechMessage {
+  type: 'ready' | 'partial' | 'final' | 'error';
+  text?: string;
+  message?: string;
+}
+
 export default function ChatPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -52,6 +67,9 @@ export default function ChatPage() {
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
   const [modelReference, setModelReference] = useState<ModelReference>({});
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
+  const [speechModelReference, setSpeechModelReference] = useState<ModelReference>({});
+  const [speechMode, setSpeechMode] = useState<'builtin' | 'provider'>('builtin');
+  const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
@@ -60,11 +78,27 @@ export default function ChatPage() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [startingRecording, setStartingRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [speechPreview, setSpeechPreview] = useState<string | null>(null);
+  const [speechFinalFailed, setSpeechFinalFailed] = useState(false);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const microphoneStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const audioChunksRef = useRef<Float32Array[]>([]);
+  const speechPreviewTimerRef = useRef<number | null>(null);
+  const speechSocketRef = useRef<WebSocket | null>(null);
+  const partialTranscriptionBusyRef = useRef(false);
+  const transcriptionRequestRef = useRef(0);
+  const recordingStartPendingRef = useRef(false);
+  const speechMountedRef = useRef(false);
   const openRequestRef = useRef(0);
 
   const refreshList = () => chatApi.list().then(setConversations);
@@ -105,18 +139,52 @@ export default function ChatPage() {
       chatApi.list(),
       providersApi.list(),
       providersApi.settings(),
+      providersApi.builtInSpeechStatus(),
     ])
-      .then(async ([items, nextProviders, nextSettings]) => {
+      .then(async ([items, nextProviders, nextSettings, speechStatus]) => {
         setConversations(items);
         setProviders(nextProviders);
         setSettings(nextSettings);
         const preferredModel = preferredChatModel(nextSettings);
         setPreferredModelReference(preferredModel);
         setModelReference(preferredModel);
+        setSpeechModelReference(nextSettings.default_model_references.speech ?? {});
+        if (
+          nextSettings.default_model_references.speech?.provider_profile_id
+          && nextSettings.default_model_references.speech?.model
+        ) {
+          setSpeechMode('provider');
+        }
+        setBuiltInSpeech(speechStatus);
         if (items[0]) await open(items[0].id);
       })
       .catch(setError)
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => {
+    if (builtInSpeech?.state !== 'installing') return;
+    const timer = window.setInterval(() => {
+      void providersApi.builtInSpeechStatus()
+        .then(setBuiltInSpeech)
+        .catch(setError);
+    }, 750);
+    return () => window.clearInterval(timer);
+  }, [builtInSpeech?.state]);
+
+  useEffect(() => {
+    speechMountedRef.current = true;
+    return () => {
+      speechMountedRef.current = false;
+      if (speechPreviewTimerRef.current !== null) {
+        window.clearInterval(speechPreviewTimerRef.current);
+      }
+      audioProcessorRef.current?.disconnect();
+      audioSourceRef.current?.disconnect();
+      speechSocketRef.current?.close();
+      void audioContextRef.current?.close();
+      microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -289,7 +357,7 @@ export default function ChatPage() {
 
   const send = async (override?: string) => {
     const submitted = (override ?? content).trim();
-    if (!submitted || sending) return;
+    if (!submitted || sending || recording || startingRecording || transcribing || speechPreview !== null) return;
     const request = openRequestRef.current;
     setSending(true);
     setError(null);
@@ -320,6 +388,194 @@ export default function ChatPage() {
       setContent(submitted);
       setOptimisticUser(null);
       setSending(false);
+      setError(nextError);
+    }
+  };
+
+  const transcribeRecording = async (audio: Blob, final: boolean) => {
+    if (!final && partialTranscriptionBusyRef.current) return;
+    const request = ++transcriptionRequestRef.current;
+    if (final) {
+      setTranscribing(true);
+      setSpeechFinalFailed(false);
+      setError(null);
+    } else {
+      partialTranscriptionBusyRef.current = true;
+    }
+    try {
+      const result = await providersApi.transcribe(audio, speechModelReference);
+      if (request === transcriptionRequestRef.current) {
+        setSpeechPreview(result.text.trim());
+      }
+    } catch (nextError) {
+      if (final) setSpeechFinalFailed(true);
+      setError(nextError);
+    } finally {
+      if (final) setTranscribing(false);
+      else partialTranscriptionBusyRef.current = false;
+    }
+  };
+
+  const stopRecording = () => {
+    if (speechPreviewTimerRef.current !== null) {
+      window.clearInterval(speechPreviewTimerRef.current);
+      speechPreviewTimerRef.current = null;
+    }
+    audioProcessorRef.current?.disconnect();
+    audioSourceRef.current?.disconnect();
+    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+    void audioContextRef.current?.close();
+    const chunks = audioChunksRef.current;
+    const sampleRate = audioContextRef.current?.sampleRate ?? 16_000;
+    const speechSocket = speechSocketRef.current;
+    audioProcessorRef.current = null;
+    audioSourceRef.current = null;
+    microphoneStreamRef.current = null;
+    audioContextRef.current = null;
+    audioChunksRef.current = [];
+    setRecording(false);
+    if (speechMode === 'builtin' && speechSocket?.readyState === WebSocket.OPEN) {
+      try {
+        speechSocket.send('finish');
+        setTranscribing(true);
+      } catch (nextError) {
+        setTranscribing(false);
+        setSpeechFinalFailed(true);
+        setError(nextError);
+      }
+    } else if (chunks.length) {
+      void transcribeRecording(encodeWav(chunks, sampleRate), true);
+    }
+  };
+
+  const toggleRecording = async () => {
+    if (recording) {
+      stopRecording();
+      return;
+    }
+    if (recordingStartPendingRef.current) return;
+    recordingStartPendingRef.current = true;
+    setStartingRecording(true);
+    let acquiredStream: MediaStream | null = null;
+    let acquiredContext: AudioContext | null = null;
+    try {
+      setError(null);
+      setSpeechPreview('');
+      setSpeechFinalFailed(false);
+      const microphone = navigator.mediaDevices.getUserMedia({ audio: true });
+      const speechWarmup = speechMode === 'builtin'
+        ? providersApi.startBuiltInSpeech()
+        : Promise.resolve(null);
+      const [microphoneResult, warmupResult] = await Promise.allSettled([
+        microphone,
+        speechWarmup,
+      ]);
+      if (microphoneResult.status !== 'fulfilled') throw microphoneResult.reason;
+      if (warmupResult.status === 'rejected') throw warmupResult.reason;
+      const activeStream = microphoneResult.value;
+      acquiredStream = activeStream;
+      const speechStatus = warmupResult.value;
+      if (speechStatus) setBuiltInSpeech(speechStatus);
+      if (speechMode === 'builtin') {
+        const socket = providersApi.builtInSpeechSocket();
+        speechSocketRef.current = socket;
+        await new Promise<void>((resolve, reject) => {
+          socket.onopen = () => resolve();
+          socket.onerror = () => reject(
+            new Error('Could not connect to the local Nemotron speech stream.'),
+          );
+        });
+        socket.onmessage = (event) => {
+          const message = JSON.parse(String(event.data)) as BuiltInSpeechMessage;
+          if (message.type === 'partial' || message.type === 'final') {
+            setSpeechPreview(message.text?.trim() ?? '');
+          }
+          if (message.type === 'final') {
+            setTranscribing(false);
+            setSpeechFinalFailed(!message.text?.trim());
+            socket.close();
+          } else if (message.type === 'error') {
+            setTranscribing(false);
+            setSpeechFinalFailed(true);
+            setError(new Error(message.message || 'Nemotron transcription failed.'));
+          }
+        };
+        socket.onclose = () => {
+          if (speechSocketRef.current === socket) speechSocketRef.current = null;
+        };
+      }
+      if (!speechMountedRef.current) {
+        activeStream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      const context = new AudioContext({ sampleRate: 16_000 });
+      acquiredContext = context;
+      const source = context.createMediaStreamSource(activeStream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      microphoneStreamRef.current = activeStream;
+      audioContextRef.current = acquiredContext;
+      audioSourceRef.current = source;
+      audioProcessorRef.current = processor;
+      audioChunksRef.current = [];
+      processor.onaudioprocess = (event) => {
+        const samples = new Float32Array(event.inputBuffer.getChannelData(0));
+        const socket = speechSocketRef.current;
+        if (speechMode === 'builtin' && socket?.readyState === WebSocket.OPEN) {
+          socket.send(encodePcm16(samples, context.sampleRate));
+        } else {
+          audioChunksRef.current.push(samples);
+        }
+      };
+      source.connect(processor);
+      processor.connect(context.destination);
+      setRecording(true);
+      if (speechMode === 'provider') {
+        speechPreviewTimerRef.current = window.setInterval(() => {
+          if (!audioChunksRef.current.length) return;
+          void transcribeRecording(
+            encodeWav(audioChunksRef.current, context.sampleRate),
+            false,
+          );
+        }, PROVIDER_TRANSCRIPTION_INTERVAL_MS);
+      }
+    } catch (nextError) {
+      acquiredStream?.getTracks().forEach((track) => track.stop());
+      void acquiredContext?.close();
+      microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
+      microphoneStreamRef.current = null;
+      audioProcessorRef.current?.disconnect();
+      audioSourceRef.current?.disconnect();
+      void audioContextRef.current?.close();
+      audioProcessorRef.current = null;
+      audioSourceRef.current = null;
+      audioContextRef.current = null;
+      speechSocketRef.current?.close();
+      speechSocketRef.current = null;
+      audioChunksRef.current = [];
+      setRecording(false);
+      setSpeechPreview(null);
+      setError(nextError);
+    } finally {
+      recordingStartPendingRef.current = false;
+      if (speechMountedRef.current) setStartingRecording(false);
+    }
+  };
+
+  const acceptSpeechPreview = () => {
+    const transcript = speechPreview?.trim();
+    if (!transcript) return;
+    setContent((currentContent) =>
+      [currentContent.trim(), transcript].filter(Boolean).join(' '),
+    );
+    setSpeechPreview(null);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  };
+
+  const installBuiltInSpeech = async () => {
+    setError(null);
+    try {
+      setBuiltInSpeech(await providersApi.installBuiltInSpeech());
+    } catch (nextError) {
       setError(nextError);
     }
   };
@@ -370,6 +626,15 @@ export default function ChatPage() {
     modelReferenceLabel(modelReference, providers)
     || modelReferenceLabel(settings.default_model_references.chat ?? {}, providers)
     || 'No model configured';
+  const speechOptions = capabilityOptions(providers, 'speech');
+  const builtInSpeechReady =
+    builtInSpeech?.state === 'ready' || builtInSpeech?.state === 'running';
+  const speechModelConfigured = speechMode === 'builtin'
+    ? builtInSpeechReady
+    : Boolean(speechModelReference.provider_profile_id && speechModelReference.model);
+  const speechInstallProgress = builtInSpeech?.total_bytes
+    ? Math.min(100, Math.round(100 * builtInSpeech.downloaded_bytes / builtInSpeech.total_bytes))
+    : 0;
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
   // The active turn has no persisted user message yet, so its trace renders after the optimistic one.
@@ -436,7 +701,7 @@ export default function ChatPage() {
                   className="conversation-delete"
                   title="Delete chat"
                   aria-label={`Delete ${conversation.title}`}
-                  disabled={sending}
+                  disabled={sending || transcribing}
                   onClick={() => void remove(conversation.id)}
                 >
                   <Icon name="trash" size={14} />
@@ -495,7 +760,7 @@ export default function ChatPage() {
                           type="button"
                           className="suggestion"
                           key={suggestion}
-                          disabled={sending}
+                          disabled={sending || speechPreview !== null}
                           onClick={() => void send(suggestion)}
                         >
                           <Icon name="sparkle" size={14} />
@@ -580,18 +845,103 @@ export default function ChatPage() {
                       }}
                       placeholder="Ask for a research outcome…"
                     />
-                    <button
-                      className="button icon composer-send"
-                      type="button"
-                      aria-label="Send message"
-                      disabled={sending || !content.trim()}
-                      onClick={() => void send()}
-                    >
-                      {sending
-                        ? <span className="spinner tiny" aria-hidden="true" />
-                        : <Icon name="arrowRight" size={16} />}
-                    </button>
+                    <div className="composer-actions">
+                      <button
+                        className={`button secondary icon composer-record${recording ? ' recording' : ''}`}
+                        type="button"
+                        aria-label={recording ? 'Stop recording and transcribe' : 'Record speech'}
+                        title={
+                          speechModelConfigured
+                            ? recording ? 'Stop and transcribe' : 'Record speech'
+                            : 'Choose a speech recognition model'
+                        }
+                        disabled={sending || startingRecording || transcribing || !speechModelConfigured}
+                        onClick={() => void toggleRecording()}
+                      >
+                        {startingRecording || transcribing
+                          ? <span className="spinner tiny" aria-hidden="true" />
+                          : <Icon name={recording ? 'stop' : 'microphone'} size={16} />}
+                      </button>
+                      <button
+                        className="button icon composer-send"
+                        type="button"
+                        aria-label="Send message"
+                        disabled={sending || transcribing || speechPreview !== null || !content.trim()}
+                        onClick={() => void send()}
+                      >
+                        {sending
+                          ? <span className="spinner tiny" aria-hidden="true" />
+                          : <Icon name="arrowRight" size={16} />}
+                      </button>
+                    </div>
                   </div>
+                  {speechPreview !== null ? (
+                    <section className="speech-review" aria-live="polite">
+                      <div className="speech-review-head">
+                        <strong>
+                          {recording
+                            ? 'Live transcript'
+                            : transcribing
+                              ? 'Finishing transcript…'
+                              : speechFinalFailed ? 'Transcription incomplete' : 'Review transcript'}
+                        </strong>
+                        {recording ? <span className="recording-dot">Listening</span> : null}
+                      </div>
+                      <textarea
+                        value={speechPreview}
+                        rows={3}
+                        disabled={recording || transcribing}
+                        aria-label="Speech transcript preview"
+                        placeholder={recording ? 'Start speaking…' : 'Waiting for transcription…'}
+                        onChange={(event) => setSpeechPreview(event.target.value)}
+                      />
+                      {speechFinalFailed ? (
+                        <small className="speech-review-error">
+                          The final pass failed, so this partial transcript cannot be accepted. Retry the recording or discard it.
+                        </small>
+                      ) : null}
+                      <div className="button-row speech-review-actions">
+                        {recording ? (
+                          <button className="button small" type="button" onClick={stopRecording}>
+                            <Icon name="stop" size={14} />
+                            Stop
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              className="button small"
+                              type="button"
+                              disabled={transcribing || speechFinalFailed || !speechPreview.trim()}
+                              onClick={acceptSpeechPreview}
+                            >
+                              <Icon name="check" size={14} />
+                              Use transcript
+                            </button>
+                            <button
+                              className="button secondary small"
+                              type="button"
+                              disabled={transcribing}
+                              onClick={() => {
+                                setSpeechPreview(null);
+                                void toggleRecording();
+                              }}
+                            >
+                              <Icon name="refresh" size={14} />
+                              Retry
+                            </button>
+                            <button
+                              className="button ghost small"
+                              type="button"
+                              disabled={transcribing}
+                              onClick={() => setSpeechPreview(null)}
+                            >
+                              Discard
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </section>
+                  ) : null}
                   <div className="composer-footer">
                     <div className="composer-model">
                       <span className="composer-model-label">
@@ -606,6 +956,55 @@ export default function ChatPage() {
                         onChange={selectModel}
                       />
                     </div>
+                    <div className="composer-speech">
+                      <Icon name="microphone" size={13} />
+                      <select
+                        className="speech-source-select"
+                        aria-label="Speech recognition source"
+                        value={speechMode}
+                        disabled={recording || startingRecording || transcribing}
+                        onChange={(event) => setSpeechMode(event.target.value as 'builtin' | 'provider')}
+                      >
+                        <option value="builtin">Nemotron English local</option>
+                        <option value="provider">Provider model</option>
+                      </select>
+                      {speechMode === 'builtin' ? (
+                        !builtInSpeech?.available ? (
+                          <span title={builtInSpeech?.error ?? undefined}>Unavailable</span>
+                        ) : builtInSpeech.state === 'error' ? (
+                          <button
+                            className="button secondary small"
+                            type="button"
+                            onClick={() => void installBuiltInSpeech()}
+                          >
+                            Retry install
+                          </button>
+                        ) : builtInSpeechReady ? (
+                          <span className="speech-ready">Ready</span>
+                        ) : builtInSpeech?.state === 'installing' ? (
+                          <span>Downloading {speechInstallProgress}%</span>
+                        ) : (
+                          <button
+                            className="button secondary small"
+                            type="button"
+                            onClick={() => void installBuiltInSpeech()}
+                          >
+                            Install model
+                          </button>
+                        )
+                      ) : (
+                        <ModelSelect
+                          options={speechOptions}
+                          value={speechModelReference}
+                          disabled={recording || startingRecording || transcribing}
+                          placeholder={speechOptions.length ? 'Speech model' : 'No speech models'}
+                          onChange={(reference) => setSpeechModelReference(reference)}
+                        />
+                      )}
+                      {startingRecording ? <span>Opening microphone…</span> : null}
+                      {recording ? <span>Listening…</span> : null}
+                      {transcribing ? <span>Transcribing…</span> : null}
+                    </div>
                     <span className="composer-hint">
                       <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline
                     </span>
@@ -618,6 +1017,58 @@ export default function ChatPage() {
       </div>
     </div>
   );
+}
+
+export function encodePcm16(
+  samples: Float32Array,
+  inputSampleRate: number,
+  outputSampleRate = 16_000,
+): ArrayBuffer {
+  const outputLength = Math.max(
+    1,
+    Math.round(samples.length * outputSampleRate / inputSampleRate),
+  );
+  const pcm = new Int16Array(outputLength);
+  const ratio = inputSampleRate / outputSampleRate;
+  for (let index = 0; index < outputLength; index += 1) {
+    const sourceIndex = Math.min(samples.length - 1, Math.floor(index * ratio));
+    const sample = Math.max(-1, Math.min(1, samples[sourceIndex]));
+    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return pcm.buffer;
+}
+
+export function encodeWav(chunks: Float32Array[], sampleRate: number): Blob {
+  const sampleCount = chunks.reduce((total, chunk) => total + chunk.length, 0);
+  const buffer = new ArrayBuffer(44 + sampleCount * 2);
+  const view = new DataView(buffer);
+  const writeText = (offset: number, value: string) => {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  };
+  writeText(0, 'RIFF');
+  view.setUint32(4, 36 + sampleCount * 2, true);
+  writeText(8, 'WAVE');
+  writeText(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, 'data');
+  view.setUint32(40, sampleCount * 2, true);
+  let offset = 44;
+  for (const chunk of chunks) {
+    for (const sample of chunk) {
+      const clamped = Math.max(-1, Math.min(1, sample));
+      view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+      offset += 2;
+    }
+  }
+  return new Blob([buffer], { type: 'audio/wav' });
 }
 
 function Message({

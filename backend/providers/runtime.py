@@ -22,7 +22,7 @@ from backend.providers.ollama import OllamaClient, OllamaError
 from backend.providers.schemas import ProviderModel as ProviderModelEntry
 from backend.providers.types import AgentModelDefaults, ModelReference
 
-Capability = Literal["chat", "embedding", "vision", "tools"]
+Capability = Literal["chat", "embedding", "vision", "tools", "speech"]
 OLLAMA_PLACEHOLDER_KEY = "ollama"
 OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "not-required"
 logger = logging.getLogger(__name__)
@@ -128,6 +128,13 @@ class ModelRuntime:
             raise ProviderRuntimeError(
                 f"Model '{model}' is disabled for provider profile '{profile.name}'."
             )
+        if capability == "speech" and (
+            declared_model is None
+            or "speech" not in set(declared_model.get("capabilities") or [])
+        ):
+            raise ProviderRuntimeError(
+                f"Model '{model}' is not configured for speech recognition."
+            )
         return ResolvedModel(
             profile_id=profile.id,
             profile_name=profile.name,
@@ -231,6 +238,29 @@ class ModelRuntime:
             merged = {entry.name: entry for entry in discovered}
             merged.update({entry.name: entry for entry in manual})
         return list(merged.values())
+
+    async def transcribe(
+        self,
+        resolved: ResolvedModel,
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> str:
+        if resolved.kind == "ollama":
+            raise ProviderRuntimeError("Ollama profiles do not support OpenAI audio transcriptions.")
+        try:
+            async with self.client(resolved) as client:
+                response = await client.audio.transcriptions.create(
+                    model=resolved.model,
+                    file=(filename, content, content_type),
+                )
+        except OpenAIError as exc:
+            raise ProviderRuntimeError(f"Speech transcription failed: {exc}") from exc
+        text = response.text.strip()
+        if not text:
+            raise ProviderRuntimeError("The speech model returned an empty transcription.")
+        return text
 
     async def generate(
         self,

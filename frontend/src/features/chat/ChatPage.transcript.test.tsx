@@ -274,6 +274,18 @@ function installFetch() {
       if (url.endsWith('/api/agent/conversations')) return respond([conversationSummary()]);
       if (url.endsWith('/api/providers')) return respond(PROVIDERS);
       if (url.endsWith('/api/settings')) return respond(SETTINGS);
+      if (url.endsWith('/api/providers/speech/builtin/status')) {
+        return respond({
+          state: 'ready',
+          available: true,
+          installed: true,
+          running: false,
+          model: 'nvidia/nemotron-speech-streaming-en-0.6b',
+          downloaded_bytes: 0,
+          total_bytes: 463_945_051,
+          error: null,
+        });
+      }
       if (url.includes(`/api/agent/conversations/${CONVERSATION_ID}/messages`) && method === 'POST') {
         const { content } = JSON.parse(String(init?.body));
         return respond({ conversation: {}, run: server.startRun(content) });

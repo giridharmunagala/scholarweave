@@ -30,7 +30,8 @@ PERSISTED_SETTING_KEYS = {
     "ocr_llm_model",
     "ocr_llm_triage_model",
 }
-MODEL_DEFAULT_CAPABILITIES = {"chat", "embedding", "vision"}
+MODEL_DEFAULT_CAPABILITIES = {"chat", "embedding", "vision", "speech"}
+OPTIONAL_MODEL_SETTING_KEYS = {"ocr_llm_model", "ocr_llm_triage_model"}
 
 
 def _normalize_model_references(value: dict[str, Any]) -> dict[str, Any]:
@@ -39,6 +40,10 @@ def _normalize_model_references(value: dict[str, Any]) -> dict[str, Any]:
         for capability, reference in value.items()
         if capability in MODEL_DEFAULT_CAPABILITIES
     }
+
+
+def _normalize_optional_model(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 class SettingsSchema(BaseModel):
@@ -116,6 +121,10 @@ class SettingsService:
                     if key == "last_chat_model_reference":
                         value = ModelReferenceSpec.model_validate(value).model_dump(mode="json")
                         record.value_json = value
+                    if key in OPTIONAL_MODEL_SETTING_KEYS:
+                        value = _normalize_optional_model(value)
+                        if value is None:
+                            session.delete(record)
                     setattr(self.settings, key, value)
             session.commit()
 
@@ -147,8 +156,10 @@ class SettingsService:
             docling_batch_size=self.settings.docling_batch_size,
             docling_num_threads=self.settings.docling_num_threads,
             ocr_llm_enhancement_enabled=self.settings.ocr_llm_enhancement_enabled,
-            ocr_llm_model=self.settings.ocr_llm_model,
-            ocr_llm_triage_model=self.settings.ocr_llm_triage_model,
+            ocr_llm_model=_normalize_optional_model(self.settings.ocr_llm_model),
+            ocr_llm_triage_model=_normalize_optional_model(
+                self.settings.ocr_llm_triage_model
+            ),
         )
 
     def update(self, payload: SettingsUpdate) -> SettingsResponse:

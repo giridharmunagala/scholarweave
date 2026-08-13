@@ -240,7 +240,7 @@ curl -s http://127.0.0.1:8000/api/health
 ### 1. Model providers
 
 A **provider profile** is a persisted record of `kind`, `base_url`, an optional API key, and a
-model catalogue. Capabilities (`chat`, `embedding`, `vision`) each resolve to a
+model catalogue. Capabilities (`chat`, `embedding`, `vision`, `speech`) each resolve to a
 `(provider_profile_id, model)` reference, so you can run reasoning on a cloud model while
 embeddings stay local — or the reverse.
 
@@ -308,6 +308,21 @@ curl -sX POST http://127.0.0.1:8000/api/providers \
 
 `--jinja` (llama.cpp) matters: tool calling depends on the model's chat template being applied.
 If the server needs a key, set `api_key`; otherwise it is left unset and a placeholder is used.
+
+#### Local streaming speech recognition
+
+The chat composer includes managed, English-only Nemotron ASR Streaming 0.6B recognition.
+Click **Install model** beside the microphone, or use
+**Settings → Models → Built-in speech recognition**. ScholarWeave downloads a pinned,
+checksum-verified INT8 model package into `<data_dir>/speech`, loads it only when needed, and
+reuses the files across application restarts. The same Settings card can unload the model and
+delete all managed speech files.
+
+The browser streams 16 kHz PCM audio to the local recognizer and displays transcription while
+you speak. It requires explicit
+**Use transcript** confirmation before inserting editable text into the chat composer. To use a
+different local or hosted transcription server, switch the composer from **Nemotron English local** to
+**Provider model** and configure an OpenAI-compatible model with the `speech` capability.
 
 #### OpenAI
 

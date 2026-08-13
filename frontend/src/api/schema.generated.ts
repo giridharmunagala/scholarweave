@@ -473,6 +473,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/providers/speech/builtin": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Uninstall Built In Speech */
+        delete: operations["uninstall_built_in_speech_api_providers_speech_builtin_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/speech/builtin/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install Built In Speech */
+        post: operations["install_built_in_speech_api_providers_speech_builtin_install_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/speech/builtin/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Built In Speech */
+        post: operations["start_built_in_speech_api_providers_speech_builtin_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/speech/builtin/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Built In Speech Status */
+        get: operations["built_in_speech_status_api_providers_speech_builtin_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/speech/transcriptions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Transcribe Speech */
+        post: operations["transcribe_speech_api_providers_speech_transcriptions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers/{profile_id}": {
         parameters: {
             query?: never;
@@ -916,40 +1001,7 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** AgentBlueprint */
-        "AgentBlueprint-Input": {
-            /** Agent Tools */
-            agent_tools?: components["schemas"]["AgentToolSpec"][];
-            /** Agents */
-            agents: components["schemas"]["AgentSpec"][];
-            /** Description */
-            description?: string | null;
-            /** Entry Agent Id */
-            entry_agent_id: string;
-            /** Guardrails */
-            guardrails?: components["schemas"]["GuardrailSpec"][];
-            /** Handoffs */
-            handoffs?: components["schemas"]["HandoffSpec"][];
-            /** Name */
-            name: string;
-            run?: components["schemas"]["RunSettingsSpec"];
-            /**
-             * Schema Version
-             * @default 1
-             * @constant
-             */
-            schema_version: 1;
-            /**
-             * Sdk Version
-             * @default 0.19.4
-             * @constant
-             */
-            sdk_version: "0.19.4";
-            session?: components["schemas"]["SessionPolicySpec"];
-            /** Tools */
-            tools?: (components["schemas"]["FunctionToolSpec"] | components["schemas"]["WebSearchToolSpec"] | components["schemas"]["FileSearchToolSpec"])[];
-        };
-        /** AgentBlueprint */
-        "AgentBlueprint-Output": {
+        AgentBlueprint: {
             /** Agent Tools */
             agent_tools?: components["schemas"]["AgentToolSpec"][];
             /** Agents */
@@ -1007,7 +1059,7 @@ export interface components {
         AgentRevisionResponse: {
             /** Agent Id */
             agent_id: string;
-            blueprint: components["schemas"]["AgentBlueprint-Output"];
+            blueprint: components["schemas"]["AgentBlueprint"];
             /**
              * Created At
              * Format: date-time
@@ -1085,7 +1137,7 @@ export interface components {
         };
         /** AgentWriteRequest */
         AgentWriteRequest: {
-            blueprint: components["schemas"]["AgentBlueprint-Input"];
+            blueprint: components["schemas"]["AgentBlueprint"];
             /** Presentation */
             presentation?: {
                 [key: string]: unknown;
@@ -1125,6 +1177,15 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
+        /** Body_transcribe_speech_api_providers_speech_transcriptions_post */
+        Body_transcribe_speech_api_providers_speech_transcriptions_post: {
+            /** File */
+            file: string;
+            /** Model */
+            model: string;
+            /** Provider Profile Id */
+            provider_profile_id: string;
+        };
         /** Body_upload_document_api_documents_post */
         Body_upload_document_api_documents_post: {
             /** File */
@@ -1140,6 +1201,31 @@ export interface components {
              * @default New builder chat
              */
             title: string;
+        };
+        /** BuiltInSpeechStatus */
+        BuiltInSpeechStatus: {
+            /** Available */
+            available: boolean;
+            /**
+             * Downloaded Bytes
+             * @default 0
+             */
+            downloaded_bytes: number;
+            /** Error */
+            error?: string | null;
+            /** Installed */
+            installed: boolean;
+            /** Model */
+            model: string;
+            /** Running */
+            running: boolean;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "not_installed" | "installing" | "ready" | "running" | "error";
+            /** Total Bytes */
+            total_bytes: number;
         };
         /** ConversationCreateRequest */
         ConversationCreateRequest: {
@@ -1791,7 +1877,7 @@ export interface components {
         /** ProviderModel */
         ProviderModel: {
             /** Capabilities */
-            capabilities?: ("chat" | "embedding" | "vision" | "tools")[];
+            capabilities?: ("chat" | "embedding" | "vision" | "tools" | "speech")[];
             /**
              * Enabled
              * @default true
@@ -1906,7 +1992,7 @@ export interface components {
         RunCreateRequest: {
             /** Agent Revision Id */
             agent_revision_id?: string | null;
-            blueprint?: components["schemas"]["AgentBlueprint-Input"] | null;
+            blueprint?: components["schemas"]["AgentBlueprint"] | null;
             /** Conversation Id */
             conversation_id?: string | null;
             /** Input */
@@ -2225,6 +2311,11 @@ export interface components {
              * @enum {string}
              */
             type: "tool_search_output_item";
+        };
+        /** TranscriptionResponse */
+        TranscriptionResponse: {
+            /** Text */
+            text: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -2563,7 +2654,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AgentBlueprint-Input"];
+                "application/json": components["schemas"]["AgentBlueprint"];
             };
         };
         responses: {
@@ -2602,7 +2693,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AgentBlueprint-Output"][];
+                    "application/json": components["schemas"]["AgentBlueprint"][];
                 };
             };
         };
@@ -2616,7 +2707,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AgentBlueprint-Input"];
+                "application/json": components["schemas"]["AgentBlueprint"];
             };
         };
         responses: {
@@ -3469,6 +3560,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    uninstall_built_in_speech_api_providers_speech_builtin_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
+                };
+            };
+        };
+    };
+    install_built_in_speech_api_providers_speech_builtin_install_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
+                };
+            };
+        };
+    };
+    start_built_in_speech_api_providers_speech_builtin_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
+                };
+            };
+        };
+    };
+    built_in_speech_status_api_providers_speech_builtin_status_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
+                };
+            };
+        };
+    };
+    transcribe_speech_api_providers_speech_transcriptions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_transcribe_speech_api_providers_speech_transcriptions_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TranscriptionResponse"];
                 };
             };
             /** @description Validation Error */

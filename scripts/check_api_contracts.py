@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -22,7 +23,12 @@ def main() -> None:
         )
         subprocess.run(
             [
-                str(FRONTEND / "node_modules" / ".bin" / "openapi-typescript"),
+                str(
+                    FRONTEND
+                    / "node_modules"
+                    / ".bin"
+                    / ("openapi-typescript.cmd" if os.name == "nt" else "openapi-typescript")
+                ),
                 str(generated_openapi),
                 "-o",
                 str(generated_types),
