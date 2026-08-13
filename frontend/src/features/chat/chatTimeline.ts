@@ -10,6 +10,7 @@ export interface TimelineSource {
   url: string;
   title: string;
   host: string;
+  imageUrl?: string;
 }
 
 export interface ReasoningStep {
@@ -402,11 +403,24 @@ function walk(value: unknown, depth: number, found: TimelineSource[]): void {
 
   const url = firstString(value, ['url', 'link', 'href', 'source_url', 'pdf_url']);
   if (url) {
-    const source = toSource(url, firstString(value, TITLE_KEYS));
+    const source = toSource(
+      url,
+      firstString(value, TITLE_KEYS),
+      firstHttpUrl(value, ['image_url', 'imageUrl', 'thumbnail', 'thumbnail_url', 'img_src']),
+    );
     if (source) found.push(source);
   }
   for (const [key, entry] of Object.entries(value)) {
-    if (key === 'url' || key === 'link' || key === 'href') continue;
+    if ([
+      'url',
+      'link',
+      'href',
+      'image_url',
+      'imageUrl',
+      'thumbnail',
+      'thumbnail_url',
+      'img_src',
+    ].includes(key)) continue;
     walk(entry, depth + 1, found);
   }
 }
@@ -419,7 +433,16 @@ function firstString(record: Record<string, unknown>, keys: string[]): string | 
   return null;
 }
 
-function toSource(url: string, title: string | null): TimelineSource | null {
+function firstHttpUrl(record: Record<string, unknown>, keys: string[]): string | undefined {
+  const value = firstString(record, keys);
+  return value && /^https?:\/\//i.test(value) ? value : undefined;
+}
+
+function toSource(
+  url: string,
+  title: string | null,
+  imageUrl?: string,
+): TimelineSource | null {
   const cleaned = url.replace(/[.,;]+$/, '');
   if (!/^https?:\/\//i.test(cleaned)) return null;
   let host = '';
@@ -429,17 +452,24 @@ function toSource(url: string, title: string | null): TimelineSource | null {
     return null;
   }
   if (!host) return null;
-  return { url: cleaned, title: title || host, host };
+  return { url: cleaned, title: title || host, host, ...(imageUrl ? { imageUrl } : {}) };
 }
 
 export function dedupeSources(sources: TimelineSource[]): TimelineSource[] {
   const seen = new Map<string, TimelineSource>();
   for (const source of sources) {
     const existing = seen.get(source.url);
-    // A later mention with a real title beats an earlier bare link.
-    if (!existing || (existing.title === existing.host && source.title !== source.host)) {
+    if (!existing) {
       seen.set(source.url, source);
+      continue;
     }
+    seen.set(source.url, {
+      ...existing,
+      ...(existing.title === existing.host && source.title !== source.host
+        ? { title: source.title }
+        : {}),
+      ...(source.imageUrl ? { imageUrl: source.imageUrl } : {}),
+    });
   }
   return [...seen.values()];
 }

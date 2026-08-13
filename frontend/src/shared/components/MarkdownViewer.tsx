@@ -2,19 +2,39 @@ import { useEffect, useRef, useState, type ComponentPropsWithoutRef } from 'reac
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
 import { Icon } from './Icons';
 
 const MARKDOWN_COMPONENTS: Components = { img: MarkdownImage, table: MarkdownTable };
+const SAFE_HTML_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    div: [
+      ...(defaultSchema.attributes?.div ?? []),
+      ['className', 'math', 'math-display'],
+    ],
+    span: [
+      ...(defaultSchema.attributes?.span ?? []),
+      ['className', 'math', 'math-inline'],
+    ],
+  },
+};
 
 export function MarkdownViewer({ content }: { content: string }) {
   return (
     <article className="markdown-viewer">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[
+          rehypeRaw,
+          [rehypeSanitize, SAFE_HTML_SCHEMA],
+          rehypeKatex,
+        ]}
         components={MARKDOWN_COMPONENTS}
       >
         {normalizeModelMath(content)}

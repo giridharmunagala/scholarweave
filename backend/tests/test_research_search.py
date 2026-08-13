@@ -33,6 +33,7 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
                             "url": "https://example.test/result",
                             "content": "Useful &amp; public",
                             "engine": "example",
+                            "thumbnail": "/searx/image_proxy?url=https%3A%2F%2Fimages.example.test%2Fresult.jpg",
                         }
                     ]
                 },
@@ -99,6 +100,7 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
         "snippet": "Useful & public",
         "engine": "example",
         "published_at": None,
+        "image_url": "https://search.test/searx/image_proxy?url=https%3A%2F%2Fimages.example.test%2Fresult.jpg",
     }
     assert arxiv["results"][0]["arxiv_id"] == "2601.00001v1"
     assert arxiv["results"][0]["authors"] == ["Ada Researcher"]

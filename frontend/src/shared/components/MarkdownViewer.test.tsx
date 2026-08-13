@@ -47,4 +47,21 @@ describe('MarkdownViewer', () => {
     expect(html).toContain('[ x = y ]');
     expect(html).not.toContain('class="katex');
   });
+
+  it('renders safe embedded HTML and removes executable markup', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownViewer
+        content={
+          '<details open onclick="alert(1)"><summary>Derivation</summary><p>Use <em>verified</em> evidence.</p></details>\n\n<script>alert(2)</script><a href="javascript:alert(3)">Unsafe link</a>'
+        }
+      />,
+    );
+
+    expect(html).toContain('<details open="">');
+    expect(html).toContain('<summary>Derivation</summary>');
+    expect(html).toContain('<em>verified</em>');
+    expect(html).not.toContain('onclick');
+    expect(html).not.toContain('<script');
+    expect(html).not.toContain('javascript:');
+  });
 });

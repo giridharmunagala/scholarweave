@@ -7,6 +7,7 @@ import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -70,9 +71,10 @@ class ResearchSearchService:
 
     async def search_web(self, query: str, limit: int) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
+        search_url = f"{self._settings.searxng_base_url.rstrip('/')}/search"
         payload = await self._post_json(
             "web",
-            f"{self._settings.searxng_base_url.rstrip('/')}/search",
+            search_url,
             data={
                 "q": query,
                 "format": "json",
@@ -94,6 +96,7 @@ class ResearchSearchService:
                     "snippet": _clean_text(item.get("content")),
                     "engine": str(item.get("engine") or ""),
                     "published_at": item.get("publishedDate"),
+                    "image_url": _result_image_url(item, search_url),
                 }
             )
             if len(results) == limit:
@@ -277,3 +280,14 @@ def _clean_text(value: Any) -> str:
 def _element_text(element: ET.Element, path: str) -> str:
     child = element.find(path, _ATOM)
     return _clean_text(child.text if child is not None else "")
+
+
+def _result_image_url(item: dict[str, Any], search_url: str) -> str | None:
+    for key in ("thumbnail", "img_src", "thumbnail_src"):
+        value = item.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        resolved = urljoin(search_url, value.strip())
+        if urlparse(resolved).scheme in {"http", "https"}:
+            return resolved
+    return None

@@ -536,6 +536,44 @@
 
 /* ------------------------------------------------------------- Sources --- */
 
+.source-images {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+.source-image {
+  position: relative;
+  min-height: 7rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  color: white;
+  text-decoration: none;
+}
+.source-image:hover { border-color: var(--border-strong); }
+.source-image img {
+  display: block;
+  width: 100%;
+  height: 9rem;
+  object-fit: cover;
+  transition: transform var(--dur-fast) var(--ease);
+}
+.source-image:hover img { transform: scale(1.02); }
+.source-image span {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  padding: 1.5rem .55rem .45rem;
+  background: linear-gradient(transparent, rgb(0 0 0 / 78%));
+  font-size: var(--text-xs);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .source-chips { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: var(--space-2); }
 .source-chips.compact { margin-top: 0; }
 .source-chip {

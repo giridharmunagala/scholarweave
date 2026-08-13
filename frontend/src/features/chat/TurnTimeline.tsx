@@ -269,6 +269,41 @@ export function SourceChips({
   );
 }
 
+export function SourceImages({ sources }: { sources: TimelineSource[] }) {
+  const images = sources.filter((source) => source.imageUrl);
+  if (!images.length) return null;
+
+  return (
+    <div className="source-images" aria-label="Images from search results">
+      {images.map((source) => <SourceImage key={`${source.url}:${source.imageUrl}`} source={source} />)}
+    </div>
+  );
+}
+
+function SourceImage({ source }: { source: TimelineSource }) {
+  const [failed, setFailed] = useState(false);
+  if (!source.imageUrl || failed) return null;
+
+  return (
+    <a
+      className="source-image"
+      href={source.url}
+      target="_blank"
+      rel="noreferrer"
+      title={`${source.title} — ${source.host}`}
+    >
+      <img
+        src={source.imageUrl}
+        alt={source.title}
+        loading="lazy"
+        decoding="async"
+        onError={() => setFailed(true)}
+      />
+      <span>{source.title}</span>
+    </a>
+  );
+}
+
 /** A stable colour per host, derived locally so no favicon request ever leaves the machine. */
 function hostTint(host: string): { background: string; color: string } {
   let hash = 0;

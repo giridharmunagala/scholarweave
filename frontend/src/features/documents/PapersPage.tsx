@@ -8,6 +8,7 @@ import './papers.css';
 
 type Document = components['schemas']['DocumentResponse'];
 type Artifact = Document['artifacts'][number];
+type DocumentChunk = Document['chunks'][number];
 type ArtifactContent = components['schemas']['ArtifactContentResponse'];
 type IngestionOptions = components['schemas']['IngestionOptionsResponse'];
 type IngestionMode = IngestionOptions['recommended_mode'];
@@ -33,6 +34,35 @@ type SavedWebNote = {
 
 function displayKind(kind: string): string {
   return kind.split('_').join(' ');
+}
+
+function chunkLabel(chunk: DocumentChunk): string {
+  if (chunk.section_title?.trim()) {
+    return chunk.citation.trim()
+      ? `${chunk.citation} · ${chunk.section_title}`
+      : chunk.section_title;
+  }
+  if (chunk.citation.trim()) return chunk.citation;
+  return chunk.page_start === chunk.page_end
+    ? `Page ${chunk.page_start}`
+    : `Pages ${chunk.page_start}–${chunk.page_end}`;
+}
+
+export function ExtractionChunks({ chunks }: { chunks: DocumentChunk[] }) {
+  if (!chunks.length) return null;
+  return (
+    <section className="extraction-chunks">
+      <span className="eyebrow">Extracted text</span>
+      <div className="chunk-list">
+        {chunks.map((chunk) => (
+          <details className="disclosure" key={chunk.id} open>
+            <summary>{chunkLabel(chunk)}</summary>
+            <p>{chunk.text}</p>
+          </details>
+        ))}
+      </div>
+    </section>
+  );
 }
 
 function ingestionStatus(document: Document): string {
@@ -763,16 +793,7 @@ export default function PapersPage() {
                   </div>
                 </section>
               ) : null}
-              {!ingesting ? (
-                <div className="chunk-list">
-                  {selected.chunks.map((chunk) => (
-                    <details className="disclosure" key={chunk.id}>
-                      <summary>{chunk.citation}</summary>
-                      <p>{chunk.text}</p>
-                    </details>
-                  ))}
-                </div>
-              ) : null}
+              {!ingesting ? <ExtractionChunks chunks={selected.chunks} /> : null}
             </div>
           ) : (
             <EmptyState

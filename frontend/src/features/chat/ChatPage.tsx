@@ -35,7 +35,7 @@ import {
   type TimelineSource,
   type TurnTimeline,
 } from './chatTimeline';
-import { SourceChips, TurnTimelineView } from './TurnTimeline';
+import { SourceChips, SourceImages, TurnTimelineView } from './TurnTimeline';
 import './chat.css';
 
 const SUGGESTIONS = [
@@ -653,6 +653,7 @@ function Message({
         />
         <MarkdownViewer content={text} />
         {streaming ? <i className="stream-cursor" aria-hidden="true" /> : null}
+        {isAssistant && sources?.length ? <SourceImages sources={sources} /> : null}
         {isAssistant && sources?.length ? <SourceChips sources={sources} /> : null}
         {isAssistant ? (
           <MessageActions

@@ -161,6 +161,8 @@
 .artifact-preview-content { max-height: 68vh; overflow: auto; padding: var(--space-5); }
 .artifact-source { color: var(--text); }
 
+.extraction-chunks { display: grid; gap: var(--space-2); min-width: 0; }
+.extraction-chunks > .eyebrow { margin: 0; }
 .chunk-list { display: grid; gap: var(--space-1); max-height: 52vh; overflow: auto; }
 .chunk-list p { margin: 0; font-size: var(--text-sm); white-space: pre-wrap; }
 

@@ -72,7 +72,11 @@ function buildTurn(turn: Turn, runId: string) {
         raw_item: { call_id: callId },
         output: {
           results: [
-            { title: 'Dense retrieval survey', url: 'https://arxiv.org/abs/2401.00001' },
+            {
+              title: 'Dense retrieval survey',
+              url: 'https://arxiv.org/abs/2401.00001',
+              image_url: 'https://images.example.test/dense-retrieval.jpg',
+            },
             { title: 'RAG benchmarks', url: 'https://openreview.net/forum?id=abc' },
           ],
         },
@@ -463,6 +467,9 @@ describe('chat transcript detail', () => {
     const links = [...answerSources!.querySelectorAll('a')].map((link) => link.getAttribute('href'));
     expect(links).toContain('https://arxiv.org/abs/2401.00001');
     expect(links).toContain('https://openreview.net/forum?id=abc');
+    const resultImage = container.querySelector('.message.role-assistant .source-image img');
+    expect(resultImage?.getAttribute('src')).toBe('https://images.example.test/dense-retrieval.jpg');
+    expect(resultImage?.getAttribute('alt')).toBe('Dense retrieval survey');
   });
 
   it('rebuilds the trace for turns whose live stream was never seen', async () => {
