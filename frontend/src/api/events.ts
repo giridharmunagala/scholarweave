@@ -25,6 +25,8 @@ export const RUN_EVENT_TYPES = [
   'tool.completed',
   'tool.failed',
   'builder.todos.updated',
+  'extended.plan.updated',
+  'extended.note.saved',
   'handoff.completed',
   'guardrail.result',
   'guardrail.tripwire',

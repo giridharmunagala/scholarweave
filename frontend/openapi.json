@@ -1,7 +1,7 @@
 {
   "components": {
     "schemas": {
-      "AgentBlueprint": {
+      "AgentBlueprint-Input": {
         "additionalProperties": false,
         "properties": {
           "agent_tools": {
@@ -14,7 +14,121 @@
           },
           "agents": {
             "items": {
-              "$ref": "#/components/schemas/AgentSpec"
+              "$ref": "#/components/schemas/AgentSpec-Input"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Agents",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "entry_agent_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Entry Agent Id",
+            "type": "string"
+          },
+          "guardrails": {
+            "items": {
+              "$ref": "#/components/schemas/GuardrailSpec"
+            },
+            "maxItems": 100,
+            "title": "Guardrails",
+            "type": "array"
+          },
+          "handoffs": {
+            "items": {
+              "$ref": "#/components/schemas/HandoffSpec"
+            },
+            "maxItems": 200,
+            "title": "Handoffs",
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunSettingsSpec"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "sdk_version": {
+            "const": "0.19.4",
+            "default": "0.19.4",
+            "title": "Sdk Version",
+            "type": "string"
+          },
+          "session": {
+            "$ref": "#/components/schemas/SessionPolicySpec"
+          },
+          "tools": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "file_search": "#/components/schemas/FileSearchToolSpec",
+                  "function": "#/components/schemas/FunctionToolSpec",
+                  "web_search": "#/components/schemas/WebSearchToolSpec"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/FunctionToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/WebSearchToolSpec"
+                },
+                {
+                  "$ref": "#/components/schemas/FileSearchToolSpec"
+                }
+              ]
+            },
+            "maxItems": 200,
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "entry_agent_id",
+          "agents"
+        ],
+        "title": "AgentBlueprint",
+        "type": "object"
+      },
+      "AgentBlueprint-Output": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_tools": {
+            "items": {
+              "$ref": "#/components/schemas/AgentToolSpec"
+            },
+            "maxItems": 200,
+            "title": "Agent Tools",
+            "type": "array"
+          },
+          "agents": {
+            "items": {
+              "$ref": "#/components/schemas/AgentSpec-Output"
             },
             "maxItems": 100,
             "minItems": 1,
@@ -175,7 +289,7 @@
             "type": "string"
           },
           "blueprint": {
-            "$ref": "#/components/schemas/AgentBlueprint"
+            "$ref": "#/components/schemas/AgentBlueprint-Output"
           },
           "created_at": {
             "format": "date-time",
@@ -212,7 +326,124 @@
         "title": "AgentRevisionResponse",
         "type": "object"
       },
-      "AgentSpec": {
+      "AgentSpec-Input": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 4000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+            "title": "Id",
+            "type": "string"
+          },
+          "input_guardrail_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Input Guardrail Ids",
+            "type": "array"
+          },
+          "instructions": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Instructions",
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "model_settings": {
+            "$ref": "#/components/schemas/ModelSettingsSpec"
+          },
+          "name": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "output": {
+            "anyOf": [
+              {
+                "discriminator": {
+                  "mapping": {
+                    "json_schema": "#/components/schemas/JsonOutputSpec"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/JsonOutputSpec"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "output_guardrail_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Output Guardrail Ids",
+            "type": "array"
+          },
+          "reset_tool_choice": {
+            "default": true,
+            "title": "Reset Tool Choice",
+            "type": "boolean"
+          },
+          "tool_ids": {
+            "items": {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
+              "type": "string"
+            },
+            "maxItems": 100,
+            "title": "Tool Ids",
+            "type": "array"
+          },
+          "tool_use_behavior": {
+            "default": "run_llm_again",
+            "enum": [
+              "run_llm_again",
+              "stop_on_first_tool"
+            ],
+            "title": "Tool Use Behavior",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "instructions"
+        ],
+        "title": "AgentSpec",
+        "type": "object"
+      },
+      "AgentSpec-Output": {
         "additionalProperties": false,
         "properties": {
           "description": {
@@ -420,7 +651,7 @@
         "additionalProperties": false,
         "properties": {
           "blueprint": {
-            "$ref": "#/components/schemas/AgentBlueprint"
+            "$ref": "#/components/schemas/AgentBlueprint-Input"
           },
           "presentation": {
             "additionalProperties": true,
@@ -756,6 +987,35 @@
             "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "work_mode": {
+            "default": "direct",
+            "enum": [
+              "direct",
+              "extended"
+            ],
+            "title": "Work Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -1016,6 +1276,26 @@
             "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
           }
         },
         "required": [
@@ -2180,6 +2460,16 @@
             ],
             "title": "Presence Penalty"
           },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "temperature": {
             "anyOf": [
               {
@@ -2366,6 +2656,29 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "reasoning_efforts": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Efforts"
           }
         },
         "required": [
@@ -2664,6 +2977,33 @@
         "title": "ReasoningRunItem",
         "type": "object"
       },
+      "ReasoningSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          }
+        },
+        "title": "ReasoningSpec",
+        "type": "object"
+      },
       "RemotePdfDownloadRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2709,7 +3049,7 @@
           "blueprint": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/AgentBlueprint"
+                "$ref": "#/components/schemas/AgentBlueprint-Input"
               },
               {
                 "type": "null"
@@ -2741,6 +3081,26 @@
               }
             ],
             "title": "Input"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
           }
         },
         "required": [
@@ -3227,7 +3587,26 @@
         "type": "object"
       },
       "SessionPolicySpec": {
-        "properties": {},
+        "properties": {
+          "history_max_items": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 2.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "History Max Items"
+          },
+          "messages_only": {
+            "default": false,
+            "title": "Messages Only",
+            "type": "boolean"
+          }
+        },
         "title": "SessionPolicySpec",
         "type": "object"
       },
@@ -3354,6 +3733,14 @@
             "title": "Retrieval Max Context Chars",
             "type": "integer"
           },
+          "user_profile": {
+            "title": "User Profile",
+            "type": "string"
+          },
+          "user_timezone": {
+            "title": "User Timezone",
+            "type": "string"
+          },
           "workspace_dir": {
             "title": "Workspace Dir",
             "type": "string"
@@ -3370,6 +3757,8 @@
           "last_chat_model_reference",
           "request_timeout_seconds",
           "agent_tracing_enabled",
+          "user_timezone",
+          "user_profile",
           "python_tool_enabled",
           "python_tool_timeout_seconds",
           "python_tool_memory_mb",
@@ -3617,6 +4006,31 @@
               }
             ],
             "title": "Retrieval Max Context Chars"
+          },
+          "user_profile": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Profile"
+          },
+          "user_timezone": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Timezone"
           }
         },
         "title": "SettingsUpdate",
@@ -4491,7 +4905,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentBlueprint"
+                "$ref": "#/components/schemas/AgentBlueprint-Input"
               }
             }
           },
@@ -4534,7 +4948,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/AgentBlueprint"
+                    "$ref": "#/components/schemas/AgentBlueprint-Output"
                   },
                   "title": "Response Templates Api Agents Templates Get",
                   "type": "array"
@@ -4557,7 +4971,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AgentBlueprint"
+                "$ref": "#/components/schemas/AgentBlueprint-Input"
               }
             }
           },

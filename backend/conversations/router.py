@@ -74,6 +74,7 @@ async def send_conversation_message(
         payload.content,
         agent_revision_id=record.agent_revision_id,
         conversation_id=conversation_id,
+        reasoning_effort=payload.reasoning_effort,
     )
     return ConversationMessageResponse(
         conversation=_response(container.conversations.get(conversation_id)),
@@ -143,7 +144,12 @@ async def send_autonomous_message(
     record = container.autonomous.get_conversation(conversation_id)
     if record.kind != "autonomous":
         raise ValueError("Conversation is not an autonomous-agent chat.")
-    run = container.autonomous.start_message(conversation_id, payload.content)
+    run = container.autonomous.start_message(
+        conversation_id,
+        payload.content,
+        reasoning_effort=payload.reasoning_effort,
+        work_mode=payload.work_mode,
+    )
     return ConversationMessageResponse(
         conversation=_response(container.autonomous.get_conversation(conversation_id)),
         run=run_response(container.runs.get(run.id)),
@@ -200,7 +206,11 @@ async def send_builder_message(
     record = container.builder.get_conversation(conversation_id)
     if record.kind != "builder":
         raise ValueError("Conversation is not a builder chat.")
-    run = container.builder.start_message(conversation_id, payload.content)
+    run = container.builder.start_message(
+        conversation_id,
+        payload.content,
+        reasoning_effort=payload.reasoning_effort,
+    )
     return ConversationMessageResponse(
         conversation=_response(container.builder.get_conversation(conversation_id)),
         run=run_response(container.runs.get(run.id)),

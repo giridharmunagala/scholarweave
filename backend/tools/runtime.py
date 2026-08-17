@@ -9,12 +9,21 @@ from backend.agents.blueprint import AgentBlueprint
 from backend.agents.catalog import ToolCatalog
 from backend.agents.service import AgentService
 from backend.agents.templates import starter_blueprints
+from backend.autonomous.work import (
+    create_work_plan,
+    list_work_notes,
+    read_work_note,
+    save_work_note,
+    update_work_item,
+)
 from backend.builder.todos import (
     create_builder_todo_plan,
     finish_builder_run,
     update_builder_todo,
 )
 from backend.core.config import Settings
+from backend.core.text import clean_filename
+from backend.conversations.memory import ConversationMemoryService
 from backend.documents import DocumentService
 from backend.documents.paper import manifest_pages
 from backend.direct_agents.repository import DirectAgentRepository
@@ -24,6 +33,7 @@ from backend.persistence.files import SafeStorage
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService
 from backend.tools.service import FunctionToolService
+from backend.tools.sandbox import SandboxLimits, run_python
 from backend.core.json import dumps_json
 from backend.workspace.service import WorkspaceService
 
@@ -43,6 +53,7 @@ class ApplicationToolRuntime:
         function_tool_service: FunctionToolService | None = None,
         tool_catalog: ToolCatalog | None = None,
         direct_agent_repository: DirectAgentRepository | None = None,
+        conversation_memory: ConversationMemoryService | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -55,6 +66,7 @@ class ApplicationToolRuntime:
         self._function_tools = function_tool_service
         self._catalog = tool_catalog
         self._direct_agents = direct_agent_repository
+        self._conversation_memory = conversation_memory
 
     async def invoke(
         self,
@@ -66,6 +78,11 @@ class ApplicationToolRuntime:
             "builder.todos.create": create_builder_todo_plan,
             "builder.todos.update": update_builder_todo,
             "builder.finish": finish_builder_run,
+            "extended.plan.create": create_work_plan,
+            "extended.plan.update": update_work_item,
+            "extended.notes.save": self._save_extended_work_note,
+            "extended.notes.list": list_work_notes,
+            "extended.notes.read": read_work_note,
             "tools.search": self._search_tools,
             "research.pages.read_all": self._read_all_paper_pages,
             "research.pages.read_retained": self._read_retained_paper_pages,
@@ -99,6 +116,9 @@ class ApplicationToolRuntime:
             "workspace.paper.ensure": self._ensure_paper_workspace,
             "workspace.paper.name.set": self._set_paper_workspace_name,
             "artifacts.write": self._write_artifact,
+            "conversation.memory.search": self._search_conversation_memory,
+            "conversation.memory.read": self._read_conversation_memory,
+            "python.execute": self._execute_python,
             "sdk.catalog": self._sdk_catalog,
             "agents.list": self._list_agents,
             "agents.get": self._get_agent,
@@ -114,8 +134,59 @@ class ApplicationToolRuntime:
             result = await result
         if catalog_id in {"builder.todos.create", "builder.todos.update"}:
             await context.emit("builder.todos.updated", result)
+        if catalog_id in {"extended.plan.create", "extended.plan.update"}:
+            await context.emit("extended.plan.updated", result)
+        if catalog_id == "extended.notes.save":
+            await context.emit("extended.note.saved", result)
         await context.emit("tool.application_completed", {"catalog_id": catalog_id})
         return result
+
+    def _search_conversation_memory(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        memory = self._require_conversation_memory()
+        query = str(arguments["query"]).strip()
+        matches = memory.search(
+            query,
+            exclude_conversation_id=context.conversation_id,
+            limit=int(arguments["limit"]),
+        )
+        return {
+            "query": query,
+            "matches": matches,
+            "reuse_guidance": (
+                "Read and reuse only when the request, assumptions, and evidence clearly match. "
+                "Otherwise update the work."
+            ),
+        }
+
+    def _read_conversation_memory(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return self._require_conversation_memory().read(str(arguments["run_id"]))
+
+    async def _execute_python(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        if not self._settings.python_tool_enabled:
+            raise ValueError("Sandboxed Python execution is disabled in Settings.")
+        result = await run_python(
+            str(arguments["code"]),
+            dict(arguments["inputs"]),
+            limits=SandboxLimits(
+                timeout_seconds=self._settings.python_tool_timeout_seconds,
+                memory_mb=self._settings.python_tool_memory_mb,
+            ),
+            allowed_imports=self._settings.python_tool_allowed_imports,
+            entrypoint="compute",
+        )
+        return {"output": result.value, "stdout": result.stdout}
 
     def _search_tools(
         self,
@@ -757,6 +828,38 @@ class ApplicationToolRuntime:
             "kind": document.kind,
         }
 
+    def _save_extended_work_note(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        result = save_work_note(arguments, context)
+        sources = list(result["sources"])
+        source_section = (
+            "\n\n## Sources\n\n" + "\n".join(f"- {source}" for source in sources)
+            if sources
+            else ""
+        )
+        folder = clean_filename(context.run_id)
+        filename = clean_filename(f"{result['note_id']}-{result['title']}")
+        path = f"extended-work-notes/{folder}/{filename}.md"
+        try:
+            document = self._workspace.write_file(
+                path,
+                f"# {result['title']}\n\n{result['content']}{source_section}\n",
+                tags=["extended-work", f"run:{context.run_id}"],
+            )
+        except Exception:
+            notes = context.metadata.get("extended_work_notes")
+            if isinstance(notes, dict):
+                notes.pop(result["note_id"], None)
+            raise
+        self._append_workspace_receipt(context, document, "Created")
+        return {
+            **result,
+            "workspace_path": document.path,
+        }
+
     def _set_paper_workspace_name(
         self,
         arguments: dict[str, Any],
@@ -997,6 +1100,11 @@ class ApplicationToolRuntime:
         if self._function_tools is None:
             raise RuntimeError("Function-tool authoring is not configured.")
         return self._function_tools
+
+    def _require_conversation_memory(self) -> ConversationMemoryService:
+        if self._conversation_memory is None:
+            raise RuntimeError("Conversation memory is unavailable.")
+        return self._conversation_memory
 
     def _require_direct_agents(self) -> DirectAgentRepository:
         if self._direct_agents is None:

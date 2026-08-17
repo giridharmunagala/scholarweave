@@ -6,6 +6,7 @@ import {
   formatStepDuration,
   humanizeToolName,
   type ReasoningStep,
+  type AgentStep,
   type TimelineSource,
   type ToolStep,
   type TurnStep,
@@ -20,6 +21,7 @@ import {
 
 type TimelineRow =
   | { kind: 'reasoning'; step: ReasoningStep }
+  | { kind: 'agent'; step: AgentStep }
   | { kind: 'tools'; steps: ToolStep[] }
   | { kind: 'handoff'; step: Extract<TurnStep, { kind: 'handoff' }> };
 
@@ -29,6 +31,7 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
     <div className="turn-timeline" aria-label="Agent activity">
       {groupSteps(timeline.steps).map((row) => {
         if (row.kind === 'reasoning') return <ReasoningRow key={row.step.id} step={row.step} />;
+        if (row.kind === 'agent') return <AgentRow key={row.step.id} step={row.step} />;
         if (row.kind === 'handoff') {
           return (
             <div className="timeline-row static" key={row.step.id}>
@@ -62,6 +65,10 @@ function groupSteps(steps: TurnStep[]): TimelineRow[] {
     if (step.kind === 'reasoning') {
       if (!step.text.trim()) continue;
       rows.push({ kind: 'reasoning', step });
+      continue;
+    }
+    if (step.kind === 'agent') {
+      rows.push({ kind: 'agent', step });
       continue;
     }
     rows.push({ kind: 'handoff', step });
@@ -113,6 +120,44 @@ function ReasoningRow({ step }: { step: ReasoningStep }) {
         >
           <MarkdownViewer content={step.text} />
           {step.streaming ? <i className="stream-cursor" aria-hidden="true" /> : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AgentRow({ step }: { step: AgentStep }) {
+  const [open, setOpen] = useState(step.status === 'running');
+  const wasRunningRef = useRef(step.status === 'running');
+  const elapsed = formatStepDuration(step.seconds);
+
+  useLayoutEffect(() => {
+    if (wasRunningRef.current && step.status === 'completed') setOpen(false);
+    wasRunningRef.current = step.status === 'running';
+  }, [step.status]);
+
+  return (
+    <div className={`timeline-row agent${open ? ' open' : ''}${step.status === 'running' ? ' live' : ''}`}>
+      <button type="button" className="timeline-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+        {step.status === 'running'
+          ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />
+          : <Icon className="timeline-glyph" name="agents" size={15} />}
+        <span className="timeline-label">
+          <span className="timeline-lead">Sub-agent:</span>
+          <strong>{step.name}</strong>
+          {elapsed ? <small>{elapsed}</small> : null}
+        </span>
+        <Icon className="timeline-chevron" name="arrowRight" size={13} />
+      </button>
+      {open ? (
+        <div className="timeline-detail agent">
+          {step.output == null ? (
+            <p className="tool-detail-note">Working in a focused context…</p>
+          ) : typeof step.output === 'string' ? (
+            <MarkdownViewer content={step.output} />
+          ) : (
+            <pre>{formatPayload(step.output)}</pre>
+          )}
         </div>
       ) : null}
     </div>

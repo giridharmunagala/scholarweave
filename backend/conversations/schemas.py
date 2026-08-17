@@ -5,7 +5,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.agents.blueprint import ModelReferenceSpec, SessionPolicySpec
+from backend.agents.blueprint import (
+    ModelReferenceSpec,
+    ReasoningEffort,
+    SessionPolicySpec,
+)
 from backend.runs.schemas import RunResponse
 
 
@@ -49,6 +53,8 @@ class ConversationDetailResponse(ConversationResponse):
 
 class ConversationMessageRequest(ConversationSchema):
     content: str = Field(min_length=1, max_length=100_000)
+    reasoning_effort: ReasoningEffort | None = None
+    work_mode: Literal["direct", "extended"] = "direct"
 
 
 class ConversationMessageResponse(ConversationSchema):

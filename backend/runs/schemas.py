@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.agents.blueprint import AgentBlueprint
+from backend.agents.blueprint import AgentBlueprint, ReasoningEffort
 
 
 class RunSchema(BaseModel):
@@ -156,6 +156,7 @@ class RunCreateRequest(RunSchema):
     blueprint: AgentBlueprint | None = None
     input: str | list[dict[str, Any]]
     conversation_id: str | None = None
+    reasoning_effort: ReasoningEffort | None = None
 
     @model_validator(mode="after")
     def require_one_agent_source(self) -> "RunCreateRequest":

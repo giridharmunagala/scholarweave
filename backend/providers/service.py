@@ -5,6 +5,7 @@ from openai import OpenAIError
 
 from backend.providers.errors import ProviderDiscoveryError, ProviderRuntimeError
 from backend.providers.ollama import OllamaError
+from backend.providers.reasoning import infer_reasoning_efforts
 from backend.providers.runtime import ModelRuntime
 from backend.providers.repository import ProviderRepository
 from backend.providers.schemas import (
@@ -47,7 +48,10 @@ class ProviderService:
             kind=payload.kind,
             base_url=payload.base_url.rstrip("/"),
             api_key=payload.api_key or None,
-            models_json=[model.model_dump(mode="json") for model in payload.models],
+            models_json=[
+                self._with_inferred_reasoning(payload.kind, model).model_dump(mode="json")
+                for model in payload.models
+            ],
             state="active",
         )
         return self._response(record)
@@ -55,8 +59,12 @@ class ProviderService:
     def update(self, profile_id: str, payload: ProviderUpdate) -> ProviderResponse:
         values = payload.model_dump(exclude_unset=True)
         if "models" in values:
+            provider_kind = values.get("kind") or self._repository.get(profile_id).kind
             values["models_json"] = [
-                ProviderModel.model_validate(model).model_dump(mode="json")
+                self._with_inferred_reasoning(
+                    provider_kind,
+                    ProviderModel.model_validate(model),
+                ).model_dump(mode="json")
                 for model in values.pop("models")
             ]
         if values.get("base_url"):
@@ -90,8 +98,8 @@ class ProviderService:
 
     async def discover(self, profile_id: str) -> ProviderModelsResponse:
         record = self._repository.get(profile_id)
-        existing_enabled = {
-            str(item["name"]): bool(item.get("enabled", record.kind != "azure_openai"))
+        existing_models = {
+            str(item["name"]): item
             for item in (record.models_json or [])
             if item.get("name")
         }
@@ -100,20 +108,13 @@ class ProviderService:
         except ProviderDiscoveryError as exc:
             return ProviderModelsResponse(
                 models=[
-                    ProviderModel(name=entry.name, capabilities=entry.capabilities)
+                    self._merge_discovered_model(record.kind, entry, existing_models)
                     for entry in exc.manual_models
                 ],
                 discovery_error=f"{type(exc).__name__}: {exc}",
             )
         discovered_models = [
-            ProviderModel(
-                name=entry.name,
-                capabilities=entry.capabilities,
-                enabled=existing_enabled.get(
-                    entry.name,
-                    record.kind != "azure_openai",
-                ),
-            )
+            self._merge_discovered_model(record.kind, entry, existing_models)
             for entry in entries
         ]
         self._repository.update(
@@ -257,15 +258,53 @@ class ProviderService:
             api_key_set=bool(record.api_key),
             state=record.state,
             models=[
-                ProviderModel.model_validate({
-                    **item,
-                    "enabled": item.get(
-                        "enabled",
-                        record.kind != "azure_openai",
-                    ),
-                })
+                ProviderService._with_inferred_reasoning(
+                    record.kind,
+                    ProviderModel.model_validate({
+                        **item,
+                        "enabled": item.get(
+                            "enabled",
+                            record.kind != "azure_openai",
+                        ),
+                    }),
+                )
                 for item in (record.models_json or [])
             ],
             created_at=record.created_at,
             updated_at=record.updated_at,
+        )
+
+    @staticmethod
+    def _with_inferred_reasoning(
+        provider_kind: str,
+        model: ProviderModel,
+    ) -> ProviderModel:
+        if model.reasoning_efforts is not None:
+            return model
+        return model.model_copy(
+            update={
+                "reasoning_efforts": infer_reasoning_efforts(provider_kind, model.name),
+            }
+        )
+
+    @staticmethod
+    def _merge_discovered_model(
+        provider_kind: str,
+        discovered: ProviderModel,
+        existing_models: dict[str, dict],
+    ) -> ProviderModel:
+        existing = existing_models.get(discovered.name, {})
+        reasoning_efforts = (
+            existing.get("reasoning_efforts")
+            if "reasoning_efforts" in existing
+            else discovered.reasoning_efforts
+        )
+        return ProviderService._with_inferred_reasoning(
+            provider_kind,
+            ProviderModel(
+                name=discovered.name,
+                capabilities=discovered.capabilities,
+                reasoning_efforts=reasoning_efforts,
+                enabled=bool(existing.get("enabled", provider_kind != "azure_openai")),
+            ),
         )

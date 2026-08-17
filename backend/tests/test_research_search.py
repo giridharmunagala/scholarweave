@@ -17,6 +17,10 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+def test_default_searxng_endpoint_matches_local_setup() -> None:
+    assert Settings.model_fields["searxng_base_url"].default == "http://127.0.0.1:8888"
+
+
 @pytest.mark.anyio
 async def test_search_providers_return_normalized_cited_results(tmp_path) -> None:
     requests: list[httpx.Request] = []

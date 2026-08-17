@@ -50,6 +50,32 @@ async def test_builtin_catalog_builds_sdk_function_tool() -> None:
     assert tool.name == "list_documents"
 
 
+@pytest.mark.anyio
+async def test_builtin_tools_unwrap_nested_agent_tool_context() -> None:
+    catalog = create_tool_catalog()
+    tool = catalog.build_function_tool(
+        FunctionToolSpec(id="list", catalog_id="documents.list")
+    )
+    runtime = Runtime()
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=runtime)
+    nested_context = SimpleNamespace(context=SimpleNamespace(context=context))
+
+    output = await tool.on_invoke_tool(nested_context, "{}")
+
+    assert output == {"ok": True}
+    assert runtime.calls == [("documents.list", {}, "run-1")]
+
+
+def test_extended_note_schema_avoids_unsupported_array_constraints() -> None:
+    catalog = create_tool_catalog()
+    tool = catalog.build_function_tool(
+        FunctionToolSpec(id="note", catalog_id="extended.notes.save")
+    )
+
+    sources = tool.params_json_schema["properties"]["sources"]
+    assert sources == {"type": "array", "items": {"type": "string"}}
+
+
 @pytest.mark.parametrize("catalog_id", ["workspace.write", "artifacts.write"])
 def test_builtin_json_content_tools_define_array_items(catalog_id: str) -> None:
     catalog = create_tool_catalog()

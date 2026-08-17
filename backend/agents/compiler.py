@@ -26,9 +26,11 @@ from backend.agents.catalog import GuardrailCatalog, ToolCatalog
 from backend.agents.instructions import with_global_agent_instructions
 from backend.agents.output import JsonSchemaOutput
 from backend.core.errors import ValidationError
+from backend.core.config import Settings
 from backend.providers.errors import ProviderRuntimeError
 from backend.providers.types import AgentModelResolver, ModelReference, ResolvedAgentModel
 from backend.runtime.context import ScholarWeaveContext
+from backend.runtime.hooks import ScholarWeaveRunHooks
 from backend.runtime.sdk_compat import assert_supported_sdk
 
 
@@ -49,10 +51,12 @@ class AgentCompiler:
         model_resolver: AgentModelResolver,
         tool_catalog: ToolCatalog,
         guardrail_catalog: GuardrailCatalog | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._models = model_resolver
         self._tools = tool_catalog
         self._guardrails = guardrail_catalog or GuardrailCatalog()
+        self._settings = settings
 
     def compile(self, blueprint: AgentBlueprint) -> CompiledAgent:
         assert_supported_sdk()
@@ -85,7 +89,11 @@ class AgentCompiler:
             agents_by_id[spec.id] = Agent[ScholarWeaveContext](
                 name=spec.name,
                 handoff_description=spec.description,
-                instructions=with_global_agent_instructions(spec.instructions),
+                instructions=with_global_agent_instructions(
+                    spec.instructions,
+                    timezone_name=self._settings.user_timezone if self._settings else None,
+                    user_profile=self._settings.user_profile if self._settings else None,
+                ),
                 model=resolved.model,
                 model_settings=self._model_settings(spec.model_settings, resolved),
                 output_type=output_type,
@@ -126,6 +134,7 @@ class AgentCompiler:
                     tool_name=spec.tool_name,
                     tool_description=spec.tool_description,
                     max_turns=spec.max_turns,
+                    hooks=ScholarWeaveRunHooks(),
                     needs_approval=spec.needs_approval,
                 )
             )
@@ -220,6 +229,11 @@ class AgentCompiler:
             parallel_tool_calls=parallel,
             truncation=spec.truncation,
             max_tokens=spec.max_tokens,
+            reasoning=(
+                spec.reasoning.model_dump(exclude_none=True)
+                if spec.reasoning is not None
+                else None
+            ),
             verbosity=spec.verbosity,
             include_usage=True,
         )

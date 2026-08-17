@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,7 +30,7 @@ class Settings(BaseSettings):
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
 
-    searxng_base_url: str = "http://127.0.0.1:32768"
+    searxng_base_url: str = "http://127.0.0.1:8888"
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
     wikipedia_api_url: str = "https://en.wikipedia.org/w/api.php"
     search_user_agent: str = (
@@ -44,6 +45,8 @@ class Settings(BaseSettings):
     max_temporary_web_sources: int = Field(default=20, ge=1, le=100)
 
     agent_tracing_enabled: bool = False
+    user_timezone: str = "Asia/Kolkata"
+    user_profile: str = "Based in Hyderabad, Telangana, India."
 
     python_tool_enabled: bool = True
     python_tool_timeout_seconds: float = 10.0
@@ -88,6 +91,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_paths(self) -> "Settings":
+        try:
+            ZoneInfo(self.user_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown user timezone '{self.user_timezone}'.") from exc
         self.data_dir = self.data_dir.resolve()
         self.workspace_dir = self.workspace_dir.resolve()
         self.frontend_dist_dir = self.frontend_dist_dir.resolve()

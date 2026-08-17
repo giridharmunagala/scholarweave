@@ -14,6 +14,7 @@ from backend.autonomous import AutonomousAgentService
 from backend.builder.service import BuilderService
 from backend.core.config import Settings
 from backend.conversations.repository import ConversationRepository
+from backend.conversations.memory import ConversationMemoryService
 from backend.conversations.service import ConversationService
 from backend.core.settings_service import SettingsService
 from backend.documents import DocumentService
@@ -78,6 +79,7 @@ class ApplicationServices:
     agents: AgentService
     sdk_sessions: SdkSessionFactory
     conversations: ConversationService
+    conversation_memory: ConversationMemoryService
     events: EventBroker
     runs: RunService
     builder: BuilderService
@@ -165,7 +167,12 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     )
     tool_catalog.register_dynamic_factory(function_tools.dynamic_factory)
     guardrail_catalog = create_guardrail_catalog()
-    compiler = AgentCompiler(model_resolver, tool_catalog, guardrail_catalog)
+    compiler = AgentCompiler(
+        model_resolver,
+        tool_catalog,
+        guardrail_catalog,
+        settings=resolved,
+    )
     agents = AgentService(AgentRepository(session_factory), compiler)
 
     sdk_sessions = SdkSessionFactory(resolved.database_path)
@@ -173,6 +180,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         ConversationRepository(session_factory),
         sdk_sessions,
     )
+    conversation_memory = ConversationMemoryService(session_factory)
     direct_agent_repository = DirectAgentRepository(session_factory)
     events = EventBroker()
     tool_runtime = ApplicationToolRuntime(
@@ -187,6 +195,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         function_tool_service=function_tools,
         tool_catalog=tool_catalog,
         direct_agent_repository=direct_agent_repository,
+        conversation_memory=conversation_memory,
     )
     runs = RunService(
         RunRepository(session_factory),
@@ -239,6 +248,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         agents=agents,
         sdk_sessions=sdk_sessions,
         conversations=conversations,
+        conversation_memory=conversation_memory,
         events=events,
         runs=runs,
         builder=builder,

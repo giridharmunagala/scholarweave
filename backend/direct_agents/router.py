@@ -104,6 +104,7 @@ async def send_direct_message(
         payload.content,
         agent_revision_id=None,
         conversation_id=conversation_id,
+        reasoning_effort=payload.reasoning_effort,
         runtime_metadata={
             "direct_agent_key": scope.agent_key,
             "direct_agent_document_ids": list(scope.document_ids_json or []),

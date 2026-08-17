@@ -16,8 +16,7 @@ body {
   color: var(--text);
   font-family: var(--font-sans);
   font-size: var(--text-base);
-  line-height: 1.55;
-  -webkit-font-smoothing: antialiased;
+  line-height: 1.6;
   text-rendering: optimizeLegibility;
 }
 
@@ -31,6 +30,7 @@ a:hover { text-decoration: underline; }
 
 h1, h2, h3, h4, p { margin-top: 0; }
 h1, h2, h3, h4 { color: var(--text-strong); line-height: 1.2; }
+h1, h2, h3, h4, p, li, dd, dt, label, button, a { overflow-wrap: anywhere; }
 h1 { margin-bottom: var(--space-2); font-size: clamp(1.45rem, 2.2vw, 1.95rem); font-weight: 700; letter-spacing: -.025em; }
 h2 { font-size: var(--text-lg); font-weight: 650; letter-spacing: -.012em; }
 h3 { font-size: var(--text-base); font-weight: 650; }

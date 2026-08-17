@@ -52,6 +52,7 @@ async def create_run(
         payload.input,
         agent_revision_id=payload.agent_revision_id,
         conversation_id=payload.conversation_id,
+        reasoning_effort=payload.reasoning_effort,
     )
     return run_response(container.runs.get(record.id))
 
@@ -90,10 +91,8 @@ async def resolve_interruption(
     container=Depends(services),
 ) -> RunResponse:
     record = container.runs.get(run_id)
-    compiled = (
-        container.agents.compile_revision(record.agent_revision_id)
-        if record.agent_revision_id
-        else container.compiler.compile(AgentBlueprint.model_validate(record.blueprint_json))
+    compiled = container.compiler.compile(
+        AgentBlueprint.model_validate(record.blueprint_json)
     )
     updated = await container.runs.resolve_interruption(
         compiled,

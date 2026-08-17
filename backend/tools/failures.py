@@ -6,7 +6,7 @@ from typing import Any
 from agents.tool import with_function_tool_failure_error_handler
 from agents.tool_context import ToolContext
 
-from backend.runtime.context import ScholarWeaveContext
+from backend.runtime.context import ScholarWeaveContext, unwrap_scholar_context
 
 _FAILURES_KEY = "_recoverable_tool_failures"
 
@@ -38,8 +38,9 @@ def consume_tool_failure(
     context: Any,
     tool_name: str,
 ) -> dict[str, str] | None:
-    scholar_context = getattr(context, "context", None)
-    if not isinstance(scholar_context, ScholarWeaveContext):
+    try:
+        scholar_context = unwrap_scholar_context(context)
+    except TypeError:
         return None
     failures = scholar_context.metadata.get(_FAILURES_KEY)
     if not isinstance(failures, dict):
@@ -55,10 +56,11 @@ def _record_failure(
     tool_name: str,
     error: Exception,
 ) -> None:
-    failures = context.context.metadata.setdefault(_FAILURES_KEY, {})
+    scholar_context = unwrap_scholar_context(context)
+    failures = scholar_context.metadata.setdefault(_FAILURES_KEY, {})
     if not isinstance(failures, dict):
         failures = {}
-        context.context.metadata[_FAILURES_KEY] = failures
+        scholar_context.metadata[_FAILURES_KEY] = failures
     failures[_tool_call_key(context, tool_name)] = {
         "error_type": type(error).__name__,
         "error": str(error) or type(error).__name__,

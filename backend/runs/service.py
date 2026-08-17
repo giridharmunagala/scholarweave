@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 from agents import (
     InputGuardrailTripwireTriggered,
+    ModelSettings,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
@@ -17,12 +19,13 @@ from agents import (
     ToolOutputGuardrailTripwireTriggered,
 )
 
+from backend.agents.blueprint import ReasoningEffort, ReasoningSpec
 from backend.agents.compiler import CompiledAgent
 from backend.runs.broker import EventBroker
 from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
 from backend.runs.repository import RunRepository
-from backend.runtime.context import ScholarWeaveContext, ToolRuntime
+from backend.runtime.context import ScholarWeaveContext, ToolReceipt, ToolRuntime
 from backend.runtime.hooks import ScholarWeaveRunHooks
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
@@ -34,6 +37,25 @@ GuardrailTripwire = (
     | ToolInputGuardrailTripwireTriggered
     | ToolOutputGuardrailTripwireTriggered
 )
+
+
+def _with_reasoning_effort(
+    compiled: CompiledAgent,
+    reasoning_effort: ReasoningEffort | None,
+) -> CompiledAgent:
+    if reasoning_effort is None:
+        return compiled
+
+    reasoning = {"effort": reasoning_effort}
+    inherited = compiled.run_config.model_settings or ModelSettings()
+    run_config = replace(
+        compiled.run_config,
+        model_settings=inherited.resolve(ModelSettings(reasoning=reasoning)),
+    )
+    blueprint = compiled.blueprint.model_copy(deep=True)
+    for agent in blueprint.agents:
+        agent.model_settings.reasoning = ReasoningSpec(effort=reasoning_effort)
+    return replace(compiled, blueprint=blueprint, run_config=run_config)
 
 
 class RunService:
@@ -64,8 +86,10 @@ class RunService:
         *,
         agent_revision_id: str | None,
         conversation_id: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
         runtime_metadata: dict[str, Any] | None = None,
     ):
+        compiled = _with_reasoning_effort(compiled, reasoning_effort)
         record = self._repository.create(
             agent_revision_id=agent_revision_id,
             conversation_id=conversation_id,
@@ -154,11 +178,29 @@ class RunService:
         if interruption.run_id != run_id or interruption.status != "pending":
             raise ValueError("The interruption is not pending for this run.")
         sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+        serialized_context = record.state_json.get("context", {}).get("context", {})
+        serialized_context = serialized_context if isinstance(serialized_context, dict) else {}
+        raw_metadata = serialized_context.get("metadata")
+        raw_receipts = serialized_context.get("receipts")
         live_context = ScholarWeaveContext(
             run_id=run_id,
             conversation_id=record.conversation_id,
             tool_runtime=self._tool_runtime,
             event_sink=sink,
+            metadata=dict(raw_metadata) if isinstance(raw_metadata, dict) else {},
+            receipts=[
+                ToolReceipt(
+                    kind=str(receipt.get("kind") or ""),
+                    title=str(receipt.get("title") or ""),
+                    description=str(receipt.get("description") or ""),
+                    href=receipt.get("href")
+                    if isinstance(receipt.get("href"), str)
+                    else None,
+                    metadata=dict(receipt.get("metadata") or {}),
+                )
+                for receipt in raw_receipts or []
+                if isinstance(receipt, dict)
+            ],
         )
         state = await RunState.from_json(
             compiled.entry_agent,
@@ -370,6 +412,17 @@ class RunService:
                 context_serializer=lambda context: {
                     "run_id": context.run_id,
                     "conversation_id": context.conversation_id,
+                    "metadata": to_jsonable(context.metadata),
+                    "receipts": [
+                        {
+                            "kind": receipt.kind,
+                            "title": receipt.title,
+                            "description": receipt.description,
+                            "href": receipt.href,
+                            "metadata": to_jsonable(receipt.metadata),
+                        }
+                        for receipt in context.receipts
+                    ],
                 }
             )
             for item in result.interruptions:

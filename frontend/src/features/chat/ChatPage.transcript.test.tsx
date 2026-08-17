@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { RouterProvider } from '../../app/router';
 
 /**
  * Long research turns emit several assistant messages and a burst of tool calls, and later
@@ -11,6 +12,7 @@ import { createRoot, type Root } from 'react-dom/client';
  */
 
 const CONVERSATION_ID = 'conv-1';
+const NEW_CONVERSATION_ID = 'conv-new';
 
 interface Turn {
   input: string;
@@ -153,12 +155,16 @@ const BUILT = TURNS.map((turn, index) => buildTurn(turn, `run-${index + 1}`));
 class FakeServer {
   sessionItems: Record<string, unknown>[] = [];
   runs: Record<string, any>[] = [];
+  reasoningEfforts: Array<string | null> = [];
+  workModes: string[] = [];
   turnIndex = 0;
   listeners = new Map<string, FakeEventSource>();
 
   reset() {
     this.sessionItems = [];
     this.runs = [];
+    this.reasoningEfforts = [];
+    this.workModes = [];
     this.turnIndex = 0;
     this.listeners.clear();
   }
@@ -196,6 +202,14 @@ class FakeServer {
     run.items = BUILT[index].items;
     run.started_at = new Date().toISOString();
     run.finished_at = new Date().toISOString();
+    run.usage = {
+      performance: {
+        input_tokens: 1200 + index,
+        output_tokens: 300 + index,
+        input_tokens_estimated: false,
+        output_tokens_estimated: false,
+      },
+    };
     this.sessionItems.push(...BUILT[index].sessionItems);
   }
 }
@@ -234,7 +248,9 @@ class FakeEventSource {
   }
 }
 
-const SETTINGS = { default_model_references: { chat: { provider_id: 'p1', model: 'gemini' } } };
+const SETTINGS = {
+  default_model_references: { chat: { provider_profile_id: 'p1', model: 'gemini' } },
+};
 const PROVIDERS = [
   {
     id: 'p1',
@@ -242,7 +258,12 @@ const PROVIDERS = [
     kind: 'openai_compatible',
     base_url: null,
     archived: false,
-    models: [{ id: 'gemini', name: 'gemini', enabled: true }],
+    models: [{
+      id: 'gemini',
+      name: 'gemini',
+      enabled: true,
+      reasoning_efforts: ['low', 'medium', 'high'],
+    }],
   },
 ];
 
@@ -250,10 +271,10 @@ function respond(body: unknown) {
   return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) } as Response);
 }
 
-function conversationSummary() {
+function conversationSummary(id = CONVERSATION_ID) {
   return {
-    id: CONVERSATION_ID,
-    title: 'Recorded chat',
+    id,
+    title: id === NEW_CONVERSATION_ID ? 'Brand new chat' : 'Recorded chat',
     kind: 'autonomous',
     agent_revision_id: null,
     model_reference: SETTINGS.default_model_references.chat,
@@ -271,6 +292,9 @@ function installFetch() {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
+      if (url.endsWith('/api/agent/conversations') && method === 'POST') {
+        return respond(conversationSummary(NEW_CONVERSATION_ID));
+      }
       if (url.endsWith('/api/agent/conversations')) return respond([conversationSummary()]);
       if (url.endsWith('/api/providers')) return respond(PROVIDERS);
       if (url.endsWith('/api/settings')) return respond(SETTINGS);
@@ -287,11 +311,26 @@ function installFetch() {
         });
       }
       if (url.includes(`/api/agent/conversations/${CONVERSATION_ID}/messages`) && method === 'POST') {
-        const { content } = JSON.parse(String(init?.body));
+        const {
+          content,
+          reasoning_effort = null,
+          work_mode = 'direct',
+        } = JSON.parse(String(init?.body));
+        server.reasoningEfforts.push(reasoning_effort);
+        server.workModes.push(work_mode);
         return respond({ conversation: {}, run: server.startRun(content) });
+      }
+      if (url.includes(`/api/agent/conversations/${NEW_CONVERSATION_ID}/messages`) && method === 'POST') {
+        const { content } = JSON.parse(String(init?.body));
+        const run = server.startRun(content);
+        run.conversation_id = NEW_CONVERSATION_ID;
+        return respond({ conversation: {}, run });
       }
       if (url.endsWith(`/api/agent/conversations/${CONVERSATION_ID}`)) {
         return respond({ ...conversationSummary(), items: server.sessionItems });
+      }
+      if (url.endsWith(`/api/agent/conversations/${NEW_CONVERSATION_ID}`)) {
+        return respond({ ...conversationSummary(NEW_CONVERSATION_ID), items: [] });
       }
       if (url.includes('/api/runs?conversation_id=')) return respond(server.runs);
       const runMatch = /\/api\/runs\/([^/?]+)$/.exec(url);
@@ -320,8 +359,11 @@ describe('chat transcript detail', () => {
 
   beforeEach(() => {
     server.reset();
+    localStorage.clear();
+    window.history.replaceState({}, '', '/');
     installFetch();
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
+    vi.stubGlobal('scrollTo', vi.fn());
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -336,7 +378,11 @@ describe('chat transcript detail', () => {
   const mount = async (ChatPage: () => JSX.Element) => {
     root = createRoot(container);
     await act(async () => {
-      root.render(<ChatPage />);
+      root.render(
+        <RouterProvider>
+          <ChatPage />
+        </RouterProvider>,
+      );
     });
     await flush();
   };
@@ -357,6 +403,14 @@ describe('chat transcript detail', () => {
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flush(2);
+  };
+
+  const openSettings = async () => {
+    await act(async () => {
+      container
+        .querySelector('.chat-settings-toggle')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
   };
 
   /** Play one turn end to end: stream its events, then persist and close the run. */
@@ -406,6 +460,87 @@ describe('chat transcript detail', () => {
     expect(container.querySelectorAll('.turn-timeline')).toHaveLength(TURNS.length);
     expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
     expect(text(container.querySelectorAll('.turn-timeline')[0])).toContain('Searched');
+  });
+
+  it('keeps latest context usage visible after the request completes', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await runTurn(0);
+
+    expect(text(container.querySelector('.run-context-usage'))).toContain('1.2K context');
+    expect(text(container.querySelector('.context-usage-card'))).toContain('context tokens consumed');
+    expect(text(container.querySelector('.context-usage-card'))).toContain('1.5K');
+  });
+
+  it('sends the selected reasoning effort with each turn', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    expect(container.querySelector('.chat-settings-content')).toBeNull();
+    expect(container.querySelector('.conversation-list')).toBeNull();
+    await openSettings();
+
+    const select = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Reasoning effort"]',
+    )!;
+    expect(Array.from(select.options, (option) => option.value)).toEqual([
+      '',
+      'low',
+      'medium',
+      'high',
+    ]);
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(select, 'high');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    await send('Use deeper reasoning');
+
+    expect(server.reasoningEfforts).toEqual(['high']);
+    expect(localStorage.getItem('scholarweave-reasoning-effort')).toBe('high');
+  });
+
+  it('persists and sends extended work mode', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await openSettings();
+    const select = Array.from(container.querySelectorAll<HTMLSelectElement>('.chat-settings select'))
+      .find((candidate) => Array.from(candidate.options).some((option) => option.value === 'extended'))!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(select, 'extended');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await send('Compare these concerns separately');
+
+    expect(server.workModes).toEqual(['extended']);
+    expect(localStorage.getItem('scholarweave:chat-work-mode')).toBe('extended');
+  });
+
+  it('keeps a newly created chat selected after submitting with Enter', async () => {
+    window.history.replaceState({}, '', '/?new=1');
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const textarea = container.querySelector('textarea')!;
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!;
+    await act(async () => {
+      setter.call(textarea, 'Start a separate investigation');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    });
+    await flush(3);
+
+    expect(window.location.search).toBe(`?conversation=${NEW_CONVERSATION_ID}`);
+    expect(text(container.querySelector('.chat-header-title strong'))).toBe('Brand new chat');
   });
 
   it('streams the trace live and keeps it expandable once settled', async () => {

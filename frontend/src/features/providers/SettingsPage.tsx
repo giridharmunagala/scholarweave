@@ -3,13 +3,14 @@ import { Icon, type IconName } from '../../shared/components/Icons';
 import { ErrorNotice, Loading, PageHeader } from '../../shared/components/Ui';
 import { ModelDefaultsPanel } from './ModelDefaultsPanel';
 import { ProviderProfilesPanel } from './ProviderProfilesPanel';
-import { DocumentsPanel, RuntimePanel } from './SettingsSections';
+import { DocumentsPanel, ProfilePanel, RuntimePanel } from './SettingsSections';
 import { providersApi, type Provider, type Settings } from './api';
 import './providers.css';
 
-type SectionKey = 'models' | 'providers' | 'documents' | 'runtime';
+type SectionKey = 'profile' | 'models' | 'providers' | 'documents' | 'runtime';
 
 const SECTIONS: { key: SectionKey; label: string; icon: IconName; hint: string }[] = [
+  { key: 'profile', label: 'Profile', icon: 'agents', hint: 'Location and time context' },
   { key: 'models', label: 'Models', icon: 'sparkle', hint: 'Defaults per capability' },
   { key: 'providers', label: 'Providers', icon: 'tools', hint: 'Profiles and catalogues' },
   { key: 'documents', label: 'Documents', icon: 'papers', hint: 'OCR and ingestion' },
@@ -71,6 +72,8 @@ export default function SettingsPage() {
     try {
       const next = await providersApi.updateSettings({
         default_model_references: settings.default_model_references,
+        user_timezone: settings.user_timezone,
+        user_profile: settings.user_profile,
         agent_tracing_enabled: settings.agent_tracing_enabled,
         python_tool_enabled: settings.python_tool_enabled,
         python_tool_timeout_seconds: settings.python_tool_timeout_seconds,
@@ -124,6 +127,9 @@ export default function SettingsPage() {
         </nav>
 
         <div className="settings-sections">
+          {section === 'profile' ? (
+            <ProfilePanel settings={settings} onChange={setSettings} />
+          ) : null}
           {section === 'models' ? (
             <ModelDefaultsPanel settings={settings} providers={providers} onChange={setSettings} />
           ) : null}

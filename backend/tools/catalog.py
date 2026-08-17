@@ -8,7 +8,7 @@ from agents.tool_context import ToolContext
 
 from backend.agents.blueprint import FunctionToolSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
-from backend.runtime.context import ScholarWeaveContext
+from backend.runtime.context import ScholarWeaveContext, unwrap_scholar_context
 from backend.tools.failures import recoverable_tool_invoker
 
 
@@ -572,6 +572,121 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
         True,
     ),
     (
+        "conversation.memory.search",
+        "search_conversation_memory",
+        (
+            "Search completed turns from older local conversations. Results are lexical candidates, "
+            "not proof of equivalence; reuse only a clearly matching result."
+        ),
+        _object_schema(
+            {
+                "query": {"type": "string", "minLength": 3, "maxLength": 500},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["query", "limit"],
+        ),
+        True,
+    ),
+    (
+        "conversation.memory.read",
+        "read_conversation_memory",
+        "Read the request and answer for one clearly matching completed conversation turn.",
+        _object_schema(
+            {"run_id": {"type": "string", "minLength": 1}},
+            required=["run_id"],
+        ),
+        True,
+    ),
+    (
+        "python.execute",
+        "execute_python",
+        (
+            "Run transient sandboxed Python for exact calculations, simulations, and chart data. "
+            "Code must define compute(inputs) and return a JSON-serializable value."
+        ),
+        _object_schema(
+            {
+                "code": {"type": "string", "minLength": 1, "maxLength": 20_000},
+                "inputs": {"type": "object"},
+            },
+            required=["code", "inputs"],
+        ),
+        True,
+    ),
+    (
+        "extended.plan.create",
+        "create_extended_work_plan",
+        "Create the ordered plan for one extended-work run.",
+        _object_schema(
+            {
+                "tasks": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 10,
+                    "items": _object_schema(
+                        {
+                            "id": {"type": "string", "minLength": 1},
+                            "title": {"type": "string", "minLength": 1},
+                        },
+                        required=["id", "title"],
+                    ),
+                }
+            },
+            required=["tasks"],
+        ),
+        True,
+    ),
+    (
+        "extended.plan.update",
+        "update_extended_work_item",
+        "Complete or block the current extended work item and advance the plan.",
+        _object_schema(
+            {
+                "id": {"type": "string", "minLength": 1},
+                "status": {"type": "string", "enum": ["completed", "blocked"]},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
+            },
+            required=["id", "status", "summary"],
+        ),
+        True,
+    ),
+    (
+        "extended.notes.save",
+        "save_extended_work_note",
+        "Save detailed intermediate findings outside the coordinator prompt.",
+        _object_schema(
+            {
+                "task_id": {"type": "string", "minLength": 1},
+                "title": {"type": "string", "minLength": 1, "maxLength": 300},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
+                "content": {"type": "string", "minLength": 1, "maxLength": 100_000},
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            required=["task_id", "title", "summary", "content", "sources"],
+        ),
+        True,
+    ),
+    (
+        "extended.notes.list",
+        "list_extended_work_notes",
+        "List compact summaries of intermediate notes from the current extended run.",
+        _object_schema({}),
+        True,
+    ),
+    (
+        "extended.notes.read",
+        "read_extended_work_note",
+        "Read one selected intermediate note from the current extended run.",
+        _object_schema(
+            {"note_id": {"type": "string", "minLength": 1}},
+            required=["note_id"],
+        ),
+        True,
+    ),
+    (
         "sdk.catalog",
         "list_sdk_primitives",
         "List the OpenAI Agents SDK primitives and ScholarWeave function tools available to the builder.",
@@ -684,10 +799,11 @@ def _factory(
             raw_arguments: str,
         ) -> Any:
             arguments = json.loads(raw_arguments)
-            return await context.context.tool_runtime.invoke(
+            scholar_context = unwrap_scholar_context(context)
+            return await scholar_context.tool_runtime.invoke(
                 catalog_id,
                 arguments,
-                context.context,
+                scholar_context,
             )
 
         tool_name = spec.name or default_name

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from agents import SQLiteSession, Session
 
@@ -14,28 +14,28 @@ from backend.providers.types import ResolvedAgentModel
 class SdkSessionFactory:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
-        self._sessions: dict[tuple[object, ...], Session] = {}
+        self._sessions: dict[str, Session] = {}
         self._run_locks: dict[str, asyncio.Lock] = {}
 
     def get(
         self,
         conversation_id: str,
-        _policy: SessionPolicySpec,
+        policy: SessionPolicySpec,
         _primary_model: ResolvedAgentModel,
     ) -> Session:
-        key = (conversation_id,)
-        existing = self._sessions.get(key)
-        if existing is not None:
-            return existing
+        existing = self._sessions.get(conversation_id)
+        if existing is None:
+            existing = SQLiteSession(
+                conversation_id,
+                self._database_path,
+                sessions_table="sdk_sessions",
+                messages_table="sdk_session_items",
+            )
+            self._sessions[conversation_id] = existing
 
-        session: Session = SQLiteSession(
-            conversation_id,
-            self._database_path,
-            sessions_table="sdk_sessions",
-            messages_table="sdk_session_items",
-        )
-        self._sessions[key] = session
-        return session
+        if policy.history_max_items is None and not policy.messages_only:
+            return existing
+        return PolicySession(existing, policy)
 
     async def clear(
         self,
@@ -50,3 +50,47 @@ class SdkSessionFactory:
         lock = self._run_locks.setdefault(conversation_id, asyncio.Lock())
         async with lock:
             yield
+
+
+class PolicySession:
+    """A bounded view that keeps extended-work internals out of future prompts."""
+
+    def __init__(self, session: Session, policy: SessionPolicySpec) -> None:
+        self._session = session
+        self._policy = policy
+        self.session_id = session.session_id
+        self.session_settings = session.session_settings
+
+    async def get_items(self, limit: int | None = None) -> list[Any]:
+        items = await self._session.get_items()
+        if self._policy.messages_only:
+            items = [item for item in items if _message_role(item) in {"user", "assistant"}]
+        limits = [
+            value
+            for value in (limit, self._policy.history_max_items)
+            if value is not None
+        ]
+        return items[-min(limits):] if limits else items
+
+    async def add_items(self, items: list[Any]) -> None:
+        selected = (
+            [item for item in items if _message_role(item) in {"user", "assistant"}]
+            if self._policy.messages_only
+            else items
+        )
+        if selected:
+            await self._session.add_items(selected)
+
+    async def pop_item(self) -> Any | None:
+        return await self._session.pop_item()
+
+    async def clear_session(self) -> None:
+        await self._session.clear_session()
+
+
+def _message_role(item: Any) -> str | None:
+    if isinstance(item, dict):
+        role = item.get("role")
+    else:
+        role = getattr(item, "role", None)
+    return role if isinstance(role, str) else None

@@ -162,10 +162,26 @@ a.card:hover .card-arrow, button.card:hover .card-arrow { transform: translateX(
   border-radius: 50%;
   background: currentColor;
 }
-.status-completed, .status-active, .status-ready { color: var(--success); border-color: color-mix(in srgb, var(--success) 35%, var(--border)); }
-.status-failed, .status-cancelled, .status-error { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); }
-.status-running { color: var(--accent-strong); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
-.status-paused, .status-pending, .status-processing { color: var(--warning); border-color: color-mix(in srgb, var(--warning) 35%, var(--border)); }
+.status-completed, .status-active, .status-ready {
+  border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+  color: var(--success);
+}
+.status-failed, .status-cancelled, .status-error {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--danger);
+}
+.status-running {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--accent-strong);
+}
+.status-paused, .status-pending, .status-processing {
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+  background: color-mix(in srgb, var(--warning) 10%, var(--surface));
+  color: var(--warning);
+}
 /* A live run gets a gentle pulse so progress is obvious at a glance. */
 .status-running::before, .status-processing::before { animation: pulse-dot 1.6s var(--ease) infinite; }
 
@@ -233,8 +249,8 @@ th, td { padding: .6rem .75rem; border-bottom: 1px solid var(--border); text-ali
 th {
   position: sticky;
   top: 0;
-  background: var(--surface);
-  color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  color: var(--accent-strong);
   font-size: var(--text-xs);
   font-weight: 650;
   letter-spacing: .05em;
@@ -289,10 +305,10 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
 
 /* Shared rich-text output for chats, documents, and workspace previews. */
 .markdown-viewer {
-  max-width: 82ch;
+  max-width: 72ch;
   margin: 0 auto;
   color: var(--text);
-  line-height: 1.7;
+  line-height: 1.75;
 }
 .markdown-viewer > :first-child { margin-top: 0; }
 .markdown-viewer > :last-child { margin-bottom: 0; }
@@ -314,6 +330,28 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   background: var(--accent-soft);
 }
 .markdown-viewer blockquote p { color: var(--muted); }
+/* Inline code is a highlight, not body text — give it its own tint. */
+.markdown-viewer :not(pre) > code {
+  border: 1px solid color-mix(in srgb, var(--hosted) 22%, transparent);
+  background: color-mix(in srgb, var(--hosted) 12%, var(--surface-2));
+  color: color-mix(in srgb, var(--hosted) 72%, var(--text-strong));
+}
+.markdown-viewer mark {
+  padding: .05em .25em;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--warning) 26%, transparent);
+  color: var(--text-strong);
+}
+.markdown-viewer strong { color: var(--text-strong); font-weight: 680; }
+.markdown-viewer a { color: var(--accent-strong); text-decoration-color: color-mix(in srgb, var(--accent) 45%, transparent); text-decoration-line: underline; text-underline-offset: .18em; }
+.markdown-viewer a:hover { text-decoration-color: var(--accent); }
+.markdown-viewer h2, .markdown-viewer h3 { color: var(--text-strong); }
+.markdown-viewer h2 {
+  padding-bottom: .18em;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+}
+.markdown-viewer ul > li::marker { color: var(--accent); }
+.markdown-viewer ol > li::marker { color: var(--accent); font-weight: 650; }
 .markdown-viewer pre {
   overflow: auto;
   padding: var(--space-3);
@@ -323,6 +361,174 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   white-space: pre;
 }
 .markdown-viewer table { width: 100%; margin: 0; }
+
+/* --------------------------------------------------------- Code artefact --- */
+
+.code-card {
+  margin: var(--space-4) 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-inset);
+  overflow: hidden;
+}
+.code-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: .28rem .35rem .28rem .7rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--accent) 10%, var(--surface-2)),
+    var(--surface-2)
+  );
+}
+.code-card-lang {
+  color: var(--accent-strong);
+  font-size: .68rem;
+  font-weight: 750;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.code-card-lines { color: var(--muted); font-size: .68rem; }
+.code-card-head button {
+  display: inline-grid;
+  width: 1.6rem;
+  height: 1.6rem;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+.code-card-head button:hover { background: var(--surface-3); color: var(--text); }
+.code-card-head button.active { background: var(--accent-soft); color: var(--accent-strong); }
+.code-card-body {
+  max-height: 32rem;
+  padding: var(--space-3) var(--space-4);
+  overflow: auto;
+  color: var(--text);
+  font-size: .8rem;
+  line-height: 1.65;
+  white-space: pre;
+}
+.code-card-body.wrapped { white-space: pre-wrap; word-break: break-word; }
+
+/* Syntax colours resolve from the theme palette (see tokens.css). */
+.tok-comment { color: var(--syn-comment); font-style: italic; }
+.tok-string { color: var(--syn-string); }
+.tok-number { color: var(--syn-number); }
+.tok-keyword { color: var(--syn-keyword); font-weight: 620; }
+.tok-type { color: var(--syn-type); }
+.tok-constant { color: var(--syn-constant); }
+.tok-function { color: var(--syn-function); }
+.tok-operator { color: var(--syn-operator); }
+.tok-punct { color: var(--syn-punct); }
+.tok-tag { color: var(--syn-keyword); }
+.tok-attr { color: var(--syn-function); }
+.tok-inserted {
+  display: inline-block;
+  width: 100%;
+  background: color-mix(in srgb, var(--success) 16%, transparent);
+  color: var(--success);
+}
+.tok-deleted {
+  display: inline-block;
+  width: 100%;
+  background: color-mix(in srgb, var(--danger) 14%, transparent);
+  color: var(--danger);
+}
+
+/* -------------------------------------------------------------- Charts --- */
+
+.chart-card {
+  margin: var(--space-4) 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.chart-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: .3rem .35rem .3rem .7rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--viz-1) 12%, var(--surface-2)),
+    color-mix(in srgb, var(--viz-2) 8%, var(--surface-2))
+  );
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+}
+.chart-head .chart-head-icon { color: var(--accent); }
+.chart-head button {
+  display: inline-grid;
+  width: 1.6rem;
+  height: 1.6rem;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.chart-head button:hover { background: var(--surface-3); color: var(--text); }
+.chart-head button.active { background: var(--accent-soft); color: var(--accent-strong); }
+.chart-plot { padding: var(--space-3) var(--space-2) 0; }
+.chart-plot svg { display: block; width: 100%; height: auto; }
+.chart-grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
+.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
+.chart-tick { fill: var(--muted); font-size: 12px; font-family: var(--font-sans); }
+.chart-axis-title {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 650;
+  font-family: var(--font-sans);
+  letter-spacing: .04em;
+}
+.chart-value { fill: var(--muted); font-size: 11px; font-family: var(--font-sans); }
+.chart-slice-label { fill: var(--accent-contrast); font-size: 12px; font-weight: 700; font-family: var(--font-sans); }
+.chart-donut-total { fill: var(--text-strong); font-size: 20px; font-weight: 700; font-family: var(--font-sans); }
+.chart-bar rect { transition: opacity var(--dur-fast) var(--ease); }
+.chart-plot:hover .chart-bar rect { opacity: .82; }
+.chart-plot .chart-bar:hover rect { opacity: 1; }
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  list-style: none;
+}
+.chart-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 600;
+}
+.chart-legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+.chart-data { max-height: 18rem; margin: 0 var(--space-3) var(--space-3); overflow: auto; border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.chart-data table { width: 100%; margin: 0; font-size: var(--text-xs); }
+.chart-data th { position: sticky; top: 0; background: var(--surface-2); }
+.chart-caption {
+  padding: 0 var(--space-4) var(--space-3);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-align: center;
+}
+.chart-card-error { padding: var(--space-3); border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.chart-card-error .chart-head { margin: calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) var(--space-3); }
+.chart-error-message { color: var(--danger); font-size: var(--text-sm); }
 
 /* A table in an answer is an artefact: framed, liftable, and openable when it outgrows the column. */
 .markdown-table-card { margin: var(--space-4) 0; }
@@ -355,7 +561,7 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
 }
 .markdown-table-actions button:hover { background: var(--surface-3); color: var(--text); }
 .markdown-table-scroll { overflow-x: auto; }
-.markdown-table-scroll th { background: color-mix(in srgb, var(--surface-2) 70%, var(--surface)); font-weight: 650; }
+.markdown-table-scroll th { background: color-mix(in srgb, var(--accent) 8%, var(--surface)); font-weight: 650; }
 .markdown-table-card.expanded .markdown-table-frame {
   position: fixed;
   inset: 4vh 4vw;

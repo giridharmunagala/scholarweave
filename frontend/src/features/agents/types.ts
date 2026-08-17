@@ -1,8 +1,8 @@
 import type { components } from '../../api/schema.generated';
 
-export type AgentBlueprint = components['schemas']['AgentBlueprint'];
-export type AgentBlueprintOutput = components['schemas']['AgentBlueprint'];
-export type AgentSpec = components['schemas']['AgentSpec'];
+export type AgentBlueprint = components['schemas']['AgentBlueprint-Input'];
+export type AgentBlueprintOutput = components['schemas']['AgentBlueprint-Output'];
+export type AgentSpec = components['schemas']['AgentSpec-Input'];
 export type ToolSpec =
   | components['schemas']['FunctionToolSpec']
   | components['schemas']['WebSearchToolSpec']
@@ -32,7 +32,7 @@ export function blankBlueprint(): AgentBlueprint {
     agent_tools: [],
     guardrails: [],
     run: { max_turns: 10, max_tool_concurrency: null, tracing_enabled: false },
-    session: {},
+    session: { messages_only: false },
   };
 }
 
@@ -67,7 +67,7 @@ export function normalizeBlueprint(value: AgentBlueprintOutput): AgentBlueprint 
     agent_tools: value.agent_tools ?? [],
     guardrails: value.guardrails ?? [],
     run: value.run ?? { max_turns: 10, max_tool_concurrency: null, tracing_enabled: false },
-    session: value.session ?? {},
+    session: value.session ?? { messages_only: false },
   };
 }
 

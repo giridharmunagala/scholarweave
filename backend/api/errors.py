@@ -17,7 +17,11 @@ def install_error_handlers(app: FastAPI) -> None:
         exc: RequestValidationError,
     ) -> JSONResponse:
         detail = [
-            {key: value for key, value in error.items() if key != "input"}
+            {
+                key: value
+                for key, value in error.items()
+                if key not in {"input", "ctx"}
+            }
             for error in exc.errors()
         ]
         return JSONResponse(status_code=422, content={"detail": detail})

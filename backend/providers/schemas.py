@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 
 ProviderKind = Literal[
     "ollama",
@@ -22,7 +24,19 @@ class ProviderSchema(BaseModel):
 class ProviderModel(ProviderSchema):
     name: str = Field(min_length=1, max_length=255)
     capabilities: set[ModelCapability] = Field(default_factory=set)
+    reasoning_efforts: list[ReasoningEffort] | None = None
     enabled: bool = True
+
+    @field_validator("reasoning_efforts")
+    @classmethod
+    def normalize_reasoning_efforts(
+        cls,
+        value: list[ReasoningEffort] | None,
+    ) -> list[ReasoningEffort] | None:
+        if value is None:
+            return None
+        selected = set(value)
+        return [effort for effort in REASONING_EFFORTS if effort in selected]
 
 
 class ProviderCreate(ProviderSchema):

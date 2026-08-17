@@ -3,6 +3,10 @@ import { createPortal } from 'react-dom';
 import { Icon } from '../../shared/components/Icons';
 import { Panel, StatusPill } from '../../shared/components/Ui';
 import {
+  REASONING_EFFORTS,
+  type ReasoningEffort,
+} from '../chat/ReasoningEffortSelect';
+import {
   providersApi,
   type Provider,
   type ProviderCreate,
@@ -45,7 +49,7 @@ export function ProviderProfilesPanel({
     ? catalogProvider.models.filter((model) => {
         const matchesQuery =
           !normalizedCatalogQuery
-          || `${model.name} ${model.capabilities?.join(' ') ?? ''}`
+          || `${model.name} ${model.capabilities?.join(' ') ?? ''} ${model.reasoning_efforts?.join(' ') ?? ''}`
             .toLocaleLowerCase()
             .includes(normalizedCatalogQuery);
         const matchesState =
@@ -175,6 +179,36 @@ export function ProviderProfilesPanel({
           if (enabled) capabilities.add(capability);
           else capabilities.delete(capability);
           return { ...model, capabilities: [...capabilities] };
+        }),
+      });
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const setModelReasoningEffort = async (
+    provider: Provider,
+    modelName: string,
+    effort: ReasoningEffort,
+    enabled: boolean,
+  ) => {
+    const key = `${provider.id}:${modelName}`;
+    setBusy(`configure:${key}:reasoning`);
+    try {
+      await providersApi.update(provider.id, {
+        models: provider.models.map((model) => {
+          if (model.name !== modelName) return model;
+          const reasoningEfforts = new Set(model.reasoning_efforts ?? []);
+          if (enabled) reasoningEfforts.add(effort);
+          else reasoningEfforts.delete(effort);
+          return {
+            ...model,
+            reasoning_efforts: REASONING_EFFORTS.filter((item) =>
+              reasoningEfforts.has(item)
+            ),
+          };
         }),
       });
       await onRefresh();
@@ -384,6 +418,41 @@ export function ProviderProfilesPanel({
                             </label>
                           ))}
                         </span>
+                        <details className="provider-model-reasoning">
+                          <summary>
+                            Thinking: {
+                              model.reasoning_efforts?.length
+                                ? model.reasoning_efforts.join(', ')
+                                : model.reasoning_efforts === null
+                                  ? 'not configured'
+                                  : 'off'
+                            }
+                          </summary>
+                          <span
+                            className="provider-model-reasoning-options"
+                            role="group"
+                            aria-label={`${model.name} supported reasoning levels`}
+                          >
+                            {REASONING_EFFORTS.map((effort) => (
+                              <label key={effort}>
+                                <input
+                                  type="checkbox"
+                                  checked={model.reasoning_efforts?.includes(effort) ?? false}
+                                  disabled={modelUpdateBusy}
+                                  onChange={(event) =>
+                                    void setModelReasoningEffort(
+                                      catalogProvider,
+                                      model.name,
+                                      effort,
+                                      event.target.checked,
+                                    )
+                                  }
+                                />
+                                {effort}
+                              </label>
+                            ))}
+                          </span>
+                        </details>
                         <label className="provider-model-enabled">
                           <input
                             type="checkbox"

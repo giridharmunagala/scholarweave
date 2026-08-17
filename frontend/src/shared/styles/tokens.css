@@ -11,10 +11,10 @@
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
 
-  --text-xs: .72rem;
-  --text-sm: .8rem;
-  --text-base: .92rem;
-  --text-lg: 1.05rem;
+  --text-xs: .78rem;
+  --text-sm: .875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
 
   --space-1: .25rem;
   --space-2: .5rem;
@@ -39,7 +39,31 @@
   --sidebar-width: 244px;
   --sidebar-width-compact: 68px;
   --topbar-height: 56px;
-  --content-max: 1380px;
+  --content-max: 1560px;
+  /* Wide workspace for transcripts, result media and the composer. */
+  --chat-measure: min(1600px, 100%);
+
+  /*
+   * Syntax colours resolve through the theme palette, so highlighted code
+   * follows whichever theme is active without a per-theme code palette.
+   */
+  --syn-keyword: var(--hosted);
+  --syn-string: var(--success);
+  --syn-number: var(--warning);
+  --syn-comment: var(--muted);
+  --syn-function: var(--accent-strong);
+  --syn-type: var(--handoff);
+  --syn-constant: var(--danger);
+  --syn-operator: var(--text-strong);
+  --syn-punct: var(--muted);
+
+  /* Categorical series colours for charts and other data visuals. */
+  --viz-1: var(--accent);
+  --viz-2: var(--hosted);
+  --viz-3: var(--tool);
+  --viz-4: var(--handoff);
+  --viz-5: var(--guardrail);
+  --viz-6: var(--agent);
 }
 
 /* ---------------------------------------------------------------- Paper --- */
@@ -47,7 +71,8 @@
 [data-theme='paper'] {
   color-scheme: light;
   --bg: #f6f3ec;
-  --bg-accent: radial-gradient(110% 80% at 6% -14%, rgb(47 94 181 / 10%) 0%, transparent 58%);
+  --bg-accent: radial-gradient(110% 80% at 6% -14%, rgb(47 94 181 / 12%) 0%, transparent 58%),
+    radial-gradient(80% 60% at 98% -8%, rgb(151 105 15 / 12%) 0%, transparent 56%);
   --surface: #fffdf9;
   --surface-2: #f1ece2;
   --surface-3: #e6dfd1;
@@ -56,7 +81,7 @@
   --border-strong: #cabfaa;
   --text: #2a251d;
   --text-strong: #16120c;
-  --muted: #6d6555;
+  --muted: #5f5748;
   --accent: #2f5eb5;
   --accent-strong: #22488f;
   --accent-contrast: #ffffff;
@@ -81,7 +106,8 @@
 [data-theme='cloud'] {
   color-scheme: light;
   --bg: #eff3f9;
-  --bg-accent: radial-gradient(110% 80% at 94% -14%, rgb(37 99 235 / 12%) 0%, transparent 58%);
+  --bg-accent: radial-gradient(110% 80% at 94% -14%, rgb(37 99 235 / 14%) 0%, transparent 58%),
+    radial-gradient(80% 60% at 2% -8%, rgb(124 58 237 / 10%) 0%, transparent 56%);
   --surface: #ffffff;
   --surface-2: #eef3fa;
   --surface-3: #e0e8f4;
@@ -90,7 +116,7 @@
   --border-strong: #b9c7db;
   --text: #131a26;
   --text-strong: #060a12;
-  --muted: #5b6a80;
+  --muted: #4d5d73;
   --accent: #2563eb;
   --accent-strong: #1d4ed8;
   --accent-contrast: #ffffff;
@@ -124,7 +150,7 @@
   --border-strong: #3b4761;
   --text: #e9eef8;
   --text-strong: #ffffff;
-  --muted: #94a2ba;
+  --muted: #a8b4c8;
   --accent: #6f8dff;
   --accent-strong: #a5bbff;
   --accent-contrast: #08111f;
@@ -158,7 +184,7 @@
   --border-strong: #363945;
   --text: #f1f3f7;
   --text-strong: #ffffff;
-  --muted: #8b909e;
+  --muted: #a3a8b5;
   --accent: #5eeaff;
   --accent-strong: #9df3ff;
   --accent-contrast: #001217;
@@ -192,7 +218,7 @@
   --border-strong: #375044;
   --text: #e6f0ea;
   --text-strong: #ffffff;
-  --muted: #8ba99d;
+  --muted: #9bb7ab;
   --accent: #5fd39a;
   --accent-strong: #93e9bf;
   --accent-contrast: #04150e;
@@ -210,6 +236,251 @@
   --shadow-lg: 0 28px 60px -26px rgb(0 0 0 / 76%);
   --shadow: var(--shadow-md);
   --scrim: rgb(3 10 8 / 66%);
+}
+
+/* ---------------------------------------------------------------- Snow --- */
+/* Pure white with vivid indigo/violet accents — the most colourful light. */
+[data-theme='snow'] {
+  color-scheme: light;
+  --bg: #f7f8fd;
+  --bg-accent: radial-gradient(90% 70% at 0% -10%, rgb(79 70 229 / 16%) 0%, transparent 55%),
+    radial-gradient(80% 60% at 100% -6%, rgb(236 72 153 / 12%) 0%, transparent 55%),
+    radial-gradient(70% 55% at 50% 108%, rgb(14 165 233 / 10%) 0%, transparent 60%);
+  --surface: #ffffff;
+  --surface-2: #f3f4fd;
+  --surface-3: #e7e8fa;
+  --surface-inset: #fafbff;
+  --border: #e3e5f4;
+  --border-strong: #c2c6e6;
+  --text: #1e2235;
+  --text-strong: #0b0e1c;
+  --muted: #5b6180;
+  --accent: #4f46e5;
+  --accent-strong: #3d34cc;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e8e7fe;
+  --success: #0d9488;
+  --warning: #b45309;
+  --danger: #dc2657;
+  --agent: #4f46e5;
+  --tool: #0d9488;
+  --handoff: #ea8c00;
+  --guardrail: #dc2657;
+  --hosted: #db2777;
+  --shadow-sm: 0 1px 2px rgb(30 30 80 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(30 30 80 / 28%);
+  --shadow-lg: 0 28px 56px -26px rgb(30 30 80 / 38%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(16 18 40 / 36%);
+}
+
+/* ---------------------------------------------------------------- Mint --- */
+/* Airy white with fresh teal/green highlights. */
+[data-theme='mint'] {
+  color-scheme: light;
+  --bg: #eaf6f1;
+  --bg-accent: radial-gradient(95% 72% at 4% -12%, rgb(16 185 129 / 20%) 0%, transparent 56%),
+    radial-gradient(80% 60% at 98% -6%, rgb(14 165 233 / 16%) 0%, transparent 55%);
+  --surface: #fbfffd;
+  --surface-2: #e3f3eb;
+  --surface-3: #cfe9dd;
+  --surface-inset: #f1faf6;
+  --border: #cce4d8;
+  --border-strong: #98c8b3;
+  --text: #14261f;
+  --text-strong: #05140e;
+  --muted: #45675a;
+  --accent: #0b8f6b;
+  --accent-strong: #076d52;
+  --accent-contrast: #ffffff;
+  --accent-soft: #d4f0e4;
+  --success: #087f61;
+  --warning: #a86a08;
+  --danger: #cf3b52;
+  --agent: #0f9d76;
+  --tool: #0284c7;
+  --handoff: #c2740a;
+  --guardrail: #cf3b52;
+  --hosted: #7c3aed;
+  --shadow-sm: 0 1px 2px rgb(10 60 45 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(10 60 45 / 24%);
+  --shadow-lg: 0 28px 56px -26px rgb(10 60 45 / 32%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(6 34 26 / 34%);
+}
+
+/* ------------------------------------------------------------- Blossom --- */
+/* White with rose and violet — soft but saturated. */
+[data-theme='blossom'] {
+  color-scheme: light;
+  --bg: #fdf5f9;
+  --bg-accent: radial-gradient(95% 72% at 6% -12%, rgb(236 72 153 / 16%) 0%, transparent 56%),
+    radial-gradient(85% 62% at 96% -8%, rgb(139 92 246 / 16%) 0%, transparent 56%);
+  --surface: #ffffff;
+  --surface-2: #fbedf4;
+  --surface-3: #f5dbe8;
+  --surface-inset: #fef8fb;
+  --border: #f2dde8;
+  --border-strong: #dfb8cd;
+  --text: #2c1c26;
+  --text-strong: #190910;
+  --muted: #6d5060;
+  --accent: #d43f8d;
+  --accent-strong: #b02570;
+  --accent-contrast: #ffffff;
+  --accent-soft: #fbe2ef;
+  --success: #12876a;
+  --warning: #b3730a;
+  --danger: #d33049;
+  --agent: #d43f8d;
+  --tool: #12876a;
+  --handoff: #b3730a;
+  --guardrail: #d33049;
+  --hosted: #7c3aed;
+  --shadow-sm: 0 1px 2px rgb(90 20 60 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(90 20 60 / 24%);
+  --shadow-lg: 0 28px 56px -26px rgb(90 20 60 / 32%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(50 14 34 / 34%);
+}
+
+/* -------------------------------------------------------------- Citrus --- */
+/* Bright white with amber, lime and sky accents. */
+[data-theme='citrus'] {
+  color-scheme: light;
+  --bg: #fdfaf0;
+  --bg-accent: radial-gradient(95% 72% at 2% -12%, rgb(245 158 11 / 18%) 0%, transparent 56%),
+    radial-gradient(85% 62% at 98% -8%, rgb(132 204 22 / 16%) 0%, transparent 56%);
+  --surface: #ffffff;
+  --surface-2: #fbf4e2;
+  --surface-3: #f4e9cd;
+  --surface-inset: #fefcf5;
+  --border: #efe4cb;
+  --border-strong: #d6c295;
+  --text: #2a2415;
+  --text-strong: #171204;
+  --muted: #6a5c3c;
+  --accent: #c2740a;
+  --accent-strong: #96590a;
+  --accent-contrast: #ffffff;
+  --accent-soft: #fbeed2;
+  --success: #4d7c0f;
+  --warning: #b45309;
+  --danger: #cc3341;
+  --agent: #c2740a;
+  --tool: #4d7c0f;
+  --handoff: #0284c7;
+  --guardrail: #cc3341;
+  --hosted: #7c3aed;
+  --shadow-sm: 0 1px 2px rgb(90 65 10 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(90 65 10 / 24%);
+  --shadow-lg: 0 28px 56px -26px rgb(90 65 10 / 32%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(46 34 8 / 34%);
+}
+
+/* -------------------------------------------------------------- Sunrise --- */
+/* Bright light theme with warm rose/amber highlights. */
+[data-theme='sunrise'] {
+  color-scheme: light;
+  --bg: #fdf4ef;
+  --bg-accent: radial-gradient(120% 85% at 10% -16%, rgb(234 88 96 / 14%) 0%, transparent 55%),
+    radial-gradient(90% 70% at 96% -10%, rgb(245 158 11 / 16%) 0%, transparent 58%);
+  --surface: #fffaf6;
+  --surface-2: #fbeee5;
+  --surface-3: #f4e0d2;
+  --surface-inset: #fdf6f0;
+  --border: #f0dccd;
+  --border-strong: #dcbda6;
+  --text: #3a251d;
+  --text-strong: #24120c;
+  --muted: #7a5747;
+  --accent: #e0533f;
+  --accent-strong: #b93a2a;
+  --accent-contrast: #ffffff;
+  --accent-soft: #fce3dc;
+  --success: #12805d;
+  --warning: #b3730a;
+  --danger: #c9314b;
+  --agent: #e0533f;
+  --tool: #12805d;
+  --handoff: #d08700;
+  --guardrail: #c9314b;
+  --hosted: #8b47c6;
+  --shadow-sm: 0 1px 2px rgb(120 60 40 / 10%);
+  --shadow-md: 0 8px 20px -10px rgb(120 60 40 / 26%);
+  --shadow-lg: 0 26px 54px -26px rgb(120 60 40 / 34%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(70 40 30 / 34%);
+}
+
+/* --------------------------------------------------------------- Aurora --- */
+/* Deep indigo dark theme with vivid violet and cyan highlights. */
+[data-theme='aurora'] {
+  color-scheme: dark;
+  --bg: #0c0a1b;
+  --bg-accent: radial-gradient(110% 80% at 8% -14%, rgb(167 111 255 / 20%) 0%, transparent 58%),
+    radial-gradient(90% 70% at 92% -8%, rgb(56 214 226 / 14%) 0%, transparent 55%);
+  --surface: #15132a;
+  --surface-2: #1d1a38;
+  --surface-3: #282349;
+  --surface-inset: #100e21;
+  --border: #2e2a52;
+  --border-strong: #453e72;
+  --text: #ece9fb;
+  --text-strong: #ffffff;
+  --muted: #a9a2cf;
+  --accent: #a77bff;
+  --accent-strong: #c8aeff;
+  --accent-contrast: #120a25;
+  --accent-soft: #26204a;
+  --success: #3fd9b0;
+  --warning: #ffc457;
+  --danger: #ff6f91;
+  --agent: #a77bff;
+  --tool: #3fd9b0;
+  --handoff: #ffc457;
+  --guardrail: #ff6f91;
+  --hosted: #38d6e2;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 45%);
+  --shadow-md: 0 10px 26px -12px rgb(10 4 30 / 68%);
+  --shadow-lg: 0 28px 60px -26px rgb(10 4 30 / 78%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(8 5 20 / 62%);
+}
+
+/* ----------------------------------------------------------------- Nord --- */
+/* Cool arctic dark theme with soft frost highlights. */
+[data-theme='nord'] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --bg-accent: radial-gradient(110% 80% at 6% -14%, rgb(136 192 208 / 16%) 0%, transparent 58%);
+  --surface: #363d4b;
+  --surface-2: #3f4757;
+  --surface-3: #4a5364;
+  --surface-inset: #2b313c;
+  --border: #48505f;
+  --border-strong: #5c6779;
+  --text: #e5e9f0;
+  --text-strong: #ffffff;
+  --muted: #b3bccb;
+  --accent: #88c0d0;
+  --accent-strong: #b3dbe6;
+  --accent-contrast: #1c2129;
+  --accent-soft: #3b4a53;
+  --success: #a3be8c;
+  --warning: #ebcb8b;
+  --danger: #d98a92;
+  --agent: #88c0d0;
+  --tool: #a3be8c;
+  --handoff: #ebcb8b;
+  --guardrail: #d98a92;
+  --hosted: #b48ead;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 32%);
+  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 48%);
+  --shadow-lg: 0 28px 60px -26px rgb(0 0 0 / 58%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(20 24 31 / 56%);
 }
 
 @media (prefers-reduced-motion: reduce) {

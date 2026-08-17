@@ -7,6 +7,8 @@ import {
   useState,
 } from 'react';
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
+import { useLocation, useNavigate } from '../../app/router';
+import { copyToClipboard } from '../../shared/clipboard';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { ModelSelect } from '../../shared/components/ModelSelect';
@@ -20,16 +22,25 @@ import {
 } from '../providers/api';
 import {
   chatApi,
+  notifyChatConversationsChanged,
   type Conversation,
   type ConversationDetail,
   type ModelReference,
   type Run,
+  type WorkMode,
 } from './api';
 import {
   ChatModelPicker,
   modelReferenceLabel,
   preferredChatModel,
 } from './ChatModelPicker';
+import {
+  readStoredReasoningEffort,
+  reasoningEffortsForModel,
+  ReasoningEffortSelect,
+  storeReasoningEffort,
+  type ReasoningEffort,
+} from './ReasoningEffortSelect';
 import {
   applyChatStreamEvent,
   emptyChatStream,
@@ -43,6 +54,7 @@ import {
   type TurnTimeline,
 } from './chatTimeline';
 import { SourceChips, SourceImages, TurnTimelineView } from './TurnTimeline';
+import { RunInsightsPanel } from './RunInsightsPanel';
 import './chat.css';
 
 const SUGGESTIONS = [
@@ -51,6 +63,7 @@ const SUGGESTIONS = [
   'What open research questions remain in this area?',
   'Draft research notes with citations for my current topic.',
 ];
+const WORK_MODE_STORAGE_KEY = 'scholarweave:chat-work-mode';
 
 export const PROVIDER_TRANSCRIPTION_INTERVAL_MS = 750;
 
@@ -61,21 +74,25 @@ interface BuiltInSpeechMessage {
 }
 
 export default function ChatPage() {
+  const { search } = useLocation();
+  const navigate = useNavigate();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
   const [modelReference, setModelReference] = useState<ModelReference>({});
-  const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [speechModelReference, setSpeechModelReference] = useState<ModelReference>({});
   const [speechMode, setSpeechMode] = useState<'builtin' | 'provider'>('builtin');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
+    readStoredReasoningEffort,
+  );
+  const [workMode, setWorkMode] = useState<WorkMode>(readStoredWorkMode);
   const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
   const [optimisticUser, setOptimisticUser] = useState<string | null>(null);
   const [content, setContent] = useState('');
-  const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -84,7 +101,7 @@ export default function ChatPage() {
   const [speechPreview, setSpeechPreview] = useState<string | null>(null);
   const [speechFinalFailed, setSpeechFinalFailed] = useState(false);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -100,8 +117,39 @@ export default function ChatPage() {
   const recordingStartPendingRef = useRef(false);
   const speechMountedRef = useRef(false);
   const openRequestRef = useRef(0);
+  const handledRouteRef = useRef<string | null>(null);
+  const supportedReasoningEfforts = useMemo(
+    () => reasoningEffortsForModel(providers, modelReference),
+    [providers, modelReference.provider_profile_id, modelReference.model],
+  );
 
-  const refreshList = () => chatApi.list().then(setConversations);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setSettingsOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (
+      reasoningEffort
+      && modelReference.provider_profile_id
+      && modelReference.model
+      && !supportedReasoningEfforts?.includes(reasoningEffort)
+    ) {
+      setReasoningEffort(null);
+      storeReasoningEffort(null);
+    }
+  }, [reasoningEffort, supportedReasoningEfforts]);
+
+  const refreshList = () =>
+    chatApi.list().then((items) => {
+      setConversations(items);
+      notifyChatConversationsChanged();
+      return items;
+    });
   const open = async (id: string) => {
     const request = ++openRequestRef.current;
     setRun(null);
@@ -141,12 +189,11 @@ export default function ChatPage() {
       providersApi.settings(),
       providersApi.builtInSpeechStatus(),
     ])
-      .then(async ([items, nextProviders, nextSettings, speechStatus]) => {
+      .then(([items, nextProviders, nextSettings, speechStatus]) => {
         setConversations(items);
         setProviders(nextProviders);
         setSettings(nextSettings);
         const preferredModel = preferredChatModel(nextSettings);
-        setPreferredModelReference(preferredModel);
         setModelReference(preferredModel);
         setSpeechModelReference(nextSettings.default_model_references.speech ?? {});
         if (
@@ -156,11 +203,37 @@ export default function ChatPage() {
           setSpeechMode('provider');
         }
         setBuiltInSpeech(speechStatus);
-        if (items[0]) await open(items[0].id);
       })
       .catch(setError)
       .finally(() => setLoading(false));
   }, []);
+
+  const route = new URLSearchParams(search);
+  const newChatRequested = route.has('new');
+  const requestedConversationId = route.get('conversation');
+  const targetConversationId = requestedConversationId ?? conversations[0]?.id;
+
+  useEffect(() => {
+    if (loading) return;
+    if (newChatRequested) {
+      openRequestRef.current += 1;
+      setCurrent(null);
+      setRun(null);
+      setRuns([]);
+      setStream(emptyChatStream);
+      setOptimisticUser(null);
+      setSending(false);
+      setPinnedToBottom(true);
+      return;
+    }
+    if (!targetConversationId || handledRouteRef.current === targetConversationId) {
+      handledRouteRef.current = null;
+      return;
+    }
+    if (current?.id !== targetConversationId) {
+      void open(targetConversationId).catch(setError);
+    }
+  }, [loading, newChatRequested, targetConversationId]);
 
   useEffect(() => {
     if (builtInSpeech?.state !== 'installing') return;
@@ -320,16 +393,8 @@ export default function ChatPage() {
     setPinnedToBottom(true);
   };
 
-  const create = () => {
-    setCurrent(null);
-    setModelReference(preferredModelReference);
-    resetThread();
-    composerRef.current?.focus();
-  };
-
   const selectModel = (reference: ModelReference) => {
     setModelReference(reference);
-    setPreferredModelReference(reference);
     void providersApi
       .updateSettings({ last_chat_model_reference: reference })
       .then(setSettings)
@@ -337,22 +402,13 @@ export default function ChatPage() {
     if (current) {
       setCurrent(null);
       resetThread();
+      navigate('/?new=1');
     }
   };
 
-  const remove = async (id: string) => {
-    try {
-      await chatApi.remove(id);
-      const remaining = await chatApi.list();
-      setConversations(remaining);
-      if (current?.id === id) {
-        resetThread();
-        if (remaining[0]) await open(remaining[0].id);
-        else setCurrent(null);
-      }
-    } catch (nextError) {
-      setError(nextError);
-    }
+  const selectReasoningEffort = (effort: ReasoningEffort | null) => {
+    setReasoningEffort(effort);
+    storeReasoningEffort(effort);
   };
 
   const send = async (override?: string) => {
@@ -375,9 +431,16 @@ export default function ChatPage() {
         if (request !== openRequestRef.current) return;
         setCurrent(conversation);
         setModelReference(conversation.model_reference);
+        handledRouteRef.current = conversation.id;
+        navigate(`/?conversation=${encodeURIComponent(conversation.id)}`, { replace: true });
         void refreshList();
       }
-      const response = await chatApi.send(conversation.id, submitted);
+      const response = await chatApi.send(
+        conversation.id,
+        submitted,
+        reasoningEffort,
+        workMode,
+      );
       if (request !== openRequestRef.current) return;
       setRun(response.run);
       setRuns((previous) => mergeRun(previous, response.run));
@@ -580,16 +643,6 @@ export default function ChatPage() {
     }
   };
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLocaleLowerCase();
-    if (!needle) return conversations;
-    return conversations.filter((conversation) =>
-      `${conversation.title} ${conversation.last_message_preview}`
-        .toLocaleLowerCase()
-        .includes(needle),
-    );
-  }, [conversations, query]);
-
   // Every run keeps its own trace, so an older turn never borrows the newest turn's activity.
   const persistedTimelines = useMemo(() => {
     const timelines = new Map<string, TurnTimeline>();
@@ -636,6 +689,9 @@ export default function ChatPage() {
     ? Math.min(100, Math.round(100 * builtInSpeech.downloaded_bytes / builtInSpeech.total_bytes))
     : 0;
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
+  const activeMetrics = run ? turnMetrics(run) : null;
+  const activeEvents = run && stream.events.length >= run.events.length ? stream.events : run?.events ?? [];
+  const activeTimeline = run ? timelineFor(run) : emptyTurnTimeline;
 
   // The active turn has no persisted user message yet, so its trace renders after the optimistic one.
   const pendingRun = run && !reasoningAnchors.anchored.has(run.id) ? run : null;
@@ -650,71 +706,7 @@ export default function ChatPage() {
   return (
     <div className="page page-wide chat-page">
       {error ? <ErrorNotice error={error} /> : null}
-      <div className={`chat-layout${sidebarOpen ? '' : ' collapsed'}`}>
-        <aside className="conversation-list panel" aria-label="Conversations">
-          <div className="conversation-list-head">
-            <div className="conversation-list-actions">
-              <button className="button block new-chat" type="button" onClick={create}>
-                <Icon name="plus" size={15} />
-                New chat
-              </button>
-              <button
-                type="button"
-                className="button ghost icon chat-sidebar-toggle"
-                aria-label={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
-                title={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
-                onClick={() => setSidebarOpen((value) => !value)}
-              >
-                <Icon name="sidebar" size={16} />
-              </button>
-            </div>
-            <div className="conversation-search">
-              <Icon name="search" size={14} />
-              <input
-                type="search"
-                value={query}
-                placeholder="Search chats…"
-                aria-label="Search conversations"
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </div>
-          </div>
-          <div className="conversation-scroll">
-            {filtered.map((conversation) => (
-              <div
-                className={current?.id === conversation.id ? 'conversation active' : 'conversation'}
-                key={conversation.id}
-              >
-                <button
-                  type="button"
-                  className="conversation-open"
-                  onClick={() => {
-                    void open(conversation.id).catch(setError);
-                  }}
-                >
-                  <strong>{conversation.title}</strong>
-                  <small>{conversation.last_message_preview || 'No messages yet'}</small>
-                  <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
-                </button>
-                <button
-                  type="button"
-                  className="conversation-delete"
-                  title="Delete chat"
-                  aria-label={`Delete ${conversation.title}`}
-                  disabled={sending || transcribing}
-                  onClick={() => void remove(conversation.id)}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              </div>
-            ))}
-            {!filtered.length ? (
-              <p className="conversation-empty">
-                {conversations.length ? 'No chats match your search.' : 'No research chats yet.'}
-              </p>
-            ) : null}
-          </div>
-        </aside>
+      <div className="chat-layout agent-chat-layout">
         <section className="chat-surface panel">
           <header className="chat-header">
             <div className="chat-header-inner">
@@ -732,11 +724,46 @@ export default function ChatPage() {
                     Working…
                   </span>
                 ) : null}
+                {activeMetrics?.inputTokens != null ? (
+                  <span
+                    className="run-context-usage"
+                    title="Context tokens consumed by the latest request"
+                  >
+                    <Icon name="runs" size={13} />
+                    {activeMetrics.inputEstimated ? '~' : ''}
+                    {formatMetric(activeMetrics.inputTokens)} context
+                  </span>
+                ) : null}
                 {run ? <StatusPill value={run.status} /> : null}
+                <button
+                  type="button"
+                  className="button small chat-new"
+                  title="Start a new chat"
+                  disabled={!hasTranscript && !current}
+                  onClick={() => {
+                    setCurrent(null);
+                    resetThread();
+                    navigate('/?new=1');
+                  }}
+                >
+                  <Icon name="plus" size={14} />
+                  <span className="chat-new-label">New chat</span>
+                </button>
+                <button
+                  type="button"
+                  className={`button secondary small chat-settings-toggle${settingsOpen ? ' active' : ''}`}
+                  aria-expanded={settingsOpen}
+                  aria-controls="chat-settings-panel"
+                  title="Model and speech settings"
+                  onClick={() => setSettingsOpen((value) => !value)}
+                >
+                  <Icon name="sliders" size={14} />
+                  <span className="chat-settings-toggle-label">Settings</span>
+                </button>
               </div>
             </div>
           </header>
-          <div className="chat-workspace">
+          <div className={`chat-workspace${run ? ' has-insights' : ''}`}>
             <div className="chat-thread">
               <div
                 className="message-list"
@@ -942,76 +969,139 @@ export default function ChatPage() {
                       </div>
                     </section>
                   ) : null}
-                  <div className="composer-footer">
-                    <div className="composer-model">
-                      <span className="composer-model-label">
-                        <Icon name="sparkle" size={13} />
-                        Model
-                      </span>
-                      <ChatModelPicker
-                        providers={providers}
-                        settings={settings}
-                        value={modelReference}
-                        disabled={sending}
-                        onChange={selectModel}
-                      />
-                    </div>
-                    <div className="composer-speech">
-                      <Icon name="microphone" size={13} />
-                      <select
-                        className="speech-source-select"
-                        aria-label="Speech recognition source"
-                        value={speechMode}
-                        disabled={recording || startingRecording || transcribing}
-                        onChange={(event) => setSpeechMode(event.target.value as 'builtin' | 'provider')}
-                      >
-                        <option value="builtin">Nemotron English local</option>
-                        <option value="provider">Provider model</option>
-                      </select>
-                      {speechMode === 'builtin' ? (
-                        !builtInSpeech?.available ? (
-                          <span title={builtInSpeech?.error ?? undefined}>Unavailable</span>
-                        ) : builtInSpeech.state === 'error' ? (
-                          <button
-                            className="button secondary small"
-                            type="button"
-                            onClick={() => void installBuiltInSpeech()}
-                          >
-                            Retry install
-                          </button>
-                        ) : builtInSpeechReady ? (
-                          <span className="speech-ready">Ready</span>
-                        ) : builtInSpeech?.state === 'installing' ? (
-                          <span>Downloading {speechInstallProgress}%</span>
-                        ) : (
-                          <button
-                            className="button secondary small"
-                            type="button"
-                            onClick={() => void installBuiltInSpeech()}
-                          >
-                            Install model
-                          </button>
-                        )
-                      ) : (
-                        <ModelSelect
-                          options={speechOptions}
-                          value={speechModelReference}
-                          disabled={recording || startingRecording || transcribing}
-                          placeholder={speechOptions.length ? 'Speech model' : 'No speech models'}
-                          onChange={(reference) => setSpeechModelReference(reference)}
-                        />
-                      )}
-                      {startingRecording ? <span>Opening microphone…</span> : null}
-                      {recording ? <span>Listening…</span> : null}
-                      {transcribing ? <span>Transcribing…</span> : null}
-                    </div>
-                    <span className="composer-hint">
-                      <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline
-                    </span>
-                  </div>
                 </div>
               </div>
             </div>
+            {run ? (
+              <RunInsightsPanel
+                status={run.status}
+                events={activeEvents}
+                timeline={activeTimeline}
+                metrics={activeMetrics}
+              />
+            ) : null}
+            {settingsOpen ? (
+              <button
+                type="button"
+                className="chat-settings-scrim"
+                aria-label="Close chat settings"
+                tabIndex={-1}
+                onClick={() => setSettingsOpen(false)}
+              />
+            ) : null}
+            <aside
+              className="chat-settings"
+              id="chat-settings-panel"
+              aria-label="Chat model settings"
+              hidden={!settingsOpen}
+            >
+              {settingsOpen ? (
+                <div className="chat-settings-content">
+                  <header className="chat-settings-head">
+                    <div className="chat-settings-heading">
+                      <span className="eyebrow">Run configuration</span>
+                      <strong>Chat settings</strong>
+                    </div>
+                    <button
+                      type="button"
+                      className="button ghost icon chat-settings-close"
+                      aria-label="Close chat settings"
+                      title="Close"
+                      onClick={() => setSettingsOpen(false)}
+                    >
+                      <Icon name="close" size={15} />
+                    </button>
+                  </header>
+                  <label className="field">
+                    Model
+                    <ChatModelPicker
+                      providers={providers}
+                      settings={settings}
+                      value={modelReference}
+                      disabled={sending}
+                      onChange={selectModel}
+                    />
+                  </label>
+                  <ReasoningEffortSelect
+                    value={reasoningEffort}
+                    supportedEfforts={supportedReasoningEfforts}
+                    disabled={sending}
+                    onChange={selectReasoningEffort}
+                  />
+                  <label className="field">
+                    Work mode
+                    <select
+                      value={workMode}
+                      disabled={sending}
+                      onChange={(event) => {
+                        const mode = event.target.value as WorkMode;
+                        setWorkMode(mode);
+                        window.localStorage.setItem(WORK_MODE_STORAGE_KEY, mode);
+                      }}
+                    >
+                      <option value="direct">Direct</option>
+                      <option value="extended">Extended work (sequential)</option>
+                    </select>
+                    <small>
+                      Extended work plans focused tasks, runs each in a fresh context, and combines
+                      their stored findings.
+                    </small>
+                  </label>
+                  <hr />
+                  <label className="field">
+                    Speech recognition
+                    <select
+                      className="speech-source-select"
+                      aria-label="Speech recognition source"
+                      value={speechMode}
+                      disabled={recording || startingRecording || transcribing}
+                      onChange={(event) => setSpeechMode(event.target.value as 'builtin' | 'provider')}
+                    >
+                      <option value="builtin">Nemotron English local</option>
+                      <option value="provider">Provider model</option>
+                    </select>
+                  </label>
+                  {speechMode === 'builtin' ? (
+                    <div className="chat-settings-status">
+                      {!builtInSpeech?.available ? (
+                        <span title={builtInSpeech?.error ?? undefined}>Unavailable</span>
+                      ) : builtInSpeech.state === 'error' ? (
+                        <button
+                          className="button secondary small"
+                          type="button"
+                          onClick={() => void installBuiltInSpeech()}
+                        >
+                          Retry install
+                        </button>
+                      ) : builtInSpeechReady ? (
+                        <span className="speech-ready">Ready</span>
+                      ) : builtInSpeech?.state === 'installing' ? (
+                        <span>Downloading {speechInstallProgress}%</span>
+                      ) : (
+                        <button
+                          className="button secondary small"
+                          type="button"
+                          onClick={() => void installBuiltInSpeech()}
+                        >
+                          Install model
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <ModelSelect
+                      options={speechOptions}
+                      value={speechModelReference}
+                      disabled={recording || startingRecording || transcribing}
+                      placeholder={speechOptions.length ? 'Speech model' : 'No speech models'}
+                      onChange={(reference) => setSpeechModelReference(reference)}
+                    />
+                  )}
+                  {startingRecording ? <small>Opening microphone…</small> : null}
+                  {recording ? <small>Listening…</small> : null}
+                  {transcribing ? <small>Transcribing…</small> : null}
+                </div>
+              ) : null}
+            </aside>
           </div>
         </section>
       </div>
@@ -1213,6 +1303,11 @@ function displayStream(run: Run): ChatStreamState {
   return run.status === 'completed' ? { ...restored, assistant: '' } : restored;
 }
 
+function readStoredWorkMode(): WorkMode {
+  const stored = window.localStorage.getItem(WORK_MODE_STORAGE_KEY);
+  return stored === 'extended' ? 'extended' : 'direct';
+}
+
 function runsForConversation(runs: Run[], conversationId: string): Run[] {
   return runs
     .filter((candidate) => candidate.conversation_id === conversationId)
@@ -1386,17 +1481,6 @@ function formatDuration(value: number): string {
   return `${Math.floor(value / 60)}m ${Math.round(value % 60)}s`;
 }
 
-export function relativeTime(value: string): string {
-  const timestamp = new Date(value).getTime();
-  if (Number.isNaN(timestamp)) return '';
-  const seconds = Math.round((Date.now() - timestamp) / 1000);
-  if (seconds < 60) return 'now';
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
-  if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
-  return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
 function MessageHeader({
   label,
   content,
@@ -1436,22 +1520,4 @@ function MessageHeader({
       ) : null}
     </div>
   );
-}
-
-async function copyToClipboard(content: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(content);
-    return;
-  }
-
-  const textarea = document.createElement('textarea');
-  textarea.value = content;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand('copy');
-  textarea.remove();
-  if (!copied) throw new Error('The browser denied clipboard access.');
 }

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from agents import FunctionTool, Model, ModelResponse, ModelSettings, TResponseInputItem, Usage
 
-from backend.agents.blueprint import AgentBlueprint
+from backend.agents.blueprint import AgentBlueprint, ReasoningSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.agents.compiler import AgentCompiler
 from backend.agents.export import export_agent
@@ -154,6 +154,16 @@ def test_compiler_builds_real_sdk_topology() -> None:
     assert "\nCurrent time:" in compiled.entry_agent.instructions
     assert compiled.entry_agent.model_settings.include_usage is True
     assert compiled.max_turns == 10
+
+
+def test_compiler_maps_reasoning_effort_to_sdk_settings() -> None:
+    source = blueprint()
+    source.agents[0].model_settings.reasoning = ReasoningSpec(effort="xhigh")
+
+    compiled = AgentCompiler(Resolver(), tool_catalog()).compile(source)
+
+    assert compiled.entry_agent.model_settings.reasoning is not None
+    assert compiled.entry_agent.model_settings.reasoning.effort == "xhigh"
 
 
 def test_global_instructions_include_current_date_and_time() -> None:

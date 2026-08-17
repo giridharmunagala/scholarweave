@@ -4,6 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from backend.providers.reasoning import ReasoningEffort
 from backend.runtime.sdk_compat import SUPPORTED_SDK_VERSION
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")]
@@ -24,6 +25,10 @@ class ModelReferenceSpec(BlueprintModel):
         return self
 
 
+class ReasoningSpec(BlueprintModel):
+    effort: ReasoningEffort | None = None
+
+
 class ModelSettingsSpec(BlueprintModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     top_p: float | None = Field(default=None, ge=0, le=1)
@@ -33,6 +38,7 @@ class ModelSettingsSpec(BlueprintModel):
     parallel_tool_calls: bool | None = None
     truncation: Literal["auto", "disabled"] | None = None
     max_tokens: int | None = Field(default=None, ge=1)
+    reasoning: ReasoningSpec | None = None
     verbosity: Literal["low", "medium", "high"] | None = None
 
 
@@ -127,7 +133,10 @@ class RunSettingsSpec(BlueprintModel):
 
 
 class SessionPolicySpec(BlueprintModel):
-    # Accept persisted pre-removal policy fields without exposing or using them.
+    history_max_items: int | None = Field(default=None, ge=2, le=100)
+    messages_only: bool = False
+
+    # Accept persisted pre-removal policy fields.
     model_config = ConfigDict(extra="ignore")
 
 

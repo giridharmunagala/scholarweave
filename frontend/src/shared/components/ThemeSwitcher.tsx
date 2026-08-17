@@ -45,26 +45,31 @@ export function ThemeSwitcher() {
       </button>
       {open ? (
         <div className="theme-popover" role="menu" aria-label="Theme">
-          {THEMES.map((theme) => (
-            <button
-              key={theme.id}
-              type="button"
-              role="menuitemradio"
-              aria-checked={preference === theme.id}
-              className="theme-option"
-              onClick={() => choose(theme.id)}
-            >
-              <span className="swatch" aria-hidden="true">
-                {theme.swatch.map((color) => (
-                  <i key={color} style={{ background: color }} />
-                ))}
-              </span>
-              <span className="stack-tight" style={{ gap: 0 }}>
-                {theme.label}
-                <small className="muted">{theme.description}</small>
-              </span>
-              {preference === theme.id ? <Icon name="check" size={15} className="check" /> : null}
-            </button>
+          {(['light', 'dark'] as const).map((scheme) => (
+            <div className="theme-group" key={scheme}>
+              <span className="theme-group-label">{scheme === 'light' ? 'Light' : 'Dark'}</span>
+              {THEMES.filter((theme) => theme.scheme === scheme).map((theme) => (
+                <button
+                  key={theme.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={preference === theme.id}
+                  className="theme-option"
+                  onClick={() => choose(theme.id)}
+                >
+                  <span className="swatch" aria-hidden="true">
+                    {theme.swatch.map((color) => (
+                      <i key={color} style={{ background: color }} />
+                    ))}
+                  </span>
+                  <span className="stack-tight" style={{ gap: 0 }}>
+                    {theme.label}
+                    <small className="muted">{theme.description}</small>
+                  </span>
+                  {preference === theme.id ? <Icon name="check" size={15} className="check" /> : null}
+                </button>
+              ))}
+            </div>
           ))}
           <hr />
           <button

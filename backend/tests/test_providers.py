@@ -52,7 +52,12 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     )
     assert updated.status_code == 200
     assert updated.json()["models"] == [
-        {"name": "embed-1", "capabilities": ["embedding"], "enabled": False}
+        {
+            "name": "embed-1",
+            "capabilities": ["embedding"],
+            "reasoning_efforts": None,
+            "enabled": False,
+        }
     ]
 
     restarted = TestClient(
@@ -67,7 +72,12 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     restarted_profile = restarted.get(f"/api/providers/{profile_id}").json()
     assert restarted_profile["api_key_set"] is True
     assert restarted_profile["models"] == [
-        {"name": "embed-1", "capabilities": ["embedding"], "enabled": False}
+        {
+            "name": "embed-1",
+            "capabilities": ["embedding"],
+            "reasoning_efforts": None,
+            "enabled": False,
+        }
     ]
     archived = restarted.delete(f"/api/providers/{profile_id}")
     assert archived.status_code == 200
@@ -100,6 +110,64 @@ def test_last_chat_model_reference_persists_across_restarts(test_settings) -> No
         )
     )
     assert restarted.get("/api/settings").json()["last_chat_model_reference"] == reference
+
+
+def test_provider_models_expose_model_specific_reasoning_efforts(test_settings) -> None:
+    client = TestClient(create_app(test_settings))
+    luna = client.post(
+        "/api/providers",
+        json={
+            "name": "Azure reasoning",
+            "kind": "azure_openai",
+            "base_url": "https://azure.example.test/openai/v1",
+            "api_key": "test-key",
+            "models": [{"name": "gpt-5.6-luna"}],
+        },
+    ).json()["models"][0]
+    compatible = client.post(
+        "/api/providers",
+        json={
+            "name": "Local reasoning",
+            "kind": "openai_compatible",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "models": [
+                {"name": "qwen3.8-27b-q3-vision-long"},
+                {"name": "custom-model"},
+            ],
+        },
+    ).json()["models"]
+
+    assert luna["reasoning_efforts"] == [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert compatible[0]["reasoning_efforts"] == ["low", "medium", "xhigh"]
+    assert compatible[1]["reasoning_efforts"] is None
+
+
+def test_user_profile_and_timezone_settings_persist(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        updated = client.put(
+            "/api/settings",
+            json={
+                "user_timezone": "Asia/Kolkata",
+                "user_profile": "Based in Hyderabad, India.",
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["user_timezone"] == "Asia/Kolkata"
+        assert updated.json()["user_profile"] == "Based in Hyderabad, India."
+
+        invalid = client.put(
+            "/api/settings",
+            json={"user_timezone": "Not/A_Timezone"},
+        )
+        assert invalid.status_code == 422
 
 
 def test_legacy_empty_ocr_model_references_migrate_to_null(test_settings) -> None:

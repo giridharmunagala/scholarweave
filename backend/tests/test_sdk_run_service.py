@@ -41,9 +41,11 @@ class Resolver:
 class ToolRuntime:
     def __init__(self) -> None:
         self.calls = []
+        self.context_metadata = []
 
     async def invoke(self, catalog_id, arguments, context):
         self.calls.append((catalog_id, arguments))
+        self.context_metadata.append(dict(context.metadata))
         return [{"id": "paper-1", "title": "Paper"}]
 
 
@@ -234,10 +236,24 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
         EventBroker(),
     )
 
-    paused = await service.run_now(compiled, "List the papers.")
+    run = service.create(
+        compiled,
+        "List the papers.",
+        agent_revision_id=None,
+        conversation_id=None,
+        runtime_metadata={"extended_work_notes": [{"summary": "Keep this finding."}]},
+    )
+    for _attempt in range(200):
+        paused = service.get(run.id)
+        if paused.status in {"paused", "completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.01)
 
     assert paused.status == "paused"
     assert paused.state_json
+    assert paused.state_json["context"]["context"]["metadata"] == {
+        "extended_work_notes": [{"summary": "Keep this finding."}]
+    }
     assert len(paused.interruptions) == 1
     assert paused.interruptions[0].status == "pending"
     assert tool_runtime.calls == []
@@ -257,6 +273,9 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
     assert resumed.status == "completed", resumed.error
     assert resumed.interruptions[0].status == "approved"
     assert tool_runtime.calls == [("documents.list", {})]
+    assert tool_runtime.context_metadata == [
+        {"extended_work_notes": [{"summary": "Keep this finding."}]}
+    ]
     assert sum(item.item_type == "tool_call_item" for item in resumed.items) == 1
     assert sum(item.item_type == "tool_call_output_item" for item in resumed.items) == 1
     assert any(event.event_type == "run.paused" for event in resumed.events)

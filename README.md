@@ -3,9 +3,11 @@
 **A local-first autonomous research agent, built directly on the OpenAI Agents SDK.**
 
 ScholarWeave is a self-hosted research workspace: you point it at PDFs and the open web, it
-ingests and indexes them, and a single autonomous agent does the actual work — searching,
-reading primary text, tracing evidence, and writing durable, cited notes into a local
-workspace. Every model call can stay on your machine.
+ingests and indexes them, and an autonomous agent does the actual work — searching, reading
+primary text, tracing evidence, computing exact results, and writing durable, cited notes into
+a local workspace. Direct chat uses one agent; optional Extended work uses the same selected
+model in sequential, fresh-context planner and worker calls. Every model call can stay on your
+machine.
 
 ![Research agent](docs/screenshots/research-chat.png)
 
@@ -106,8 +108,12 @@ readable text), reads exact pages or section-aware chunks, cross-checks claims, 
 Markdown into the workspace — preferring exact replacements and appends over rewriting a file.
 It keeps going until the outcome is complete or it hits a concrete blocker.
 
-**Runtime model.** Conversation history is owned exclusively by the SDK `Session` contract — one
-SQLite-backed session per conversation, retained without automatic summarization or replacement.
+**Runtime model.** Conversation history is owned by the SDK `Session` contract — one SQLite-backed
+session per conversation. Direct mode retains the full history. Extended work gives its coordinator
+a bounded message-only view, decomposes broad requests into ordered work items, executes each item
+sequentially through `Agent.as_tool`, stores detailed findings in run-scoped notes, and then reads
+only the notes needed for final synthesis. Completed turns from older conversations are available
+through conservative lexical search; the agent reuses them only when the match is clear.
 `ScholarWeaveContext` carries repositories, IDs, services, and event sinks through
 `RunContextWrapper`; that local context is never injected into model input unless a tool or the
 instructions deliberately expose it. Pause and resume use serialized SDK `RunState`.
@@ -157,8 +163,9 @@ usage.
 
 ### Settings
 
-Per-capability model defaults (chat/reasoning, embeddings, vision enhancement) and provider
-profiles. Unavailable models are flagged rather than silently substituted.
+Per-capability model defaults (chat/reasoning, embeddings, vision enhancement), provider profiles,
+and a user profile with an IANA timezone. Every compiled agent receives the current localized date
+and time plus the saved profile. Unavailable models are flagged rather than silently substituted.
 
 ![Model defaults](docs/screenshots/settings.png)
 ![Provider profiles](docs/screenshots/settings-providers.png)
@@ -544,6 +551,8 @@ file at the repo root. Settings marked ✅ are also editable at runtime through 
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | ✅ | Default Ollama endpoint |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | ✅ | Per-model-request timeout |
 | `AGENT_TRACING_ENABLED` | `false` | ✅ | SDK tracing |
+| `USER_TIMEZONE` | `Asia/Kolkata` | ✅ | IANA timezone injected into every agent context |
+| `USER_PROFILE` | `Based in Hyderabad, Telangana, India.` | ✅ | Personal context injected into every agent |
 | `OCR_ENGINE` | `docling` | ✅ | `docling` or `tesseract` |
 | `OCR_LANGUAGE` | `eng` | | Tesseract language pack |
 | `DOCLING_DEVICE` | `auto` | ✅ | `auto` / `cuda` / `cpu` |
@@ -607,7 +616,7 @@ Everything under `local_data/` and `workspace/` is git-ignored.
 
 ## Agent tool surface
 
-The autonomous agent is a single SDK `Agent` with 40+ `FunctionTool`s bound, `max_turns: 50`, and
+Direct mode is a single SDK `Agent` with 40+ `FunctionTool`s bound, `max_turns: 50`, and
 serialized tool execution. Browse the live catalogue at `GET /api/sdk/catalog` or in **Tools**.
 
 | Group | Representative tools |
@@ -617,7 +626,12 @@ serialized tool execution. Browse the live catalogue at `GET /api/sdk/catalog` o
 | Summaries | `list_paper_summaries`, `save_paper_summary` |
 | Workspace | `ensure_paper_workspace`, `create_workspace_note`, `read_workspace_file`, `write_workspace_file`, `append_workspace_markdown`, `replace_workspace_markdown`, `search_workspace`, `set_workspace_file_tags` |
 | Authoring | `save_agent_blueprint`, `validate_agent_blueprint`, `list_saved_agents`, `save_custom_function_tool`, `write_artifact` |
+| Context and computation | `search_conversation_memory`, `read_conversation_memory`, `execute_python` |
 | Discovery | `search_available_tools`, `list_sdk_primitives` |
+
+Extended work adds a coordinator, a structured planner, and one reusable focused worker as
+`Agent.as_tool` relations. Calls remain sequential (`parallel_tool_calls: false`, tool concurrency
+`1`); the planner and each worker use the same configured model with isolated prompts.
 
 Fixed, single-purpose agents are also exposed over the API (`GET /api/research-agents`): a paper
 **Summary agent**, an **Open areas identification agent**, a per-paper **Q&A bot**, and a

@@ -1001,11 +1001,44 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** AgentBlueprint */
-        AgentBlueprint: {
+        "AgentBlueprint-Input": {
             /** Agent Tools */
             agent_tools?: components["schemas"]["AgentToolSpec"][];
             /** Agents */
-            agents: components["schemas"]["AgentSpec"][];
+            agents: components["schemas"]["AgentSpec-Input"][];
+            /** Description */
+            description?: string | null;
+            /** Entry Agent Id */
+            entry_agent_id: string;
+            /** Guardrails */
+            guardrails?: components["schemas"]["GuardrailSpec"][];
+            /** Handoffs */
+            handoffs?: components["schemas"]["HandoffSpec"][];
+            /** Name */
+            name: string;
+            run?: components["schemas"]["RunSettingsSpec"];
+            /**
+             * Schema Version
+             * @default 1
+             * @constant
+             */
+            schema_version: 1;
+            /**
+             * Sdk Version
+             * @default 0.19.4
+             * @constant
+             */
+            sdk_version: "0.19.4";
+            session?: components["schemas"]["SessionPolicySpec"];
+            /** Tools */
+            tools?: (components["schemas"]["FunctionToolSpec"] | components["schemas"]["WebSearchToolSpec"] | components["schemas"]["FileSearchToolSpec"])[];
+        };
+        /** AgentBlueprint */
+        "AgentBlueprint-Output": {
+            /** Agent Tools */
+            agent_tools?: components["schemas"]["AgentToolSpec"][];
+            /** Agents */
+            agents: components["schemas"]["AgentSpec-Output"][];
             /** Description */
             description?: string | null;
             /** Entry Agent Id */
@@ -1059,7 +1092,7 @@ export interface components {
         AgentRevisionResponse: {
             /** Agent Id */
             agent_id: string;
-            blueprint: components["schemas"]["AgentBlueprint"];
+            blueprint: components["schemas"]["AgentBlueprint-Output"];
             /**
              * Created At
              * Format: date-time
@@ -1077,7 +1110,39 @@ export interface components {
             sdk_version: string;
         };
         /** AgentSpec */
-        AgentSpec: {
+        "AgentSpec-Input": {
+            /** Description */
+            description?: string | null;
+            /** Id */
+            id: string;
+            /** Input Guardrail Ids */
+            input_guardrail_ids?: string[];
+            /** Instructions */
+            instructions: string;
+            model?: components["schemas"]["ModelReferenceSpec"];
+            model_settings?: components["schemas"]["ModelSettingsSpec"];
+            /** Name */
+            name: string;
+            /** Output */
+            output?: components["schemas"]["JsonOutputSpec"] | null;
+            /** Output Guardrail Ids */
+            output_guardrail_ids?: string[];
+            /**
+             * Reset Tool Choice
+             * @default true
+             */
+            reset_tool_choice: boolean;
+            /** Tool Ids */
+            tool_ids?: string[];
+            /**
+             * Tool Use Behavior
+             * @default run_llm_again
+             * @enum {string}
+             */
+            tool_use_behavior: "run_llm_again" | "stop_on_first_tool";
+        };
+        /** AgentSpec */
+        "AgentSpec-Output": {
             /** Description */
             description?: string | null;
             /** Id */
@@ -1137,7 +1202,7 @@ export interface components {
         };
         /** AgentWriteRequest */
         AgentWriteRequest: {
-            blueprint: components["schemas"]["AgentBlueprint"];
+            blueprint: components["schemas"]["AgentBlueprint-Input"];
             /** Presentation */
             presentation?: {
                 [key: string]: unknown;
@@ -1273,6 +1338,14 @@ export interface components {
         ConversationMessageRequest: {
             /** Content */
             content: string;
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
+            /**
+             * Work Mode
+             * @default direct
+             * @enum {string}
+             */
+            work_mode: "direct" | "extended";
         };
         /** ConversationMessageResponse */
         ConversationMessageResponse: {
@@ -1380,6 +1453,8 @@ export interface components {
         DirectConversationMessageRequest: {
             /** Content */
             content: string;
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
         };
         /** DirectConversationMessageResponse */
         DirectConversationMessageResponse: {
@@ -1838,6 +1913,7 @@ export interface components {
             parallel_tool_calls?: boolean | null;
             /** Presence Penalty */
             presence_penalty?: number | null;
+            reasoning?: components["schemas"]["ReasoningSpec"] | null;
             /** Temperature */
             temperature?: number | null;
             /** Tool Choice */
@@ -1885,6 +1961,8 @@ export interface components {
             enabled: boolean;
             /** Name */
             name: string;
+            /** Reasoning Efforts */
+            reasoning_efforts?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
         };
         /** ProviderModelsResponse */
         ProviderModelsResponse: {
@@ -1981,6 +2059,11 @@ export interface components {
              */
             type: "reasoning_item";
         };
+        /** ReasoningSpec */
+        ReasoningSpec: {
+            /** Effort */
+            effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
+        };
         /** RemotePdfDownloadRequest */
         RemotePdfDownloadRequest: {
             /** Title */
@@ -1992,13 +2075,15 @@ export interface components {
         RunCreateRequest: {
             /** Agent Revision Id */
             agent_revision_id?: string | null;
-            blueprint?: components["schemas"]["AgentBlueprint"] | null;
+            blueprint?: components["schemas"]["AgentBlueprint-Input"] | null;
             /** Conversation Id */
             conversation_id?: string | null;
             /** Input */
             input: string | {
                 [key: string]: unknown;
             }[];
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
         };
         /** RunEventResponse */
         RunEventResponse: {
@@ -2134,7 +2219,15 @@ export interface components {
             type: string;
         };
         /** SessionPolicySpec */
-        SessionPolicySpec: Record<string, never>;
+        SessionPolicySpec: {
+            /** History Max Items */
+            history_max_items?: number | null;
+            /**
+             * Messages Only
+             * @default false
+             */
+            messages_only: boolean;
+        };
         /** SettingsResponse */
         SettingsResponse: {
             /** Agent Tracing Enabled */
@@ -2191,6 +2284,10 @@ export interface components {
             request_timeout_seconds: number;
             /** Retrieval Max Context Chars */
             retrieval_max_context_chars: number;
+            /** User Profile */
+            user_profile: string;
+            /** User Timezone */
+            user_timezone: string;
             /** Workspace Dir */
             workspace_dir: string;
         };
@@ -2233,6 +2330,10 @@ export interface components {
             request_timeout_seconds?: number | null;
             /** Retrieval Max Context Chars */
             retrieval_max_context_chars?: number | null;
+            /** User Profile */
+            user_profile?: string | null;
+            /** User Timezone */
+            user_timezone?: string | null;
         };
         /** ToolApprovalRunItem */
         ToolApprovalRunItem: {
@@ -2654,7 +2755,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AgentBlueprint"];
+                "application/json": components["schemas"]["AgentBlueprint-Input"];
             };
         };
         responses: {
@@ -2693,7 +2794,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AgentBlueprint"][];
+                    "application/json": components["schemas"]["AgentBlueprint-Output"][];
                 };
             };
         };
@@ -2707,7 +2808,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["AgentBlueprint"];
+                "application/json": components["schemas"]["AgentBlueprint-Input"];
             };
         };
         responses: {

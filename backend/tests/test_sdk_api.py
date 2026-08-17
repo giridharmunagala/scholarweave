@@ -90,6 +90,7 @@ def test_agent_revision_and_runner_api(test_settings, stub_provider) -> None:
             json={
                 "agent_revision_id": agent["latest_revision"]["id"],
                 "input": "What is ScholarWeave?",
+                "reasoning_effort": "high",
             },
         )
         assert run_response.status_code == 202, run_response.text
@@ -106,6 +107,11 @@ def test_agent_revision_and_runner_api(test_settings, stub_provider) -> None:
         assert run is not None
         assert run["status"] == "completed", run
         assert run["final_output"] == "Stub answer."
+        assert next(
+            request
+            for request in stub_provider.requests
+            if request.get("messages")
+        )["reasoning_effort"] == "high"
         assert any(item["type"] == "message_output_item" for item in run["items"])
         assert any(event["event_type"] == "run.completed" for event in run["events"])
 
@@ -145,7 +151,10 @@ def test_autonomous_research_agent_discovers_and_calls_tools_until_done(
 
         message_response = client.post(
             f"/api/agent/conversations/{conversation['id']}/messages",
-            json={"content": "Research saved papers"},
+            json={
+                "content": "Research saved papers",
+                "reasoning_effort": "medium",
+            },
         )
         assert message_response.status_code == 202, message_response.text
         run_id = message_response.json()["run"]["id"]
@@ -160,12 +169,110 @@ def test_autonomous_research_agent_discovers_and_calls_tools_until_done(
 
         assert run is not None
         assert run["status"] == "completed", run
+        assert all(
+            request["reasoning_effort"] == "medium"
+            for request in stub_provider.requests
+            if request.get("messages")
+        )
         assert {"search_available_tools", "list_documents"} <= set(stub_provider.tools_offered)
         assert sum(item["type"] == "tool_call_output_item" for item in run["items"]) == 2
 
         detail = client.get(f"/api/agent/conversations/{conversation['id']}")
         assert detail.status_code == 200, detail.text
         assert any(item["role"] == "user" for item in detail.json()["items"])
+
+
+def test_autonomous_extended_work_mode_compiles_isolated_agents(
+    test_settings,
+    stub_provider,
+) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            "/api/agent/conversations",
+            json={
+                "title": "Extended analysis",
+                "model_reference": {
+                    "provider_profile_id": profile_id,
+                    "model": "stub-model",
+                },
+            },
+        ).json()
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={
+                "content": "Answer directly if no decomposition is needed.",
+                "work_mode": "extended",
+            },
+        )
+        assert response.status_code == 202, response.text
+        run_id = response.json()["run"]["id"]
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            run = client.get(f"/api/runs/{run_id}").json()
+            if run["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.05)
+
+        assert run["status"] == "completed", run
+        record = app.state.services.runs.get(run_id)
+        assert record.blueprint_json["name"] == "ScholarWeave extended work"
+        assert [agent["id"] for agent in record.blueprint_json["agents"]] == [
+            "agent",
+            "planner",
+            "worker",
+        ]
+        assert record.blueprint_json["session"] == {
+            "history_max_items": 12,
+            "messages_only": True,
+        }
+
+
+def test_autonomous_agent_can_compute_with_sandboxed_python(
+    test_settings,
+    stub_provider,
+) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        profile_id = configure_provider(client, stub_provider)
+        stub_provider.call_tool = "execute_python"
+        stub_provider.tool_arguments = {
+            "code": "def compute(inputs):\n    return {'square': inputs['value'] ** 2}\n",
+            "inputs": {"value": 7},
+        }
+        conversation = client.post(
+            "/api/agent/conversations",
+            json={
+                "title": "Compute",
+                "model_reference": {
+                    "provider_profile_id": profile_id,
+                    "model": "stub-model",
+                },
+            },
+        ).json()
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={"content": "Square seven exactly."},
+        )
+        run_id = response.json()["run"]["id"]
+
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            run = client.get(f"/api/runs/{run_id}").json()
+            if run["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.05)
+
+        assert run["status"] == "completed", run
+        completed = [
+            event
+            for event in run["events"]
+            if event["event_type"] == "tool.completed"
+            and event["payload"].get("tool_name") == "execute_python"
+        ]
+        assert completed[0]["payload"]["result"]["output"] == {"square": 49}
 
 
 def test_function_tool_authoring_api(test_settings) -> None:

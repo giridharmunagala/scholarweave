@@ -1,5 +1,6 @@
 import { json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
+import type { ReasoningEffort } from '../chat/ReasoningEffortSelect';
 
 export type DirectAgent = components['schemas']['DirectAgentResponse'];
 export type DirectConversation = components['schemas']['DirectConversationResponse'];
@@ -32,10 +33,13 @@ export const directAgentsApi = {
     request<DirectConversationDetail>(
       `/research-agent-conversations/${encodeURIComponent(id)}`,
     ),
-  send: (id: string, content: string) =>
+  send: (id: string, content: string, reasoningEffort: ReasoningEffort | null) =>
     request<components['schemas']['DirectConversationMessageResponse']>(
       `/research-agent-conversations/${encodeURIComponent(id)}/messages`,
-      json('POST', { content }),
+      json('POST', {
+        content,
+        reasoning_effort: reasoningEffort ?? undefined,
+      }),
     ),
   run: (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}`),
 };

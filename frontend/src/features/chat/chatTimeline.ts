@@ -45,12 +45,23 @@ export interface HandoffStep {
   to: string;
 }
 
-export type TurnStep = ReasoningStep | ToolStep | HandoffStep;
+export interface AgentStep {
+  kind: 'agent';
+  id: string;
+  sequence: number;
+  name: string;
+  output: unknown;
+  status: 'running' | 'completed';
+  seconds: number | null;
+}
+
+export type TurnStep = ReasoningStep | ToolStep | HandoffStep | AgentStep;
 
 export interface TurnTimeline {
   steps: TurnStep[];
   sources: TimelineSource[];
   toolCount: number;
+  agentCount: number;
   reasoningSeconds: number | null;
   running: boolean;
 }
@@ -59,6 +70,7 @@ export const emptyTurnTimeline: TurnTimeline = {
   steps: [],
   sources: [],
   toolCount: 0,
+  agentCount: 0,
   reasoningSeconds: null,
   running: false,
 };
@@ -78,6 +90,7 @@ const TERMINAL_EVENTS = new Set([
 type MutableStep =
   | (ReasoningStep & { startedAt: number | null })
   | (ToolStep & { startedAt: number | null; callId: string | null; settled: boolean })
+  | (AgentStep & { startedAt: number | null })
   | HandoffStep;
 
 export function buildTurnTimeline(
@@ -91,6 +104,7 @@ export function buildTurnTimeline(
   let phaseStart: number | null = null;
   let lastAt: number | null = null;
   let settled = options.settled === true;
+  let rootAgentName: string | null = null;
 
   const closeReasoning = (at: number | null) => {
     if (!openReasoning) return;
@@ -136,6 +150,46 @@ export function buildTurnTimeline(
       }
       // The answer starting is the moment thinking stopped.
       if (rawType === 'response.output_text.delta') closeReasoning(at);
+      continue;
+    }
+
+    if (event.event_type === 'agent.started') {
+      const name = stringOr(event.payload.agent_name);
+      if (!name) continue;
+      if (rootAgentName === null) {
+        rootAgentName = name;
+        continue;
+      }
+      if (name === rootAgentName) continue;
+      steps.push({
+        kind: 'agent',
+        id: `agent-${event.sequence}`,
+        sequence: event.sequence,
+        name,
+        output: null,
+        status: 'running',
+        seconds: null,
+        startedAt: at,
+      });
+      continue;
+    }
+
+    if (event.event_type === 'agent.completed') {
+      const name = stringOr(event.payload.agent_name);
+      if (!name || name === rootAgentName) continue;
+      const target = findAgent(steps, name) ?? pushAgent(steps, {
+        kind: 'agent',
+        id: `agent-${event.sequence}`,
+        sequence: event.sequence,
+        name,
+        output: null,
+        status: 'running',
+        seconds: null,
+        startedAt: at,
+      });
+      target.status = 'completed';
+      target.output = event.payload.output ?? null;
+      target.seconds = duration(target.startedAt, at);
       continue;
     }
 
@@ -199,12 +253,19 @@ export function buildTurnTimeline(
 
   const running =
     !settled
-    && (Boolean(openReasoning) || steps.some((step) => step.kind === 'tool' && step.status === 'running'));
+    && (
+      Boolean(openReasoning)
+      || steps.some(
+        (step) =>
+          (step.kind === 'tool' || step.kind === 'agent') && step.status === 'running',
+      )
+    );
 
   return {
     steps: steps.map(freezeStep),
     sources: dedupeSources(steps.flatMap((step) => (step.kind === 'tool' ? step.sources : []))),
     toolCount: steps.filter((step) => step.kind === 'tool').length,
+    agentCount: steps.filter((step) => step.kind === 'agent').length,
     reasoningSeconds: totalReasoningSeconds(steps),
     running,
   };
@@ -273,6 +334,7 @@ function toolStep(sequence: number, name: string, at: number | null) {
 }
 
 type MutableTool = ReturnType<typeof toolStep>;
+type MutableAgent = AgentStep & { startedAt: number | null };
 
 function pushTool(steps: MutableStep[], step: MutableTool): MutableTool {
   steps.push(step);
@@ -290,6 +352,21 @@ function findTool(
   return null;
 }
 
+function pushAgent(steps: MutableStep[], step: MutableAgent): MutableAgent {
+  steps.push(step);
+  return step;
+}
+
+function findAgent(steps: MutableStep[], name: string): MutableAgent | null {
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (step.kind === 'agent' && step.name === name && step.status === 'running') {
+      return step as MutableAgent;
+    }
+  }
+  return null;
+}
+
 function freezeStep(step: MutableStep): TurnStep {
   if (step.kind === 'reasoning') {
     const { startedAt: _startedAt, ...rest } = step;
@@ -297,6 +374,10 @@ function freezeStep(step: MutableStep): TurnStep {
   }
   if (step.kind === 'tool') {
     const { startedAt: _startedAt, callId: _callId, settled: _settled, ...rest } = step as MutableTool;
+    return rest;
+  }
+  if (step.kind === 'agent') {
+    const { startedAt: _startedAt, ...rest } = step;
     return rest;
   }
   return step;

@@ -40,3 +40,13 @@ class ScholarWeaveContext:
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.event_sink is not None:
             await self.event_sink.emit(event_type, payload)
+
+
+def unwrap_scholar_context(value: Any) -> ScholarWeaveContext:
+    current = getattr(value, "context", value)
+    while not isinstance(current, ScholarWeaveContext):
+        nested = getattr(current, "context", None)
+        if nested is None or nested is current:
+            raise TypeError("Could not resolve the ScholarWeave context.")
+        current = nested
+    return current
