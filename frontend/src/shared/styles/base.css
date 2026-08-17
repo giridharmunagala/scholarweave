@@ -16,7 +16,7 @@ body {
   color: var(--text);
   font-family: var(--font-sans);
   font-size: var(--text-base);
-  line-height: 1.6;
+  line-height: 1.58;
   text-rendering: optimizeLegibility;
 }
 
@@ -29,11 +29,11 @@ a { color: var(--accent-strong); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
 h1, h2, h3, h4, p { margin-top: 0; }
-h1, h2, h3, h4 { color: var(--text-strong); line-height: 1.2; }
+h1, h2, h3, h4 { color: var(--text-strong); line-height: 1.16; }
 h1, h2, h3, h4, p, li, dd, dt, label, button, a { overflow-wrap: anywhere; }
-h1 { margin-bottom: var(--space-2); font-size: clamp(1.45rem, 2.2vw, 1.95rem); font-weight: 700; letter-spacing: -.025em; }
-h2 { font-size: var(--text-lg); font-weight: 650; letter-spacing: -.012em; }
-h3 { font-size: var(--text-base); font-weight: 650; }
+h1 { margin-bottom: var(--space-2); font-size: clamp(1.65rem, 2.4vw, 2.2rem); font-weight: 780; letter-spacing: -.04em; }
+h2 { font-size: var(--text-lg); font-weight: 720; letter-spacing: -.018em; }
+h3 { font-size: var(--text-base); font-weight: 700; }
 p { margin-bottom: var(--space-3); color: var(--muted); }
 p:last-child { margin-bottom: 0; }
 small { font-size: var(--text-sm); }
@@ -85,7 +85,7 @@ input:hover, textarea:hover, select:hover { border-color: var(--border-strong); 
 input:focus, textarea:focus, select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+  box-shadow: var(--accent-ring);
 }
 input[type='checkbox'], input[type='radio'] { width: auto; accent-color: var(--accent); }
 input[type='file'] { padding: .4rem; }

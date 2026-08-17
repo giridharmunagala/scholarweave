@@ -305,6 +305,10 @@ class ProviderService:
                 name=discovered.name,
                 capabilities=discovered.capabilities,
                 reasoning_efforts=reasoning_efforts,
+                context_window_tokens=(
+                    existing.get("context_window_tokens")
+                    or discovered.context_window_tokens
+                ),
                 enabled=bool(existing.get("enabled", provider_kind != "azure_openai")),
             ),
         )

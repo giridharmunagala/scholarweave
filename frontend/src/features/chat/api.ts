@@ -8,6 +8,7 @@ export type SessionItem = components['schemas']['SessionItemResponse'];
 export type Run = components['schemas']['RunResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
 export type WorkMode = 'direct' | 'extended';
+export type WorkBudget = 'low' | 'medium' | 'high';
 
 export const CHAT_CONVERSATIONS_CHANGED = 'scholarweave:chat-conversations-changed';
 
@@ -29,6 +30,7 @@ export const chatApi = {
     content: string,
     reasoningEffort: ReasoningEffort | null,
     workMode: WorkMode,
+    workBudget: WorkBudget,
   ) =>
     request<components['schemas']['ConversationMessageResponse']>(
       `/agent/conversations/${encodeURIComponent(id)}/messages`,
@@ -36,6 +38,7 @@ export const chatApi = {
         content,
         reasoning_effort: reasoningEffort ?? undefined,
         work_mode: workMode,
+        work_budget: workBudget,
       }),
     ),
   remove: (id: string) =>
@@ -43,4 +46,6 @@ export const chatApi = {
   runs: (conversationId: string) =>
     request<Run[]>(`/runs?conversation_id=${encodeURIComponent(conversationId)}`),
   run: (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}`),
+  cancelRun: (id: string) =>
+    request<Run>(`/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
 };

@@ -202,6 +202,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         sdk_sessions,
         tool_runtime,
         events,
+        retention_days=resolved.run_retention_days,
+        delete_run_artifacts=documents.delete_run_artifacts,
     )
     builder = BuilderService(compiler, conversations, runs)
     autonomous = AutonomousAgentService(compiler, conversations, runs, function_tools)

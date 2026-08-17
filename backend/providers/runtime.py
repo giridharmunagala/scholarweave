@@ -36,6 +36,7 @@ class ResolvedModel:
     base_url: str
     api_key: str | None
     model: str
+    context_window_tokens: int | None = None
 
     @property
     def agent_base_url(self) -> str:
@@ -142,6 +143,12 @@ class ModelRuntime:
             base_url=profile.base_url,
             api_key=profile.api_key,
             model=model,
+            context_window_tokens=(
+                int(declared_model["context_window_tokens"])
+                if declared_model is not None
+                and isinstance(declared_model.get("context_window_tokens"), int)
+                else None
+            ),
         )
 
     def client(self, resolved: ResolvedModel) -> AsyncOpenAI:
@@ -178,6 +185,7 @@ class ModelRuntime:
                         continue
                     reported = set(item.get("capabilities") or [])
                     capabilities: set[Capability] = set()
+                    details: dict[str, Any] = {}
                     try:
                         details = await client.show_model(name)
                         reported.update(details.get("capabilities") or [])
@@ -203,7 +211,11 @@ class ModelRuntime:
                             else "chat"
                         )
                     discovered.append(
-                        ProviderModelEntry(name=name, capabilities=capabilities)
+                        ProviderModelEntry(
+                            name=name,
+                            capabilities=capabilities,
+                            context_window_tokens=_ollama_context_window(details),
+                        )
                     )
             else:
                 resolved = ResolvedModel(
@@ -231,6 +243,12 @@ class ModelRuntime:
                         entry.name,
                         ProviderModelEntry(name=entry.name),
                     ).capabilities,
+                    context_window_tokens=(
+                        manual_by_name[entry.name].context_window_tokens
+                        if entry.name in manual_by_name
+                        and manual_by_name[entry.name].context_window_tokens is not None
+                        else entry.context_window_tokens
+                    ),
                 )
                 for entry in discovered
             }
@@ -238,7 +256,6 @@ class ModelRuntime:
             merged = {entry.name: entry for entry in discovered}
             merged.update({entry.name: entry for entry in manual})
         return list(merged.values())
-
     async def transcribe(
         self,
         resolved: ResolvedModel,
@@ -367,6 +384,21 @@ class ModelRuntime:
             return response
         response = await self.client(resolved).embeddings.create(model=resolved.model, input=inputs)
         return [item.embedding for item in response.data]
+
+
+def _ollama_context_window(details: dict[str, Any]) -> int | None:
+    model_info = details.get("model_info")
+    if not isinstance(model_info, dict):
+        return None
+    candidates = [
+        value
+        for key, value in model_info.items()
+        if str(key).endswith(".context_length") or key == "context_length"
+    ]
+    for value in candidates:
+        if isinstance(value, int) and 4_096 <= value <= 2_000_000:
+            return value
+    return None
 
 
 def _options(temperature: float | None) -> dict[str, Any] | None:

@@ -12,6 +12,21 @@ class ToolRuntime(Protocol):
         context: "ScholarWeaveContext",
     ) -> Any: ...
 
+    async def bound_tool_result(
+        self,
+        catalog_id: str,
+        result: Any,
+        context: "ScholarWeaveContext",
+        *,
+        max_tokens: int | None = None,
+    ) -> Any: ...
+
+    def store_context_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        context: "ScholarWeaveContext",
+    ) -> dict[str, Any]: ...
+
 
 class RuntimeEventSink(Protocol):
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None: ...

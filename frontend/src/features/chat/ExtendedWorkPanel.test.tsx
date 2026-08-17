@@ -63,6 +63,7 @@ describe('ExtendedWorkPanel', () => {
 
     const note = container.querySelector<HTMLDetailsElement>('.extended-work-note')!;
     expect(note.textContent).toContain('Evidence notes');
+    expect(container.querySelector('.extended-work-status[aria-label="Completed"] svg')).not.toBeNull();
     await act(async () => {
       note.open = true;
       note.querySelector<HTMLButtonElement>('.extended-work-note-copy')!.click();

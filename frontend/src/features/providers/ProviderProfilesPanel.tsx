@@ -218,6 +218,28 @@ export function ProviderProfilesPanel({
       setBusy(null);
     }
   };
+  const setModelContextWindow = async (
+    provider: Provider,
+    modelName: string,
+    contextWindowTokens: number | null,
+  ) => {
+    const key = `${provider.id}:${modelName}`;
+    setBusy(`configure:${key}:context`);
+    try {
+      await providersApi.update(provider.id, {
+        models: provider.models.map((model) =>
+          model.name === modelName
+            ? { ...model, context_window_tokens: contextWindowTokens }
+            : model
+        ),
+      });
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
   const openCatalog = (providerId: string) => {
     setModelFilter('all');
     setCatalogProviderId(providerId);
@@ -418,6 +440,42 @@ export function ProviderProfilesPanel({
                             </label>
                           ))}
                         </span>
+                        <label className="provider-model-context-window">
+                          Context
+                          <input
+                            type="number"
+                            min={4096}
+                            max={2000000}
+                            step={1024}
+                            defaultValue={model.context_window_tokens ?? ''}
+                            placeholder="fallback"
+                            disabled={modelUpdateBusy}
+                            aria-label={`${model.name} context window tokens`}
+                            onBlur={(event) => {
+                              const nextValue = event.target.value
+                                ? Number(event.target.value)
+                                : null;
+                              if (
+                                nextValue !== (model.context_window_tokens ?? null)
+                                && (
+                                  nextValue === null
+                                  || (
+                                    Number.isInteger(nextValue)
+                                    && nextValue >= 4096
+                                    && nextValue <= 2000000
+                                  )
+                                )
+                              ) {
+                                void setModelContextWindow(
+                                  catalogProvider,
+                                  model.name,
+                                  nextValue,
+                                );
+                              }
+                            }}
+                          />
+                          tokens
+                        </label>
                         <details className="provider-model-reasoning">
                           <summary>
                             Thinking: {

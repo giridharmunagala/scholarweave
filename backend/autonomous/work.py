@@ -6,6 +6,14 @@ from backend.runtime.context import ScholarWeaveContext
 
 PLAN_KEY = "extended_work_plan"
 NOTES_KEY = "extended_work_notes"
+BUDGET_KEY = "extended_work_budget"
+SAFETY_USAGE_KEY = "extended_work_safety_usage"
+
+SAFETY_LIMIT_CATEGORIES = {
+    "web.search": "external_searches",
+    "arxiv.search": "external_searches",
+    "wikipedia.search": "external_searches",
+}
 
 
 def create_work_plan(
@@ -15,8 +23,8 @@ def create_work_plan(
     if context.metadata.get(PLAN_KEY):
         raise ValueError("This extended run already has a work plan.")
     raw_tasks = arguments.get("tasks")
-    if not isinstance(raw_tasks, list) or not 2 <= len(raw_tasks) <= 10:
-        raise ValueError("An extended work plan must contain between 2 and 10 tasks.")
+    if not isinstance(raw_tasks, list) or not 1 <= len(raw_tasks) <= 10:
+        raise ValueError("An extended work plan must contain between 1 and 10 tasks.")
 
     tasks: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -30,14 +38,34 @@ def create_work_plan(
         if task_id in seen:
             raise ValueError(f"Duplicate work item id '{task_id}'.")
         seen.add(task_id)
-        tasks.append(
-            {
-                "id": task_id,
-                "title": title,
-                "status": "in_progress" if index == 0 else "pending",
-                "summary": None,
-            }
-        )
+        task = {
+            "id": task_id,
+            "title": title,
+            "status": "in_progress" if index == 0 else "pending",
+            "summary": None,
+        }
+        for key in ("instructions", "expected_output", "rationale"):
+            value = raw_task.get(key)
+            if value is not None:
+                value = str(value).strip()
+                if not value:
+                    raise ValueError(f"Work item {key} must be non-empty when supplied.")
+                task[key] = value
+        effort = raw_task.get("effort")
+        if effort is not None:
+            if effort not in {"low", "medium", "high"}:
+                raise ValueError("Work item effort must be low, medium, or high.")
+            task["effort"] = effort
+        source_target = raw_task.get("source_target")
+        if source_target is not None:
+            if (
+                not isinstance(source_target, int)
+                or isinstance(source_target, bool)
+                or not 0 <= source_target <= 300
+            ):
+                raise ValueError("Work item source_target must be an integer from 0 to 300.")
+            task["source_target"] = source_target
+        tasks.append(task)
     context.metadata[PLAN_KEY] = tasks
     context.metadata[NOTES_KEY] = {}
     return work_snapshot(context)
@@ -155,6 +183,57 @@ def work_snapshot(context: ScholarWeaveContext) -> dict[str, Any]:
     }
 
 
+def budget_status(
+    _arguments: dict[str, Any],
+    context: ScholarWeaveContext,
+) -> dict[str, Any]:
+    budget = _budget(context)
+    limits = budget["safety_limits"]
+    usage = context.metadata.get(SAFETY_USAGE_KEY)
+    usage = usage if isinstance(usage, dict) else {}
+    return {
+        "name": budget["name"],
+        "recommended_tasks": budget["recommended_tasks"],
+        "exploration_targets": budget["exploration_targets"],
+        "safety_limits": {
+            category: {
+                "used": int(usage.get(category, 0)),
+                "limit": limit,
+                "remaining": max(0, limit - int(usage.get(category, 0))),
+            }
+            for category, limit in limits.items()
+        },
+    }
+
+
+def consume_tool_safety_limit(catalog_id: str, context: ScholarWeaveContext) -> None:
+    category = SAFETY_LIMIT_CATEGORIES.get(catalog_id)
+    if category is None:
+        return
+    budget_value = context.metadata.get(BUDGET_KEY)
+    if not isinstance(budget_value, dict):
+        return
+    limits = budget_value.get("safety_limits")
+    if not isinstance(limits, dict):
+        return
+    limit = limits.get(category)
+    if not isinstance(limit, int):
+        return
+    usage = context.metadata.setdefault(SAFETY_USAGE_KEY, {})
+    if not isinstance(usage, dict):
+        usage = {}
+        context.metadata[SAFETY_USAGE_KEY] = usage
+    used = int(usage.get(category, 0))
+    if used >= limit:
+        raise ValueError(
+            f"The extended-work safety cap for {category.replace('_', ' ')} was reached "
+            f"({used}/{limit}). "
+            "Use the evidence already gathered, inspect the budget status, or ask the user "
+            "before starting more external searches."
+        )
+    usage[category] = used + 1
+
+
 def _tasks(context: ScholarWeaveContext) -> list[dict[str, Any]]:
     tasks = context.metadata.get(PLAN_KEY)
     if not isinstance(tasks, list) or not tasks:
@@ -167,3 +246,15 @@ def _notes(context: ScholarWeaveContext) -> dict[str, dict[str, Any]]:
     if not isinstance(notes, dict):
         raise ValueError("Create an extended work plan before using work notes.")
     return notes
+
+
+def _budget(context: ScholarWeaveContext) -> dict[str, Any]:
+    value = context.metadata.get(BUDGET_KEY)
+    if not isinstance(value, dict):
+        return {
+            "name": "medium",
+            "recommended_tasks": 6,
+            "exploration_targets": 5,
+            "safety_limits": {"external_searches": 300},
+        }
+    return value

@@ -4,7 +4,15 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from agents import FunctionTool, Model, ModelResponse, ModelSettings, TResponseInputItem, Usage
+from agents import (
+    FunctionTool,
+    Model,
+    ModelBehaviorError,
+    ModelResponse,
+    ModelSettings,
+    TResponseInputItem,
+    Usage,
+)
 
 from backend.agents.blueprint import AgentBlueprint, ReasoningSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
@@ -15,6 +23,7 @@ from backend.agents.instructions import (
     GLOBAL_AGENT_INSTRUCTIONS,
     with_global_agent_instructions,
 )
+from backend.agents.output import JsonSchemaOutput
 from backend.core.errors import ValidationError
 from backend.providers.types import ModelReference, ResolvedAgentModel
 
@@ -150,10 +159,41 @@ def test_compiler_builds_real_sdk_topology() -> None:
     assert compiled.agents_by_id["researcher"].output_type is not None
     assert GLOBAL_AGENT_INSTRUCTIONS in compiled.entry_agent.instructions
     assert GLOBAL_AGENT_INSTRUCTIONS in compiled.agents_by_id["researcher"].instructions
+    assert "Structured output requirement:" in compiled.agents_by_id["researcher"].instructions
+    assert "Return only one JSON value matching the Finding schema" in (
+        compiled.agents_by_id["researcher"].instructions
+    )
+    assert '"required":["answer"]' in compiled.agents_by_id["researcher"].instructions
     assert "System information:\nCurrent date:" in compiled.entry_agent.instructions
     assert "\nCurrent time:" in compiled.entry_agent.instructions
     assert compiled.entry_agent.model_settings.include_usage is True
     assert compiled.max_turns == 10
+
+
+def test_json_schema_output_accepts_fenced_json() -> None:
+    output = JsonSchemaOutput(
+        "Finding",
+        {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+        strict=True,
+    )
+
+    assert output.validate_json('```json\n{"answer":"done"}\n```') == {"answer": "done"}
+
+
+def test_json_schema_output_reports_plain_text_as_model_behavior_error() -> None:
+    output = JsonSchemaOutput(
+        "Finding",
+        {"type": "object"},
+        strict=True,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="invalid JSON.*response started with"):
+        output.validate_json("Here is the requested analysis.")
 
 
 def test_compiler_maps_reasoning_effort_to_sdk_settings() -> None:

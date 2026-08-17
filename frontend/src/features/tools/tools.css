@@ -3,10 +3,10 @@
 .tool-badge {
   display: grid;
   justify-self: start;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   place-items: center;
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--accent-soft);
   color: var(--accent-strong);
 }

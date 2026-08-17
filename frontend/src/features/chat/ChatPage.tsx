@@ -27,6 +27,7 @@ import {
   type ConversationDetail,
   type ModelReference,
   type Run,
+  type WorkBudget,
   type WorkMode,
 } from './api';
 import {
@@ -64,6 +65,12 @@ const SUGGESTIONS = [
   'Draft research notes with citations for my current topic.',
 ];
 const WORK_MODE_STORAGE_KEY = 'scholarweave:chat-work-mode';
+const WORK_BUDGET_STORAGE_KEY = 'scholarweave:chat-work-budget';
+const WORK_BUDGET_DETAILS: Record<WorkBudget, string> = {
+  low: 'Prioritize about 3 tasks and 3 sources at a time; normal lookups are uncapped.',
+  medium: 'Prioritize about 6 tasks and 5 sources at a time; normal lookups are uncapped.',
+  high: 'Prioritize about 10 tasks and 8 sources at a time; normal lookups are uncapped.',
+};
 
 export const PROVIDER_TRANSCRIPTION_INTERVAL_MS = 750;
 
@@ -87,6 +94,7 @@ export default function ChatPage() {
     readStoredReasoningEffort,
   );
   const [workMode, setWorkMode] = useState<WorkMode>(readStoredWorkMode);
+  const [workBudget, setWorkBudget] = useState<WorkBudget>(readStoredWorkBudget);
   const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -95,6 +103,7 @@ export default function ChatPage() {
   const [content, setContent] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [recording, setRecording] = useState(false);
   const [startingRecording, setStartingRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
@@ -383,6 +392,10 @@ export default function ChatPage() {
     };
   }, [run?.id, run?.status, current?.id, sending]);
 
+  useEffect(() => {
+    if (!run || isTerminalRun(run)) setStopping(false);
+  }, [run?.id, run?.status]);
+
   const resetThread = () => {
     openRequestRef.current += 1;
     setRun(null);
@@ -416,6 +429,7 @@ export default function ChatPage() {
     if (!submitted || sending || recording || startingRecording || transcribing || speechPreview !== null) return;
     const request = openRequestRef.current;
     setSending(true);
+    setStopping(false);
     setError(null);
     setContent('');
     setOptimisticUser(submitted);
@@ -440,6 +454,7 @@ export default function ChatPage() {
         submitted,
         reasoningEffort,
         workMode,
+        workBudget,
       );
       if (request !== openRequestRef.current) return;
       setRun(response.run);
@@ -451,6 +466,21 @@ export default function ChatPage() {
       setContent(submitted);
       setOptimisticUser(null);
       setSending(false);
+      setError(nextError);
+    }
+  };
+
+  const stopRun = async () => {
+    if (!run || isTerminalRun(run) || stopping) return;
+    setStopping(true);
+    setError(null);
+    try {
+      const nextRun = await chatApi.cancelRun(run.id);
+      setRun(nextRun);
+      setRuns((previous) => mergeRun(previous, nextRun));
+      if (isTerminalRun(nextRun)) setSending(false);
+    } catch (nextError) {
+      setStopping(false);
       setError(nextError);
     }
   };
@@ -689,8 +719,8 @@ export default function ChatPage() {
     ? Math.min(100, Math.round(100 * builtInSpeech.downloaded_bytes / builtInSpeech.total_bytes))
     : 0;
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
-  const activeMetrics = run ? turnMetrics(run) : null;
   const activeEvents = run && stream.events.length >= run.events.length ? stream.events : run?.events ?? [];
+  const activeMetrics = run ? turnMetrics(run, activeEvents) : null;
   const activeTimeline = run ? timelineFor(run) : emptyTurnTimeline;
 
   // The active turn has no persisted user message yet, so its trace renders after the optimistic one.
@@ -723,6 +753,19 @@ export default function ChatPage() {
                     <span className="spinner tiny" aria-hidden="true" />
                     Working…
                   </span>
+                ) : null}
+                {run && !isTerminalRun(run) ? (
+                  <button
+                    type="button"
+                    className="button danger small chat-stop"
+                    disabled={stopping}
+                    onClick={() => void stopRun()}
+                  >
+                    {stopping
+                      ? <span className="spinner tiny" aria-hidden="true" />
+                      : <Icon name="stop" size={13} />}
+                    {stopping ? 'Stopping…' : 'Stop'}
+                  </button>
                 ) : null}
                 {activeMetrics?.inputTokens != null ? (
                   <span
@@ -828,7 +871,7 @@ export default function ChatPage() {
                     text={stream.assistant}
                     className="streaming"
                     streaming
-                    metrics={run ? turnMetrics(run) : null}
+                    metrics={activeMetrics}
                     sources={liveTimeline.sources}
                   />
                 ) : null}
@@ -1047,6 +1090,26 @@ export default function ChatPage() {
                       their stored findings.
                     </small>
                   </label>
+                  {workMode === 'extended' ? (
+                    <label className="field">
+                      Research scope
+                      <select
+                        aria-label="Extended research scope"
+                        value={workBudget}
+                        disabled={sending}
+                        onChange={(event) => {
+                          const budget = event.target.value as WorkBudget;
+                          setWorkBudget(budget);
+                          window.localStorage.setItem(WORK_BUDGET_STORAGE_KEY, budget);
+                        }}
+                      >
+                        <option value="low">Low</option>
+                        <option value="medium">Medium</option>
+                        <option value="high">High</option>
+                      </select>
+                      <small>{WORK_BUDGET_DETAILS[workBudget]}</small>
+                    </label>
+                  ) : null}
                   <hr />
                   <label className="field">
                     Speech recognition
@@ -1308,6 +1371,11 @@ function readStoredWorkMode(): WorkMode {
   return stored === 'extended' ? 'extended' : 'direct';
 }
 
+function readStoredWorkBudget(): WorkBudget {
+  const stored = window.localStorage.getItem(WORK_BUDGET_STORAGE_KEY);
+  return stored === 'low' || stored === 'high' ? stored : 'medium';
+}
+
 function runsForConversation(runs: Run[], conversationId: string): Run[] {
   return runs
     .filter((candidate) => candidate.conversation_id === conversationId)
@@ -1397,8 +1465,11 @@ interface TurnMetrics {
   durationSeconds: number | null;
 }
 
-export function turnMetrics(run: Run): TurnMetrics | null {
-  const usage = run.usage as Record<string, unknown>;
+export function turnMetrics(
+  run: Run,
+  events: readonly RunStreamEvent[] = [],
+): TurnMetrics | null {
+  const usage = latestUsageUpdate(events) ?? run.usage as Record<string, unknown>;
   const performance = isRecord(usage.performance) ? usage.performance : null;
   const inputTokens = performance
     ? metricNumber(performance.input_tokens)
@@ -1417,6 +1488,18 @@ export function turnMetrics(run: Run): TurnMetrics | null {
     generationRate: metricNumber(performance?.generation_tokens_per_second),
     durationSeconds,
   };
+}
+
+function latestUsageUpdate(
+  events: readonly RunStreamEvent[],
+): Record<string, unknown> | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.event_type === 'usage.updated' && isRecord(event.payload.performance)) {
+      return event.payload;
+    }
+  }
+  return null;
 }
 
 function TurnMetadata({ metrics }: { metrics: TurnMetrics }) {

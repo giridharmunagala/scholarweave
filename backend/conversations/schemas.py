@@ -55,6 +55,7 @@ class ConversationMessageRequest(ConversationSchema):
     content: str = Field(min_length=1, max_length=100_000)
     reasoning_effort: ReasoningEffort | None = None
     work_mode: Literal["direct", "extended"] = "direct"
+    work_budget: Literal["low", "medium", "high"] = "medium"
 
 
 class ConversationMessageResponse(ConversationSchema):

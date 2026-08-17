@@ -101,8 +101,8 @@ class DocumentService:
     def delete_document(self, document_id: str) -> bool:
         return self.repository.delete(document_id)
 
-    def delete_run_artifact_files(self, run_id: str) -> None:
-        self.repository.delete_run_artifact_files(run_id)
+    def delete_run_artifacts(self, run_id: str) -> None:
+        self.repository.delete_run_artifacts(run_id)
 
     def artifact_bytes(self, artifact: Artifact) -> bytes:
         return self.repository.artifact_bytes(artifact)

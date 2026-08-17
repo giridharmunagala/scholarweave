@@ -24,14 +24,19 @@ from backend.agents.blueprint import (
 )
 from backend.agents.catalog import GuardrailCatalog, ToolCatalog
 from backend.agents.instructions import with_global_agent_instructions
-from backend.agents.output import JsonSchemaOutput
+from backend.agents.output import JsonSchemaOutput, with_json_schema_output_instructions
 from backend.core.errors import ValidationError
 from backend.core.config import Settings
 from backend.providers.errors import ProviderRuntimeError
 from backend.providers.types import AgentModelResolver, ModelReference, ResolvedAgentModel
 from backend.runtime.context import ScholarWeaveContext
+from backend.runtime.context_budget import create_context_budget_filter
 from backend.runtime.hooks import ScholarWeaveRunHooks
+from backend.runtime.priorities import ResearchPriorityRequest, prioritizer_enabled
 from backend.runtime.sdk_compat import assert_supported_sdk
+from backend.tools.failures import nested_agent_failure_handler
+
+UNLIMITED_AGENT_TOOL_TURNS = 2_147_483_647
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,14 +91,21 @@ class AgentCompiler:
                 if spec.output is not None
                 else None
             )
+            instructions = with_global_agent_instructions(
+                spec.instructions,
+                timezone_name=self._settings.user_timezone if self._settings else None,
+                user_profile=self._settings.user_profile if self._settings else None,
+            )
+            if spec.output is not None:
+                instructions = with_json_schema_output_instructions(
+                    instructions,
+                    spec.output.name,
+                    spec.output.schema_,
+                )
             agents_by_id[spec.id] = Agent[ScholarWeaveContext](
                 name=spec.name,
                 handoff_description=spec.description,
-                instructions=with_global_agent_instructions(
-                    spec.instructions,
-                    timezone_name=self._settings.user_timezone if self._settings else None,
-                    user_profile=self._settings.user_profile if self._settings else None,
-                ),
+                instructions=instructions,
                 model=resolved.model,
                 model_settings=self._model_settings(spec.model_settings, resolved),
                 output_type=output_type,
@@ -129,12 +141,24 @@ class AgentCompiler:
 
         agent_tools_by_owner: dict[str, list[Tool]] = {agent_id: [] for agent_id in agents_by_id}
         for spec in blueprint.agent_tools:
+            is_prioritizer = spec.tool_name == "prioritize_research_work"
             agent_tools_by_owner[spec.owner_agent_id].append(
                 agents_by_id[spec.delegate_agent_id].as_tool(
                     tool_name=spec.tool_name,
                     tool_description=spec.tool_description,
-                    max_turns=spec.max_turns,
+                    is_enabled=(
+                        prioritizer_enabled
+                        if is_prioritizer
+                        else True
+                    ),
+                    parameters=ResearchPriorityRequest if is_prioritizer else None,
+                    include_input_schema=is_prioritizer,
+                    max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
                     hooks=ScholarWeaveRunHooks(),
+                    failure_error_function=nested_agent_failure_handler(
+                        spec.tool_name,
+                        agents_by_id[spec.delegate_agent_id].name,
+                    ),
                     needs_approval=spec.needs_approval,
                 )
             )
@@ -143,6 +167,18 @@ class AgentCompiler:
             spec = agent_specs[agent_id]
             bound_tools = [tools_by_id[tool_id] for tool_id in spec.tool_ids]
             bound_tools.extend(agent_tools_by_owner[agent_id])
+            if self._settings is not None and bound_tools and not any(
+                getattr(tool, "name", None) == "read_tool_result"
+                for tool in bound_tools
+            ):
+                bound_tools.append(
+                    self._tools.build_function_tool(
+                        FunctionToolSpec(
+                            id="context-result-reader",
+                            catalog_id="tool.results.read",
+                        )
+                    )
+                )
             self._validate_tool_names(agent_id, bound_tools)
             self._validate_hosted_tools(agent_id, bound_tools, resolved_models[agent_id])
             agent.tools = bound_tools
@@ -166,6 +202,19 @@ class AgentCompiler:
                 tracing_disabled=not blueprint.run.tracing_enabled,
                 tool_execution=ToolExecutionConfig(
                     max_function_tool_concurrency=blueprint.run.max_tool_concurrency
+                ),
+                call_model_input_filter=(
+                    create_context_budget_filter(
+                        self._settings,
+                        {
+                            id(agents_by_id[agent_id]): context_window
+                            for agent_id, resolved in resolved_models.items()
+                            if (context_window := resolved.context_window_tokens)
+                            is not None
+                        },
+                    )
+                    if self._settings is not None
+                    else None
                 ),
             ),
             max_turns=blueprint.run.max_turns,

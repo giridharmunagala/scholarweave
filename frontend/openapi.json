@@ -1008,6 +1008,16 @@
             ],
             "title": "Reasoning Effort"
           },
+          "work_budget": {
+            "default": "medium",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "title": "Work Budget",
+            "type": "string"
+          },
           "work_mode": {
             "default": "direct",
             "enum": [
@@ -2645,6 +2655,19 @@
             "title": "Capabilities",
             "type": "array",
             "uniqueItems": true
+          },
+          "context_window_tokens": {
+            "anyOf": [
+              {
+                "maximum": 2000000.0,
+                "minimum": 4096.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window Tokens"
           },
           "enabled": {
             "default": true,

@@ -77,6 +77,7 @@ class ProfileModelResolver:
                 supports_parallel_tool_calls=True,
                 model_name=resolved.model,
                 responses_client=client,
+                context_window_tokens=resolved.context_window_tokens,
             )
         model = OpenAIChatCompletionsModel(
             model=resolved.model,
@@ -90,4 +91,5 @@ class ProfileModelResolver:
             supports_parallel_tool_calls=resolved.kind
             in {"azure_openai", "azure_foundry"},
             model_name=resolved.model,
+            context_window_tokens=resolved.context_window_tokens,
         )

@@ -1341,6 +1341,12 @@ export interface components {
             /** Reasoning Effort */
             reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
             /**
+             * Work Budget
+             * @default medium
+             * @enum {string}
+             */
+            work_budget: "low" | "medium" | "high";
+            /**
              * Work Mode
              * @default direct
              * @enum {string}
@@ -1954,6 +1960,8 @@ export interface components {
         ProviderModel: {
             /** Capabilities */
             capabilities?: ("chat" | "embedding" | "vision" | "tools" | "speech")[];
+            /** Context Window Tokens */
+            context_window_tokens?: number | null;
             /**
              * Enabled
              * @default true

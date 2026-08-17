@@ -51,6 +51,50 @@ async def test_builtin_catalog_builds_sdk_function_tool() -> None:
 
 
 @pytest.mark.anyio
+async def test_large_tool_results_are_retained_and_returned_by_reference(
+    test_settings,
+) -> None:
+    test_settings.tool_result_max_tokens = 512
+    services = create_services(test_settings)
+    try:
+        runtime = services.runs._tool_runtime
+        full_result = [
+            {
+                "id": f"source-{index}",
+                "title": f"Source {index}",
+                "url": f"https://example.com/{index}",
+                "text": "Detailed source content " * 80,
+            }
+            for index in range(20)
+        ]
+        runtime._list_documents = lambda _arguments, _context: full_result
+        context = ScholarWeaveContext(run_id="bounded-run", tool_runtime=runtime)
+
+        compacted = await runtime.invoke("documents.list", {}, context)
+
+        assert compacted["truncated"] is True
+        assert compacted["original_characters"] > 2_048
+        assert compacted["preview"]["identifiers"][0]["id"] == "source-0"
+        result_ref = compacted["result_ref"]
+        first_page = await runtime.invoke(
+            "tool.results.read",
+            {
+                "result_ref": result_ref,
+                "start": 0,
+                "max_characters": 2_048,
+            },
+            context,
+        )
+        assert first_page["has_more"] is True
+        assert 0 < first_page["next_start"] <= 2_048
+        artifact = services.documents.get_artifact(result_ref)
+        assert artifact is not None
+        assert json.loads(services.documents.artifact_bytes(artifact)) == full_result
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
 async def test_builtin_tools_unwrap_nested_agent_tool_context() -> None:
     catalog = create_tool_catalog()
     tool = catalog.build_function_tool(
@@ -96,6 +140,7 @@ def test_builtin_json_content_tools_define_array_items(catalog_id: str) -> None:
 
 @pytest.mark.anyio
 async def test_sdk_catalog_exposes_blueprint_contract(test_settings) -> None:
+    test_settings.tool_result_max_tokens = 16_000
     services = create_services(test_settings)
     try:
         runtime = services.runs._tool_runtime

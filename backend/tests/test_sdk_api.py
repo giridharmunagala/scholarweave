@@ -204,6 +204,7 @@ def test_autonomous_extended_work_mode_compiles_isolated_agents(
             json={
                 "content": "Answer directly if no decomposition is needed.",
                 "work_mode": "extended",
+                "work_budget": "low",
             },
         )
         assert response.status_code == 202, response.text
@@ -222,12 +223,20 @@ def test_autonomous_extended_work_mode_compiles_isolated_agents(
         assert [agent["id"] for agent in record.blueprint_json["agents"]] == [
             "agent",
             "planner",
+            "prioritizer",
             "worker",
         ]
         assert record.blueprint_json["session"] == {
             "history_max_items": 12,
             "messages_only": True,
         }
+        assert record.blueprint_json["run"]["max_turns"] == 100
+        assert [tool["max_turns"] for tool in record.blueprint_json["agent_tools"]] == [
+            10,
+            None,
+            100,
+            None,
+        ]
 
 
 def test_autonomous_agent_can_compute_with_sandboxed_python(

@@ -49,9 +49,11 @@ export interface AgentStep {
   kind: 'agent';
   id: string;
   sequence: number;
+  completedSequence: number | null;
   name: string;
+  invocationId: string | null;
   output: unknown;
-  status: 'running' | 'completed';
+  status: 'running' | 'completed' | 'failed' | 'superseded';
   seconds: number | null;
 }
 
@@ -163,9 +165,11 @@ export function buildTurnTimeline(
       if (name === rootAgentName) continue;
       steps.push({
         kind: 'agent',
-        id: `agent-${event.sequence}`,
+        id: stringOr(event.payload.invocation_id) ?? `agent-${event.sequence}`,
         sequence: event.sequence,
+        completedSequence: null,
         name,
+        invocationId: stringOr(event.payload.invocation_id),
         output: null,
         status: 'running',
         seconds: null,
@@ -174,21 +178,32 @@ export function buildTurnTimeline(
       continue;
     }
 
-    if (event.event_type === 'agent.completed') {
+    if (
+      event.event_type === 'agent.completed'
+      || event.event_type === 'agent.failed'
+      || event.event_type === 'agent.superseded'
+    ) {
       const name = stringOr(event.payload.agent_name);
       if (!name || name === rootAgentName) continue;
-      const target = findAgent(steps, name) ?? pushAgent(steps, {
+      const invocationId = stringOr(event.payload.invocation_id);
+      const target = findAgent(steps, name, invocationId) ?? pushAgent(steps, {
         kind: 'agent',
-        id: `agent-${event.sequence}`,
+        id: invocationId ?? `agent-${event.sequence}`,
         sequence: event.sequence,
+        completedSequence: null,
         name,
+        invocationId,
         output: null,
         status: 'running',
         seconds: null,
         startedAt: at,
       });
-      target.status = 'completed';
-      target.output = event.payload.output ?? null;
+      target.status = event.event_type.slice('agent.'.length) as AgentStep['status'];
+      target.completedSequence = event.sequence;
+      target.output = event.payload.output
+        ?? event.payload.error
+        ?? event.payload.reason
+        ?? null;
       target.seconds = duration(target.startedAt, at);
       continue;
     }
@@ -357,10 +372,19 @@ function pushAgent(steps: MutableStep[], step: MutableAgent): MutableAgent {
   return step;
 }
 
-function findAgent(steps: MutableStep[], name: string): MutableAgent | null {
+function findAgent(
+  steps: MutableStep[],
+  name: string,
+  invocationId: string | null,
+): MutableAgent | null {
   for (let index = steps.length - 1; index >= 0; index -= 1) {
     const step = steps[index];
-    if (step.kind === 'agent' && step.name === name && step.status === 'running') {
+    if (
+      step.kind === 'agent'
+      && step.name === name
+      && step.status === 'running'
+      && (invocationId === null || step.invocationId === invocationId)
+    ) {
       return step as MutableAgent;
     }
   }

@@ -157,6 +157,8 @@ class FakeServer {
   runs: Record<string, any>[] = [];
   reasoningEfforts: Array<string | null> = [];
   workModes: string[] = [];
+  workBudgets: string[] = [];
+  cancelledRunIds: string[] = [];
   turnIndex = 0;
   listeners = new Map<string, FakeEventSource>();
 
@@ -165,6 +167,8 @@ class FakeServer {
     this.runs = [];
     this.reasoningEfforts = [];
     this.workModes = [];
+    this.workBudgets = [];
+    this.cancelledRunIds = [];
     this.turnIndex = 0;
     this.listeners.clear();
   }
@@ -315,9 +319,11 @@ function installFetch() {
           content,
           reasoning_effort = null,
           work_mode = 'direct',
+          work_budget = 'medium',
         } = JSON.parse(String(init?.body));
         server.reasoningEfforts.push(reasoning_effort);
         server.workModes.push(work_mode);
+        server.workBudgets.push(work_budget);
         return respond({ conversation: {}, run: server.startRun(content) });
       }
       if (url.includes(`/api/agent/conversations/${NEW_CONVERSATION_ID}/messages`) && method === 'POST') {
@@ -333,6 +339,14 @@ function installFetch() {
         return respond({ ...conversationSummary(NEW_CONVERSATION_ID), items: [] });
       }
       if (url.includes('/api/runs?conversation_id=')) return respond(server.runs);
+      const cancelMatch = /\/api\/runs\/([^/?]+)\/cancel$/.exec(url);
+      if (cancelMatch && method === 'POST') {
+        const cancelled = server.runs.find((run) => run.id === cancelMatch[1])!;
+        cancelled.status = 'cancelled';
+        cancelled.cancel_requested = true;
+        server.cancelledRunIds.push(cancelled.id);
+        return respond(cancelled);
+      }
       const runMatch = /\/api\/runs\/([^/?]+)$/.exec(url);
       if (runMatch) return respond(server.runs.find((run) => run.id === runMatch[1]));
       throw new Error(`Unhandled request: ${method} ${url}`);
@@ -517,10 +531,41 @@ describe('chat transcript detail', () => {
       setter.call(select, 'extended');
       select.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    const budget = container.querySelector<HTMLSelectElement>(
+      'select[aria-label="Extended research scope"]',
+    )!;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLSelectElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(budget, 'high');
+      budget.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     await send('Compare these concerns separately');
 
     expect(server.workModes).toEqual(['extended']);
+    expect(server.workBudgets).toEqual(['high']);
+    expect(container.querySelector('.chat-settings-content')?.textContent).toContain(
+      'Prioritize about 10 tasks and 8 sources at a time; normal lookups are uncapped.',
+    );
     expect(localStorage.getItem('scholarweave:chat-work-mode')).toBe('extended');
+    expect(localStorage.getItem('scholarweave:chat-work-budget')).toBe('high');
+  });
+
+  it('offers a stop control while a research run is active', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send('Run an extended investigation');
+
+    const stop = container.querySelector<HTMLButtonElement>('.chat-stop')!;
+    expect(stop.textContent).toContain('Stop');
+    await act(async () => stop.click());
+    await flush(2);
+
+    expect(server.cancelledRunIds).toEqual(['run-1']);
+    expect(container.querySelector('.chat-stop')).toBeNull();
+    expect(text(container.querySelector('.status-pill'))).toContain('cancelled');
   });
 
   it('keeps a newly created chat selected after submitting with Enter', async () => {

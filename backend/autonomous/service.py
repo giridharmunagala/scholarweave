@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from backend.agents.blueprint import (
@@ -15,6 +16,7 @@ from backend.tools.service import FunctionToolService
 
 AUTONOMOUS_TOOL_IDS = (
     ("search-tools", "tools.search"),
+    ("read-tool-result", "tool.results.read"),
     ("list-documents", "documents.list"),
     ("inspect-paper", "documents.inspect"),
     ("ingest-paper", "documents.ingest"),
@@ -53,6 +55,8 @@ AUTONOMOUS_TOOL_IDS = (
     ("save-function-tool", "function_tools.save"),
 )
 EXTENDED_WORK_TOOL_IDS = (
+    ("budget-status", "extended.budget.status"),
+    ("list-priority-decisions", "extended.priorities.list"),
     ("create-work-plan", "extended.plan.create"),
     ("update-work-item", "extended.plan.update"),
     ("save-work-note", "extended.notes.save"),
@@ -60,6 +64,7 @@ EXTENDED_WORK_TOOL_IDS = (
     ("read-work-note", "extended.notes.read"),
 )
 FOCUSED_WORKER_TOOL_IDS = (
+    "read-tool-result",
     "list-documents",
     "inspect-paper",
     "ingest-paper",
@@ -78,9 +83,30 @@ FOCUSED_WORKER_TOOL_IDS = (
     "read-workspace",
     "search-conversation-memory",
     "read-conversation-memory",
+    "budget-status",
+    "list-priority-decisions",
     "save-work-note",
 )
 WorkMode = Literal["direct", "extended"]
+WorkBudget = Literal["low", "medium", "high"]
+
+
+@dataclass(frozen=True, slots=True)
+class ExtendedWorkBudget:
+    recommended_tasks: int
+    exploration_targets: int
+
+
+EXTENDED_WORK_BUDGETS: dict[WorkBudget, ExtendedWorkBudget] = {
+    "low": ExtendedWorkBudget(3, 3),
+    "medium": ExtendedWorkBudget(6, 5),
+    "high": ExtendedWorkBudget(10, 8),
+}
+
+EXTENDED_PLANNER_TURN_BACKSTOP = 10
+EXTENDED_WORKER_TURN_BACKSTOP = 100
+EXTENDED_COORDINATOR_TURN_BACKSTOP = 100
+EXTERNAL_SEARCH_SAFETY_LIMIT = 300
 
 
 class AutonomousAgentService:
@@ -121,11 +147,16 @@ class AutonomousAgentService:
         conversation_id: str,
         *,
         work_mode: WorkMode = "direct",
+        work_budget: WorkBudget = "medium",
     ):
         record = self.get_conversation(conversation_id)
         if record.kind != "autonomous":
             raise ValueError("Conversation is not an autonomous-agent chat.")
-        return self._compile(record.model_reference_json, work_mode=work_mode)
+        return self._compile(
+            record.model_reference_json,
+            work_mode=work_mode,
+            work_budget=work_budget,
+        )
 
     async def conversation_items(self, conversation_id: str):
         compiled = self.compile_conversation(conversation_id)
@@ -139,8 +170,13 @@ class AutonomousAgentService:
         *,
         reasoning_effort: ReasoningEffort | None = None,
         work_mode: WorkMode = "direct",
+        work_budget: WorkBudget = "medium",
     ):
-        compiled = self.compile_conversation(conversation_id, work_mode=work_mode)
+        compiled = self.compile_conversation(
+            conversation_id,
+            work_mode=work_mode,
+            work_budget=work_budget,
+        )
         self._conversations.touch(conversation_id, message)
         return self._runs.create(
             compiled,
@@ -148,6 +184,22 @@ class AutonomousAgentService:
             agent_revision_id=None,
             conversation_id=conversation_id,
             reasoning_effort=reasoning_effort,
+            runtime_metadata={
+                "extended_work_budget": {
+                    "name": work_budget,
+                    "recommended_tasks": EXTENDED_WORK_BUDGETS[
+                        work_budget
+                    ].recommended_tasks,
+                    "exploration_targets": EXTENDED_WORK_BUDGETS[
+                        work_budget
+                    ].exploration_targets,
+                    "safety_limits": {
+                        "external_searches": EXTERNAL_SEARCH_SAFETY_LIMIT,
+                    },
+                }
+            }
+            if work_mode == "extended"
+            else None,
         )
 
     def _compile(
@@ -155,6 +207,7 @@ class AutonomousAgentService:
         model_reference: dict,
         *,
         work_mode: WorkMode = "direct",
+        work_budget: WorkBudget = "medium",
     ):
         custom_tools = [
             (
@@ -169,6 +222,7 @@ class AutonomousAgentService:
                 model_reference,
                 custom_tools=custom_tools,
                 work_mode=work_mode,
+                work_budget=work_budget,
             )
         )
 
@@ -178,6 +232,7 @@ def autonomous_blueprint(
     *,
     custom_tools: list[tuple[str, str, bool]] | None = None,
     work_mode: WorkMode = "direct",
+    work_budget: WorkBudget = "medium",
 ) -> AgentBlueprint:
     model = ModelReferenceSpec.model_validate(model_reference or {})
     tool_definitions = [
@@ -203,6 +258,7 @@ def autonomous_blueprint(
     ]
     all_tool_ids = [tool["id"] for tool in [*application_tools, *dynamic_tools]]
     if work_mode == "extended":
+        budget = EXTENDED_WORK_BUDGETS[work_budget]
         coordinator_tool_ids = [
             tool_id
             for tool_id, _catalog_id in EXTENDED_WORK_TOOL_IDS
@@ -222,15 +278,40 @@ def autonomous_blueprint(
                     "specific keywords. Reuse an older result only when the request and evidence clearly "
                     "match; otherwise treat it as background and update the work. Invoke plan_extended_work "
                     "with the complete user request and a compact statement of relevant prior context. "
-                    "Create the returned ordered plan with create_extended_work_plan. Execute exactly one "
-                    "work item at a time by invoking execute_focused_work with a self-contained prompt that "
+                    "Compare the returned candidates with the selected scope thresholds before creating the "
+                    "run plan. If they fit, create them directly with create_extended_work_plan. If they exceed "
+                    "a threshold, resolve that overflow with prioritize_research_work and create only its revised "
+                    "allocation. Execute exactly one work item at a time by invoking execute_focused_work with a "
+                    "self-contained prompt that "
                     "includes the work-item ID, objective, necessary constraints, and expected output. Each "
                     "focused worker has a fresh context and must save detailed findings to a run note. After "
-                    "each worker returns, mark the current item completed or blocked with a concise summary. "
+                    "each worker returns, call list_research_priority_decisions before delegating again, then "
+                    "mark the current item completed or blocked with a concise summary. Treat deferred, merged, "
+                    "replaced, or stopped work as intentional scope decisions, not failed or missing work; never "
+                    "respawn it unless a later prioritization explicitly restores it or its stop condition changes. "
+                    "Listing, acknowledging, or applying a priority decision is not new evidence: never call the "
+                    "prioritizer merely in response to its own output or to a plan/status update. The tool remains "
+                    "unavailable until a new focused-work scope starts or a research tool produces new progress. "
                     "Do not issue parallel calls. After all items settle, list the run notes and read only "
                     "the notes needed to reconcile findings. Synthesize one direct answer to the original "
                     "request, explicitly resolving conflicts and uncertainty. For simple requests that do "
-                    "not benefit from decomposition, answer directly without manufacturing a plan."
+                    "not benefit from decomposition, answer directly without manufacturing a plan. "
+                    f"This run has the {work_budget} budget. Prioritize about {budget.recommended_tasks} "
+                    f"focused items and {budget.exploration_targets} source or query targets at a time. "
+                    "These are prioritization guidance, not hard per-tool quotas: workspace, source, memory, "
+                    "and compute lookups are not preset-capped. "
+                    "Ask the planner to stay within those thresholds. Call prioritize_research_work only when "
+                    f"the proposed plan exceeds {budget.recommended_tasks} focused items, an allocation exceeds "
+                    f"{budget.exploration_targets} source or query targets, the external-search safety capacity "
+                    "cannot support the plan, or execution is concretely blocked by one of those limits. Do not "
+                    "invoke it for every extended request or merely because planning completed. When invoked, "
+                    "include the original objective, proposed work, relevant prior context, current limit status, "
+                    "and the exact overflow or blocker. The isolated LLM sub-agent can merge, replace, reorder, "
+                    "resize, or defer work. Check extended_work_budget_status before expanding scope. Prioritize "
+                    "the highest-value evidence and synthesize from what is already "
+                    f"available. A shared {EXTERNAL_SEARCH_SAFETY_LIMIT}-call cap across web, arXiv, and "
+                    "Wikipedia searches exists only to stop runaway loops. This coordinator has a "
+                    f"{EXTENDED_COORDINATOR_TURN_BACKSTOP}-turn emergency backstop."
                 ),
                 "model": model,
                 "model_settings": {"parallel_tool_calls": False},
@@ -243,7 +324,14 @@ def autonomous_blueprint(
                 "instructions": (
                     "Decompose the supplied request into the smallest useful ordered set of independent "
                     "work items. Each item must be specific enough for a fresh-context worker. Preserve all "
-                    "user constraints. Use two to eight items; do not solve the request."
+                    f"user constraints. The selected {work_budget} scope targets at most "
+                    f"{budget.recommended_tasks} focused items and about {budget.exploration_targets} source or "
+                    "query targets per item. Workspace, source, memory, and compute lookups have no preset quota; "
+                    f"web, arXiv, and Wikipedia share a {EXTERNAL_SEARCH_SAFETY_LIMIT}-call runaway cap. Normally "
+                    f"return no more than {budget.recommended_tasks} tasks. Return additional candidates, up to "
+                    "ten total, only when an essential user requirement cannot fit; the coordinator will invoke "
+                    "the prioritizer specifically to resolve that overflow. Do not solve the request. This planner "
+                    f"has a {EXTENDED_PLANNER_TURN_BACKSTOP}-turn emergency backstop."
                 ),
                 "model": model,
                 "model_settings": {"parallel_tool_calls": False},
@@ -256,7 +344,7 @@ def autonomous_blueprint(
                             "tasks": {
                                 "type": "array",
                                 "minItems": 2,
-                                "maxItems": 8,
+                                "maxItems": 10,
                                 "items": {
                                     "type": "object",
                                     "properties": {
@@ -281,6 +369,110 @@ def autonomous_blueprint(
                 },
             },
             {
+                "id": "prioritizer",
+                "name": "Research Work Prioritizer",
+                "description": (
+                    "Reallocates research effort in an isolated context using model judgment."
+                ),
+                "instructions": (
+                    "You are an isolated research-work prioritizer. Evaluate the supplied objective, constraints, "
+                    "current plan or progress, available evidence, candidate tasks or sources, and scope guidance. "
+                    "Use semantic judgment rather than a fixed score or mechanical pruning. Preserve every "
+                    "essential user requirement while cutting low-value, duplicative, speculative, or tangential "
+                    "work. You may merge, replace, reorder, resize, or defer candidates and redistribute effort "
+                    "and source targets. Account for dependencies, information gain, evidence quality, uncertainty, "
+                    "and the cost of delaying the final answer. Treat the scope's task and source counts as soft "
+                    f"targets: for this {work_budget} run, about {budget.recommended_tasks} tasks and "
+                    f"{budget.exploration_targets} source or query targets at a time. Ordinary lookups are "
+                    f"unmetered, with only a shared {EXTERNAL_SEARCH_SAFETY_LIMIT}-call external-search runaway "
+                    "cap. You are called only to resolve a stated overflow, exhausted capacity, or blocked "
+                    "allocation. Do not invent a new reason to reprioritize. Exceed the soft targets only when "
+                    "necessary and explain why. If progress is supplied, "
+                    "prefer finishing promising work and stop lines of inquiry whose expected value has fallen. "
+                    "Do not research the topic, call tools, or invent evidence. Return a self-contained allocation "
+                    "that the caller can execute without retaining your internal context."
+                ),
+                "model": model,
+                "model_settings": {"parallel_tool_calls": False},
+                "output": {
+                    "kind": "json_schema",
+                    "name": "ResearchWorkAllocation",
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "summary": {"type": "string"},
+                            "recommended": {
+                                "type": "array",
+                                "maxItems": 10,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "kind": {
+                                            "type": "string",
+                                            "enum": ["task", "query", "website", "paper"],
+                                        },
+                                        "action": {
+                                            "type": "string",
+                                            "enum": ["pursue", "continue", "merge", "replace"],
+                                        },
+                                        "effort": {
+                                            "type": "string",
+                                            "enum": ["low", "medium", "high"],
+                                        },
+                                        "source_target": {
+                                            "type": "integer",
+                                            "minimum": 0,
+                                            "maximum": EXTERNAL_SEARCH_SAFETY_LIMIT,
+                                        },
+                                        "rationale": {"type": "string"},
+                                        "instructions": {"type": "string"},
+                                        "expected_output": {"type": "string"},
+                                    },
+                                    "required": [
+                                        "id",
+                                        "title",
+                                        "kind",
+                                        "action",
+                                        "effort",
+                                        "source_target",
+                                        "rationale",
+                                        "instructions",
+                                        "expected_output",
+                                    ],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "deferred": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "reason": {"type": "string"},
+                                    },
+                                    "required": ["id", "title", "reason"],
+                                    "additionalProperties": False,
+                                },
+                            },
+                            "stop_conditions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "summary",
+                            "recommended",
+                            "deferred",
+                            "stop_conditions",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            {
                 "id": "worker",
                 "name": "Focused Work Specialist",
                 "description": "Solves one bounded work item in a fresh context and stores detailed findings.",
@@ -289,9 +481,30 @@ def autonomous_blueprint(
                     "expand into unrelated parts of the parent request. Search prior conversations only when "
                     "it can avoid duplicate work, and reuse a result only when it clearly matches. Use the "
                     "research, document, and workspace tools as needed. Verify important claims. "
-                    "Before returning, call save_extended_work_note with the supplied work-item ID, a concise "
-                    "summary, detailed evidence-bearing content, and source references. Return only a compact "
-                    "handoff containing the summary, key findings, caveats, and saved note ID."
+                    f"The {work_budget} setting is scope guidance, not a per-tool quota. Workspace, source, "
+                    f"memory, and compute lookups are not preset-capped. The overall run targets about "
+                    f"{budget.recommended_tasks} focused items and this worker should consider about "
+                    f"{budget.exploration_targets} source or query targets at a time. When more than "
+                    f"{budget.exploration_targets} queries, websites, or papers look plausible, call "
+                    "the isolated prioritize_research_work LLM sub-agent with the objective, current findings, "
+                    "candidates, current limit status, and scope guidance. Follow its revised allocation. Invoke "
+                    "it only for an actual overflow beyond the source/query target, exhausted external-search "
+                    "capacity, or a concrete limit-related blocker—not for routine research or merely because "
+                    "new evidence arrived. Do not explore deferred targets unless recommended "
+                    "work is blocked or their value materially changes. Use extended_work_budget_status when "
+                    "remaining capacity affects your choice. "
+                    "Never call the prioritizer again merely to acknowledge, apply, or reconsider its own output. "
+                    "A new call requires intervening research progress; priority listings, notes, and plan/status "
+                    "updates do not count as new evidence. "
+                    f"A shared {EXTERNAL_SEARCH_SAFETY_LIMIT}-call cap across web, arXiv, and Wikipedia "
+                    "searches is only a runaway safety backstop. This worker has a "
+                    f"{EXTENDED_WORKER_TURN_BACKSTOP}-turn emergency backstop. "
+                    "Save checkpoint notes as useful findings accumulate so another worker can resume if this "
+                    "attempt is interrupted. Before returning, call save_extended_work_note with the supplied "
+                    "work-item ID, a concise summary, detailed evidence-bearing content, and source references. "
+                    "Return only a compact handoff containing the summary, key findings, caveats, saved note ID, "
+                    "and any reprioritization summary. Deferred or stopped work must be labeled as intentional, "
+                    "not failed, so the coordinator does not respawn it."
                 ),
                 "model": model,
                 "model_settings": {"parallel_tool_calls": False},
@@ -305,7 +518,21 @@ def autonomous_blueprint(
                 "delegate_agent_id": "planner",
                 "tool_name": "plan_extended_work",
                 "tool_description": "Create a focused sequential plan for a broad request.",
-                "max_turns": 4,
+                "max_turns": EXTENDED_PLANNER_TURN_BACKSTOP,
+            },
+            {
+                "id": "prioritize-coordinator-work",
+                "owner_agent_id": "agent",
+                "delegate_agent_id": "prioritizer",
+                "tool_name": "prioritize_research_work",
+                "tool_description": (
+                    "Resolve an actual research-scope overflow or limit-related blocker with an isolated LLM "
+                    f"sub-agent. The {work_budget} thresholds are {budget.recommended_tasks} tasks and "
+                    f"{budget.exploration_targets} source/query targets. Set trigger to task_limit_exceeded or "
+                    "source_limit_exceeded only when observed is greater than the matching threshold; use "
+                    "external_search_cap_reached only at 300 searches. Include the current state, evidence, "
+                    "candidates, constraints, and limit status."
+                ),
             },
             {
                 "id": "execute-work",
@@ -313,11 +540,24 @@ def autonomous_blueprint(
                 "delegate_agent_id": "worker",
                 "tool_name": "execute_focused_work",
                 "tool_description": "Execute one bounded work item in a fresh reduced context.",
-                "max_turns": 30,
+                "max_turns": EXTENDED_WORKER_TURN_BACKSTOP,
+            },
+            {
+                "id": "prioritize-worker-work",
+                "owner_agent_id": "worker",
+                "delegate_agent_id": "prioritizer",
+                "tool_name": "prioritize_research_work",
+                "tool_description": (
+                    "Resolve an actual source/query overflow or limit-related blocker with an isolated LLM "
+                    f"sub-agent. The {work_budget} source/query threshold is {budget.exploration_targets}. Set "
+                    "trigger to source_limit_exceeded only when observed is greater than that threshold; use "
+                    "external_search_cap_reached only at 300 searches. Include current evidence, candidates, "
+                    "constraints, state, and limit status."
+                ),
             },
         ]
         session = {"history_max_items": 12, "messages_only": True}
-        max_turns = 80
+        max_turns = EXTENDED_COORDINATOR_TURN_BACKSTOP
         description = "Completes extended research through sequential isolated-context work."
     else:
         agents = [

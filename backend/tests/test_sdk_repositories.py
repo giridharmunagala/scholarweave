@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 from agents import FunctionTool, Model, ModelResponse, ModelSettings, TResponseInputItem, Usage
 
@@ -10,6 +11,7 @@ from backend.agents.compiler import AgentCompiler
 from backend.agents.repository import AgentRepository
 from backend.agents.service import AgentService
 from backend.core.config import Settings
+from backend.core.time import utcnow
 from backend.conversations.repository import ConversationRepository
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
@@ -179,3 +181,44 @@ def test_tool_conversation_and_run_repositories(tmp_path) -> None:
         run.id
     ]
     assert runs.list(conversation_id="another-conversation") == []
+
+
+def test_run_repository_bulk_deletes_run_relations(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    sessions = create_session_factory(settings)
+    runs = RunRepository(sessions)
+    old_run = runs.create(
+        agent_revision_id=None,
+        conversation_id=None,
+        agent_name="Old run",
+        input_value="old",
+        blueprint={},
+    )
+    current_run = runs.create(
+        agent_revision_id=None,
+        conversation_id=None,
+        agent_name="Current run",
+        input_value="current",
+        blueprint={},
+    )
+    runs.add_event(old_run.id, "run.completed", {})
+    runs.add_items(
+        old_run.id,
+        [{"type": "message_output_item", "agent_name": "Old run"}],
+    )
+    with sessions() as session:
+        stored = session.get(type(old_run), old_run.id)
+        assert stored is not None
+        stored.created_at = utcnow() - timedelta(days=3)
+        session.commit()
+
+    expired = runs.ids_created_before(utcnow() - timedelta(days=2))
+    runs.delete_many(expired)
+
+    assert expired == [old_run.id]
+    assert [record.id for record in runs.list()] == [current_run.id]

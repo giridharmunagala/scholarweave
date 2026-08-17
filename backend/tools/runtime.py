@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
+import uuid
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -10,6 +13,8 @@ from backend.agents.catalog import ToolCatalog
 from backend.agents.service import AgentService
 from backend.agents.templates import starter_blueprints
 from backend.autonomous.work import (
+    budget_status,
+    consume_tool_safety_limit,
     create_work_plan,
     list_work_notes,
     read_work_note,
@@ -29,9 +34,11 @@ from backend.documents.paper import manifest_pages
 from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
+from backend.runtime.serialization import to_jsonable
 from backend.persistence.files import SafeStorage
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService
+from backend.runtime.priorities import list_priority_decisions, mark_tool_progress
 from backend.tools.service import FunctionToolService
 from backend.tools.sandbox import SandboxLimits, run_python
 from backend.core.json import dumps_json
@@ -75,9 +82,12 @@ class ApplicationToolRuntime:
         context: ScholarWeaveContext,
     ) -> Any:
         handlers = {
+            "tool.results.read": self._read_tool_result,
             "builder.todos.create": create_builder_todo_plan,
             "builder.todos.update": update_builder_todo,
             "builder.finish": finish_builder_run,
+            "extended.budget.status": budget_status,
+            "extended.priorities.list": list_priority_decisions,
             "extended.plan.create": create_work_plan,
             "extended.plan.update": update_work_item,
             "extended.notes.save": self._save_extended_work_note,
@@ -129,17 +139,186 @@ class ApplicationToolRuntime:
         handler = handlers.get(catalog_id)
         if handler is None:
             raise ValueError(f"Unknown application tool '{catalog_id}'.")
+        consume_tool_safety_limit(catalog_id, context)
         result = handler(arguments, context)
         if inspect.isawaitable(result):
             result = await result
+        bounded_result = await self.bound_tool_result(catalog_id, result, context)
+        mark_tool_progress(catalog_id, context)
         if catalog_id in {"builder.todos.create", "builder.todos.update"}:
-            await context.emit("builder.todos.updated", result)
+            await context.emit("builder.todos.updated", bounded_result)
         if catalog_id in {"extended.plan.create", "extended.plan.update"}:
-            await context.emit("extended.plan.updated", result)
+            await context.emit("extended.plan.updated", bounded_result)
         if catalog_id == "extended.notes.save":
-            await context.emit("extended.note.saved", result)
+            await context.emit("extended.note.saved", bounded_result)
         await context.emit("tool.application_completed", {"catalog_id": catalog_id})
-        return result
+        return bounded_result
+
+    def store_context_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        checkpoint_id = str(checkpoint["checkpoint_id"])
+        relative_path = f"runs/{context.run_id}/checkpoints/{checkpoint_id}.json"
+        stored = self._storage.write_json(
+            self._settings.artifacts_dir,
+            relative_path,
+            checkpoint,
+        )
+        artifact = self._documents.create_artifact_record(
+            owner_type="agent_run",
+            kind="context_checkpoint",
+            relative_path=relative_path,
+            media_type="application/json",
+            stored=stored,
+            metadata={
+                "agent_run_id": context.run_id,
+                "checkpoint_id": checkpoint_id,
+            },
+        )
+        return {
+            "artifact_id": artifact.id,
+            "path": relative_path,
+            "size_bytes": stored.size_bytes,
+        }
+
+    async def bound_tool_result(
+        self,
+        catalog_id: str,
+        result: Any,
+        context: ScholarWeaveContext,
+        *,
+        max_tokens: int | None = None,
+    ) -> Any:
+        jsonable = to_jsonable(result)
+        serialized = json.dumps(
+            jsonable,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        max_characters = (max_tokens or self._settings.tool_result_max_tokens) * 4
+        if len(serialized) <= max_characters:
+            return result
+
+        fingerprint = hashlib.sha256(
+            f"{catalog_id}\0{max_characters}\0{serialized}".encode("utf-8")
+        ).hexdigest()
+        cache = context.metadata.setdefault("_bounded_tool_results", {})
+        if not isinstance(cache, dict):
+            cache = {}
+            context.metadata["_bounded_tool_results"] = cache
+        cached = cache.get(fingerprint)
+        if isinstance(cached, dict):
+            return cached
+
+        result_id = str(uuid.uuid4())
+        relative_path = f"runs/{context.run_id}/tool-results/{result_id}.json"
+        stored = self._storage.write_text(
+            self._settings.artifacts_dir,
+            relative_path,
+            serialized,
+        )
+        artifact = self._documents.create_artifact_record(
+            owner_type="agent_run",
+            kind="tool_result",
+            relative_path=relative_path,
+            media_type="application/json",
+            stored=stored,
+            metadata={
+                "agent_run_id": context.run_id,
+                "catalog_id": catalog_id,
+                "original_characters": len(serialized),
+            },
+        )
+        compacted = {
+            "truncated": True,
+            "catalog_id": catalog_id,
+            "result_ref": artifact.id,
+            "original_characters": len(serialized),
+            "preview": _compact_tool_result(jsonable),
+            "read_more": {
+                "tool": "read_tool_result",
+                "arguments": {
+                    "result_ref": artifact.id,
+                    "start": 0,
+                    "max_characters": min(max_characters, 12_000),
+                },
+            },
+        }
+        preview = compacted["preview"]
+        while (
+            len(json.dumps(compacted, ensure_ascii=False, separators=(",", ":")))
+            > max_characters
+        ):
+            if preview["excerpts"]:
+                preview["excerpts"].pop()
+            elif preview["identifiers"]:
+                preview["identifiers"].pop()
+            elif preview["references"]:
+                preview["references"].pop()
+            else:
+                break
+        cache[fingerprint] = compacted
+        while len(cache) > 100:
+            cache.pop(next(iter(cache)))
+        await context.emit(
+            "tool.result_truncated",
+            {
+                "catalog_id": catalog_id,
+                "result_ref": artifact.id,
+                "original_characters": len(serialized),
+                "returned_characters": len(
+                    json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
+                ),
+            },
+        )
+        return compacted
+
+    def _read_tool_result(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        result_ref = str(arguments["result_ref"])
+        artifact = self._documents.get_artifact(result_ref)
+        metadata = artifact.metadata_json if artifact is not None else None
+        if (
+            artifact is None
+            or artifact.owner_type != "agent_run"
+            or artifact.kind != "tool_result"
+            or not isinstance(metadata, dict)
+            or metadata.get("agent_run_id") != context.run_id
+        ):
+            raise ValueError("Tool result reference was not found for this run.")
+        content = self._documents.artifact_bytes(artifact).decode("utf-8")
+        start = int(arguments["start"])
+        max_result_characters = self._settings.tool_result_max_tokens * 4
+        limit = min(
+            int(arguments["max_characters"]),
+            max_result_characters,
+        )
+        excerpt = content[start : start + limit]
+        while True:
+            end = start + len(excerpt)
+            response = {
+                "result_ref": result_ref,
+                "start": start,
+                "end": end,
+                "total_characters": len(content),
+                "content": excerpt,
+                "has_more": end < len(content),
+                "next_start": end,
+            }
+            response_characters = len(
+                json.dumps(response, ensure_ascii=False, separators=(",", ":"))
+            )
+            if response_characters <= max_result_characters or not excerpt:
+                return response
+            excerpt = excerpt[
+                : max(0, len(excerpt) - (response_characters - max_result_characters) - 32)
+            ]
 
     def _search_conversation_memory(
         self,
@@ -898,7 +1077,6 @@ class ApplicationToolRuntime:
                 metadata={"sha256": document.sha256},
             )
         )
-
     def _write_artifact(
         self,
         arguments: dict[str, Any],
@@ -1110,3 +1288,84 @@ class ApplicationToolRuntime:
         if self._direct_agents is None:
             raise RuntimeError("Direct research-agent tools are not configured.")
         return self._direct_agents
+
+
+def _compact_tool_result(value: Any) -> dict[str, Any]:
+    identifiers: list[dict[str, Any]] = []
+    excerpts: list[dict[str, str]] = []
+    references: list[str] = []
+    seen: set[str] = set()
+
+    def collect(item: Any) -> None:
+        if len(identifiers) >= 30 and len(excerpts) >= 12:
+            return
+        if isinstance(item, dict):
+            selected = {
+                str(key): _compact_scalar(child)
+                for key, child in item.items()
+                if str(key).casefold()
+                in {
+                    "id",
+                    "document_id",
+                    "source_id",
+                    "artifact_id",
+                    "title",
+                    "name",
+                    "url",
+                    "citation",
+                    "score",
+                    "rank",
+                    "status",
+                }
+                and isinstance(child, (str, int, float, bool))
+            }
+            if selected:
+                fingerprint = json.dumps(selected, sort_keys=True, ensure_ascii=False)
+                if fingerprint not in seen:
+                    seen.add(fingerprint)
+                    identifiers.append(selected)
+            for key, child in item.items():
+                normalized = str(key).casefold()
+                if normalized in {
+                    "url",
+                    "citation",
+                    "result_ref",
+                    "artifact_id",
+                } and isinstance(child, str):
+                    if child not in references:
+                        references.append(child)
+                if normalized in {
+                    "text",
+                    "content",
+                    "summary",
+                    "abstract",
+                    "snippet",
+                    "description",
+                } and isinstance(child, str):
+                    collapsed = " ".join(child.split())
+                    excerpt = (
+                        collapsed
+                        if len(collapsed) <= 320
+                        else f"{collapsed[:319]}…"
+                    )
+                    entry = {"field": str(key), "excerpt": excerpt}
+                    if entry not in excerpts:
+                        excerpts.append(entry)
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    return {
+        "identifiers": identifiers[:8],
+        "references": [_compact_scalar(value) for value in references[:12]],
+        "excerpts": excerpts[:8],
+    }
+
+
+def _compact_scalar(value: Any, limit: int = 240) -> Any:
+    if not isinstance(value, str):
+        return value
+    collapsed = " ".join(value.split())
+    return collapsed if len(collapsed) <= limit else f"{collapsed[: limit - 1]}…"

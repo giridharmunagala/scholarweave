@@ -181,6 +181,7 @@ class BufferedRunEventSink:
     async def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         raw_type = str(payload.get("raw_type") or "")
         delta = payload.get("delta")
+        usage_updated = False
         is_delta = (
             event_type == "model.stream"
             and raw_type.endswith(".delta")
@@ -190,7 +191,7 @@ class BufferedRunEventSink:
         if event_type == "model.started":
             self._start_model_call(payload)
         elif event_type == "model.completed":
-            self._finish_model_call(payload)
+            usage_updated = self._finish_model_call(payload)
 
         if event_type == "model.stream":
             if raw_type == "response.created":
@@ -213,6 +214,11 @@ class BufferedRunEventSink:
         await self._flush_live()
         await self._emit_snapshot()
         await self._downstream.emit(event_type, payload)
+        if usage_updated:
+            await self._downstream.emit(
+                "usage.updated",
+                {"performance": self.performance()},
+            )
 
     def _start_model_call(self, payload: dict[str, Any]) -> None:
         self._model_started_at = self._clock()
@@ -226,9 +232,9 @@ class BufferedRunEventSink:
             self._first_generated_at = self._clock()
         self._model_generated_chars += len(delta)
 
-    def _finish_model_call(self, payload: dict[str, Any]) -> None:
+    def _finish_model_call(self, payload: dict[str, Any]) -> bool:
         if self._model_started_at is None:
-            return
+            return False
         finished_at = self._clock()
         first_generated_at = self._first_generated_at or finished_at
         self._prompt_seconds += max(0.0, first_generated_at - self._model_started_at)
@@ -251,6 +257,7 @@ class BufferedRunEventSink:
         self._first_generated_at = None
         self._model_input_chars = 0
         self._model_generated_chars = 0
+        return True
 
     async def _emit_live_delta(self, raw_type: str, delta: str) -> None:
         if raw_type not in self._seen_delta_types:

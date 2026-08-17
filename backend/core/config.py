@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     max_temporary_web_sources: int = Field(default=20, ge=1, le=100)
 
     agent_tracing_enabled: bool = False
+    run_retention_days: int = Field(default=2, ge=1, le=365)
+    tool_result_max_tokens: int = Field(default=3_000, ge=512, le=16_000)
+    agent_context_window_tokens: int = Field(default=32_768, ge=4_096, le=2_000_000)
+    agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.95)
+    agent_context_compaction_target_tokens: int = Field(
+        default=8_192,
+        ge=1_024,
+        le=500_000,
+    )
     user_timezone: str = "Asia/Kolkata"
     user_profile: str = "Based in Hyderabad, Telangana, India."
 
@@ -91,6 +100,13 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_paths(self) -> "Settings":
+        high_water_tokens = int(
+            self.agent_context_window_tokens * self.agent_context_high_water_ratio
+        )
+        if self.agent_context_compaction_target_tokens >= high_water_tokens:
+            raise ValueError(
+                "agent_context_compaction_target_tokens must be below the context high-water mark."
+            )
         try:
             ZoneInfo(self.user_timezone)
         except ZoneInfoNotFoundError as exc:

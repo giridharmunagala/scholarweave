@@ -132,27 +132,37 @@ function AgentRow({ step }: { step: AgentStep }) {
   const elapsed = formatStepDuration(step.seconds);
 
   useLayoutEffect(() => {
-    if (wasRunningRef.current && step.status === 'completed') setOpen(false);
+    if (wasRunningRef.current && step.status !== 'running') setOpen(false);
     wasRunningRef.current = step.status === 'running';
   }, [step.status]);
 
   return (
-    <div className={`timeline-row agent${open ? ' open' : ''}${step.status === 'running' ? ' live' : ''}`}>
+    <div className={`timeline-row agent${open ? ' open' : ''}${step.status === 'running' ? ' live' : ''}${step.status === 'failed' ? ' failed' : ''}`}>
       <button type="button" className="timeline-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         {step.status === 'running'
           ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />
-          : <Icon className="timeline-glyph" name="agents" size={15} />}
+          : <Icon
+              className="timeline-glyph"
+              name={step.status === 'completed' ? 'agents' : 'close'}
+              size={15}
+            />}
         <span className="timeline-label">
           <span className="timeline-lead">Sub-agent:</span>
           <strong>{step.name}</strong>
           {elapsed ? <small>{elapsed}</small> : null}
+          {step.status === 'failed' ? <em className="timeline-failed">failed</em> : null}
+          {step.status === 'superseded' ? <em className="timeline-failed">superseded</em> : null}
         </span>
         <Icon className="timeline-chevron" name="arrowRight" size={13} />
       </button>
       {open ? (
         <div className="timeline-detail agent">
           {step.output == null ? (
-            <p className="tool-detail-note">Working in a focused context…</p>
+            <p className="tool-detail-note">
+              {step.status === 'running'
+                ? 'Working in a focused context…'
+                : `This invocation was ${step.status}.`}
+            </p>
           ) : typeof step.output === 'string' ? (
             <MarkdownViewer content={step.output} />
           ) : (
@@ -190,10 +200,9 @@ function ToolRow({ step }: { step: ToolStep }) {
 function ToolGroupRow({ steps }: { steps: ToolStep[] }) {
   const [open, setOpen] = useState(false);
   const running = steps.some((step) => step.status === 'running');
-  const failed = steps.some((step) => step.status === 'failed');
 
   return (
-    <div className={`timeline-row group${open ? ' open' : ''}${failed ? ' failed' : ''}`}>
+    <div className={`timeline-row group${open ? ' open' : ''}`}>
       <button type="button" className="timeline-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         {running
           ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />

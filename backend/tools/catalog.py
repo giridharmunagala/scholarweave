@@ -27,6 +27,24 @@ def _object_schema(
 
 APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
+        "tool.results.read",
+        "read_tool_result",
+        "Read a bounded character range from a full tool result retained after output compaction.",
+        _object_schema(
+            {
+                "result_ref": {"type": "string", "minLength": 1},
+                "start": {"type": "integer", "minimum": 0},
+                "max_characters": {
+                    "type": "integer",
+                    "minimum": 256,
+                    "maximum": 12000,
+                },
+            },
+            required=["result_ref", "start", "max_characters"],
+        ),
+        True,
+    ),
+    (
         "tools.search",
         "search_available_tools",
         "Find tools available to the autonomous agent by keyword, name, or catalog ID.",
@@ -55,8 +73,15 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
                         {
                             "id": {"type": "string", "minLength": 1},
                             "title": {"type": "string", "minLength": 1},
+                            "instructions": {"type": "string", "minLength": 1},
+                            "expected_output": {"type": "string", "minLength": 1},
                         },
-                        required=["id", "title"],
+                        required=[
+                            "id",
+                            "title",
+                            "instructions",
+                            "expected_output",
+                        ],
                     ),
                 }
             },
@@ -614,6 +639,23 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
         True,
     ),
     (
+        "extended.budget.status",
+        "extended_work_budget_status",
+        "Show soft scope guidance and the remaining external-search runaway safety capacity.",
+        _object_schema({}),
+        True,
+    ),
+    (
+        "extended.priorities.list",
+        "list_research_priority_decisions",
+        (
+            "List model-made research reallocations shared across the coordinator and focused "
+            "workers, including intentionally deferred or stopped work."
+        ),
+        _object_schema({}),
+        True,
+    ),
+    (
         "extended.plan.create",
         "create_extended_work_plan",
         "Create the ordered plan for one extended-work run.",
@@ -621,14 +663,34 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
             {
                 "tasks": {
                     "type": "array",
-                    "minItems": 2,
+                    "minItems": 1,
                     "maxItems": 10,
                     "items": _object_schema(
                         {
                             "id": {"type": "string", "minLength": 1},
                             "title": {"type": "string", "minLength": 1},
+                            "instructions": {"type": "string", "minLength": 1},
+                            "expected_output": {"type": "string", "minLength": 1},
+                            "effort": {
+                                "type": "string",
+                                "enum": ["low", "medium", "high"],
+                            },
+                            "source_target": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 300,
+                            },
+                            "rationale": {"type": "string", "minLength": 1},
                         },
-                        required=["id", "title"],
+                        required=[
+                            "id",
+                            "title",
+                            "instructions",
+                            "expected_output",
+                            "effort",
+                            "source_target",
+                            "rationale",
+                        ],
                     ),
                 }
             },

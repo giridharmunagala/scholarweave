@@ -43,6 +43,7 @@ describe('sub-agent timeline activity', () => {
     ]);
     expect(agents[1]).toMatchObject({
       status: 'completed',
+      completedSequence: 9,
       output: 'The focused evidence agrees across two sources.',
       seconds: 4,
     });
@@ -58,5 +59,47 @@ describe('sub-agent timeline activity', () => {
     ]);
 
     expect(timeline.steps.filter((step) => step.kind === 'agent')).toHaveLength(2);
+  });
+
+  it('settles the exact invocation as failed or superseded', () => {
+    const timeline = buildTurnTimeline([
+      event(1, 'agent.started', {
+        agent_name: 'Coordinator',
+        invocation_id: 'root',
+      }),
+      event(2, 'agent.started', {
+        agent_name: 'Worker',
+        invocation_id: 'worker-1',
+      }),
+      event(3, 'agent.superseded', {
+        agent_name: 'Worker',
+        invocation_id: 'worker-1',
+        reason: 'context_high_water',
+      }),
+      event(4, 'agent.started', {
+        agent_name: 'Worker',
+        invocation_id: 'worker-2',
+      }),
+      event(5, 'agent.failed', {
+        agent_name: 'Worker',
+        invocation_id: 'worker-2',
+        error: 'ContextLengthError: request too large',
+      }),
+    ], { settled: true });
+
+    const agents = timeline.steps.filter((step) => step.kind === 'agent');
+    expect(agents).toMatchObject([
+      {
+        id: 'worker-1',
+        status: 'superseded',
+        output: 'context_high_water',
+      },
+      {
+        id: 'worker-2',
+        status: 'failed',
+        output: 'ContextLengthError: request too large',
+      },
+    ]);
+    expect(timeline.running).toBe(false);
   });
 });

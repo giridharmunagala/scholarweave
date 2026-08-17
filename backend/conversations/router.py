@@ -149,6 +149,7 @@ async def send_autonomous_message(
         payload.content,
         reasoning_effort=payload.reasoning_effort,
         work_mode=payload.work_mode,
+        work_budget=payload.work_budget,
     )
     return ConversationMessageResponse(
         conversation=_response(container.autonomous.get_conversation(conversation_id)),

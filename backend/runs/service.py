@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 
 from agents import (
@@ -21,6 +22,7 @@ from agents import (
 
 from backend.agents.blueprint import ReasoningEffort, ReasoningSpec
 from backend.agents.compiler import CompiledAgent
+from backend.core.time import utcnow
 from backend.runs.broker import EventBroker
 from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
@@ -59,19 +61,27 @@ def _with_reasoning_effort(
 
 
 class RunService:
+    _CLEANUP_INTERVAL_SECONDS = 60 * 60
+
     def __init__(
         self,
         repository: RunRepository,
         sessions: SdkSessionFactory,
         tool_runtime: ToolRuntime,
         event_broker: EventBroker,
+        *,
+        retention_days: int = 2,
+        delete_run_artifacts: Callable[[str], None] | None = None,
     ) -> None:
         self._repository = repository
         self._sessions = sessions
         self._tool_runtime = tool_runtime
         self._broker = event_broker
+        self._retention = timedelta(days=retention_days)
+        self._delete_run_artifacts = delete_run_artifacts
         self._active_streams: dict[str, RunResultStreaming] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._cleanup_task: asyncio.Task[None] | None = None
 
     def list(self, *, conversation_id: str | None = None):
         return self._repository.list(conversation_id=conversation_id)
@@ -258,12 +268,44 @@ class RunService:
         self._repository.get(run_id)
         return self._repository.events_after(run_id, sequence)
 
+    async def start(self) -> None:
+        if self._cleanup_task is not None:
+            return
+        await asyncio.to_thread(self.prune_expired)
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    def prune_expired(self) -> int:
+        cutoff = utcnow() - self._retention
+        return self._delete_history(self._repository.ids_created_before(cutoff))
+
+    def clear_history(self) -> int:
+        return self._delete_history(self._repository.ids_created_before())
+
     async def close(self) -> None:
+        cleanup_task = self._cleanup_task
+        self._cleanup_task = None
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
         for stream in tuple(self._active_streams.values()):
             stream.cancel("immediate")
         tasks = tuple(self._tasks.values())
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _delete_history(self, run_ids: list[str]) -> int:
+        active_ids = set(self._active_streams) | set(self._tasks)
+        deletable = [run_id for run_id in run_ids if run_id not in active_ids]
+        if self._delete_run_artifacts is not None:
+            for run_id in deletable:
+                self._delete_run_artifacts(run_id)
+        self._repository.delete_many(deletable)
+        return len(deletable)
+
+    async def _cleanup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._CLEANUP_INTERVAL_SECONDS)
+            await asyncio.to_thread(self.prune_expired)
 
     async def _execute(
         self,
@@ -351,6 +393,7 @@ class RunService:
                     session_snapshot=session_snapshot,
                 )
         except asyncio.CancelledError:
+            await hooks.supersede_active(context, "run_cancelled")
             self._repository.cancel(run_id)
             await sink.emit("run.cancelled", {})
             raise
@@ -360,6 +403,7 @@ class RunService:
             ToolInputGuardrailTripwireTriggered,
             ToolOutputGuardrailTripwireTriggered,
         ) as exc:
+            await hooks.fail_active(context, exc)
             payload = _tripwire_payload(exc)
             await sink.emit("guardrail.tripwire", payload)
             error = f"{type(exc).__name__}: {exc}"
@@ -367,9 +411,11 @@ class RunService:
             await sink.emit("run.failed", {"error": error})
         except Exception as exc:
             if self._repository.get(run_id).cancel_requested:
+                await hooks.supersede_active(context, "run_cancelled")
                 self._repository.cancel(run_id)
                 await sink.emit("run.cancelled", {})
             else:
+                await hooks.fail_active(context, exc)
                 self._repository.fail(run_id, f"{type(exc).__name__}: {exc}")
                 await sink.emit(
                     "run.failed",
@@ -408,6 +454,7 @@ class RunService:
                     _guardrail_result_payload(kind, guardrail_result),
                 )
         if result.interruptions:
+            await ScholarWeaveRunHooks().supersede_active(context, "run_paused")
             state = result.to_state().to_json(
                 context_serializer=lambda context: {
                     "run_id": context.run_id,
@@ -439,6 +486,7 @@ class RunService:
             )
             return
         if self._repository.get(run_id).cancel_requested:
+            await ScholarWeaveRunHooks().supersede_active(context, "run_cancelled")
             self._repository.cancel(run_id)
             await sink.emit("run.cancelled", {})
             return

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import func, select
+from datetime import datetime
+
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.errors import NotFoundError
@@ -62,6 +64,13 @@ class RunRepository:
                 raise NotFoundError("Run was not found.")
             self._load_relations(record)
             return record
+
+    def ids_created_before(self, cutoff: datetime | None = None) -> list[str]:
+        with self._sessions() as session:
+            statement = select(AgentRunRecord.id)
+            if cutoff is not None:
+                statement = statement.where(AgentRunRecord.created_at < cutoff)
+            return list(session.scalars(statement))
 
     def mark_running(self, run_id: str) -> None:
         with self._sessions() as session:
@@ -249,6 +258,30 @@ class RunRepository:
             if record is None:
                 raise NotFoundError("Run was not found.")
             session.delete(record)
+            session.commit()
+
+    def delete_many(self, run_ids: list[str]) -> None:
+        if not run_ids:
+            return
+        with self._sessions() as session:
+            session.execute(
+                delete(RunInterruptionRecord).where(
+                    RunInterruptionRecord.run_id.in_(run_ids)
+                )
+            )
+            session.execute(
+                delete(AgentRunEventRecord).where(
+                    AgentRunEventRecord.run_id.in_(run_ids)
+                )
+            )
+            session.execute(
+                delete(AgentRunItemRecord).where(
+                    AgentRunItemRecord.run_id.in_(run_ids)
+                )
+            )
+            session.execute(
+                delete(AgentRunRecord).where(AgentRunRecord.id.in_(run_ids))
+            )
             session.commit()
 
     def _update(self, run_id: str, **values: Any) -> None:

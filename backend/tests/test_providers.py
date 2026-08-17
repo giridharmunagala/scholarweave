@@ -56,6 +56,7 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
             "name": "embed-1",
             "capabilities": ["embedding"],
             "reasoning_efforts": None,
+            "context_window_tokens": None,
             "enabled": False,
         }
     ]
@@ -76,6 +77,7 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
             "name": "embed-1",
             "capabilities": ["embedding"],
             "reasoning_efforts": None,
+            "context_window_tokens": None,
             "enabled": False,
         }
     ]
@@ -412,13 +414,18 @@ async def test_ollama_discovery_lists_every_installed_model_with_capabilities(
             {"name": "chat-model:12b"},
         ]
 
-    async def show_model(_client: OllamaClient, model: str) -> dict[str, list[str]]:
+    async def show_model(_client: OllamaClient, model: str) -> dict:
         return {
             "capabilities": (
                 ["embedding"]
                 if model == "embed-model:latest"
                 else ["completion", "vision", "tools"]
-            )
+            ),
+            "model_info": {
+                "llama.context_length": (
+                    8_192 if model == "embed-model:latest" else 131_072
+                )
+            },
         }
 
     monkeypatch.setattr(OllamaClient, "list_models", list_models)
@@ -433,6 +440,20 @@ async def test_ollama_discovery_lists_every_installed_model_with_capabilities(
     }
     by_name = {entry.name: entry.capabilities for entry in entries}
     assert by_name["embed-model:latest"] == {"embedding"}
+    assert {
+        entry.name: entry.context_window_tokens
+        for entry in entries
+    } == {
+        "embed-model:latest": 8_192,
+        "chat-model:12b": 131_072,
+    }
+    resolved = services.model_resolver.resolve_agent_model(
+        ModelReference(
+            provider_profile_id=profile.id,
+            model="chat-model:12b",
+        )
+    )
+    assert resolved.context_window_tokens == 131_072
     assert by_name["chat-model:12b"] == {"chat", "vision", "tools"}
     assert {
         item["name"] for item in repository.get(profile.id).models_json

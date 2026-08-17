@@ -551,6 +551,11 @@ file at the repo root. Settings marked ✅ are also editable at runtime through 
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | ✅ | Default Ollama endpoint |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | ✅ | Per-model-request timeout |
 | `AGENT_TRACING_ENABLED` | `false` | ✅ | SDK tracing |
+| `RUN_RETENTION_DAYS` | `2` | | Completed run history and generated run artifact TTL |
+| `TOOL_RESULT_MAX_TOKENS` | `3000` | | Maximum model-visible payload per tool result; full oversized results remain in run artifacts |
+| `AGENT_CONTEXT_WINDOW_TOKENS` | `32768` | | Fallback context window used when the selected model has no discovered or configured limit |
+| `AGENT_CONTEXT_HIGH_WATER_RATIO` | `0.7` | | Fraction of the context window that triggers checkpoint compaction |
+| `AGENT_CONTEXT_COMPACTION_TARGET_TOKENS` | `8192` | | Target size for checkpoint plus recent context after compaction |
 | `USER_TIMEZONE` | `Asia/Kolkata` | ✅ | IANA timezone injected into every agent context |
 | `USER_PROFILE` | `Based in Hyderabad, Telangana, India.` | ✅ | Personal context injected into every agent |
 | `OCR_ENGINE` | `docling` | ✅ | `docling` or `tesseract` |
@@ -592,7 +597,7 @@ SCHOLARWEAVE_REQUEST_TIMEOUT_SECONDS=120
 | --- | --- |
 | `local_data/metadata.sqlite3` | Settings, provider profiles, blueprints, custom tools, conversations, sessions, runs, documents, chunks, vectors |
 | `local_data/documents/` | Retained source PDFs |
-| `local_data/artifacts/` | `extracted.md`, figures, manifests, generated artifacts |
+| `local_data/artifacts/` | Extracted documents, figures, generated artifacts, full oversized tool results, and context checkpoints |
 | `local_data/llm_calls.jsonl` | Credential-redacted model request audit log |
 | `workspace/` | Agent-writable Markdown: `notes/<uuid>/note.md`, `papers/<document-id>/{summary.md,notes.md}` |
 
