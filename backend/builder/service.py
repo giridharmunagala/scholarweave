@@ -61,10 +61,7 @@ class BuilderService:
         return self._conversations.get(conversation_id)
 
     async def conversation_items(self, conversation_id: str):
-        record = self.get_conversation(conversation_id)
-        compiled = self._compile(record.model_reference_json)
-        primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-        return await self._conversations.items(conversation_id, primary)
+        return await self._conversations.items(conversation_id)
 
     def start_message(
         self,

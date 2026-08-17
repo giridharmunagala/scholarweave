@@ -3,32 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from agents import Model, ModelResponse, ModelSettings, SQLiteSession, TResponseInputItem, Usage
+from agents import SQLiteSession, TResponseInputItem
 
 from backend.agents.blueprint import SessionPolicySpec
-from backend.providers.types import ResolvedAgentModel
 from backend.runtime.sessions import SdkSessionFactory
-
-
-class NoopModel(Model):
-    async def get_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools,
-        output_schema,
-        handoffs,
-        tracing,
-        *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt,
-    ) -> ModelResponse:
-        return ModelResponse(output=[], usage=Usage(), response_id=None)
-
-    def stream_response(self, *args, **kwargs):
-        raise NotImplementedError
 
 
 @pytest.fixture
@@ -39,10 +17,9 @@ def anyio_backend() -> str:
 @pytest.mark.anyio
 async def test_session_factory_uses_unmodified_sqlite_history(tmp_path: Path) -> None:
     factory = SdkSessionFactory(tmp_path / "sessions.sqlite3")
-    model = ResolvedAgentModel(NoopModel(), "llama_cpp", False, False, False)
     policy = SessionPolicySpec()
 
-    session = factory.get("conversation", policy, model)
+    session = factory.get("conversation", policy)
     assert isinstance(session, SQLiteSession)
 
     items: list[TResponseInputItem] = [
@@ -52,7 +29,7 @@ async def test_session_factory_uses_unmodified_sqlite_history(tmp_path: Path) ->
     await session.add_items(items)
 
     assert await session.get_items() == items
-    assert factory.get("conversation", policy, model) is session
+    assert factory.get("conversation", policy) is session
 
 
 def test_legacy_compaction_policy_is_ignored() -> None:

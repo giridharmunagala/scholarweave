@@ -362,11 +362,29 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
         "web.search",
         "search_web",
-        "Search the web through a configured open-source SearXNG instance.",
+        (
+            "Search DuckDuckGo and return 10 titles, snippets, and source URLs. Use one broad, "
+            "high-signal keyword query for wide coverage before narrowing; avoid quoted exact "
+            "phrases unless looking for a known title or unique wording. The 100-request session "
+            "budget is intentionally finite, requests are limited to one per second, and the same "
+            "normalized query is never requested twice."
+        ),
         _object_schema(
             {
-                "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "A concise keyword query combining the distinctive topic, entities, and "
+                        "useful synonyms. Prefer coverage over exact-phrase variants."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 10,
+                    "description": "Always request 10 results to maximize coverage per search.",
+                },
             },
             required=["query", "limit"],
         ),

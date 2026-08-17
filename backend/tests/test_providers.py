@@ -13,9 +13,27 @@ from backend.core.models import AppSetting
 from backend.providers.errors import ProviderRuntimeError
 from backend.providers.ollama import OllamaClient
 from backend.providers.repository import ProviderRepository
-from backend.providers.runtime import ResolvedModel
+from backend.providers.runtime import ResolvedModel, _compatible_context_window
 from backend.providers.schemas import ProviderCreate, ProviderModel
 from backend.providers.types import AgentModelDefaults, ModelReference
+
+
+def test_compatible_model_context_is_read_from_llama_cpp_metadata() -> None:
+    class Model:
+        def model_dump(self, *, mode):
+            assert mode == "python"
+            return {
+                "id": "muse-glimmer",
+                "status": {
+                    "args": [
+                        "llama-server",
+                        "--ctx-size",
+                        "131072",
+                    ]
+                },
+            }
+
+    assert _compatible_context_window(Model()) == 131_072
 
 
 def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) -> None:
@@ -134,6 +152,8 @@ def test_provider_models_expose_model_specific_reasoning_efforts(test_settings) 
             "base_url": "http://127.0.0.1:8080/v1",
             "models": [
                 {"name": "qwen3.8-27b-q3-vision-long"},
+                {"name": "gemma-4-12b-q6-bf16-long"},
+                {"name": "gemma-4-12b-q8-long"},
                 {"name": "custom-model"},
             ],
         },
@@ -148,7 +168,9 @@ def test_provider_models_expose_model_specific_reasoning_efforts(test_settings) 
         "max",
     ]
     assert compatible[0]["reasoning_efforts"] == ["low", "medium", "xhigh"]
-    assert compatible[1]["reasoning_efforts"] is None
+    assert compatible[1]["reasoning_efforts"] == ["none", "high"]
+    assert compatible[2]["reasoning_efforts"] == ["none", "high"]
+    assert compatible[3]["reasoning_efforts"] is None
 
 
 def test_user_profile_and_timezone_settings_persist(test_settings) -> None:

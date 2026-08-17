@@ -82,6 +82,7 @@ class ProfileModelResolver:
         model = OpenAIChatCompletionsModel(
             model=resolved.model,
             openai_client=client,
+            buffer_streamed_tool_calls=resolved.kind in {"ollama", "openai_compatible"},
         )
         return ResolvedAgentModel(
             model=model,

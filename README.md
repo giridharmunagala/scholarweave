@@ -45,7 +45,7 @@ machine.
 - [Backend setup](#backend-setup)
   - [1. Model providers](#1-model-providers)
   - [2. OCR and document ingestion](#2-ocr-and-document-ingestion)
-  - [3. SearXNG web search](#3-searxng-web-search)
+  - [3. DuckDuckGo web search](#3-duckduckgo-web-search)
   - [4. arXiv and Wikipedia](#4-arxiv-and-wikipedia)
 - [Configuration reference](#configuration-reference)
 - [Local data layout](#local-data-layout)
@@ -76,8 +76,9 @@ ScholarWeave takes the opposite position:
   primary text, and accumulate cited summaries and notes over weeks rather than per-chat.
 - **Reading dense or scanned PDFs.** Docling preserves reading order, table structure, formulas,
   and code; OCR recovers scanned pages; an optional vision model cleans up text-poor pages.
-- **Air-gapped or confidential-ish work.** With Ollama or llama.cpp plus a local SearXNG, no
-  request leaves the machine. (Still not a compliance boundary — see the disclaimer.)
+- **Local-model or confidential-ish work.** With Ollama or llama.cpp, model prompts stay local;
+  web, arXiv, and Wikipedia searches still contact their respective public services. (This is not
+  a compliance boundary — see the disclaimer.)
 - **Building and debugging agents.** The run inspector exposes raw SDK run items, so it doubles as
   a lab for understanding how the Agents SDK actually behaves against non-OpenAI providers.
 - **Comparing local model quality.** Swap the chat model per conversation and compare tool-calling
@@ -91,7 +92,7 @@ reading the paper.
 ```mermaid
 flowchart TD
     U["You: 'compare linear attention variants and write notes'"] --> A["Autonomous agent<br/>(single SDK Agent, max 50 turns)"]
-    A -->|search_arxiv / search_web / search_wikipedia| EXT["arXiv · SearXNG · Wikipedia"]
+    A -->|search_arxiv / search_web / search_wikipedia| EXT["arXiv · DuckDuckGo · Wikipedia"]
     A -->|download_paper| ING["Ingestion: Docling / OCR → pages, figures, chunks, manifest"]
     A -->|download_web_page| TMP["Temporary in-memory page cache (4h TTL)"]
     ING --> IDX[("SQLite: chunks + embeddings")]
@@ -102,7 +103,7 @@ flowchart TD
 ```
 
 **The loop, in words.** You state a research outcome, not a step. The agent decomposes it into
-focused searches, uses arXiv for primary papers and SearXNG for wider coverage, downloads what it
+focused searches, uses arXiv for primary papers and DuckDuckGo for wider coverage, downloads what it
 needs, inspects a paper before reading it (and triggers ingestion if the source exists but has no
 readable text), reads exact pages or section-aware chunks, cross-checks claims, and writes durable
 Markdown into the workspace — preferring exact replacements and appends over rewriting a file.
@@ -207,7 +208,7 @@ not run it behind multiple workers.
   server (llama.cpp, vLLM, LM Studio, TGI…), or OpenAI / Azure credentials
 - Docling (installed with the Python dependencies) — or Tesseract if you prefer the lightweight
   OCR path
-- Optional: a [SearXNG](https://github.com/searxng/searxng) instance for web search
+- Internet access for DuckDuckGo, arXiv, Wikipedia, and remote source downloads
 
 ### Install and run
 
@@ -465,59 +466,35 @@ local_data/artifacts/documents/<document-id>/
 The manifest is what makes citations exact: tools read page text and ordered chunks straight from
 it, and return page/chunk identifiers with every excerpt.
 
-### 3. SearXNG web search
+### 3. DuckDuckGo web search
 
-Web search goes through an **open-source SearXNG instance you control** — there is no third-party
-search API and no tracking. Default endpoint: `http://127.0.0.1:8888`.
+General web search uses the [`ddgs`](https://github.com/deedy5/ddgs) Python package with its
+DuckDuckGo backend. It requires no API key or separate search service. ScholarWeave forces
+`backend="duckduckgo"` rather than allowing `ddgs` to select another engine, and uses DuckDuckGo's
+region-neutral `wt-wt` search region to avoid locale-specific empty responses. It also replaces
+`ddgs`'s randomized fake User-Agent with a stable browser-compatible value because some generated
+mobile agents receive empty result pages. Quote characters are removed from agent-generated queries
+so accidental exact-phrase searches retain broad coverage.
 
-#### Run one
+Searches are process-wide and strictly serialized, with at least one second between request starts.
+This global gate guarantees that no individual session can exceed one request per second. Each agent
+session can make at most 100 DuckDuckGo requests. Repeating the same normalized query reuses its
+session cache without consuming the budget. Agent web searches always request 10 results and are
+instructed to start with a broad, high-signal keyword query, inspect all results, and only narrow for
+a specific evidence gap—not issue a series of quoted exact-phrase variants.
 
-```bash
-docker run -d --name searxng -p 8888:8080 \
-  -v "${PWD}/searxng:/etc/searxng" \
-  -e "BASE_URL=http://127.0.0.1:8888/" \
-  searxng/searxng
-```
-
-#### Enable the JSON format (required)
-
-ScholarWeave sends a **form-encoded `POST /search`** with `format=json`. SearXNG ships with JSON
-disabled, and rejects it with **HTTP 403** even though HTML search works. Edit
-`searxng/settings.yml`:
-
-```yaml
-search:
-  formats:
-    - html
-    - json
-```
-
-If you also hit 403s from the bot limiter on a local instance, disable it:
-
-```yaml
-server:
-  limiter: false
-```
-
-Restart the container. ScholarWeave surfaces the specific error
-(*"SearXNG rejected the JSON response request. Enable 'json' in its search.formats setting."*)
-when this is misconfigured.
-
-#### Point ScholarWeave at it
-
-```bash
-SCHOLARWEAVE_SEARXNG_BASE_URL=http://127.0.0.1:8888
-SCHOLARWEAVE_WEB_SEARCH_REQUESTS_PER_MINUTE=30
-SCHOLARWEAVE_SEARCH_REQUEST_TIMEOUT_SECONDS=20
-```
+When DuckDuckGo explicitly reports a rate limit, ScholarWeave preserves the provider detail and
+fails without automatic retries so one tool call cannot amplify backend traffic. Ambiguous
+`No results found` responses remain ordinary provider failures rather than being relabeled as rate
+limits. DuckDuckGo's HTML search endpoint is unofficial, so availability and response structure are
+not guaranteed.
 
 #### Search vs. fetch
 
-SearXNG returns titles, snippets, and source URLs — not page bodies. When full-page evidence is
+DuckDuckGo returns titles, snippets, and source URLs — not page bodies. When full-page evidence is
 needed the agent calls `download_web_page`, which performs a plain HTTP **`GET`** on the selected
 public URL, extracts readable text, and returns a temporary source ID; it then uses
-`search_downloaded_web_page` / `read_downloaded_web_page` before answering. (Search is a `POST` to
-your SearXNG; fetching the linked page is a `GET` to the origin. That asymmetry is intentional.)
+`search_downloaded_web_page` / `read_downloaded_web_page` before answering.
 
 Downloaded pages live in a **process-local in-memory cache** and expire after 4 hours by default,
 capped at 20 sources and 5 MB each. Use `save_web_page_note` to keep a durable workspace note that
@@ -555,7 +532,7 @@ file at the repo root. Settings marked ✅ are also editable at runtime through 
 | `TOOL_RESULT_MAX_TOKENS` | `3000` | | Maximum model-visible payload per tool result; full oversized results remain in run artifacts |
 | `AGENT_CONTEXT_WINDOW_TOKENS` | `32768` | | Fallback context window used when the selected model has no discovered or configured limit |
 | `AGENT_CONTEXT_HIGH_WATER_RATIO` | `0.7` | | Fraction of the context window that triggers checkpoint compaction |
-| `AGENT_CONTEXT_COMPACTION_TARGET_TOKENS` | `8192` | | Target size for checkpoint plus recent context after compaction |
+| `AGENT_CONTEXT_COMPACTION_TARGET_TOKENS` | `8192` | | Minimum preferred size after compaction; the runtime scales the actual target with the selected model window and creates a rolling LLM summary |
 | `USER_TIMEZONE` | `Asia/Kolkata` | ✅ | IANA timezone injected into every agent context |
 | `USER_PROFILE` | `Based in Hyderabad, Telangana, India.` | ✅ | Personal context injected into every agent |
 | `OCR_ENGINE` | `docling` | ✅ | `docling` or `tesseract` |
@@ -569,8 +546,7 @@ file at the repo root. Settings marked ✅ are also editable at runtime through 
 | `MAX_UPLOAD_BYTES` | `40 MB` | | Upload cap |
 | `MAX_CHUNK_CHARS` / `MAX_CHUNKS_PER_DOCUMENT` | `2500` / `2000` | | Chunking limits |
 | `RETRIEVAL_MAX_CONTEXT_CHARS` | `40000` | ✅ | Retrieval context ceiling |
-| `SEARXNG_BASE_URL` | `http://127.0.0.1:8888` | | Web search endpoint |
-| `WEB_SEARCH_REQUESTS_PER_MINUTE` | `30` | | SearXNG rate limit |
+| `WEB_SEARCH_MAX_REQUESTS_PER_SESSION` | `100` | | DuckDuckGo request cap shared by one agent session (hard maximum: 100) |
 | `ARXIV_SEARCH_REQUESTS_PER_MINUTE` | `20` | | arXiv rate limit (max 20) |
 | `WIKIPEDIA_SEARCH_REQUESTS_PER_MINUTE` | `60` | | Wikipedia rate limit |
 | `SEARCH_REQUEST_TIMEOUT_SECONDS` | `20` | | Search HTTP timeout |
@@ -585,7 +561,6 @@ Example `.env`:
 
 ```bash
 SCHOLARWEAVE_OLLAMA_BASE_URL=http://127.0.0.1:11434
-SCHOLARWEAVE_SEARXNG_BASE_URL=http://127.0.0.1:8888
 SCHOLARWEAVE_OCR_ENGINE=docling
 SCHOLARWEAVE_DOCLING_DEVICE=cuda
 SCHOLARWEAVE_REQUEST_TIMEOUT_SECONDS=120

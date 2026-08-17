@@ -28,6 +28,7 @@ export const RUN_EVENT_TYPES = [
   'tool.failed',
   'tool.result_truncated',
   'context.compacted',
+  'context.summary_failed',
   'builder.todos.updated',
   'extended.plan.updated',
   'extended.note.saved',

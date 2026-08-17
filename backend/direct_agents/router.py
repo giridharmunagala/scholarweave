@@ -76,9 +76,7 @@ async def get_direct_conversation(
 ) -> DirectConversationDetailResponse:
     record = container.conversations.get(conversation_id)
     scope = container.direct_agents.repository.get_conversation_scope(conversation_id)
-    compiled = container.direct_agents.compile_conversation(conversation_id)
-    primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-    items = await container.conversations.items(conversation_id, primary)
+    items = await container.conversations.items(conversation_id)
     return DirectConversationDetailResponse(
         **_response(record, scope).model_dump(),
         items=items,
@@ -125,9 +123,7 @@ async def delete_direct_conversation(
     container=Depends(services),
 ) -> Response:
     await container.runs.cancel_conversation_runs(conversation_id)
-    compiled = container.direct_agents.compile_conversation(conversation_id)
-    primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-    await container.conversations.delete(conversation_id, primary)
+    await container.conversations.delete(conversation_id)
     container.direct_agents.repository.delete_conversation_scope(conversation_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

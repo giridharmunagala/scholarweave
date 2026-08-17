@@ -29,11 +29,13 @@ export function RunInsightsPanel({
   events,
   timeline,
   metrics,
+  hidden = false,
 }: {
   status: string;
   events: readonly RunStreamEvent[];
   timeline: TurnTimeline;
   metrics: UsageMetrics | null;
+  hidden?: boolean;
 }) {
   const [activeTab, setActiveTab] = useState<InsightTab>('overview');
   const [width, setWidth] = useState(readInsightsWidth);
@@ -86,6 +88,7 @@ export function RunInsightsPanel({
     <aside
       className="run-insights"
       aria-label="Run progress and context usage"
+      hidden={hidden}
       style={{ width: `${width}px` } as CSSProperties}
     >
       <div
@@ -112,26 +115,6 @@ export function RunInsightsPanel({
         </div>
         <div className="run-insights-head-actions">
           <span className={`run-insights-status ${status}`}>{status}</span>
-          <span className="run-insights-size-controls">
-            <button
-              type="button"
-              aria-label="Shrink run insights"
-              title="Shrink panel"
-              disabled={width <= MIN_INSIGHTS_WIDTH}
-              onClick={() => resizeBy(-40)}
-            >
-              −
-            </button>
-            <button
-              type="button"
-              aria-label="Expand run insights"
-              title="Expand panel"
-              disabled={width >= MAX_INSIGHTS_WIDTH}
-              onClick={() => resizeBy(40)}
-            >
-              +
-            </button>
-          </span>
         </div>
       </header>
 

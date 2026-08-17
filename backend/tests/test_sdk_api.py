@@ -62,6 +62,27 @@ def test_clean_sdk_api_has_no_node_or_workflow_routes(test_settings) -> None:
     assert not any(path == "/api/nodes" or "custom-nodes" in path for path in paths)
 
 
+def test_conversation_history_does_not_require_its_model_to_be_available(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        conversation = client.post(
+            "/api/agent/conversations",
+            json={
+                "title": "Unavailable legacy model",
+                "model_reference": {
+                    "provider_profile_id": "removed-provider",
+                    "model": "removed-model",
+                },
+            },
+        ).json()
+
+        detail = client.get(f"/api/agent/conversations/{conversation['id']}")
+
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["title"] == "Unavailable legacy model"
+        assert detail.json()["items"] == []
+
+
 def test_agent_revision_and_runner_api(test_settings, stub_provider) -> None:
     app = create_app(test_settings)
     with TestClient(app) as client:

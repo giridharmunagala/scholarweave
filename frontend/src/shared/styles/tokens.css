@@ -41,8 +41,8 @@
   --sidebar-width-compact: 68px;
   --topbar-height: 56px;
   --content-max: 1560px;
-  /* Wide workspace for transcripts, result media and the composer. */
-  --chat-measure: min(1600px, 100%);
+  /* Keep transcript text centered and readable while preserving room for result media. */
+  --chat-measure: min(1040px, 100%);
 
   /*
    * Syntax colours resolve through the theme palette, so highlighted code

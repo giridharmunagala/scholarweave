@@ -8,7 +8,6 @@ from typing import Any, AsyncIterator
 from agents import SQLiteSession, Session
 
 from backend.agents.blueprint import SessionPolicySpec
-from backend.providers.types import ResolvedAgentModel
 
 
 class SdkSessionFactory:
@@ -21,7 +20,6 @@ class SdkSessionFactory:
         self,
         conversation_id: str,
         policy: SessionPolicySpec,
-        _primary_model: ResolvedAgentModel,
     ) -> Session:
         existing = self._sessions.get(conversation_id)
         if existing is None:
@@ -41,9 +39,8 @@ class SdkSessionFactory:
         self,
         conversation_id: str,
         policy: SessionPolicySpec,
-        primary_model: ResolvedAgentModel,
     ) -> None:
-        await self.get(conversation_id, policy, primary_model).clear_session()
+        await self.get(conversation_id, policy).clear_session()
 
     @asynccontextmanager
     async def run_lock(self, conversation_id: str) -> AsyncIterator[None]:

@@ -52,14 +52,16 @@ async def test_openai_profile_uses_responses_and_reuses_client() -> None:
 
 
 @pytest.mark.anyio
-async def test_local_profile_uses_chat_completions() -> None:
-    runtime = Runtime("ollama")
+@pytest.mark.parametrize("provider_kind", ["ollama", "openai_compatible"])
+async def test_local_profile_uses_buffered_chat_completions(provider_kind: str) -> None:
+    runtime = Runtime(provider_kind)
     pool = SdkClientPool(runtime)  # type: ignore[arg-type]
     resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
 
     resolved = resolver.resolve_agent_model(ModelReference("profile", "qwen"))
 
     assert isinstance(resolved.model, OpenAIChatCompletionsModel)
+    assert resolved.model._buffer_streamed_tool_calls is True
     assert resolved.supports_responses is False
     assert resolved.supports_hosted_tools is False
     await pool.close()

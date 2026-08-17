@@ -329,9 +329,8 @@ class RunService:
         )
         context.event_sink = sink
         hooks = ScholarWeaveRunHooks()
-        entry_model = compiled.resolved_models[compiled.blueprint.entry_agent_id]
         session = (
-            self._sessions.get(conversation_id, compiled.blueprint.session, entry_model)
+            self._sessions.get(conversation_id, compiled.blueprint.session)
             if conversation_id is not None and not isinstance(input_value, RunState)
             else None
         )

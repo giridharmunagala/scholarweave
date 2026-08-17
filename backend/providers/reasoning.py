@@ -34,6 +34,8 @@ def infer_reasoning_efforts(
         return ["low", "medium", "high"]
     if model == "gpt-5" or model.startswith("gpt-5-"):
         return ["minimal", "low", "medium", "high"]
+    if provider_kind == "openai_compatible" and model.startswith("gemma-4-"):
+        return ["none", "high"]
     if provider_kind == "openai_compatible" and model.startswith(("qwen3.6-", "qwen3.8-")):
         return ["low", "medium", "xhigh"]
     return None

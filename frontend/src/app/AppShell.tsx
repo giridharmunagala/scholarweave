@@ -1,4 +1,11 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from 'react';
 import {
   CHAT_CONVERSATIONS_CHANGED,
   chatApi,
@@ -37,6 +44,9 @@ const NAV_GROUPS: Array<{ title: string; items: NavEntry[] }> = [
 ];
 
 const COMPACT_KEY = 'scholarweave-sidebar-compact';
+const SIDEBAR_WIDTH_KEY = 'scholarweave-sidebar-width';
+const MIN_SIDEBAR_WIDTH = 200;
+const MAX_SIDEBAR_WIDTH = 420;
 
 const TITLES: Array<[string, string]> = [
   ['/', 'Research agent'],
@@ -65,7 +75,10 @@ export function AppShell({ children }: { children: ReactNode }) {
       return false;
     }
   });
+  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
   const [drawer, setDrawer] = useState(false);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
   const chatRoute = new URLSearchParams(search);
   const activeConversation = chatRoute.has('new')
     ? null
@@ -78,6 +91,16 @@ export function AppShell({ children }: { children: ReactNode }) {
       /* Persisting the layout preference is best effort. */
     }
   }, [compact]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(sidebarWidth));
+    } catch {
+      /* Persisting the layout preference is best effort. */
+    }
+  }, [sidebarWidth]);
+
+  useEffect(() => () => dragCleanupRef.current?.(), []);
 
   // Route changes should never leave the mobile drawer covering the page.
   useEffect(() => setDrawer(false), [pathname]);
@@ -123,12 +146,42 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   };
 
+  const resizeSidebarBy = (amount: number) => {
+    setSidebarWidth((current) => clampSidebarWidth(current + amount));
+  };
+  const startSidebarResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || compact) return;
+    event.preventDefault();
+    dragCleanupRef.current?.();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const move = (nextEvent: PointerEvent) => {
+      setSidebarWidth(clampSidebarWidth(startWidth + nextEvent.clientX - startX));
+    };
+    const cleanup = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', cleanup);
+      setResizingSidebar(false);
+      dragCleanupRef.current = null;
+    };
+    setResizingSidebar(true);
+    dragCleanupRef.current = cleanup;
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', cleanup);
+  };
+
   const title = currentTitle(pathname);
   const detail = pathname.split('/').filter(Boolean)[1];
   const isChat = pathname === '/';
 
   return (
-    <div className="app-shell" data-compact={compact} data-drawer={drawer}>
+    <div
+      className="app-shell"
+      data-compact={compact}
+      data-drawer={drawer}
+      data-resizing-sidebar={resizingSidebar}
+      style={{ '--sidebar-expanded-width': `${sidebarWidth}px` } as CSSProperties}
+    >
       <aside className="sidebar">
         <Link className="brand" to="/" aria-label="ScholarWeave home">
           <span className="brand-mark">SW</span>
@@ -225,6 +278,23 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span>OpenAI Agents SDK 0.19.4</span>
           </div>
         </div>
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-label="Resize navigation sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={MIN_SIDEBAR_WIDTH}
+          aria-valuemax={MAX_SIDEBAR_WIDTH}
+          aria-valuenow={sidebarWidth}
+          tabIndex={compact ? -1 : 0}
+          onPointerDown={startSidebarResize}
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft') resizeSidebarBy(-16);
+            else if (event.key === 'ArrowRight') resizeSidebarBy(16);
+            else return;
+            event.preventDefault();
+          }}
+        />
       </aside>
 
       <div className="sidebar-scrim" role="presentation" onClick={() => setDrawer(false)} />
@@ -268,4 +338,16 @@ export function AppShell({ children }: { children: ReactNode }) {
       <CommandPalette open={palette.open} onClose={palette.close} />
     </div>
   );
+}
+
+function readSidebarWidth(): number {
+  try {
+    return clampSidebarWidth(Number(localStorage.getItem(SIDEBAR_WIDTH_KEY)) || 244);
+  } catch {
+    return 244;
+  }
+}
+
+function clampSidebarWidth(value: number): number {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(value)));
 }

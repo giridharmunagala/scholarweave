@@ -1,7 +1,7 @@
 /* Application shell: sidebar, top bar and page scaffolding. */
 
 .app-shell {
-  --current-sidebar: var(--sidebar-width);
+  --current-sidebar: var(--sidebar-expanded-width, var(--sidebar-width));
   display: grid;
   grid-template-columns: var(--current-sidebar) minmax(0, 1fr);
   min-height: 100vh;
@@ -23,6 +23,34 @@
   background: color-mix(in srgb, var(--surface) 60%, var(--bg));
   overflow: hidden;
 }
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  z-index: 2;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 4px;
+  bottom: 0;
+  width: 2px;
+  background: transparent;
+  transition: background var(--dur-fast) var(--ease);
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer:focus-visible::after { background: var(--accent); }
+.app-shell[data-resizing-sidebar='true'] {
+  cursor: col-resize;
+  user-select: none;
+}
+.app-shell[data-resizing-sidebar='true'] { transition: none; }
+.app-shell[data-compact='true'] .sidebar-resizer { display: none; }
 
 .brand {
   display: flex;
@@ -320,7 +348,7 @@
       box-shadow var(--dur-fast) var(--ease) 90ms;
   }
   .app-shell[data-compact='true'] .sidebar:hover {
-    width: var(--sidebar-width);
+    width: var(--sidebar-expanded-width, var(--sidebar-width));
     padding: var(--space-3);
     align-items: stretch;
     background: var(--surface);
@@ -481,7 +509,7 @@
 /* ----------------------------------------------------------------- Page --- */
 
 .app-main { min-width: 0; padding: clamp(var(--space-4), 2.2vw, var(--space-6)); }
-.app-main.chat-main { padding: var(--space-2); }
+.app-main.chat-main { padding: var(--space-3); }
 .page {
   display: grid;
   gap: var(--space-4);
@@ -557,18 +585,19 @@
     top: 0;
     left: 0;
     z-index: 50;
-    width: var(--sidebar-width);
+    width: var(--sidebar-expanded-width, var(--sidebar-width));
     transform: translateX(-102%);
     transition: transform var(--dur-med) var(--ease);
     box-shadow: var(--shadow-lg);
   }
   .app-shell[data-drawer='true'] .sidebar { transform: none; }
   .app-shell[data-compact='true'] .sidebar {
-    width: var(--sidebar-width);
+    width: var(--sidebar-expanded-width, var(--sidebar-width));
     padding: var(--space-3);
     align-items: stretch;
     z-index: 50;
   }
+  .sidebar-resizer { display: none; }
   .app-shell[data-compact='true'] .brand-text,
   .app-shell[data-compact='true'] .nav-group,
   .app-shell[data-compact='true'] .nav-link .nav-label,

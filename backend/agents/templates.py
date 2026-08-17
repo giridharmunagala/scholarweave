@@ -16,9 +16,13 @@ def starter_blueprints() -> list[AgentBlueprint]:
                         "name": "Paper Researcher",
                         "instructions": (
                             "Complete the user's research task using local papers, arXiv, Wikipedia, "
-                            "and web search as appropriate. Start with focused queries, recursively "
-                            "follow useful terms and citations with narrower searches, and cross-check "
-                            "important claims before answering. Stop when the available evidence is "
+                            "and web search as appropriate. Use a small number of high-information "
+                            "searches. Begin with one broad keyword query that combines distinctive "
+                            "concepts and common synonyms; avoid quoted exact phrases unless searching "
+                            "for a known title or unique wording. Request 10 results from every web search, "
+                            "review all of them before narrowing, and search again only for a specific "
+                            "evidence gap. Cross-check important "
+                            "claims before answering. Stop when the available evidence is "
                             "sufficient. Cite local claims with returned chunk citations and external "
                             "claims with returned source URLs. When the user asks to download an arXiv "
                             "result, call download_paper with its pdf_url; the returned paper is already "

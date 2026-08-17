@@ -1,14 +1,21 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qs
+import asyncio
+import threading
+import time
+from typing import Any
 
 import httpx
 import pytest
+from ddgs.exceptions import DDGSException, RatelimitException
+from ddgs.engines.duckduckgo import Duckduckgo
 
 from backend.agents.templates import starter_blueprints
 from backend.autonomous.service import autonomous_blueprint
+from backend.bootstrap import create_services
 from backend.core.config import Settings
 from backend.research import AsyncRateLimiter, ResearchSearchService
+from backend.runtime.context import ScholarWeaveContext
 from backend.tools.catalog import create_tool_catalog
 
 
@@ -17,8 +24,14 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def test_default_searxng_endpoint_matches_local_setup() -> None:
-    assert Settings.model_fields["searxng_base_url"].default == "http://127.0.0.1:8888"
+class StubDuckDuckGo:
+    def __init__(self, results: list[dict[str, Any]]) -> None:
+        self.results = results
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append((query, kwargs))
+        return self.results
 
 
 @pytest.mark.anyio
@@ -27,21 +40,6 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.url.path == "/searx/search":
-            return httpx.Response(
-                200,
-                json={
-                    "results": [
-                        {
-                            "title": "Open <b>result</b>",
-                            "url": "https://example.test/result",
-                            "content": "Useful &amp; public",
-                            "engine": "example",
-                            "thumbnail": "/searx/image_proxy?url=https%3A%2F%2Fimages.example.test%2Fresult.jpg",
-                        }
-                    ]
-                },
-            )
         if request.url.path == "/arxiv":
             return httpx.Response(
                 200,
@@ -82,7 +80,6 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
-        searxng_base_url="https://search.test/searx",
         arxiv_api_url="https://search.test/arxiv",
         wikipedia_api_url="https://search.test/wikipedia",
     )
@@ -90,7 +87,20 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
         transport=httpx.MockTransport(respond),
         headers={"User-Agent": settings.search_user_agent},
     )
-    service = ResearchSearchService(settings, client=client)
+    duckduckgo = StubDuckDuckGo(
+        [
+            {
+                "title": "Open <b>result</b>",
+                "href": "https://example.test/result",
+                "body": "Useful &amp; public",
+            }
+        ]
+    )
+    service = ResearchSearchService(
+        settings,
+        client=client,
+        duckduckgo_client=duckduckgo,
+    )
     try:
         web = await service.search_web("open source", 1)
         arxiv = await service.search_arxiv("agent research", 1)
@@ -102,24 +112,24 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
         "title": "Open result",
         "url": "https://example.test/result",
         "snippet": "Useful & public",
-        "engine": "example",
+        "engine": "duckduckgo",
         "published_at": None,
-        "image_url": "https://search.test/searx/image_proxy?url=https%3A%2F%2Fimages.example.test%2Fresult.jpg",
+        "image_url": None,
     }
+    assert web["provider"] == "duckduckgo"
+    assert duckduckgo.calls == [
+        (
+            "open source",
+            {"max_results": 1, "backend": "duckduckgo", "region": "wt-wt"},
+        )
+    ]
     assert arxiv["results"][0]["arxiv_id"] == "2601.00001v1"
     assert arxiv["results"][0]["authors"] == ["Ada Researcher"]
     assert arxiv["results"][0]["pdf_url"] == "https://arxiv.org/pdf/2601.00001v1"
     assert wikipedia["results"][0]["url"] == "https://en.wikipedia.org/wiki/Research"
-    assert requests[0].method == "POST"
-    assert parse_qs(requests[0].content.decode()) == {
-        "q": ["open source"],
-        "format": ["json"],
-        "categories": ["general"],
-        "language": ["auto"],
-    }
-    assert requests[1].url.params["max_results"] == "1"
-    assert requests[2].url.params["gsrlimit"] == "1"
-    assert [request.method for request in requests[1:]] == ["GET", "GET"]
+    assert requests[0].url.params["max_results"] == "1"
+    assert requests[1].url.params["gsrlimit"] == "1"
+    assert [request.method for request in requests] == ["GET", "GET"]
     assert all(request.headers["user-agent"] == settings.search_user_agent for request in requests)
 
 
@@ -142,25 +152,275 @@ async def test_rate_limiter_spaces_requests() -> None:
 
 
 @pytest.mark.anyio
-async def test_searxng_json_format_error_is_actionable(tmp_path) -> None:
+async def test_duckduckgo_uses_stable_user_agent(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    service = ResearchSearchService(settings)
+    try:
+        assert Duckduckgo.headers == {"User-Agent": "Mozilla/5.0"}
+    finally:
+        await service.close()
+
+
+@pytest.mark.anyio
+async def test_duckduckgo_rate_limits_fail_without_retry(tmp_path) -> None:
+    now = [100.0]
+    delays: list[float] = []
+
+    async def advance(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    class RateLimitedDuckDuckGo:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+            del query, kwargs
+            self.attempts += 1
+            raise RatelimitException("HTTP 429: too many requests")
+
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
-        searxng_base_url="https://search.test",
     )
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(403, request=request)),
+    duckduckgo = RateLimitedDuckDuckGo()
+    service = ResearchSearchService(
+        settings,
+        duckduckgo_client=duckduckgo,
+        clock=lambda: now[0],
+        sleep=advance,
     )
-    service = ResearchSearchService(settings, client=client)
     try:
-        with pytest.raises(RuntimeError, match="Enable 'json' in its search.formats"):
+        with pytest.raises(
+            RuntimeError,
+            match="HTTP 429: too many requests.*Automatic retries are disabled",
+        ):
             await service.search_web("open source", 1)
     finally:
-        await client.aclose()
+        await service.close()
+
+    assert duckduckgo.attempts == 1
+    assert delays == []
+
+
+@pytest.mark.anyio
+async def test_duckduckgo_no_results_error_is_not_overridden(tmp_path) -> None:
+    now = [100.0]
+    delays: list[float] = []
+
+    async def advance(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    class EventuallyAvailableDuckDuckGo:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+            del query, kwargs
+            self.attempts += 1
+            raise DDGSException("No results found.")
+
+    duckduckgo = EventuallyAvailableDuckDuckGo()
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    service = ResearchSearchService(
+        settings,
+        duckduckgo_client=duckduckgo,
+        clock=lambda: now[0],
+        sleep=advance,
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="search request failed: No results found",
+        ):
+            await service.search_web("open source", 1)
+    finally:
+        await service.close()
+
+    assert duckduckgo.attempts == 1
+    assert delays == []
+
+
+@pytest.mark.anyio
+async def test_duckduckgo_non_rate_limit_errors_fail_without_retry(tmp_path) -> None:
+    delays: list[float] = []
+
+    async def record_delay(delay: float) -> None:
+        delays.append(delay)
+
+    class BrokenDuckDuckGo:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+            del query, kwargs
+            self.attempts += 1
+            raise DDGSException("response parser failed")
+
+    duckduckgo = BrokenDuckDuckGo()
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    service = ResearchSearchService(
+        settings,
+        duckduckgo_client=duckduckgo,
+        sleep=record_delay,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="search request failed"):
+            await service.search_web("open source", 1)
+    finally:
+        await service.close()
+
+    assert duckduckgo.attempts == 1
+    assert delays == []
+
+
+@pytest.mark.anyio
+async def test_duckduckgo_searches_are_serial_and_spaced_one_second(tmp_path) -> None:
+    now = [100.0]
+    delays: list[float] = []
+
+    async def advance(delay: float) -> None:
+        delays.append(delay)
+        now[0] += delay
+
+    class ConcurrencyTrackingDuckDuckGo:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+            self.lock = threading.Lock()
+
+        def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]:
+            del kwargs
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.01)
+            with self.lock:
+                self.active -= 1
+            return [{"title": query, "href": f"https://example.test/{query}", "body": ""}]
+
+    duckduckgo = ConcurrencyTrackingDuckDuckGo()
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    service = ResearchSearchService(
+        settings,
+        duckduckgo_client=duckduckgo,
+        clock=lambda: now[0],
+        sleep=advance,
+    )
+    try:
+        await asyncio.gather(
+            service.search_web("first", 1),
+            service.search_web("second", 1),
+        )
+    finally:
+        await service.close()
+
+    assert duckduckgo.max_active == 1
+    assert delays == [1.0]
+
+
+@pytest.mark.anyio
+async def test_web_search_session_budget_reuses_cached_queries(
+    test_settings,
+    monkeypatch,
+) -> None:
+    test_settings.web_search_max_requests_per_session = 2
+    services = create_services(test_settings)
+    calls: list[tuple[str, int]] = []
+
+    async def search_web(query: str, limit: int) -> dict[str, Any]:
+        calls.append((query, limit))
+        return {
+            "query": query,
+            "provider": "duckduckgo",
+            "results": [
+                {
+                    "title": f"Result {index}",
+                    "url": f"https://example.test/{index}",
+                    "snippet": "",
+                }
+                for index in range(limit)
+            ],
+        }
+
+    monkeypatch.setattr(services.research_search, "search_web", search_web)
+    context = ScholarWeaveContext(
+        run_id="search-budget-run",
+        tool_runtime=services.runs._tool_runtime,
+    )
+    runtime = services.runs._tool_runtime
+    try:
+        first = await runtime.invoke(
+            "web.search",
+            {"query": '  "broad"   research topic  ', "limit": 10},
+            context,
+        )
+        cached = await runtime.invoke(
+            "web.search",
+            {"query": "BROAD RESEARCH TOPIC", "limit": 10},
+            context,
+        )
+        second = await runtime.invoke(
+            "web.search",
+            {"query": "specific evidence gap", "limit": 10},
+            context,
+        )
+        with pytest.raises(ValueError, match="session limit was reached"):
+            await runtime.invoke(
+                "web.search",
+                {"query": "unnecessary third query", "limit": 10},
+                context,
+            )
+    finally:
+        await services.close()
+
+    assert calls == [
+        ("broad research topic", 10),
+        ("specific evidence gap", 10),
+    ]
+    assert first["cached"] is False
+    assert first["search_budget"] == {"used": 1, "limit": 2, "remaining": 1}
+    assert cached["cached"] is True
+    assert len(cached["results"]) == 10
+    assert cached["search_budget"] == {"used": 1, "limit": 2, "remaining": 1}
+    assert second["search_budget"] == {"used": 2, "limit": 2, "remaining": 0}
+
+
+@pytest.mark.anyio
+async def test_agent_web_search_requires_ten_results(test_settings) -> None:
+    services = create_services(test_settings)
+    context = ScholarWeaveContext(
+        run_id="search-result-limit-run",
+        tool_runtime=services.runs._tool_runtime,
+    )
+    try:
+        with pytest.raises(ValueError, match="exactly 10 results"):
+            await services.runs._tool_runtime.invoke(
+                "web.search",
+                {"query": "broad research topic", "limit": 5},
+                context,
+            )
+    finally:
+        await services.close()
+
+    assert context.metadata.get("web_search_requests_used", 0) == 0
 
 
 def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
-    catalog_ids = {definition.catalog_id for definition in create_tool_catalog().definitions()}
+    assert Settings.model_fields["web_search_max_requests_per_session"].default == 100
+    definitions = create_tool_catalog().definitions()
+    catalog_ids = {definition.catalog_id for definition in definitions}
+    web_search = next(
+        definition for definition in definitions if definition.catalog_id == "web.search"
+    )
+    assert web_search.parameters_schema is not None
+    assert web_search.parameters_schema["properties"]["limit"] == {
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 10,
+        "description": "Always request 10 results to maximize coverage per search.",
+    }
     source_tools = {
         "documents.download",
         "webpage.download",
@@ -184,5 +444,7 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     autonomous = autonomous_blueprint({})
     autonomous_catalog_ids = {tool.catalog_id for tool in autonomous.tools}
     assert {"web.search", "arxiv.search", "wikipedia.search", *source_tools} <= autonomous_catalog_ids
-    assert "Recursively refine queries" in autonomous.agents[0].instructions
+    assert "one broad keyword query" in autonomous.agents[0].instructions
+    assert "avoid quoted exact phrases" in autonomous.agents[0].instructions
+    assert "Request 10 results from every web search" in autonomous.agents[0].instructions
     assert autonomous.run.max_turns == 50

@@ -54,10 +54,13 @@ describe('RunInsightsPanel', () => {
     expect(container.querySelector('.context-usage-card')).toBeNull();
 
     const panel = container.querySelector<HTMLElement>('.run-insights')!;
-    const expand = container.querySelector<HTMLButtonElement>('[aria-label="Expand run insights"]')!;
-    await act(async () => expand.click());
-    expect(panel.style.width).toBe('360px');
-    expect(localStorage.getItem('scholarweave:run-insights-width')).toBe('360');
+    const resizer = container.querySelector<HTMLElement>('[aria-label="Resize run insights"]')!;
+    expect(container.querySelector('.run-insights-size-controls')).toBeNull();
+    await act(async () => {
+      resizer.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    });
+    expect(panel.style.width).toBe('336px');
+    expect(localStorage.getItem('scholarweave:run-insights-width')).toBe('336');
   });
 
   it('shows recent reasoning, tool use, and the final sub-agent response', async () => {
@@ -94,6 +97,7 @@ describe('RunInsightsPanel', () => {
     const agentsTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
       .find((button) => button.textContent?.includes('Agents'))!;
     await act(async () => agentsTab.click());
+    expect(agentsTab.getAttribute('aria-selected')).toBe('true');
     const agent = container.querySelector<HTMLDetailsElement>('.subagent-insights-list details')!;
     await act(async () => {
       agent.open = true;
@@ -104,5 +108,30 @@ describe('RunInsightsPanel', () => {
     expect(agent.textContent).toContain('Search web');
     expect(agent.textContent).toContain('Final response');
     expect(agent.textContent).toContain('Two sources support the result.');
+
+    await act(async () => {
+      root.render(
+        <RunInsightsPanel
+          status="completed"
+          events={events}
+          timeline={buildTurnTimeline(events, { settled: true })}
+          metrics={null}
+          hidden
+        />,
+      );
+    });
+    expect(container.querySelector('.run-insights')?.hasAttribute('hidden')).toBe(true);
+
+    await act(async () => {
+      root.render(
+        <RunInsightsPanel
+          status="completed"
+          events={events}
+          timeline={buildTurnTimeline(events, { settled: true })}
+          metrics={null}
+        />,
+      );
+    });
+    expect(agentsTab.getAttribute('aria-selected')).toBe('true');
   });
 });

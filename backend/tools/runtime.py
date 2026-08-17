@@ -45,6 +45,11 @@ from backend.core.json import dumps_json
 from backend.workspace.service import WorkspaceService
 
 
+_WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
+_WEB_SEARCH_CACHE_KEY = "web_search_results"
+_WEB_SEARCH_ATTEMPTS_KEY = "web_search_attempted_queries"
+
+
 class ApplicationToolRuntime:
     def __init__(
         self,
@@ -825,12 +830,96 @@ class ApplicationToolRuntime:
     async def _search_web(
         self,
         arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
+        context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        return await self._research_search.search_web(
-            str(arguments["query"]),
-            int(arguments["limit"]),
+        query = " ".join(
+            str(arguments["query"])
+            .translate(str.maketrans("", "", "\"\u201c\u201d"))
+            .split()
         )
+        limit = int(arguments["limit"])
+        if not query:
+            raise ValueError("Search query cannot be empty.")
+        if limit != 10:
+            raise ValueError("Agent web searches must request exactly 10 results.")
+
+        cache = context.metadata.setdefault(_WEB_SEARCH_CACHE_KEY, {})
+        if not isinstance(cache, dict):
+            raise ValueError("The web-search session cache is invalid.")
+        cache_key = query.casefold()
+        attempts = context.metadata.setdefault(_WEB_SEARCH_ATTEMPTS_KEY, [])
+        if not isinstance(attempts, list) or any(
+            not isinstance(item, str) for item in attempts
+        ):
+            raise ValueError("The web-search session attempt history is invalid.")
+        cached = cache.get(cache_key)
+        if cached is not None:
+            if not isinstance(cached, dict):
+                raise ValueError("The cached web-search result is invalid.")
+            cached_limit = cached.get("limit")
+            cached_result = cached.get("result")
+            cached_results = (
+                cached_result.get("results") if isinstance(cached_result, dict) else None
+            )
+            if (
+                isinstance(cached_limit, int)
+                and cached_limit >= limit
+                and isinstance(cached_result, dict)
+                and isinstance(cached_results, list)
+            ):
+                return self._web_search_result(
+                    {
+                        **cached_result,
+                        "query": query,
+                        "results": cached_results[:limit],
+                    },
+                    context,
+                    cached=True,
+                )
+        if cache_key in attempts:
+            raise ValueError(
+                "This normalized web query was already attempted in the current session. "
+                "Use its earlier results instead of retrying it with a different result limit."
+            )
+
+        used = self._web_search_requests_used(context)
+        maximum = self._settings.web_search_max_requests_per_session
+        if used >= maximum:
+            raise ValueError(
+                f"The web-search session limit was reached ({used}/{maximum}). "
+                "Use the results already gathered instead of rephrasing or retrying searches."
+            )
+        context.metadata[_WEB_SEARCH_USAGE_KEY] = used + 1
+        attempts.append(cache_key)
+        result = await self._research_search.search_web(query, limit)
+        cache[cache_key] = {"limit": limit, "result": result}
+        return self._web_search_result(result, context, cached=False)
+
+    def _web_search_result(
+        self,
+        result: dict[str, Any],
+        context: ScholarWeaveContext,
+        *,
+        cached: bool,
+    ) -> dict[str, Any]:
+        used = self._web_search_requests_used(context)
+        maximum = self._settings.web_search_max_requests_per_session
+        return {
+            **result,
+            "cached": cached,
+            "search_budget": {
+                "used": used,
+                "limit": maximum,
+                "remaining": max(0, maximum - used),
+            },
+        }
+
+    @staticmethod
+    def _web_search_requests_used(context: ScholarWeaveContext) -> int:
+        value = context.metadata.get(_WEB_SEARCH_USAGE_KEY, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("The web-search session usage counter is invalid.")
+        return value
 
     async def _search_arxiv(
         self,

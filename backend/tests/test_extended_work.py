@@ -539,7 +539,7 @@ async def test_failed_nested_agent_exposes_partial_state_for_continuation() -> N
 async def test_policy_session_keeps_only_recent_messages(tmp_path) -> None:
     factory = SdkSessionFactory(tmp_path / "sessions.sqlite3")
     policy = SessionPolicySpec(history_max_items=2, messages_only=True)
-    session = factory.get("conversation", policy, None)  # type: ignore[arg-type]
+    session = factory.get("conversation", policy)
     await session.add_items(
         [
             {"role": "user", "content": "first"},
@@ -551,7 +551,7 @@ async def test_policy_session_keeps_only_recent_messages(tmp_path) -> None:
 
     items = await session.get_items()
     assert [item["content"] for item in items] == ["second", "third"]
-    full = factory.get("conversation", SessionPolicySpec(), None)  # type: ignore[arg-type]
+    full = factory.get("conversation", SessionPolicySpec())
     assert len(await full.get_items()) == 3
 
 

@@ -159,9 +159,7 @@ class AutonomousAgentService:
         )
 
     async def conversation_items(self, conversation_id: str):
-        compiled = self.compile_conversation(conversation_id)
-        primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-        return await self._conversations.items(conversation_id, primary)
+        return await self._conversations.items(conversation_id)
 
     def start_message(
         self,
@@ -481,6 +479,9 @@ def autonomous_blueprint(
                     "expand into unrelated parts of the parent request. Search prior conversations only when "
                     "it can avoid duplicate work, and reuse a result only when it clearly matches. Use the "
                     "research, document, and workspace tools as needed. Verify important claims. "
+                    "For web research, begin with one broad, high-signal keyword query and request 10 results "
+                    "for coverage. Review all results, avoid quoted exact-phrase variants, and issue another "
+                    "web search only when the existing results leave a specific evidence gap. "
                     f"The {work_budget} setting is scope guidance, not a per-tool quota. Workspace, source, "
                     f"memory, and compute lookups are not preset-capped. The overall run targets about "
                     f"{budget.recommended_tasks} focused items and this worker should consider about "
@@ -574,10 +575,14 @@ def autonomous_blueprint(
                     "describing steps. Every tool listed in your tool definitions is directly available "
                     "to you. Choose when to invoke each tool, evaluate its result, and continue the "
                     "tool-use loop until the request is complete or a concrete blocker makes completion "
-                    "impossible. For external research, decompose broad questions into focused searches, "
-                    "use arXiv for primary papers, Wikipedia for background and terminology, and SearXNG "
-                    "web search for wider coverage. Recursively refine queries from useful names, citations, "
-                    "and gaps in earlier results, cross-check important claims across independent sources, "
+                    "impossible. For external research, use a small number of high-information searches. "
+                    "Use arXiv for primary papers, Wikipedia for background and terminology, and DuckDuckGo "
+                    "web search for wider coverage. Start web research with one broad keyword query combining "
+                    "distinctive concepts and common synonyms; avoid quoted exact phrases unless looking for "
+                    "a known title or unique wording. Request 10 results from every web search, review all "
+                    "returned results before narrowing, and issue another web query only for a specific "
+                    "evidence gap. Cross-check important claims across "
+                    "independent sources, "
                     "and stop searching once the evidence is sufficient for the requested outcome. Include "
                     "the returned source URLs when citing external evidence. Download an arXiv result with "
                     "download_paper when the user requests it or full-paper evidence is needed. Download an "

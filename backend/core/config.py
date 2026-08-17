@@ -30,14 +30,13 @@ class Settings(BaseSettings):
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
 
-    searxng_base_url: str = "http://127.0.0.1:8888"
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
     wikipedia_api_url: str = "https://en.wikipedia.org/w/api.php"
     search_user_agent: str = (
         "ScholarWeave/0.1 (+https://github.com/giridharmunagala/scholarweave)"
     )
     search_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    web_search_requests_per_minute: int = Field(default=30, ge=1, le=600)
+    web_search_max_requests_per_session: int = Field(default=100, ge=1, le=100)
     arxiv_search_requests_per_minute: int = Field(default=20, ge=1, le=20)
     wikipedia_search_requests_per_minute: int = Field(default=60, ge=1, le=600)
     web_source_ttl_minutes: int = Field(default=240, ge=5, le=1440)
@@ -53,6 +52,10 @@ class Settings(BaseSettings):
         default=8_192,
         ge=1_024,
         le=500_000,
+        description=(
+            "Minimum preferred post-compaction context size. The runtime scales the actual target "
+            "with each selected model's context window."
+        ),
     )
     user_timezone: str = "Asia/Kolkata"
     user_profile: str = "Based in Hyderabad, Telangana, India."
@@ -105,7 +108,8 @@ class Settings(BaseSettings):
         )
         if self.agent_context_compaction_target_tokens >= high_water_tokens:
             raise ValueError(
-                "agent_context_compaction_target_tokens must be below the context high-water mark."
+                "agent_context_compaction_target_tokens must be below the fallback context "
+                "high-water mark."
             )
         try:
             ZoneInfo(self.user_timezone)

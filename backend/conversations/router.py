@@ -50,9 +50,7 @@ async def get_conversation(
     container=Depends(services),
 ) -> ConversationDetailResponse:
     record = container.conversations.get(conversation_id)
-    compiled = _compile_conversation(record, container)
-    primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-    items = await container.conversations.items(record.id, primary)
+    items = await container.conversations.items(record.id)
     return ConversationDetailResponse(**_response(record).model_dump(), items=items)
 
 
@@ -87,10 +85,7 @@ async def delete_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> Response:
-    record = container.conversations.get(conversation_id)
-    compiled = _compile_conversation(record, container)
-    primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-    await container.conversations.delete(conversation_id, primary)
+    await container.conversations.delete(conversation_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

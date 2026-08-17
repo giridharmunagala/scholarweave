@@ -37,6 +37,7 @@ from backend.runtime.sdk_compat import assert_supported_sdk
 from backend.tools.failures import nested_agent_failure_handler
 
 UNLIMITED_AGENT_TOOL_TURNS = 2_147_483_647
+MAX_AGENT_TOOL_DEPTH = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +213,10 @@ class AgentCompiler:
                             if (context_window := resolved.context_window_tokens)
                             is not None
                         },
+                        {
+                            id(agent): agent_id
+                            for agent_id, agent in agents_by_id.items()
+                        },
                     )
                     if self._settings is not None
                     else None
@@ -370,6 +375,86 @@ class AgentCompiler:
                 issues.append(f"Agent tool '{spec.id}' has missing delegate agent '{spec.delegate_agent_id}'.")
             if spec.owner_agent_id == spec.delegate_agent_id:
                 issues.append(f"Agent tool '{spec.id}' cannot delegate to its owner agent.")
+        issues.extend(AgentCompiler._agent_tool_topology_issues(blueprint, agent_ids))
+        return issues
+
+    @staticmethod
+    def _agent_tool_topology_issues(
+        blueprint: AgentBlueprint,
+        agent_ids: set[str],
+    ) -> list[str]:
+        graph: dict[str, list[tuple[str, int]]] = {
+            agent_id: [] for agent_id in agent_ids
+        }
+        for relation in blueprint.handoffs:
+            source = relation.source_agent_id
+            target = relation.target_agent_id
+            if source not in agent_ids or target not in agent_ids or source == target:
+                continue
+            graph[source].append((target, 0))
+        for relation in blueprint.agent_tools:
+            owner = relation.owner_agent_id
+            delegate = relation.delegate_agent_id
+            if owner not in agent_ids or delegate not in agent_ids or owner == delegate:
+                continue
+            graph[owner].append((delegate, 1))
+
+        issues: list[str] = []
+        seen_states: set[tuple[str, int]] = set()
+
+        def validate_path(
+            agent_id: str,
+            *,
+            depth: int,
+            path: list[str],
+            path_depths: dict[str, int],
+        ) -> None:
+            state = (agent_id, depth)
+            if state in seen_states:
+                return
+            seen_states.add(state)
+            current_path = [*path, agent_id]
+            current_depths = {**path_depths, agent_id: depth}
+            for delegate, edge_depth in graph[agent_id]:
+                next_depth = depth + edge_depth
+                delegation_path = [*current_path, delegate]
+                if delegate in current_depths:
+                    cycle_depth = next_depth - current_depths[delegate]
+                    if cycle_depth > 0:
+                        cycle_start = current_path.index(delegate)
+                        cycle = [*current_path[cycle_start:], delegate]
+                        message = (
+                            "Agent-tool delegation contains a cycle with recursive nesting: "
+                            + " -> ".join(f"'{item}'" for item in cycle)
+                            + "."
+                        )
+                        if message not in issues:
+                            issues.append(message)
+                    continue
+                if next_depth > MAX_AGENT_TOOL_DEPTH:
+                    message = (
+                        f"Agent-tool delegation exceeds maximum depth "
+                        f"{MAX_AGENT_TOOL_DEPTH}: "
+                        + " -> ".join(f"'{item}'" for item in delegation_path)
+                        + "."
+                    )
+                    if message not in issues:
+                        issues.append(message)
+                    continue
+                validate_path(
+                    delegate,
+                    depth=next_depth,
+                    path=current_path,
+                    path_depths=current_depths,
+                )
+
+        for agent_id in agent_ids:
+            validate_path(
+                agent_id,
+                depth=0,
+                path=[],
+                path_depths={},
+            )
         return issues
 
     @staticmethod

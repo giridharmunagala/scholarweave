@@ -26,6 +26,7 @@ describe('application chat navigation', () => {
   let root: Root;
 
   beforeEach(() => {
+    localStorage.clear();
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     window.history.replaceState({}, '', '/');
     vi.stubGlobal('scrollTo', vi.fn());
@@ -73,5 +74,13 @@ describe('application chat navigation', () => {
     expect(container.querySelector('.app-main.chat-main')).not.toBeNull();
     expect(container.querySelector('.app-body')?.getAttribute('data-chat')).toBe('true');
     expect(container.querySelector('.search-trigger')?.getAttribute('aria-label')).toBe('Search');
+
+    const shell = container.querySelector<HTMLElement>('.app-shell')!;
+    const resizer = container.querySelector<HTMLElement>('[aria-label="Resize navigation sidebar"]')!;
+    await act(async () => {
+      resizer.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    });
+    expect(shell.style.getPropertyValue('--sidebar-expanded-width')).toBe('260px');
+    expect(localStorage.getItem('scholarweave-sidebar-width')).toBe('260');
   });
 });

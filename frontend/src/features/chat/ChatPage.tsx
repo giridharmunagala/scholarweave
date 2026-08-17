@@ -88,6 +88,7 @@ export default function ChatPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
   const [modelReference, setModelReference] = useState<ModelReference>({});
+  const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [speechModelReference, setSpeechModelReference] = useState<ModelReference>({});
   const [speechMode, setSpeechMode] = useState<'builtin' | 'provider'>('builtin');
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
@@ -110,7 +111,7 @@ export default function ChatPage() {
   const [speechPreview, setSpeechPreview] = useState<string | null>(null);
   const [speechFinalFailed, setSpeechFinalFailed] = useState(false);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(true);
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -140,6 +141,10 @@ export default function ChatPage() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [settingsOpen]);
+
+  useEffect(() => {
+    if (run?.id) setSettingsOpen(false);
+  }, [run?.id]);
 
   useEffect(() => {
     if (
@@ -204,6 +209,7 @@ export default function ChatPage() {
         setSettings(nextSettings);
         const preferredModel = preferredChatModel(nextSettings);
         setModelReference(preferredModel);
+        setPreferredModelReference(preferredModel);
         setSpeechModelReference(nextSettings.default_model_references.speech ?? {});
         if (
           nextSettings.default_model_references.speech?.provider_profile_id
@@ -233,6 +239,7 @@ export default function ChatPage() {
       setOptimisticUser(null);
       setSending(false);
       setPinnedToBottom(true);
+      setModelReference(preferredModelReference);
       return;
     }
     if (!targetConversationId || handledRouteRef.current === targetConversationId) {
@@ -242,7 +249,7 @@ export default function ChatPage() {
     if (current?.id !== targetConversationId) {
       void open(targetConversationId).catch(setError);
     }
-  }, [loading, newChatRequested, targetConversationId]);
+  }, [loading, newChatRequested, targetConversationId, preferredModelReference]);
 
   useEffect(() => {
     if (builtInSpeech?.state !== 'installing') return;
@@ -408,6 +415,7 @@ export default function ChatPage() {
 
   const selectModel = (reference: ModelReference) => {
     setModelReference(reference);
+    setPreferredModelReference(reference);
     void providersApi
       .updateSettings({ last_chat_model_reference: reference })
       .then(setSettings)
@@ -806,7 +814,7 @@ export default function ChatPage() {
               </div>
             </div>
           </header>
-          <div className={`chat-workspace${run ? ' has-insights' : ''}`}>
+          <div className="chat-workspace has-side-panel">
             <div className="chat-thread">
               <div
                 className="message-list"
@@ -1021,15 +1029,7 @@ export default function ChatPage() {
                 events={activeEvents}
                 timeline={activeTimeline}
                 metrics={activeMetrics}
-              />
-            ) : null}
-            {settingsOpen ? (
-              <button
-                type="button"
-                className="chat-settings-scrim"
-                aria-label="Close chat settings"
-                tabIndex={-1}
-                onClick={() => setSettingsOpen(false)}
+                hidden={settingsOpen}
               />
             ) : null}
             <aside
@@ -1165,6 +1165,9 @@ export default function ChatPage() {
                 </div>
               ) : null}
             </aside>
+            {!run && !settingsOpen ? (
+              <aside className="chat-side-panel-placeholder" aria-hidden="true" />
+            ) : null}
           </div>
         </section>
       </div>

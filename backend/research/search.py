@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import html
+import math
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
-from typing import Any
-from urllib.parse import urljoin, urlparse
+from typing import Any, Protocol
 
 import httpx
+from ddgs import DDGS
+from ddgs.engines.duckduckgo import Duckduckgo
+from ddgs.exceptions import DDGSException, RatelimitException
 
 from backend.core.config import Settings
 
@@ -17,6 +21,21 @@ _ATOM = {"atom": "http://www.w3.org/2005/Atom"}
 _WHITESPACE = re.compile(r"\s+")
 _HTML_TAG = re.compile(r"<[^>]+>")
 _MAX_RESULTS = 10
+_DUCKDUCKGO_REQUESTS_PER_MINUTE = 60
+_DUCKDUCKGO_USER_AGENT = "Mozilla/5.0"
+_RATE_LIMIT_MARKERS = (
+    "http 202",
+    "http 429",
+    "rate limit",
+    "ratelimit",
+    "status code 202",
+    "status code 429",
+    "too many requests",
+)
+
+
+class DuckDuckGoClient(Protocol):
+    def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]: ...
 
 
 class AsyncRateLimiter:
@@ -51,6 +70,9 @@ class ResearchSearchService:
         settings: Settings,
         *,
         client: httpx.AsyncClient | None = None,
+        duckduckgo_client: DuckDuckGoClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._settings = settings
         self._owns_client = client is None
@@ -60,10 +82,33 @@ class ResearchSearchService:
             follow_redirects=True,
         )
         self._limiters = {
-            "web": AsyncRateLimiter(settings.web_search_requests_per_minute),
-            "arxiv": AsyncRateLimiter(settings.arxiv_search_requests_per_minute),
-            "wikipedia": AsyncRateLimiter(settings.wikipedia_search_requests_per_minute),
+            "arxiv": AsyncRateLimiter(
+                settings.arxiv_search_requests_per_minute,
+                clock=clock,
+                sleep=sleep,
+            ),
+            "wikipedia": AsyncRateLimiter(
+                settings.wikipedia_search_requests_per_minute,
+                clock=clock,
+                sleep=sleep,
+            ),
         }
+        if duckduckgo_client is None:
+            # ddgs otherwise chooses a random fake User-Agent; some generated mobile
+            # agents consistently receive empty DuckDuckGo HTML responses.
+            Duckduckgo.headers = {"User-Agent": _DUCKDUCKGO_USER_AGENT}
+            self._duckduckgo = DDGS(
+                timeout=max(1, math.ceil(settings.search_request_timeout_seconds))
+            )
+        else:
+            self._duckduckgo = duckduckgo_client
+        self._duckduckgo_limiter = AsyncRateLimiter(
+            _DUCKDUCKGO_REQUESTS_PER_MINUTE,
+            clock=clock,
+            sleep=sleep,
+        )
+        self._duckduckgo_lock = asyncio.Lock()
+        self._duckduckgo_thread_lock = threading.Lock()
 
     async def close(self) -> None:
         if self._owns_client:
@@ -71,37 +116,51 @@ class ResearchSearchService:
 
     async def search_web(self, query: str, limit: int) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
-        search_url = f"{self._settings.searxng_base_url.rstrip('/')}/search"
-        payload = await self._post_json(
-            "web",
-            search_url,
-            data={
-                "q": query,
-                "format": "json",
-                "categories": "general",
-                "language": "auto",
-            },
-        )
-        raw_results = payload.get("results")
+        async with self._duckduckgo_lock:
+            await self._duckduckgo_limiter.acquire()
+            try:
+                raw_results = await asyncio.to_thread(
+                    self._search_duckduckgo,
+                    query,
+                    limit,
+                )
+            except DDGSException as exc:
+                if not _is_duckduckgo_rate_limit(exc):
+                    raise RuntimeError(f"DuckDuckGo search request failed: {exc}") from exc
+                raise RuntimeError(
+                    f"DuckDuckGo search was rate-limited ({exc}). Automatic retries are disabled "
+                    "to conserve the session request budget; use evidence already gathered "
+                    "or try again in a later session."
+                ) from exc
+
         if not isinstance(raw_results, list):
-            raise ValueError("SearXNG returned an invalid results payload.")
+            raise ValueError("DuckDuckGo returned an invalid results payload.")
         results = []
         for item in raw_results:
-            if not isinstance(item, dict) or not item.get("url"):
+            if not isinstance(item, dict) or not item.get("href"):
                 continue
             results.append(
                 {
                     "title": _clean_text(item.get("title")),
-                    "url": str(item["url"]),
-                    "snippet": _clean_text(item.get("content")),
-                    "engine": str(item.get("engine") or ""),
-                    "published_at": item.get("publishedDate"),
-                    "image_url": _result_image_url(item, search_url),
+                    "url": str(item["href"]),
+                    "snippet": _clean_text(item.get("body")),
+                    "engine": "duckduckgo",
+                    "published_at": None,
+                    "image_url": None,
                 }
             )
             if len(results) == limit:
                 break
-        return {"query": query, "provider": "searxng", "results": results}
+        return {"query": query, "provider": "duckduckgo", "results": results}
+
+    def _search_duckduckgo(self, query: str, limit: int) -> list[dict[str, Any]]:
+        with self._duckduckgo_thread_lock:
+            return self._duckduckgo.text(
+                query,
+                max_results=limit,
+                backend="duckduckgo",
+                region="wt-wt",
+            )
 
     async def search_arxiv(self, query: str, limit: int) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
@@ -204,22 +263,6 @@ class ResearchSearchService:
             raise ValueError(f"{provider} search returned an invalid JSON payload.")
         return payload
 
-    async def _post_json(
-        self,
-        provider: str,
-        url: str,
-        *,
-        data: dict[str, Any],
-    ) -> dict[str, Any]:
-        response = await self._post(provider, url, data=data)
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ValueError(f"{provider} search returned invalid JSON.") from exc
-        if not isinstance(payload, dict):
-            raise ValueError(f"{provider} search returned an invalid JSON payload.")
-        return payload
-
     async def _get(
         self,
         provider: str,
@@ -235,31 +278,8 @@ class ResearchSearchService:
             raise self._request_error(provider, exc) from exc
         return response
 
-    async def _post(
-        self,
-        provider: str,
-        url: str,
-        *,
-        data: dict[str, Any],
-    ) -> httpx.Response:
-        await self._limiters[provider].acquire()
-        try:
-            response = await self._client.post(url, data=data)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise self._request_error(provider, exc) from exc
-        return response
-
     @staticmethod
     def _request_error(provider: str, exc: httpx.HTTPError) -> RuntimeError:
-        if (
-            provider == "web"
-            and isinstance(exc, httpx.HTTPStatusError)
-            and exc.response.status_code == 403
-        ):
-            return RuntimeError(
-                "SearXNG rejected the JSON response request. Enable 'json' in its search.formats setting."
-            )
         return RuntimeError(f"{provider} search request failed: {exc}")
 
     @staticmethod
@@ -282,12 +302,22 @@ def _element_text(element: ET.Element, path: str) -> str:
     return _clean_text(child.text if child is not None else "")
 
 
-def _result_image_url(item: dict[str, Any], search_url: str) -> str | None:
-    for key in ("thumbnail", "img_src", "thumbnail_src"):
-        value = item.get(key)
-        if not isinstance(value, str) or not value.strip():
+def _is_duckduckgo_rate_limit(exc: BaseException) -> bool:
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
             continue
-        resolved = urljoin(search_url, value.strip())
-        if urlparse(resolved).scheme in {"http", "https"}:
-            return resolved
-    return None
+        seen.add(id(current))
+        if isinstance(current, RatelimitException):
+            return True
+        message = str(current).casefold()
+        if any(marker in message for marker in _RATE_LIMIT_MARKERS):
+            return True
+        pending.extend(arg for arg in current.args if isinstance(arg, BaseException))
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
+    return False

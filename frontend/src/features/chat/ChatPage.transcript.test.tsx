@@ -158,6 +158,7 @@ class FakeServer {
   reasoningEfforts: Array<string | null> = [];
   workModes: string[] = [];
   workBudgets: string[] = [];
+  createdModelReferences: Record<string, unknown>[] = [];
   cancelledRunIds: string[] = [];
   turnIndex = 0;
   listeners = new Map<string, FakeEventSource>();
@@ -168,6 +169,7 @@ class FakeServer {
     this.reasoningEfforts = [];
     this.workModes = [];
     this.workBudgets = [];
+    this.createdModelReferences = [];
     this.cancelledRunIds = [];
     this.turnIndex = 0;
     this.listeners.clear();
@@ -254,6 +256,7 @@ class FakeEventSource {
 
 const SETTINGS = {
   default_model_references: { chat: { provider_profile_id: 'p1', model: 'gemini' } },
+  last_chat_model_reference: { provider_profile_id: 'p1', model: 'preferred' },
 };
 const PROVIDERS = [
   {
@@ -262,12 +265,20 @@ const PROVIDERS = [
     kind: 'openai_compatible',
     base_url: null,
     archived: false,
-    models: [{
-      id: 'gemini',
-      name: 'gemini',
-      enabled: true,
-      reasoning_efforts: ['low', 'medium', 'high'],
-    }],
+    models: [
+      {
+        id: 'gemini',
+        name: 'gemini',
+        enabled: true,
+        reasoning_efforts: ['low', 'medium', 'high'],
+      },
+      {
+        id: 'preferred',
+        name: 'preferred',
+        enabled: true,
+        reasoning_efforts: ['low', 'medium', 'high'],
+      },
+    ],
   },
 ];
 
@@ -297,6 +308,8 @@ function installFetch() {
       const url = String(input);
       const method = init?.method ?? 'GET';
       if (url.endsWith('/api/agent/conversations') && method === 'POST') {
+        const { model_reference } = JSON.parse(String(init?.body));
+        server.createdModelReferences.push(model_reference);
         return respond(conversationSummary(NEW_CONVERSATION_ID));
       }
       if (url.endsWith('/api/agent/conversations')) return respond([conversationSummary()]);
@@ -420,6 +433,7 @@ describe('chat transcript detail', () => {
   };
 
   const openSettings = async () => {
+    if (container.querySelector('.chat-settings-content')) return;
     await act(async () => {
       container
         .querySelector('.chat-settings-toggle')!
@@ -489,9 +503,8 @@ describe('chat transcript detail', () => {
   it('sends the selected reasoning effort with each turn', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
-    expect(container.querySelector('.chat-settings-content')).toBeNull();
+    expect(container.querySelector('.chat-settings-content')).not.toBeNull();
     expect(container.querySelector('.conversation-list')).toBeNull();
-    await openSettings();
 
     const select = container.querySelector<HTMLSelectElement>(
       'select[aria-label="Reasoning effort"]',
@@ -515,6 +528,21 @@ describe('chat transcript detail', () => {
 
     expect(server.reasoningEfforts).toEqual(['high']);
     expect(localStorage.getItem('scholarweave-reasoning-effort')).toBe('high');
+  });
+
+  it('keeps the right panel reserved when settings is closed', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+
+    await act(async () => {
+      container
+        .querySelector('.chat-settings-toggle')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.querySelector('.chat-settings-content')).toBeNull();
+    expect(container.querySelector('.chat-side-panel-placeholder')).not.toBeNull();
+    expect(container.querySelector('.chat-workspace')?.classList.contains('has-side-panel')).toBe(true);
   });
 
   it('persists and sends extended work mode', async () => {
@@ -542,13 +570,15 @@ describe('chat transcript detail', () => {
       setter.call(budget, 'high');
       budget.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    expect(container.querySelector('.chat-settings-content')?.textContent).toContain(
+      'Prioritize about 10 tasks and 8 sources at a time; normal lookups are uncapped.',
+    );
     await send('Compare these concerns separately');
 
     expect(server.workModes).toEqual(['extended']);
     expect(server.workBudgets).toEqual(['high']);
-    expect(container.querySelector('.chat-settings-content')?.textContent).toContain(
-      'Prioritize about 10 tasks and 8 sources at a time; normal lookups are uncapped.',
-    );
+    expect(container.querySelector('.chat-settings-content')).toBeNull();
+    expect(container.querySelector('.run-insights')).not.toBeNull();
     expect(localStorage.getItem('scholarweave:chat-work-mode')).toBe('extended');
     expect(localStorage.getItem('scholarweave:chat-work-budget')).toBe('high');
   });
@@ -582,10 +612,25 @@ describe('chat transcript detail', () => {
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
       textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
+
     await flush(3);
 
     expect(window.location.search).toBe(`?conversation=${NEW_CONVERSATION_ID}`);
     expect(text(container.querySelector('.chat-header-title strong'))).toBe('Brand new chat');
+  });
+
+  it('uses the preferred model for a new chat after viewing an older conversation', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.chat-new')!.click();
+    });
+    await send('Start with my preferred model');
+
+    expect(server.createdModelReferences).toEqual([
+      { provider_profile_id: 'p1', model: 'preferred' },
+    ]);
   });
 
   it('streams the trace live and keeps it expandable once settled', async () => {
