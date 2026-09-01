@@ -33,7 +33,7 @@ export default function RunsPage() {
   if (!id) {
     return (
       <div className="page">
-        <PageHeader eyebrow="SDK Runner" title="Runs" description="Semantic SDK run items, usage, handoffs, guardrails and interruptions." />
+        <PageHeader title="Runs" description="Every agent run, with what it did, what it used and where it stopped." />
         {error ? <ErrorNotice error={error} /> : null}
         {runs.length ? (
           <Panel>
@@ -67,7 +67,6 @@ export default function RunsPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="SDK run"
         title={selected.agent_name}
         description={`Run ${selected.id}`}
         actions={
@@ -101,6 +100,34 @@ export default function RunsPage() {
           <div className="timeline">
             {selected.items.map((item, index) => <RunItemView item={item} index={index} key={index} />)}
             {!selected.items.length ? <p>No completed semantic items yet.</p> : null}
+          </div>
+          <div className="split">
+            <Panel title="Supervisor epochs" description="Bounded execution segments and stop reasons.">
+              <div className="event-log">
+                {selected.epochs.map((epoch) => (
+                  <details className="disclosure" key={epoch.id}>
+                    <summary>
+                      Epoch {epoch.epoch_index + 1} · {epoch.status} · {epoch.terminal_reason ?? 'running'}
+                    </summary>
+                    <pre>{JSON.stringify(epoch, null, 2)}</pre>
+                  </details>
+                ))}
+                {!selected.epochs.length ? <p>No epoch has started.</p> : null}
+              </div>
+            </Panel>
+            <Panel title="Tool attempts" description="Retries, failures, and uncertain write outcomes.">
+              <div className="event-log">
+                {selected.tool_attempts.map((attempt) => (
+                  <details className="disclosure" key={attempt.id}>
+                    <summary>
+                      {attempt.catalog_id} · attempt {attempt.attempt} · {attempt.status}
+                    </summary>
+                    <pre>{JSON.stringify(attempt, null, 2)}</pre>
+                  </details>
+                ))}
+                {!selected.tool_attempts.length ? <p>No application tool attempts.</p> : null}
+              </div>
+            </Panel>
           </div>
         </Panel>
         <Panel title="Usage and output">

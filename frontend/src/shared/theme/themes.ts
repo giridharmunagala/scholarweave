@@ -8,7 +8,7 @@ export interface ThemeDefinition {
   label: string;
   description: string;
   scheme: 'light' | 'dark';
-  /** Representative colours for the picker swatch. */
+  /** The three hues a theme combines, so the swatch previews the palette. */
   swatch: [string, string, string];
 }
 
@@ -16,37 +16,37 @@ export const THEMES: ThemeDefinition[] = [
   {
     id: 'paper',
     label: 'Paper',
-    description: 'Warm, low-glare light',
+    description: 'Plum, sand and terracotta',
     scheme: 'light',
-    swatch: ['#f6f3ec', '#fffdf9', '#2f5eb5'],
+    swatch: ['#3d2b32', '#eee2ce', '#c0562a'],
   },
   {
     id: 'cloud',
     label: 'Cloud',
-    description: 'Crisp, cool light',
+    description: 'Teal, ivory and coral',
     scheme: 'light',
-    swatch: ['#eff3f9', '#ffffff', '#2563eb'],
+    swatch: ['#0e3f45', '#f2ece1', '#e2603c'],
   },
   {
     id: 'slate',
     label: 'Slate',
-    description: 'Balanced dark',
+    description: 'Indigo, charcoal and cyan',
     scheme: 'dark',
-    swatch: ['#0b0f16', '#1a2130', '#6f8dff'],
+    swatch: ['#241b56', '#1b1f2a', '#3ec9e0'],
   },
   {
     id: 'forest',
     label: 'Forest',
-    description: 'Calm green dark',
+    description: 'Pine, bark and amber',
     scheme: 'dark',
-    swatch: ['#0a1210', '#1f2f28', '#5fd39a'],
+    swatch: ['#14382a', '#21221a', '#e9b24d'],
   },
   {
     id: 'amoled',
     label: 'Amoled',
-    description: 'True black for OLED',
+    description: 'Violet, true black and neon',
     scheme: 'dark',
-    swatch: ['#000000', '#191b22', '#5eeaff'],
+    swatch: ['#1c0c40', '#000000', '#35e6f2'],
   },
 ];
 

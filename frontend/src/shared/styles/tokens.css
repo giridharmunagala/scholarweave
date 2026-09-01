@@ -36,180 +36,394 @@
   --dur-slow: 420ms;
   --ease: cubic-bezier(.22, .8, .3, 1);
 
-  --sidebar-width: 244px;
-  --sidebar-width-compact: 68px;
-  --topbar-height: 56px;
+  --rail-width: 78px;
+  --rail-bar-height: 64px;
+  --page-gutter: clamp(1rem, 2.2vw, 2rem);
   --content-max: 1380px;
+  /* The reading column grows with the window instead of pinning to 46rem, which
+   * left most of a wide screen empty, but still caps out before lines get long
+   * enough to lose your place between them. */
+  --reading-max: clamp(46rem, 64vw, 70rem);
 }
 
 /* ---------------------------------------------------------------- Paper --- */
 /* Warm, low-glare light theme tuned for long reading sessions. Default. */
 [data-theme='paper'] {
   color-scheme: light;
-  --bg: #f6f3ec;
-  --bg-accent: radial-gradient(110% 80% at 6% -14%, rgb(47 94 181 / 10%) 0%, transparent 58%);
-  --surface: #fffdf9;
-  --surface-2: #f1ece2;
-  --surface-3: #e6dfd1;
-  --surface-inset: #f7f4ed;
-  --border: #e2dacb;
-  --border-strong: #cabfaa;
-  --text: #2a251d;
-  --text-strong: #16120c;
-  --muted: #6d6555;
-  --accent: #2f5eb5;
-  --accent-strong: #22488f;
+  --bg: #f3ebdf;
+  --wallpaper: url('/wallpapers/terracotta.svg');
+  --surface: #fffdf7;
+  --surface-2: #f4ebdd;
+  --surface-3: #e9ddc9;
+  --surface-inset: #f9f4ea;
+  --border: #e3d7c3;
+  --border-strong: #c9b89c;
+  --text: #2c241d;
+  --text-strong: #17110b;
+  --muted: #5d4e3b;
+  --accent: #c0562a;
+  --accent-strong: #9c4420;
+  --accent-2: #2b7a78;
   --accent-contrast: #ffffff;
-  --accent-soft: #e4ecfa;
-  --success: #1c7f57;
-  --warning: #97690f;
-  --danger: #bd3f3f;
-  --agent: #2f5eb5;
-  --tool: #1c7f57;
-  --handoff: #97690f;
-  --guardrail: #bd3f3f;
+  --accent-soft: #f9e0d0;
+  --success: #2f7d55;
+  --warning: #a9760f;
+  --danger: #c0433f;
+  --agent: #c0562a;
+  --tool: #2b7a78;
+  --handoff: #a9760f;
+  --guardrail: #c0433f;
   --hosted: #7c4bbd;
-  --shadow-sm: 0 1px 2px rgb(60 48 30 / 8%);
-  --shadow-md: 0 6px 18px -8px rgb(60 48 30 / 22%);
-  --shadow-lg: 0 24px 50px -24px rgb(60 48 30 / 34%);
+  --rail-solid: #3d2b32;
+  --rail-deep: #241a1f;
+  --rail-edge: #1b1317;
+  --list-bg: #eee2ce;
+  --canvas-bg: #fffdf7;
+  --divider: #ddcdb4;
+  --shadow-sm: 0 1px 2px rgb(60 40 30 / 8%);
+  --shadow-md: 0 10px 26px -12px rgb(60 40 30 / 24%);
+  --shadow-lg: 0 30px 60px -28px rgb(60 40 30 / 36%);
   --shadow: var(--shadow-md);
-  --scrim: rgb(42 37 29 / 34%);
+  --scrim: rgb(42 32 26 / 46%);
 }
 
 /* ---------------------------------------------------------------- Cloud --- */
 /* Crisp, cool light theme with higher contrast for bright rooms. */
 [data-theme='cloud'] {
   color-scheme: light;
-  --bg: #eff3f9;
-  --bg-accent: radial-gradient(110% 80% at 94% -14%, rgb(37 99 235 / 12%) 0%, transparent 58%);
+  --bg: #eceff0;
+  --wallpaper: url('/wallpapers/harbour.svg');
   --surface: #ffffff;
-  --surface-2: #eef3fa;
-  --surface-3: #e0e8f4;
-  --surface-inset: #f5f8fc;
-  --border: #dbe4f0;
-  --border-strong: #b9c7db;
-  --text: #131a26;
-  --text-strong: #060a12;
-  --muted: #5b6a80;
-  --accent: #2563eb;
-  --accent-strong: #1d4ed8;
+  --surface-2: #f1f4f3;
+  --surface-3: #e2e8e7;
+  --surface-inset: #f7f9f8;
+  --border: #dde4e3;
+  --border-strong: #bcc8c7;
+  --text: #17242a;
+  --text-strong: #08131a;
+  --muted: #4d5e64;
+  --accent: #0d7d87;
+  --accent-strong: #0a626a;
+  --accent-2: #e2603c;
   --accent-contrast: #ffffff;
-  --accent-soft: #e2ebfe;
-  --success: #0f8f6c;
-  --warning: #a2700c;
-  --danger: #d03a4c;
-  --agent: #2563eb;
-  --tool: #0f8f6c;
-  --handoff: #a2700c;
-  --guardrail: #d03a4c;
-  --hosted: #7c3aed;
-  --shadow-sm: 0 1px 2px rgb(15 30 60 / 8%);
-  --shadow-md: 0 8px 20px -10px rgb(15 30 60 / 26%);
-  --shadow-lg: 0 26px 54px -26px rgb(15 30 60 / 36%);
+  --accent-soft: #d6efef;
+  --success: #2f9e64;
+  --warning: #c9821b;
+  --danger: #d24a5e;
+  --agent: #0d7d87;
+  --tool: #2f9e64;
+  --handoff: #c9821b;
+  --guardrail: #d24a5e;
+  --hosted: #7c5cd6;
+  --rail-solid: #0e3f45;
+  --rail-deep: #07292e;
+  --rail-edge: #051f22;
+  --list-bg: #f2ece1;
+  --canvas-bg: #ffffff;
+  --divider: #d6ddda;
+  --shadow-sm: 0 1px 2px rgb(12 40 44 / 8%);
+  --shadow-md: 0 10px 26px -12px rgb(12 40 44 / 24%);
+  --shadow-lg: 0 30px 60px -28px rgb(12 40 44 / 36%);
   --shadow: var(--shadow-md);
-  --scrim: rgb(12 20 34 / 38%);
+  --scrim: rgb(10 28 32 / 46%);
 }
 
 /* ---------------------------------------------------------------- Slate --- */
 /* Balanced dark theme. */
 [data-theme='slate'] {
   color-scheme: dark;
-  --bg: #0b0f16;
-  --bg-accent: radial-gradient(110% 80% at 6% -14%, rgb(111 141 255 / 14%) 0%, transparent 58%);
-  --surface: #131924;
-  --surface-2: #1a2130;
-  --surface-3: #232c3e;
-  --surface-inset: #0e131c;
-  --border: #293346;
-  --border-strong: #3b4761;
-  --text: #e9eef8;
+  --bg: #131520;
+  --wallpaper: url('/wallpapers/aurora.svg');
+  --surface: #1e2130;
+  --surface-2: #272b3d;
+  --surface-3: #333850;
+  --surface-inset: #191c29;
+  --border: #2f3449;
+  --border-strong: #454c69;
+  --text: #e7e6f0;
   --text-strong: #ffffff;
-  --muted: #94a2ba;
-  --accent: #6f8dff;
-  --accent-strong: #a5bbff;
-  --accent-contrast: #08111f;
-  --accent-soft: #1d2740;
-  --success: #4fd0a0;
-  --warning: #f2c25c;
-  --danger: #ff7686;
-  --agent: #6f8dff;
-  --tool: #4fd0a0;
-  --handoff: #f2c25c;
-  --guardrail: #ff7686;
-  --hosted: #b587ff;
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 40%);
-  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 62%);
-  --shadow-lg: 0 28px 60px -26px rgb(0 0 0 / 72%);
+  --muted: #a5a2bb;
+  --accent: #3ec9e0;
+  --accent-strong: #6fdcef;
+  --accent-2: #f472b6;
+  --accent-contrast: #06121a;
+  --accent-soft: #17384a;
+  --success: #4fd18b;
+  --warning: #e5b45c;
+  --danger: #ff6b81;
+  --agent: #3ec9e0;
+  --tool: #4fd18b;
+  --handoff: #e5b45c;
+  --guardrail: #ff6b81;
+  --hosted: #b98cff;
+  --rail-solid: #241b56;
+  --rail-deep: #120e2c;
+  --rail-edge: #0b0820;
+  --list-bg: #1e1a33;
+  --canvas-bg: #1b1f2a;
+  --divider: #343a55;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 8%);
+  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 24%);
+  --shadow-lg: 0 30px 60px -28px rgb(0 0 0 / 36%);
   --shadow: var(--shadow-md);
-  --scrim: rgb(4 7 12 / 62%);
+  --scrim: rgb(8 6 20 / 46%);
 }
 
 /* --------------------------------------------------------------- Amoled --- */
-/* True black for OLED panels and night work. */
+/* True black where you read, deep violet where you navigate. The reading surface
+ * is #000 so OLED pixels actually switch off; the rail carries all the hue. */
 [data-theme='amoled'] {
   color-scheme: dark;
   --bg: #000000;
-  --bg-accent: radial-gradient(110% 80% at 50% -22%, rgb(94 234 255 / 12%) 0%, transparent 55%);
-  --surface: #08090c;
-  --surface-2: #101116;
-  --surface-3: #191b22;
-  --surface-inset: #030405;
-  --border: #23252e;
-  --border-strong: #363945;
-  --text: #f1f3f7;
+  --wallpaper: url('/wallpapers/neon.svg');
+  --surface: #100c1e;
+  --surface-2: #191233;
+  --surface-3: #241b46;
+  --surface-inset: #08060f;
+  --border: #251d42;
+  --border-strong: #3d3168;
+  --text: #efedf7;
   --text-strong: #ffffff;
-  --muted: #8b909e;
-  --accent: #5eeaff;
-  --accent-strong: #9df3ff;
-  --accent-contrast: #001217;
-  --accent-soft: #0d1c21;
-  --success: #45e2b0;
-  --warning: #ffd166;
+  --muted: #a9a2c2;
+  --accent: #35e6f2;
+  --accent-strong: #77f1fa;
+  --accent-2: #ff5fbb;
+  --accent-contrast: #001418;
+  --accent-soft: #0b3039;
+  --success: #4ee2a0;
+  --warning: #ffc861;
   --danger: #ff6b81;
-  --agent: #5eeaff;
-  --tool: #45e2b0;
-  --handoff: #ffd166;
+  --agent: #35e6f2;
+  --tool: #4ee2a0;
+  --handoff: #ffc861;
   --guardrail: #ff6b81;
-  --hosted: #c084fc;
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 80%);
-  --shadow-md: 0 10px 26px -14px rgb(0 0 0 / 90%);
-  --shadow-lg: 0 28px 60px -28px rgb(0 0 0 / 95%);
+  --hosted: #c07dff;
+  --rail-solid: #1c0c40;
+  --rail-deep: #08021b;
+  --rail-edge: #2c1b55;
+  --list-bg: #0a0718;
+  --canvas-bg: #000000;
+  --divider: #2b2247;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 8%);
+  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 24%);
+  --shadow-lg: 0 30px 60px -28px rgb(0 0 0 / 36%);
   --shadow: var(--shadow-md);
-  --scrim: rgb(0 0 0 / 72%);
+  --scrim: rgb(0 0 0 / 46%);
 }
 
 /* --------------------------------------------------------------- Forest --- */
-/* Muted green dark theme, easy on the eyes over long sessions. */
+/* Pine, bark and amber. The rail is green, the reading surface is warm neutral and
+ * the accents are amber and mint — three families, so nothing reads as one hue. */
 [data-theme='forest'] {
   color-scheme: dark;
-  --bg: #0a1210;
-  --bg-accent: radial-gradient(110% 80% at 8% -14%, rgb(95 211 154 / 12%) 0%, transparent 58%);
-  --surface: #101a16;
-  --surface-2: #16231e;
-  --surface-3: #1f2f28;
-  --surface-inset: #0c1512;
-  --border: #26382f;
-  --border-strong: #375044;
-  --text: #e6f0ea;
+  --bg: #14170f;
+  --wallpaper: url('/wallpapers/canopy.svg');
+  --surface: #1f2318;
+  --surface-2: #282d20;
+  --surface-3: #343a2a;
+  --surface-inset: #181b12;
+  --border: #2f3625;
+  --border-strong: #465039;
+  --text: #edeade;
   --text-strong: #ffffff;
-  --muted: #8ba99d;
-  --accent: #5fd39a;
-  --accent-strong: #93e9bf;
-  --accent-contrast: #04150e;
-  --accent-soft: #14291f;
-  --success: #5fd39a;
-  --warning: #e7c06a;
-  --danger: #f2807f;
-  --agent: #5fd39a;
-  --tool: #7cc7f0;
-  --handoff: #e7c06a;
-  --guardrail: #f2807f;
-  --hosted: #b79bf0;
-  --shadow-sm: 0 1px 2px rgb(0 0 0 / 45%);
-  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 66%);
-  --shadow-lg: 0 28px 60px -26px rgb(0 0 0 / 76%);
+  --muted: #b2b39b;
+  --accent: #e9b24d;
+  --accent-strong: #f6c771;
+  --accent-2: #5cd4a2;
+  --accent-contrast: #1d1503;
+  --accent-soft: #3b2f12;
+  --success: #5cd4a2;
+  --warning: #e9b24d;
+  --danger: #f0736f;
+  --agent: #e9b24d;
+  --tool: #5cd4a2;
+  --handoff: #7fb4ee;
+  --guardrail: #f0736f;
+  --hosted: #c08ae8;
+  --rail-solid: #14382a;
+  --rail-deep: #062017;
+  --rail-edge: #04150e;
+  --list-bg: #1a2620;
+  --canvas-bg: #21221a;
+  --divider: #333c2b;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 8%);
+  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 24%);
+  --shadow-lg: 0 30px 60px -28px rgb(0 0 0 / 36%);
   --shadow: var(--shadow-md);
-  --scrim: rgb(3 10 8 / 66%);
+  --scrim: rgb(8 12 6 / 46%);
+}
+
+/* ============================================================ Colour layer ===
+ *
+ * Everything below is derived from the five palettes above, so a new theme only
+ * has to declare its base colours and inherits a full set of roles, markdown
+ * surfaces and gradients.
+ *
+ * This block matches `[data-theme]`, not just `:root`, and that matters. A custom
+ * property whose value contains var() is substituted where it is *declared*, not
+ * where it is used — so declaring these on :root alone would freeze them to the
+ * palette on <html> and they would inherit unchanged into any nested theme. Matching
+ * every themed element makes the whole derived layer recompute against that
+ * element's own palette, which is what lets the settings preview render a theme you
+ * are not currently using.
+ */
+
+:root,
+[data-theme] {
+  /* Text ramp — three weights of emphasis instead of one flat colour. */
+  --text-muted: var(--muted);
+  --text-subtle: color-mix(in srgb, var(--muted) 70%, var(--surface));
+
+  /* Gradation. Surfaces lean very slightly toward the next step up the ramp so
+   * panels read as raised without needing a shadow. */
+  --grad-panel: linear-gradient(175deg, var(--surface) 0%, color-mix(in srgb, var(--surface-2) 55%, var(--surface)) 100%);
+  --grad-accent: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+
+  /* The rail is a dark branded column in every theme, light and dark alike, so it
+   * carries its own foreground ramp rather than the page's. */
+  --rail-bg: linear-gradient(180deg,
+    color-mix(in srgb, var(--rail-solid) calc(78% - 34% * var(--glass-open)), transparent) 0%,
+    color-mix(in srgb, var(--rail-deep) calc(88% - 34% * var(--glass-open)), transparent) 100%);
+  --rail-fg: rgb(255 255 255 / 68%);
+  --rail-fg-strong: #ffffff;
+  --rail-hover: rgb(255 255 255 / 12%);
+  --rail-active: rgb(255 255 255 / 19%);
+
+  /* Glass. Surfaces are translucent so the wallpaper reads through them; the blur
+   * keeps whatever is behind from competing with the text on top. Opacity is tuned
+   * per role — reading surfaces stay the most solid.
+   *
+   * `--glass-open` dials the whole set at once: 0 is fully solid, 1 opens the
+   * surfaces right up for a photo you actually want to see. Themes ship at 0.3,
+   * which is the most the secondary text ramp takes while staying above 4.5:1 over
+   * the busiest part of a wallpaper — enough that the backdrop reads through the
+   * chat, which covers the whole viewport and otherwise hid it completely. Past
+   * that it is opt-in, and the blur, saturation, edge highlight and text halo all
+   * scale up to compensate. */
+  --glass-open: 0.3;
+  /* Deliberately shallow. A heavy frost turns the wallpaper into a smear, and that is
+   * most obvious on the chat page: it is the one page with no `.app-main` gutter, so
+   * every pixel sits behind this filter with no crisp wallpaper beside it. Softening
+   * the backdrop is what the `Soften` control is for, so this stays close to zero and
+   * only lifts once the surfaces are thin enough to need the help. */
+  --glass-blur: blur(calc(1px + 9px * var(--glass-open)))
+    saturate(calc(165% + 60% * var(--glass-open)));
+  --glass-list: color-mix(in srgb, var(--list-bg) calc(70% - 44% * var(--glass-open)), transparent);
+  --glass-canvas: color-mix(in srgb, var(--canvas-bg) calc(76% - 50% * var(--glass-open)), transparent);
+  --glass-panel: color-mix(in srgb, var(--surface) calc(70% - 44% * var(--glass-open)), transparent);
+  --glass-card: color-mix(in srgb, var(--surface) calc(58% - 34% * var(--glass-open)), transparent);
+  --glass-inset: color-mix(in srgb, var(--surface) calc(88% - 34% * var(--glass-open)), transparent);
+  /* The chat page is the one screen with no gutter, so a single flat tint across it
+   * reads as a haze over the whole wallpaper. These two split that tint by where the
+   * words actually are: `column` backs the centred reading band a little harder so
+   * prose stays legible over a busy photo, `void` lets the empty margins fall away to
+   * nothing. Both start from the same `--glass-canvas` figure and only diverge as
+   * `--glass-open` rises, so at 0 the split collapses and the page is flat again. */
+  --glass-column: color-mix(in srgb, var(--canvas-bg) calc(76% - 36% * var(--glass-open)), transparent);
+  --glass-void: color-mix(in srgb, var(--canvas-bg) max(0%, calc(76% - 84% * var(--glass-open))), transparent);
+  /* The composer keeps its own warmer list tint, so it needs a matching fade-out for
+   * the flanks either side of the input, which hold nothing. */
+  --glass-list-void: color-mix(in srgb, var(--list-bg) max(0%, calc(70% - 78% * var(--glass-open))), transparent);
+  --glass-edge: rgb(255 255 255 / calc(22% + 20% * var(--glass-open)));
+
+  /* A halo of the page colour hugging each glyph. At --glass-open: 0 the radius and
+   * the alpha are both zero, so it costs nothing until it is needed. */
+  --glass-halo: 0 0 calc(7px * var(--glass-open))
+    color-mix(in srgb, var(--bg) calc(92% * var(--glass-open)), transparent);
+
+  /* Wallpaper controls. A theme's generated backdrop needs none of these, so
+   * they default to inert; an uploaded image overrides them on <html>. */
+  --wallpaper-dim: 0%;
+  --wallpaper-blur: 0px;
+  --wallpaper-size: cover;
+  --wallpaper-repeat: no-repeat;
+
+  /* Conversation roles. What I said, what came back, what it thought, what it ran. */
+  --user-bg: linear-gradient(135deg, color-mix(in srgb, var(--accent) 20%, var(--surface)) 0%, color-mix(in srgb, var(--accent) 11%, var(--surface)) 100%);
+  --user-border: color-mix(in srgb, var(--accent) 34%, var(--border));
+  --user-text: var(--text-strong);
+  --assistant-rule: color-mix(in srgb, var(--accent) 40%, transparent);
+
+  --reason: var(--hosted);
+  --reason-soft: color-mix(in srgb, var(--hosted) 18%, var(--surface));
+  --reason-border: color-mix(in srgb, var(--hosted) 55%, var(--border));
+
+  --tool-soft: color-mix(in srgb, var(--tool) 18%, var(--surface));
+  --tool-border: color-mix(in srgb, var(--tool) 55%, var(--border));
+
+  --handoff-soft: color-mix(in srgb, var(--handoff) 18%, var(--surface));
+  --handoff-border: color-mix(in srgb, var(--handoff) 55%, var(--border));
+
+  --danger-soft: color-mix(in srgb, var(--danger) 18%, var(--surface));
+  --danger-border: color-mix(in srgb, var(--danger) 55%, var(--border));
+
+  --success-soft: color-mix(in srgb, var(--success) 18%, var(--surface));
+  --success-border: color-mix(in srgb, var(--success) 55%, var(--border));
+
+  /* Markdown surfaces. */
+  --link: var(--accent);
+  --link-hover: var(--accent-strong);
+  --code-bg: var(--surface-inset);
+  --code-head-bg: color-mix(in srgb, var(--surface-2) 78%, var(--surface));
+  --code-border: color-mix(in srgb, var(--border) 82%, var(--accent));
+  --inline-code-bg: color-mix(in srgb, var(--accent) 11%, var(--surface-2));
+  --inline-code-text: var(--accent-strong);
+  --table-head-bg: color-mix(in srgb, var(--accent) 22%, var(--surface-2));
+  --table-head-text: var(--text-strong);
+  --table-row-alt: color-mix(in srgb, var(--accent) 5%, var(--surface-2));
+  --table-border: var(--border);
+  --quote-bg: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  --quote-bar: var(--accent);
+  --quote-text: var(--text);
+  --mark-bg: color-mix(in srgb, var(--warning) 34%, var(--surface));
+  --mark-text: var(--text-strong);
+}
+
+/* Syntax palettes. Hand-picked rather than derived: legibility of code depends
+ * on hue separation that colour-mix cannot invent. Light themes use One Light,
+ * dark themes One Dark — both long-proven at these contrast levels. */
+[data-theme='paper'],
+[data-theme='cloud'] {
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.16'/%3E%3C/svg%3E");
+  --syn-comment: #9195a1;
+  --syn-string: #3f8f3e;
+  --syn-number: #9a6700;
+  --syn-keyword: #a626a4;
+  --syn-type: #b07d00;
+  --syn-constant: #9a6700;
+  --syn-function: #3f6fe0;
+  --syn-operator: #0184bc;
+  --syn-punct: #78838f;
+  --syn-tag: #d6493c;
+  --syn-attr: #9a6700;
+  --syn-inserted: #2f7d31;
+  --syn-deleted: #cf3b30;
+}
+
+[data-theme='slate'],
+[data-theme='amoled'],
+[data-theme='forest'] {
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.1'/%3E%3C/svg%3E");
+  --syn-comment: #7d8799;
+  --syn-string: #98c379;
+  --syn-number: #d19a66;
+  --syn-keyword: #c678dd;
+  --syn-type: #e5c07b;
+  --syn-constant: #d19a66;
+  --syn-function: #61afef;
+  --syn-operator: #56b6c2;
+  --syn-punct: #98a0af;
+  --syn-tag: #e06c75;
+  --syn-attr: #d19a66;
+  --syn-inserted: #98c379;
+  --syn-deleted: #e06c75;
+}
+
+/* True black needs a touch more lift than the other dark themes. */
+[data-theme='amoled'] {
+  --syn-comment: #8a93a5;
+  --syn-function: #79c0ff;
+  --syn-keyword: #d2a8ff;
 }
 
 @media (prefers-reduced-motion: reduce) {

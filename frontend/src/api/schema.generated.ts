@@ -768,6 +768,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/stop-and-answer": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Stop And Answer Run */
+        post: operations["stop_and_answer_run_api_runs__run_id__stop_and_answer_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sdk/catalog": {
         parameters: {
             query?: never;
@@ -1734,9 +1751,9 @@ export interface components {
             ocr_available: boolean;
             /**
              * Ocr Engine
-             * @enum {string}
+             * @constant
              */
-            ocr_engine: "tesseract" | "docling";
+            ocr_engine: "tesseract";
             /**
              * Recommended Mode
              * @enum {string}
@@ -2000,6 +2017,30 @@ export interface components {
                 [key: string]: unknown;
             }[];
         };
+        /** RunEpochResponse */
+        RunEpochResponse: {
+            /** Epoch Index */
+            epoch_index: number;
+            /** Error */
+            error: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Id */
+            id: string;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Status */
+            status: string;
+            /** Terminal Reason */
+            terminal_reason: string | null;
+            /** Usage */
+            usage: {
+                [key: string]: unknown;
+            };
+        };
         /** RunEventResponse */
         RunEventResponse: {
             /**
@@ -2057,6 +2098,8 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Epochs */
+            epochs: components["schemas"]["RunEpochResponse"][];
             /** Error */
             error: string | null;
             /** Events */
@@ -2065,6 +2108,10 @@ export interface components {
             final_output: unknown | null;
             /** Finished At */
             finished_at: string | null;
+            /** Goal State */
+            goal_state: {
+                [key: string]: unknown;
+            } | null;
             /** Id */
             id: string;
             /** Input */
@@ -2082,6 +2129,8 @@ export interface components {
              * @enum {string}
              */
             status: "pending" | "running" | "paused" | "completed" | "failed" | "cancelled";
+            /** Tool Attempts */
+            tool_attempts: components["schemas"]["ToolAttemptResponse"][];
             /** Usage */
             usage: {
                 [key: string]: unknown;
@@ -2134,9 +2183,29 @@ export interface components {
             type: string;
         };
         /** SessionPolicySpec */
-        SessionPolicySpec: Record<string, never>;
+        SessionPolicySpec: {
+            /** History Max Items */
+            history_max_items?: number | null;
+            /**
+             * Messages Only
+             * @default false
+             */
+            messages_only: boolean;
+        };
         /** SettingsResponse */
         SettingsResponse: {
+            /** Agent Context Compaction Target Tokens */
+            agent_context_compaction_target_tokens: number;
+            /** Agent Context High Water Ratio */
+            agent_context_high_water_ratio: number;
+            /** Agent Context Window Tokens */
+            agent_context_window_tokens: number;
+            /** Agent Epoch Max Turns */
+            agent_epoch_max_turns: number;
+            /** Agent Max Epochs */
+            agent_max_epochs: number;
+            /** Agent Run Timeout Seconds */
+            agent_run_timeout_seconds: number;
             /** Agent Tracing Enabled */
             agent_tracing_enabled: boolean;
             /** Artifacts Dir */
@@ -2149,28 +2218,14 @@ export interface components {
             default_model_references: {
                 [key: string]: components["schemas"]["ModelReferenceSpec"];
             };
-            /** Docling Batch Size */
-            docling_batch_size: number;
-            /**
-             * Docling Device
-             * @enum {string}
-             */
-            docling_device: "auto" | "cuda" | "cpu";
-            /** Docling Num Threads */
-            docling_num_threads: number;
-            /**
-             * Docling Ocr Backend
-             * @enum {string}
-             */
-            docling_ocr_backend: "onnxruntime" | "torch";
             /** Documents Dir */
             documents_dir: string;
             last_chat_model_reference: components["schemas"]["ModelReferenceSpec"];
             /**
              * Ocr Engine
-             * @enum {string}
+             * @constant
              */
-            ocr_engine: "tesseract" | "docling";
+            ocr_engine: "tesseract";
             /** Ocr Llm Enhancement Enabled */
             ocr_llm_enhancement_enabled: boolean;
             /** Ocr Llm Model */
@@ -2191,28 +2246,36 @@ export interface components {
             request_timeout_seconds: number;
             /** Retrieval Max Context Chars */
             retrieval_max_context_chars: number;
+            /** Tool Call Timeout Seconds */
+            tool_call_timeout_seconds: number;
+            /** Tool Read Retry Attempts */
+            tool_read_retry_attempts: number;
+            /** Tool Result Max Tokens */
+            tool_result_max_tokens: number;
             /** Workspace Dir */
             workspace_dir: string;
         };
         /** SettingsUpdate */
         SettingsUpdate: {
+            /** Agent Context Compaction Target Tokens */
+            agent_context_compaction_target_tokens?: number | null;
+            /** Agent Context High Water Ratio */
+            agent_context_high_water_ratio?: number | null;
+            /** Agent Context Window Tokens */
+            agent_context_window_tokens?: number | null;
+            /** Agent Epoch Max Turns */
+            agent_epoch_max_turns?: number | null;
+            /** Agent Max Epochs */
+            agent_max_epochs?: number | null;
+            /** Agent Run Timeout Seconds */
+            agent_run_timeout_seconds?: number | null;
             /** Agent Tracing Enabled */
             agent_tracing_enabled?: boolean | null;
             /** Default Model References */
             default_model_references?: {
                 [key: string]: components["schemas"]["ModelReferenceSpec"];
             } | null;
-            /** Docling Batch Size */
-            docling_batch_size?: number | null;
-            /** Docling Device */
-            docling_device?: ("auto" | "cuda" | "cpu") | null;
-            /** Docling Num Threads */
-            docling_num_threads?: number | null;
-            /** Docling Ocr Backend */
-            docling_ocr_backend?: ("onnxruntime" | "torch") | null;
             last_chat_model_reference?: components["schemas"]["ModelReferenceSpec"] | null;
-            /** Ocr Engine */
-            ocr_engine?: ("tesseract" | "docling") | null;
             /** Ocr Llm Enhancement Enabled */
             ocr_llm_enhancement_enabled?: boolean | null;
             /** Ocr Llm Model */
@@ -2233,6 +2296,17 @@ export interface components {
             request_timeout_seconds?: number | null;
             /** Retrieval Max Context Chars */
             retrieval_max_context_chars?: number | null;
+            /** Tool Call Timeout Seconds */
+            tool_call_timeout_seconds?: number | null;
+            /** Tool Read Retry Attempts */
+            tool_read_retry_attempts?: number | null;
+            /** Tool Result Max Tokens */
+            tool_result_max_tokens?: number | null;
+        };
+        /** StopAndAnswerResponse */
+        StopAndAnswerResponse: {
+            answer_run: components["schemas"]["RunResponse"];
+            stopped_run: components["schemas"]["RunResponse"];
         };
         /** ToolApprovalRunItem */
         ToolApprovalRunItem: {
@@ -2251,6 +2325,36 @@ export interface components {
              * @enum {string}
              */
             type: "tool_approval_item";
+        };
+        /** ToolAttemptResponse */
+        ToolAttemptResponse: {
+            /** Attempt */
+            attempt: number;
+            /** Catalog Id */
+            catalog_id: string;
+            /** Epoch Id */
+            epoch_id: string | null;
+            /** Error */
+            error: string | null;
+            /** Failure Category */
+            failure_category: string | null;
+            /** Finished At */
+            finished_at: string | null;
+            /** Id */
+            id: string;
+            /** Result Ref */
+            result_ref: string | null;
+            /** Retryable */
+            retryable: boolean;
+            /**
+             * Started At
+             * Format: date-time
+             */
+            started_at: string;
+            /** Status */
+            status: string;
+            /** Tool Call Id */
+            tool_call_id: string;
         };
         /** ToolCallRunItem */
         ToolCallRunItem: {
@@ -4228,6 +4332,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_and_answer_run_api_runs__run_id__stop_and_answer_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StopAndAnswerResponse"];
                 };
             };
             /** @description Validation Error */

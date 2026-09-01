@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ScholarWeave">
+  <title>ScholarWeave</title>
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#16adb3"/>
+      <stop offset="1" stop-color="#08384b"/>
+    </linearGradient>
+    <!-- Clipped to the thread's own outer edge, so the page it passes behind is
+         redrawn over exactly the crossing and nothing else. -->
+    <clipPath id="cross"><rect x="33.1" y="0" width="15.8" height="64"/></clipPath>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="url(#tile)"/>
+
+  <!-- Three pages and one thread. The thread runs over the first, behind the
+       second and over the third: the alternation is what makes it a weave rather
+       than a cross, and it survives being scaled down to 16px. -->
+  <g stroke="#073042" stroke-width="3.8" stroke-linejoin="round">
+    <g fill="#ffffff">
+      <rect x="9" y="12" width="46" height="11" rx="5.5"/>
+      <rect x="9" y="26.5" width="46" height="11" rx="5.5"/>
+      <rect x="9" y="41" width="46" height="11" rx="5.5"/>
+    </g>
+    <rect x="35" y="5" width="11" height="54" rx="5.5" fill="#fb804d"/>
+    <g clip-path="url(#cross)">
+      <rect x="9" y="26.5" width="46" height="11" rx="5.5" fill="#ffffff"/>
+    </g>
+  </g>
+</svg>

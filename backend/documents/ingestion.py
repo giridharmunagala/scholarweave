@@ -76,7 +76,7 @@ class DocumentIngestion:
             quality_model = self.vision.resolve_quality_model(enhancement_model, triage_model)
         pages = await self.ocr.extract_pages(
             pdf_path,
-            force_ocr=force_ocr or enhancement_enabled,
+            force_ocr=force_ocr,
             retain_page_images=enhancement_enabled,
             progress=progress,
         )
@@ -129,7 +129,7 @@ class DocumentIngestion:
             figure_artifacts,
             enhancement_model=enhancement_model.model if enhancement_model else None,
             triage_model=quality_model.model if quality_model else None,
-            extraction_mode="ocr" if force_ocr or enhancement_enabled else "embedded",
+            extraction_mode="ocr" if force_ocr else "embedded",
         )
 
     async def ingestion_options(self, document_id: str) -> dict[str, Any]:
@@ -145,7 +145,7 @@ class DocumentIngestion:
         return {
             **summary,
             "ocr_available": self.ocr.available(),
-            "ocr_engine": self.settings.ocr_engine,
+            "ocr_engine": "tesseract",
         }
 
     async def enhance_page(

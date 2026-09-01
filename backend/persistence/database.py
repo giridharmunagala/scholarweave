@@ -19,6 +19,10 @@ _LEGACY_COMPACTION_MARKER = "[ScholarWeave history compacted]"
 _ARTIFACTS_BACKUP_TABLE = "_sdk_cutover_artifacts"
 _CHUNKS_BACKUP_TABLE = "_sdk_cutover_document_chunks"
 _RUNTIME_TABLES = (
+    "agent_tool_attempts",
+    "agent_goal_states",
+    "agent_run_epochs",
+    "agent_run_claims",
     "agent_run_interruptions",
     "agent_run_events",
     "agent_run_items",

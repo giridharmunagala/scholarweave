@@ -31,7 +31,7 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
         if (row.kind === 'reasoning') return <ReasoningRow key={row.step.id} step={row.step} />;
         if (row.kind === 'handoff') {
           return (
-            <div className="timeline-row static" key={row.step.id}>
+            <div className="timeline-row static kind-handoff" key={row.step.id}>
               <Icon className="timeline-glyph" name="agents" size={15} />
               <span className="timeline-label">
                 Handed off from <strong>{row.step.from}</strong> to <strong>{row.step.to}</strong>
@@ -64,6 +64,7 @@ function groupSteps(steps: TurnStep[]): TimelineRow[] {
       rows.push({ kind: 'reasoning', step });
       continue;
     }
+    if (step.kind === 'agent') continue;
     rows.push({ kind: 'handoff', step });
   }
   return rows;
@@ -91,7 +92,7 @@ function ReasoningRow({ step }: { step: ReasoningStep }) {
   const label = step.streaming ? 'Thinking' : elapsed ? `Thought for ${elapsed}` : 'Thought process';
 
   return (
-    <div className={`timeline-row${open ? ' open' : ''}${step.streaming ? ' live' : ''}`}>
+    <div className={`timeline-row kind-reasoning${open ? ' open' : ''}${step.streaming ? ' live' : ''}`}>
       <button type="button" className="timeline-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         {step.streaming
           ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />
@@ -124,7 +125,7 @@ function ToolRow({ step }: { step: ToolStep }) {
   const elapsed = formatStepDuration(step.seconds);
 
   return (
-    <div className={`timeline-row${open ? ' open' : ''}${step.status === 'running' ? ' live' : ''}${step.status === 'failed' ? ' failed' : ''}`}>
+    <div className={`timeline-row kind-tool${open ? ' open' : ''}${step.status === 'running' ? ' live' : ''}${step.status === 'failed' ? ' failed' : ''}`}>
       <button type="button" className="timeline-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         {step.status === 'running'
           ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />
@@ -145,10 +146,9 @@ function ToolRow({ step }: { step: ToolStep }) {
 function ToolGroupRow({ steps }: { steps: ToolStep[] }) {
   const [open, setOpen] = useState(false);
   const running = steps.some((step) => step.status === 'running');
-  const failed = steps.some((step) => step.status === 'failed');
 
   return (
-    <div className={`timeline-row group${open ? ' open' : ''}${failed ? ' failed' : ''}`}>
+    <div className={`timeline-row group kind-tool${open ? ' open' : ''}`}>
       <button type="button" className="timeline-head" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
         {running
           ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />

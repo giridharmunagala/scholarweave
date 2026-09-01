@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import inspect
 import json
 from typing import Any
 
@@ -9,7 +11,10 @@ from agents.tool_context import ToolContext
 from backend.agents.blueprint import FunctionToolSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.runtime.context import ScholarWeaveContext
-from backend.tools.failures import recoverable_tool_invoker
+from backend.tools.failures import (
+    recoverable_tool_invoker,
+    tool_enabled_after_failures,
+)
 
 
 def _object_schema(
@@ -26,6 +31,78 @@ def _object_schema(
 
 
 APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
+    (
+        "extended.plan.update",
+        "update_goal_plan",
+        "Replace the durable goal plan and mark completed steps.",
+        _object_schema(
+            {
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "items": _object_schema(
+                        {
+                            "id": {"type": "string", "minLength": 1},
+                            "title": {"type": "string", "minLength": 1},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed", "blocked"],
+                            },
+                        },
+                        required=["id", "title", "status"],
+                    ),
+                },
+                "summary": {"type": ["string", "null"]},
+            },
+            required=["steps", "summary"],
+        ),
+        True,
+    ),
+    (
+        "extended.block",
+        "request_clarification_or_block",
+        "Record a blocker only when progress requires missing user input or access.",
+        _object_schema(
+            {
+                "reason": {"type": "string", "minLength": 1},
+                "question": {"type": ["string", "null"]},
+            },
+            required=["reason", "question"],
+        ),
+        True,
+    ),
+    (
+        "extended.finish",
+        "finish_goal",
+        "Mark the goal complete with a concise outcome and durable result references.",
+        _object_schema(
+            {
+                "summary": {"type": "string", "minLength": 1},
+                "result_refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "maxItems": 20,
+                },
+            },
+            required=["summary", "result_refs"],
+        ),
+        True,
+    ),
+    (
+        "tool.result.read",
+        "read_tool_result",
+        "Read a bounded slice of a large tool result by its result_ref.",
+        _object_schema(
+            {
+                "result_ref": {"type": "string", "minLength": 1},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 256, "maximum": 16_000},
+            },
+            required=["result_ref", "offset", "limit"],
+        ),
+        True,
+    ),
     (
         "tools.search",
         "search_available_tools",
@@ -205,13 +282,10 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
         "documents.ingest",
         "ingest_paper",
-        "Extract and index a paper. Use OCR mode when embedded extraction is unavailable.",
+        "Extract and index a paper, preserving native PDF text and using OCR only where needed.",
         _object_schema(
-            {
-                "document_id": {"type": "string", "minLength": 1},
-                "mode": {"type": "string", "enum": ["embedded", "ocr"]},
-            },
-            required=["document_id", "mode"],
+            {"document_id": {"type": "string", "minLength": 1}},
+            required=["document_id"],
         ),
         True,
     ),
@@ -273,7 +347,10 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
         "webpage.download",
         "download_web_page",
-        "Temporarily download and extract a public HTML page for chat Q&A.",
+        (
+            "Temporarily download and extract a public HTML page for chat Q&A. "
+            "Inaccessible or empty pages return status 'unavailable' without disabling this tool."
+        ),
         _object_schema(
             {"url": {"type": "string", "minLength": 1}},
             required=["url"],
@@ -337,13 +414,10 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
         "web.search",
         "search_web",
-        "Search the web through a configured open-source SearXNG instance.",
+        "Search DuckDuckGo and return up to 10 results.",
         _object_schema(
-            {
-                "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-            },
-            required=["query", "limit"],
+            {"query": {"type": "string", "minLength": 1}},
+            required=["query"],
         ),
         True,
     ),
@@ -657,18 +731,48 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
 def create_tool_catalog() -> ToolCatalog:
     catalog = ToolCatalog()
     for catalog_id, name, description, schema, strict in APPLICATION_TOOLS:
+        documented_schema = _with_parameter_descriptions(schema)
         catalog.register_function_tool(
             FunctionToolDefinition(
                 catalog_id=catalog_id,
                 label=name.replace("_", " ").title(),
                 description=description,
                 name=name,
-                parameters_schema=schema,
+                parameters_schema=documented_schema,
                 strict_json_schema=strict,
-                factory=_factory(catalog_id, name, description, schema, strict),
+                factory=_factory(
+                    catalog_id,
+                    name,
+                    description,
+                    documented_schema,
+                    strict,
+                ),
             )
         )
     return catalog
+
+
+def _with_parameter_descriptions(schema: dict[str, Any]) -> dict[str, Any]:
+    documented = copy.deepcopy(schema)
+
+    def visit(value: Any) -> None:
+        if not isinstance(value, dict):
+            return
+        properties = value.get("properties")
+        if isinstance(properties, dict):
+            for parameter_name, parameter_schema in properties.items():
+                if isinstance(parameter_schema, dict):
+                    parameter_schema.setdefault(
+                        "description",
+                        f"{parameter_name.replace('_', ' ').capitalize()}.",
+                    )
+                    visit(parameter_schema)
+        items = value.get("items")
+        if isinstance(items, dict):
+            visit(items)
+
+    visit(documented)
+    return documented
 
 
 def _factory(
@@ -684,20 +788,29 @@ def _factory(
             raw_arguments: str,
         ) -> Any:
             arguments = json.loads(raw_arguments)
-            return await context.context.tool_runtime.invoke(
-                catalog_id,
-                arguments,
-                context.context,
-            )
+            invoker = context.context.tool_runtime.invoke
+            if "tool_call_id" in inspect.signature(invoker).parameters:
+                return await invoker(
+                    catalog_id,
+                    arguments,
+                    context.context,
+                    tool_call_id=context.tool_call_id,
+                )
+            return await invoker(catalog_id, arguments, context.context)
 
         tool_name = spec.name or default_name
         return FunctionTool(
             name=tool_name,
             description=spec.description or default_description,
             params_json_schema=parameters_schema,
-            on_invoke_tool=recoverable_tool_invoker(tool_name, invoke),
+            on_invoke_tool=recoverable_tool_invoker(
+                tool_name,
+                invoke,
+                catalog_id=catalog_id,
+            ),
             strict_json_schema=strict_json_schema,
             needs_approval=spec.needs_approval,
+            is_enabled=tool_enabled_after_failures(catalog_id),
         )
 
     return build

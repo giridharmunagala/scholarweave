@@ -14,6 +14,10 @@ export const RUN_EVENT_TYPES = [
   'run.failed',
   'run.cancelled',
   'run.paused',
+  'run.recovered',
+  'run.interrupted',
+  'run.epoch.started',
+  'run.epoch.completed',
   'run.item',
   'agent.updated',
   'agent.started',
@@ -24,6 +28,10 @@ export const RUN_EVENT_TYPES = [
   'tool.started',
   'tool.completed',
   'tool.failed',
+  'tool.attempt.started',
+  'tool.attempt.completed',
+  'tool.attempt.failed',
+  'tool.result.stored',
   'builder.todos.updated',
   'handoff.completed',
   'guardrail.result',
@@ -31,6 +39,11 @@ export const RUN_EVENT_TYPES = [
   'approval.requested',
   'approval.resolved',
   'usage.updated',
+  'context.compacted',
+  'context.compaction_failed',
+  'goal.plan.updated',
+  'goal.blocked',
+  'goal.completed',
 ] as const;
 
 export function subscribeToRun(

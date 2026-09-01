@@ -14,6 +14,7 @@ from agents import (
     WebSearchTool,
     handoff,
 )
+from agents.run_config import SessionSettings
 from agents.tool import Tool
 
 from backend.agents.blueprint import (
@@ -26,10 +27,14 @@ from backend.agents.catalog import GuardrailCatalog, ToolCatalog
 from backend.agents.instructions import with_global_agent_instructions
 from backend.agents.output import JsonSchemaOutput
 from backend.core.errors import ValidationError
+from backend.core.config import Settings
 from backend.providers.errors import ProviderRuntimeError
 from backend.providers.types import AgentModelResolver, ModelReference, ResolvedAgentModel
 from backend.runtime.context import ScholarWeaveContext
+from backend.runtime.context_budget import create_context_budget_filter
 from backend.runtime.sdk_compat import assert_supported_sdk
+
+UNLIMITED_AGENT_TOOL_TURNS = 1_000_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,10 +54,12 @@ class AgentCompiler:
         model_resolver: AgentModelResolver,
         tool_catalog: ToolCatalog,
         guardrail_catalog: GuardrailCatalog | None = None,
+        settings: Settings | None = None,
     ) -> None:
         self._models = model_resolver
         self._tools = tool_catalog
         self._guardrails = guardrail_catalog or GuardrailCatalog()
+        self._settings = settings or Settings()
 
     def compile(self, blueprint: AgentBlueprint) -> CompiledAgent:
         assert_supported_sdk()
@@ -155,6 +162,22 @@ class AgentCompiler:
             run_config=RunConfig(
                 workflow_name=blueprint.name,
                 tracing_disabled=not blueprint.run.tracing_enabled,
+                call_model_input_filter=create_context_budget_filter(
+                    self._settings,
+                    {
+                        id(agents_by_id[agent_id]): (
+                            resolved_models[agent_id].context_window_tokens
+                            or self._settings.agent_context_window_tokens
+                        )
+                        for agent_id in agents_by_id
+                    },
+                    {id(agent): agent_id for agent_id, agent in agents_by_id.items()},
+                ),
+                session_settings=SessionSettings(
+                    limit=blueprint.session.history_max_items
+                ),
+                tool_not_found_behavior="return_error_to_model",
+                tool_name_collision_policy="error",
                 tool_execution=ToolExecutionConfig(
                     max_function_tool_concurrency=blueprint.run.max_tool_concurrency
                 ),

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
+import json
+import uuid
 from typing import Any
 
 from pydantic import ValidationError as PydanticValidationError
@@ -20,9 +23,10 @@ from backend.documents.paper import manifest_pages
 from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
+from backend.runs.repository import RunRepository
 from backend.persistence.files import SafeStorage
 from backend.research.search import ResearchSearchService
-from backend.research.sources import SourceDownloadService
+from backend.research.sources import SourceDownloadService, WebSourceUnavailable
 from backend.tools.service import FunctionToolService
 from backend.core.json import dumps_json
 from backend.workspace.service import WorkspaceService
@@ -43,6 +47,7 @@ class ApplicationToolRuntime:
         function_tool_service: FunctionToolService | None = None,
         tool_catalog: ToolCatalog | None = None,
         direct_agent_repository: DirectAgentRepository | None = None,
+        run_repository: RunRepository | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -55,14 +60,21 @@ class ApplicationToolRuntime:
         self._function_tools = function_tool_service
         self._catalog = tool_catalog
         self._direct_agents = direct_agent_repository
+        self._runs = run_repository
 
     async def invoke(
         self,
         catalog_id: str,
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
+        *,
+        tool_call_id: str | None = None,
     ) -> Any:
         handlers = {
+            "extended.plan.update": self._update_goal_plan,
+            "extended.block": self._block_goal,
+            "extended.finish": self._finish_goal,
+            "tool.result.read": self._read_tool_result,
             "builder.todos.create": create_builder_todo_plan,
             "builder.todos.update": update_builder_todo,
             "builder.finish": finish_builder_run,
@@ -109,14 +121,245 @@ class ApplicationToolRuntime:
         handler = handlers.get(catalog_id)
         if handler is None:
             raise ValueError(f"Unknown application tool '{catalog_id}'.")
-        result = handler(arguments, context)
-        if inspect.isawaitable(result):
-            result = await result
-        if catalog_id in {"builder.todos.create", "builder.todos.update"}:
-            await context.emit("builder.todos.updated", result)
-        await context.emit("tool.application_completed", {"catalog_id": catalog_id})
+        journal = (
+            self._runs
+            if self._runs is not None and self._runs.exists(context.run_id)
+            else None
+        )
+        safe_retry = _is_safe_read(catalog_id)
+        attempts = self._settings.tool_read_retry_attempts if safe_retry else 1
+        provider_call_id = tool_call_id
+        call_id = f"invoke-{uuid.uuid4()}"
+        for attempt_number in range(1, attempts + 1):
+            if journal is not None and journal.cancel_requested(context.run_id):
+                raise asyncio.CancelledError
+            attempt = (
+                journal.begin_tool_attempt(
+                    run_id=context.run_id,
+                    epoch_id=_active_epoch_id(context),
+                    tool_call_id=call_id,
+                    catalog_id=catalog_id,
+                    attempt=attempt_number,
+                    arguments=arguments,
+                )
+                if journal is not None
+                else None
+            )
+            await context.emit(
+                "tool.attempt.started",
+                {
+                    "catalog_id": catalog_id,
+                    "tool_call_id": call_id,
+                    "provider_call_id": provider_call_id,
+                    "attempt": attempt_number,
+                },
+            )
+            try:
+                if inspect.iscoroutinefunction(handler):
+                    result = await asyncio.wait_for(
+                        handler(arguments, context),
+                        timeout=self._settings.tool_call_timeout_seconds,
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        asyncio.to_thread(handler, arguments, context),
+                        timeout=self._settings.tool_call_timeout_seconds,
+                    )
+                    if inspect.isawaitable(result):
+                        result = await asyncio.wait_for(
+                            result,
+                            timeout=self._settings.tool_call_timeout_seconds,
+                        )
+                if journal is not None:
+                    result = await self.bound_tool_result(catalog_id, result, context)
+                if attempt is not None:
+                    journal.finish_tool_attempt(
+                        attempt.id,
+                        status="completed",
+                        result=result,
+                        result_ref=result.get("result_ref")
+                        if isinstance(result, dict)
+                        else None,
+                    )
+                if catalog_id in {"builder.todos.create", "builder.todos.update"}:
+                    await context.emit("builder.todos.updated", result)
+                goal_event = {
+                    "extended.plan.update": "goal.plan.updated",
+                    "extended.block": "goal.blocked",
+                    "extended.finish": "goal.completed",
+                }.get(catalog_id)
+                if goal_event is not None:
+                    await context.emit(goal_event, result)
+                await context.emit(
+                    "tool.attempt.completed",
+                    {
+                        "catalog_id": catalog_id,
+                        "tool_call_id": call_id,
+                        "provider_call_id": provider_call_id,
+                        "attempt": attempt_number,
+                    },
+                )
+                await context.emit("tool.application_completed", {"catalog_id": catalog_id})
+                return result
+            except asyncio.CancelledError:
+                if attempt is not None:
+                    status = "cancelled" if safe_retry else "unknown_outcome"
+                    journal.finish_tool_attempt(
+                        attempt.id,
+                        status=status,
+                        failure_category=(
+                            "cancelled" if safe_retry else "cancelled_after_dispatch"
+                        ),
+                        error=(
+                            None
+                            if safe_retry
+                            else "Cancellation occurred after a write was dispatched."
+                        ),
+                    )
+                raise
+            except Exception as error:
+                category, transient = _classify_tool_error(error)
+                retryable = safe_retry and transient and attempt_number < attempts
+                status = "failed" if safe_retry else "unknown_outcome"
+                if attempt is not None:
+                    journal.finish_tool_attempt(
+                        attempt.id,
+                        status=status,
+                        failure_category=category,
+                        retryable=retryable,
+                        error=f"{type(error).__name__}: {error}",
+                    )
+                await context.emit(
+                    "tool.attempt.failed",
+                    {
+                        "catalog_id": catalog_id,
+                        "tool_call_id": call_id,
+                        "provider_call_id": provider_call_id,
+                        "attempt": attempt_number,
+                        "category": category,
+                        "retryable": retryable,
+                        "outcome": status,
+                    },
+                )
+                if retryable:
+                    await asyncio.sleep(0.25 * attempt_number)
+                    continue
+                raise
+        raise RuntimeError("Tool invocation ended without a result.")
+
+    async def bound_tool_result(
+        self,
+        catalog_id: str,
+        result: Any,
+        context: ScholarWeaveContext,
+        *,
+        max_tokens: int | None = None,
+    ) -> Any:
+        if isinstance(result, dict) and result.get("result_ref") and result.get("truncated"):
+            return result
+        serialized = json.dumps(result, ensure_ascii=False, default=str)
+        limit = (max_tokens or self._settings.tool_result_max_tokens) * 4
+        if len(serialized) <= limit:
+            return result
+        relative_path = (
+            f"runs/{context.run_id}/tool-results/{uuid.uuid4().hex}.json"
+        )
+        stored = self._storage.write_text(
+            self._settings.artifacts_dir,
+            relative_path,
+            serialized,
+        )
+        await context.emit(
+            "tool.result.stored",
+            {
+                "catalog_id": catalog_id,
+                "result_ref": stored.relative_path,
+                "size_bytes": stored.size_bytes,
+            },
+        )
+        return {
+            "truncated": True,
+            "result_ref": stored.relative_path,
+            "size_bytes": stored.size_bytes,
+            "preview": serialized[:limit],
+            "instruction": "Use read_tool_result with this result_ref for targeted slices.",
+        }
+
+    def store_context_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        checkpoint_id = str(checkpoint.get("checkpoint_id") or uuid.uuid4())
+        relative_path = f"runs/{context.run_id}/checkpoints/{checkpoint_id}.json"
+        stored = self._storage.write_json(
+            self._settings.artifacts_dir,
+            relative_path,
+            checkpoint,
+        )
+        return {
+            "result_ref": stored.relative_path,
+            "size_bytes": stored.size_bytes,
+        }
+
+    def _read_tool_result(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        result_ref = str(arguments["result_ref"])
+        if not result_ref.startswith(f"runs/{context.run_id}/"):
+            raise ValueError("result_ref does not belong to the active run.")
+        offset = int(arguments["offset"])
+        limit = int(arguments["limit"])
+        content = self._storage.read_artifact(result_ref).decode("utf-8")
+        return {
+            "result_ref": result_ref,
+            "offset": offset,
+            "content": content[offset : offset + limit],
+            "has_more": offset + limit < len(content),
+            "next_offset": min(len(content), offset + limit),
+            "size_characters": len(content),
+        }
+
+    def _update_goal_plan(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        if self._runs is None:
+            raise RuntimeError("Goal persistence is unavailable.")
+        state = self._runs.get_goal_state(context.run_id)
+        state.update({"steps": arguments["steps"], "summary": arguments.get("summary")})
+        result = self._runs.save_goal_state(context.run_id, status="active", state=state)
+        context.metadata["goal_state"] = result
         return result
 
+    def _block_goal(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        if self._runs is None:
+            raise RuntimeError("Goal persistence is unavailable.")
+        state = self._runs.get_goal_state(context.run_id)
+        state["blocker"] = arguments
+        result = self._runs.save_goal_state(context.run_id, status="blocked", state=state)
+        context.metadata["goal_state"] = result
+        return result
+
+    def _finish_goal(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        if self._runs is None:
+            raise RuntimeError("Goal persistence is unavailable.")
+        state = self._runs.get_goal_state(context.run_id)
+        state["outcome"] = arguments
+        result = self._runs.save_goal_state(context.run_id, status="completed", state=state)
+        context.metadata["goal_state"] = result
+        return result
     def _search_tools(
         self,
         arguments: dict[str, Any],
@@ -138,17 +381,6 @@ class ApplicationToolRuntime:
             for definition in definitions
             if definition.catalog_id in available_catalog_ids
         ]
-        if self._function_tools is not None:
-            tools.extend(
-                {
-                    "catalog_id": f"custom:{document.latest_revision.id}",
-                    "name": document.record.name,
-                    "description": document.latest_revision.description,
-                    "parameters_schema": document.latest_revision.parameters_schema_json,
-                    "requires_approval": document.latest_revision.requires_approval,
-                }
-                for document in self._function_tools.list()
-            )
         if query:
             tools = [
                 tool
@@ -392,7 +624,7 @@ class ApplicationToolRuntime:
             "next_action": (
                 None
                 if readable
-                else "Call ingest_paper with mode='embedded', or mode='ocr' for scanned pages."
+                else "Call ingest_paper; it uses native PDF text first and OCR only where needed."
             ),
         }
 
@@ -402,8 +634,7 @@ class ApplicationToolRuntime:
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
         document_id = str(arguments["document_id"])
-        mode = str(arguments["mode"])
-        await self._documents.ingest_document(document_id, force_ocr=mode == "ocr")
+        await self._documents.ingest_document(document_id)
         return self._inspect_paper({"document_id": document_id}, context)
 
     def _read_paper_pages(
@@ -506,7 +737,22 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         _context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        source = await self._source_downloads.download_web_page(str(arguments["url"]))
+        requested_url = str(arguments["url"])
+        try:
+            source = await self._source_downloads.download_web_page(requested_url)
+        except WebSourceUnavailable as exc:
+            return {
+                "status": "unavailable",
+                "source_id": None,
+                "title": None,
+                "url": exc.url,
+                "chunk_count": 0,
+                "reason": exc.reason,
+                "next_action": (
+                    "Use the search-result snippet or try another result URL; "
+                    "the download_web_page tool remains available."
+                ),
+            }
         return self._web_source_result(source)
 
     async def _list_web_pages(
@@ -577,10 +823,7 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         _context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        return await self._research_search.search_web(
-            str(arguments["query"]),
-            int(arguments["limit"]),
-        )
+        return await self._research_search.search_web(str(arguments["query"]))
 
     async def _search_arxiv(
         self,
@@ -605,6 +848,7 @@ class ApplicationToolRuntime:
     @staticmethod
     def _web_source_result(source) -> dict[str, Any]:
         return {
+            "status": "available",
             "source_id": source.id,
             "title": source.title,
             "url": source.url,
@@ -1002,3 +1246,56 @@ class ApplicationToolRuntime:
         if self._direct_agents is None:
             raise RuntimeError("Direct research-agent tools are not configured.")
         return self._direct_agents
+
+
+def _active_epoch_id(context: ScholarWeaveContext) -> str | None:
+    value = context.metadata.get("active_epoch_id")
+    return value if isinstance(value, str) else None
+
+
+_SAFE_READ_PREFIXES = (
+    "tools.",
+    "documents.list",
+    "documents.inspect",
+    "documents.read_",
+    "retrieval.",
+    "research.pages.read",
+    "research.summaries.list",
+    "web.search",
+    "arxiv.search",
+    "wikipedia.search",
+    "webpage.list",
+    "webpage.read",
+    "webpage.search",
+    "workspace.list",
+    "workspace.search",
+    "workspace.read",
+    "workspace.tags.search",
+    "sdk.catalog",
+    "agents.list",
+    "agents.get",
+    "agents.validate",
+    "tool.result.read",
+)
+
+
+def _is_safe_read(catalog_id: str) -> bool:
+    return any(catalog_id.startswith(prefix) for prefix in _SAFE_READ_PREFIXES)
+
+
+def _classify_tool_error(error: Exception) -> tuple[str, bool]:
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout", True
+    status_code = getattr(error, "status_code", None)
+    message = str(error).casefold()
+    if status_code == 429:
+        return "rate_limited", True
+    if (isinstance(status_code, int) and status_code >= 500) or any(
+        marker in message for marker in ("http 500", "http 502", "http 503", "http 504")
+    ):
+        return "upstream_unavailable", True
+    if isinstance(error, (ConnectionError, OSError)):
+        return "transport", True
+    if isinstance(error, (ValueError, TypeError, KeyError)):
+        return "invalid_input", False
+    return "tool_error", False

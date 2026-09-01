@@ -52,6 +52,18 @@ class AgentRunRecord(Base):
         back_populates="run",
         cascade="all, delete-orphan",
     )
+    epochs: Mapped[list["AgentRunEpochRecord"]] = relationship(
+        order_by="AgentRunEpochRecord.epoch_index",
+        cascade="all, delete-orphan",
+    )
+    tool_attempts: Mapped[list["AgentToolAttemptRecord"]] = relationship(
+        order_by="AgentToolAttemptRecord.started_at",
+        cascade="all, delete-orphan",
+    )
+    goal_state: Mapped["AgentGoalStateRecord | None"] = relationship(
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
 
 
 class AgentRunItemRecord(Base):
@@ -97,3 +109,83 @@ class RunInterruptionRecord(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     run: Mapped[AgentRunRecord] = relationship(back_populates="interruptions")
+
+
+class AgentRunClaimRecord(Base):
+    __tablename__ = "agent_run_claims"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    owner_id: Mapped[str] = mapped_column(String(36), index=True)
+    claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AgentRunEpochRecord(Base):
+    __tablename__ = "agent_run_epochs"
+    __table_args__ = (
+        UniqueConstraint("run_id", "epoch_index", name="uq_run_epoch_index"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    epoch_index: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="running")
+    input_json: Mapped[Any] = mapped_column(JSONText)
+    usage_json: Mapped[Any] = mapped_column(JSONText, default=dict)
+    terminal_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentToolAttemptRecord(Base):
+    __tablename__ = "agent_tool_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "epoch_id",
+            "tool_call_id",
+            "attempt",
+            name="uq_epoch_tool_attempt",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), index=True
+    )
+    epoch_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_run_epochs.id", ondelete="SET NULL"), nullable=True
+    )
+    tool_call_id: Mapped[str] = mapped_column(String(255))
+    catalog_id: Mapped[str] = mapped_column(String(255))
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="started")
+    arguments_json: Mapped[Any] = mapped_column(JSONText)
+    result_json: Mapped[Any | None] = mapped_column(JSONText, nullable=True)
+    result_ref: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retryable: Mapped[bool] = mapped_column(Boolean, default=False)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentGoalStateRecord(Base):
+    __tablename__ = "agent_goal_states"
+
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True
+    )
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="active")
+    state_json: Mapped[Any] = mapped_column(JSONText, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )

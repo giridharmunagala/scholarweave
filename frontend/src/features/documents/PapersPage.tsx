@@ -123,6 +123,7 @@ export default function PapersPage() {
   const [remotePdfUrl, setRemotePdfUrl] = useState('');
   const [remotePdfTitle, setRemotePdfTitle] = useState('');
   const [webUrl, setWebUrl] = useState('');
+  const [showImport, setShowImport] = useState(false);
   const [webSources, setWebSources] = useState<WebSource[]>([]);
   const [selectedWebSource, setSelectedWebSource] = useState<WebSource | null>(null);
   const [webNoteName, setWebNoteName] = useState('');
@@ -449,27 +450,39 @@ export default function PapersPage() {
   const operationBusy = busyAction !== null;
   const recommendedMode = ingestionOptions?.recommended_mode ?? 'embedded';
   const pageProgress = selected ? ingestionProgress(selected) : null;
+  const importOpen = showImport || webSources.length > 0;
 
   return (
     <div className="page">
       <PageHeader
-        eyebrow="Retained research domain"
         title="Papers"
-        description="PDF ingestion remains a standalone document operation. Agents access indexed content through SDK FunctionTools."
+        description="Your PDF library. Once a paper is added the agent can search, quote and summarise it."
         actions={
-          <label className="button upload-button">
-            <Icon name="upload" size={16} />
-            {busyAction === 'upload' ? 'Uploading…' : 'Upload PDF'}
-            <input
-              type="file"
-              accept=".pdf,application/pdf"
-              disabled={operationBusy}
-              onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])}
-            />
-          </label>
+          <>
+            <button
+              className="button secondary"
+              type="button"
+              aria-expanded={importOpen}
+              onClick={() => setShowImport((value) => !value)}
+            >
+              <Icon name="download" size={16} />
+              Add from URL
+            </button>
+            <label className="button upload-button">
+              <Icon name="upload" size={16} />
+              {busyAction === 'upload' ? 'Uploading…' : 'Upload PDF'}
+              <input
+                type="file"
+                accept=".pdf,application/pdf"
+                disabled={operationBusy}
+                onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])}
+              />
+            </label>
+          </>
         }
       />
       {error ? <ErrorNotice error={error} /> : null}
+      {importOpen ? (
       <div className="source-import-grid">
         <Panel
           title="Download a PDF"
@@ -590,6 +603,7 @@ export default function PapersPage() {
           ) : null}
         </Panel>
       </div>
+      ) : null}
       <div className="papers-layout">
         <Panel
           title="Library"

@@ -131,6 +131,32 @@ class RunInterruptionResponse(RunSchema):
     resolved_at: datetime | None
 
 
+class RunEpochResponse(RunSchema):
+    id: str
+    epoch_index: int
+    status: str
+    terminal_reason: str | None
+    usage: dict[str, Any]
+    error: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class ToolAttemptResponse(RunSchema):
+    id: str
+    epoch_id: str | None
+    tool_call_id: str
+    catalog_id: str
+    attempt: int
+    status: str
+    failure_category: str | None
+    retryable: bool
+    result_ref: str | None
+    error: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
 class RunResponse(RunSchema):
     id: str
     agent_revision_id: str | None
@@ -149,6 +175,9 @@ class RunResponse(RunSchema):
     items: list[RunItemResponse]
     events: list[RunEventResponse]
     interruptions: list[RunInterruptionResponse]
+    epochs: list[RunEpochResponse]
+    tool_attempts: list[ToolAttemptResponse]
+    goal_state: dict[str, Any] | None
 
 
 class RunCreateRequest(RunSchema):
@@ -162,6 +191,11 @@ class RunCreateRequest(RunSchema):
         if bool(self.agent_revision_id) == bool(self.blueprint):
             raise ValueError("Provide exactly one of agent_revision_id or blueprint.")
         return self
+
+
+class StopAndAnswerResponse(RunSchema):
+    stopped_run: RunResponse
+    answer_run: RunResponse
 
 
 class InterruptionResolutionRequest(RunSchema):
@@ -208,4 +242,43 @@ def run_response(record) -> RunResponse:
             )
             for interruption in record.interruptions
         ],
+        epochs=[
+            RunEpochResponse(
+                id=epoch.id,
+                epoch_index=epoch.epoch_index,
+                status=epoch.status,
+                terminal_reason=epoch.terminal_reason,
+                usage=epoch.usage_json or {},
+                error=epoch.error,
+                started_at=epoch.started_at,
+                finished_at=epoch.finished_at,
+            )
+            for epoch in record.epochs
+        ],
+        tool_attempts=[
+            ToolAttemptResponse(
+                id=attempt.id,
+                epoch_id=attempt.epoch_id,
+                tool_call_id=attempt.tool_call_id,
+                catalog_id=attempt.catalog_id,
+                attempt=attempt.attempt,
+                status=attempt.status,
+                failure_category=attempt.failure_category,
+                retryable=attempt.retryable,
+                result_ref=attempt.result_ref,
+                error=attempt.error,
+                started_at=attempt.started_at,
+                finished_at=attempt.finished_at,
+            )
+            for attempt in record.tool_attempts
+        ],
+        goal_state=(
+            {
+                "version": record.goal_state.version,
+                "status": record.goal_state.status,
+                **dict(record.goal_state.state_json),
+            }
+            if record.goal_state is not None
+            else None
+        ),
     )

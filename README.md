@@ -43,7 +43,7 @@ workspace. Every model call can stay on your machine.
 - [Backend setup](#backend-setup)
   - [1. Model providers](#1-model-providers)
   - [2. OCR and document ingestion](#2-ocr-and-document-ingestion)
-  - [3. SearXNG web search](#3-searxng-web-search)
+  - [3. DuckDuckGo web search](#3-duckduckgo-web-search)
   - [4. arXiv and Wikipedia](#4-arxiv-and-wikipedia)
 - [Configuration reference](#configuration-reference)
 - [Local data layout](#local-data-layout)
@@ -72,10 +72,10 @@ ScholarWeave takes the opposite position:
 
 - **Literature review.** Search arXiv and the open web, download the papers that matter, read the
   primary text, and accumulate cited summaries and notes over weeks rather than per-chat.
-- **Reading dense or scanned PDFs.** Docling preserves reading order, table structure, formulas,
-  and code; OCR recovers scanned pages; an optional vision model cleans up text-poor pages.
-- **Air-gapped or confidential-ish work.** With Ollama or llama.cpp plus a local SearXNG, no
-  request leaves the machine. (Still not a compliance boundary — see the disclaimer.)
+- **Reading dense or scanned PDFs.** Existing PDF text is retained, Tesseract recovers scanned or
+  text-poor pages, and an optional vision model cleans up difficult pages.
+- **Local model and document processing.** With Ollama or llama.cpp, model requests and ingested
+  documents stay local. DuckDuckGo, arXiv, and Wikipedia searches still use their public services.
 - **Building and debugging agents.** The run inspector exposes raw SDK run items, so it doubles as
   a lab for understanding how the Agents SDK actually behaves against non-OpenAI providers.
 - **Comparing local model quality.** Swap the chat model per conversation and compare tool-calling
@@ -89,8 +89,8 @@ reading the paper.
 ```mermaid
 flowchart TD
     U["You: 'compare linear attention variants and write notes'"] --> A["Autonomous agent<br/>(single SDK Agent, max 50 turns)"]
-    A -->|search_arxiv / search_web / search_wikipedia| EXT["arXiv · SearXNG · Wikipedia"]
-    A -->|download_paper| ING["Ingestion: Docling / OCR → pages, figures, chunks, manifest"]
+    A -->|search_arxiv / search_web / search_wikipedia| EXT["arXiv · DuckDuckGo · Wikipedia"]
+    A -->|download_paper| ING["Ingestion: native PDF text / Tesseract fallback → pages, figures, chunks, manifest"]
     A -->|download_web_page| TMP["Temporary in-memory page cache (4h TTL)"]
     ING --> IDX[("SQLite: chunks + embeddings")]
     A -->|search_papers / read_paper_pages / read_document_chunks| IDX
@@ -100,7 +100,7 @@ flowchart TD
 ```
 
 **The loop, in words.** You state a research outcome, not a step. The agent decomposes it into
-focused searches, uses arXiv for primary papers and SearXNG for wider coverage, downloads what it
+focused searches, uses arXiv for primary papers and DuckDuckGo for wider coverage, downloads what it
 needs, inspects a paper before reading it (and triggers ingestion if the source exists but has no
 readable text), reads exact pages or section-aware chunks, cross-checks claims, and writes durable
 Markdown into the workspace — preferring exact replacements and appends over rewriting a file.
@@ -119,7 +119,11 @@ instructions deliberately expose it. Pause and resume use serialized SDK `RunSta
 Streaming transcript with an inline per-turn trace — each thought and tool call appears in order
 between the question and the answer, expandable to its request and result — plus the sources the
 turn consulted and token/throughput accounting. The chat model is selectable per conversation from
-any enabled provider model.
+any enabled provider model. While a run is active, **Stop** cancels model and tool work immediately;
+**Answer now** stops research and starts a tool-free answer from the evidence already collected.
+After three consecutive failures from the same information tool, only that tool is disabled for the
+remainder of the run. The agent continues with other tools or sources, and answers with an explicit
+limitation only when those alternatives are exhausted.
 
 ![Research agent](docs/screenshots/research-chat.png)
 
@@ -198,9 +202,7 @@ not run it behind multiple workers.
 - Node.js 20+
 - One model backend: [Ollama](https://ollama.com/) (easiest local option), an OpenAI-compatible
   server (llama.cpp, vLLM, LM Studio, TGI…), or OpenAI / Azure credentials
-- Docling (installed with the Python dependencies) — or Tesseract if you prefer the lightweight
-  OCR path
-- Optional: a [SearXNG](https://github.com/searxng/searxng) instance for web search
+- Tesseract with the required language pack for scanned or text-poor PDFs
 
 ### Install and run
 
@@ -382,52 +384,30 @@ works either way.
 
 ### 2. OCR and document ingestion
 
-Ingestion has two modes. ScholarWeave inspects the PDF text layer first and recommends one:
+Ingestion always inspects each page's PDF text layer first. It has two user-facing modes:
 
-- **`embedded`** — extract the existing text layer. Chosen when ≥80% of pages already contain
-  selectable text.
-- **`ocr`** — force full-page recognition. Use for scans and text-poor PDFs.
+- **`embedded`** — preserve sufficient native text and automatically use Tesseract only for pages
+  with fewer than `PDF_MIN_TEXT_CHARS` readable characters. This is the agent default.
+- **`ocr`** — explicitly force full-page Tesseract recognition. This is a manual recovery option
+  for PDFs with a corrupt or misleading text layer.
 
 ```bash
 curl -s http://127.0.0.1:8000/api/documents/<document-id>/ingestion-options
 # {"total_pages":22,"embedded_text_pages":22,"embedded_text_ratio":1.0,
-#  "recommended_mode":"embedded","ocr_available":true,"ocr_engine":"docling"}
+#  "recommended_mode":"embedded","ocr_available":true,"ocr_engine":"tesseract"}
 ```
 
 An ingestion that yields no readable text **fails** rather than creating a metadata-only
 "ready" document.
 
-#### Engine A — Docling (default, recommended)
-
-Docling ships with the Python dependencies. It preserves page layout, reading order, table
-structure, formulas, and code, and applies **RapidOCR** to scanned or text-poor regions.
-
-```bash
-SCHOLARWEAVE_OCR_ENGINE=docling
-SCHOLARWEAVE_DOCLING_DEVICE=auto          # auto | cuda | cpu
-SCHOLARWEAVE_DOCLING_OCR_BACKEND=onnxruntime  # onnxruntime | torch
-SCHOLARWEAVE_DOCLING_BATCH_SIZE=4
-SCHOLARWEAVE_DOCLING_NUM_THREADS=4
-```
-
-- The `onnxruntime` backend is the default and needs no extra install (`onnxruntime` is a pinned
-  dependency). Choose `torch` only if you already have a CUDA PyTorch build and want GPU OCR.
-- Docling downloads its layout/OCR models on **first use**, so the first ingestion is slow and
-  needs network access. Run one ingestion before going offline.
-- Conversions are serialized behind a lock and converters are cached per configuration, so tune
-  `batch_size`/`num_threads` to your CPU rather than expecting parallel documents.
-
-#### Engine B — Tesseract (lightweight alternative)
+#### Tesseract OCR fallback
 
 ```bash
 # Ubuntu / Debian
 sudo apt install tesseract-ocr tesseract-ocr-eng
 ```
 
-```bash
-SCHOLARWEAVE_OCR_ENGINE=tesseract
-SCHOLARWEAVE_OCR_LANGUAGE=eng
-```
+Set `SCHOLARWEAVE_OCR_LANGUAGE=eng` to choose the installed language pack.
 
 ScholarWeave verifies that both the `tesseract` binary and the requested language pack are present;
 if either is missing, `ocr_available` reports `false` in `/api/health` and OCR ingestion is
@@ -435,8 +415,9 @@ rejected up front instead of producing empty pages.
 
 #### Optional — vision clean-up of poor pages
 
-After OCR, a vision model can rewrite pages whose recognition quality is poor. It is **off by
-default** because it multiplies ingestion cost.
+After extraction, a vision model can rewrite pages whose recognition quality is poor. Enabling it
+retains page images for review but does not force OCR on pages with sufficient native text. It is
+**off by default** because it multiplies ingestion cost.
 
 ```bash
 SCHOLARWEAVE_OCR_LLM_ENHANCEMENT_ENABLED=true
@@ -458,59 +439,20 @@ local_data/artifacts/documents/<document-id>/
 The manifest is what makes citations exact: tools read page text and ordered chunks straight from
 it, and return page/chunk identifiers with every excerpt.
 
-### 3. SearXNG web search
+### 3. DuckDuckGo web search
 
-Web search goes through an **open-source SearXNG instance you control** — there is no third-party
-search API and no tracking. Default endpoint: `http://127.0.0.1:8888`.
-
-#### Run one
-
-```bash
-docker run -d --name searxng -p 8888:8080 \
-  -v "${PWD}/searxng:/etc/searxng" \
-  -e "BASE_URL=http://127.0.0.1:8888/" \
-  searxng/searxng
-```
-
-#### Enable the JSON format (required)
-
-ScholarWeave sends a **form-encoded `POST /search`** with `format=json`. SearXNG ships with JSON
-disabled, and rejects it with **HTTP 403** even though HTML search works. Edit
-`searxng/settings.yml`:
-
-```yaml
-search:
-  formats:
-    - html
-    - json
-```
-
-If you also hit 403s from the bot limiter on a local instance, disable it:
-
-```yaml
-server:
-  limiter: false
-```
-
-Restart the container. ScholarWeave surfaces the specific error
-(*"SearXNG rejected the JSON response request. Enable 'json' in its search.formats setting."*)
-when this is misconfigured.
-
-#### Point ScholarWeave at it
-
-```bash
-SCHOLARWEAVE_SEARXNG_BASE_URL=http://127.0.0.1:8888
-SCHOLARWEAVE_WEB_SEARCH_REQUESTS_PER_MINUTE=30
-SCHOLARWEAVE_SEARCH_REQUEST_TIMEOUT_SECONDS=20
-```
+Web search uses DuckDuckGo directly. Each call returns up to 10 results, and a process-wide limiter
+spaces calls at least two seconds apart. No search API key or separate search service is required.
 
 #### Search vs. fetch
 
-SearXNG returns titles, snippets, and source URLs — not page bodies. When full-page evidence is
+DuckDuckGo returns titles, snippets, and source URLs — not page bodies. When full-page evidence is
 needed the agent calls `download_web_page`, which performs a plain HTTP **`GET`** on the selected
 public URL, extracts readable text, and returns a temporary source ID; it then uses
-`search_downloaded_web_page` / `read_downloaded_web_page` before answering. (Search is a `POST` to
-your SearXNG; fetching the linked page is a `GET` to the origin. That asymmetry is intentional.)
+`search_downloaded_web_page` / `read_downloaded_web_page` before answering.
+The fetch uses browser-like request headers because some public sites reject bot-style user agents.
+Blocked, missing, non-HTML, or empty pages return `status: "unavailable"` to the agent rather than a
+tool failure; the agent can keep using `download_web_page` with another search result.
 
 Downloaded pages live in a **process-local in-memory cache** and expire after 4 hours by default,
 capped at 20 sources and 5 MB each. Use `save_web_page_note` to keep a durable workspace note that
@@ -544,19 +486,12 @@ file at the repo root. Settings marked ✅ are also editable at runtime through 
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434` | ✅ | Default Ollama endpoint |
 | `REQUEST_TIMEOUT_SECONDS` | `60` | ✅ | Per-model-request timeout |
 | `AGENT_TRACING_ENABLED` | `false` | ✅ | SDK tracing |
-| `OCR_ENGINE` | `docling` | ✅ | `docling` or `tesseract` |
 | `OCR_LANGUAGE` | `eng` | | Tesseract language pack |
-| `DOCLING_DEVICE` | `auto` | ✅ | `auto` / `cuda` / `cpu` |
-| `DOCLING_OCR_BACKEND` | `onnxruntime` | ✅ | RapidOCR backend |
-| `DOCLING_BATCH_SIZE` | `4` | ✅ | OCR/layout/table batch size |
-| `DOCLING_NUM_THREADS` | `4` | ✅ | Docling accelerator threads |
 | `OCR_LLM_ENHANCEMENT_ENABLED` | `false` | ✅ | Vision clean-up of poor pages |
 | `PDF_MIN_TEXT_CHARS` | `40` | | Per-page threshold for "has text" |
 | `MAX_UPLOAD_BYTES` | `40 MB` | | Upload cap |
 | `MAX_CHUNK_CHARS` / `MAX_CHUNKS_PER_DOCUMENT` | `2500` / `2000` | | Chunking limits |
 | `RETRIEVAL_MAX_CONTEXT_CHARS` | `40000` | ✅ | Retrieval context ceiling |
-| `SEARXNG_BASE_URL` | `http://127.0.0.1:8888` | | Web search endpoint |
-| `WEB_SEARCH_REQUESTS_PER_MINUTE` | `30` | | SearXNG rate limit |
 | `ARXIV_SEARCH_REQUESTS_PER_MINUTE` | `20` | | arXiv rate limit (max 20) |
 | `WIKIPEDIA_SEARCH_REQUESTS_PER_MINUTE` | `60` | | Wikipedia rate limit |
 | `SEARCH_REQUEST_TIMEOUT_SECONDS` | `20` | | Search HTTP timeout |
@@ -572,8 +507,7 @@ Example `.env`:
 ```bash
 SCHOLARWEAVE_OLLAMA_BASE_URL=http://127.0.0.1:11434
 SCHOLARWEAVE_SEARXNG_BASE_URL=http://127.0.0.1:8888
-SCHOLARWEAVE_OCR_ENGINE=docling
-SCHOLARWEAVE_DOCLING_DEVICE=cuda
+SCHOLARWEAVE_OCR_LANGUAGE=eng
 SCHOLARWEAVE_REQUEST_TIMEOUT_SECONDS=120
 ```
 
@@ -607,8 +541,10 @@ Everything under `local_data/` and `workspace/` is git-ignored.
 
 ## Agent tool surface
 
-The autonomous agent is a single SDK `Agent` with 40+ `FunctionTool`s bound, `max_turns: 50`, and
-serialized tool execution. Browse the live catalogue at `GET /api/sdk/catalog` or in **Tools**.
+The autonomous agent is a single SDK `Agent` with a research-scoped tool set and serialized tool
+execution. A durable supervisor divides long work into bounded epochs, persists goal progress and
+tool attempts, recovers interrupted conversation runs at startup, and compacts history before the
+model window is exhausted. Browse the live catalogue at `GET /api/sdk/catalog` or in **Tools**.
 
 | Group | Representative tools |
 | --- | --- |
@@ -616,8 +552,11 @@ serialized tool execution. Browse the live catalogue at `GET /api/sdk/catalog` o
 | Paper corpus | `list_documents`, `inspect_paper`, `ingest_paper`, `read_paper_pages`, `read_document_chunks`, `search_papers`, `read_retained_paper_pages`, `save_paper_page_decisions` |
 | Summaries | `list_paper_summaries`, `save_paper_summary` |
 | Workspace | `ensure_paper_workspace`, `create_workspace_note`, `read_workspace_file`, `write_workspace_file`, `append_workspace_markdown`, `replace_workspace_markdown`, `search_workspace`, `set_workspace_file_tags` |
-| Authoring | `save_agent_blueprint`, `validate_agent_blueprint`, `list_saved_agents`, `save_custom_function_tool`, `write_artifact` |
-| Discovery | `search_available_tools`, `list_sdk_primitives` |
+| Goal control | `update_goal_plan`, `request_clarification_or_block`, `finish_goal`, `read_tool_result` |
+| Discovery | `search_available_tools` |
+
+Agent authoring and custom Python remain available in their dedicated builder/tools experiences;
+they are intentionally excluded from the default research coordinator.
 
 Fixed, single-purpose agents are also exposed over the API (`GET /api/research-agents`): a paper
 **Summary agent**, an **Open areas identification agent**, a per-paper **Q&A bot**, and a

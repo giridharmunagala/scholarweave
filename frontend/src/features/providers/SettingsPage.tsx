@@ -1,19 +1,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Icon, type IconName } from '../../shared/components/Icons';
 import { ErrorNotice, Loading, PageHeader } from '../../shared/components/Ui';
+import { AppearancePanel } from './AppearancePanel';
 import { ModelDefaultsPanel } from './ModelDefaultsPanel';
 import { ProviderProfilesPanel } from './ProviderProfilesPanel';
 import { DocumentsPanel, RuntimePanel } from './SettingsSections';
 import { providersApi, type Provider, type Settings } from './api';
 import './providers.css';
 
-type SectionKey = 'models' | 'providers' | 'documents' | 'runtime';
+type SectionKey = 'models' | 'providers' | 'documents' | 'runtime' | 'appearance';
 
 const SECTIONS: { key: SectionKey; label: string; icon: IconName; hint: string }[] = [
   { key: 'models', label: 'Models', icon: 'sparkle', hint: 'Defaults per capability' },
   { key: 'providers', label: 'Providers', icon: 'tools', hint: 'Profiles and catalogues' },
   { key: 'documents', label: 'Documents', icon: 'papers', hint: 'OCR and ingestion' },
   { key: 'runtime', label: 'Runtime', icon: 'sliders', hint: 'Limits and storage' },
+  { key: 'appearance', label: 'Appearance', icon: 'palette', hint: 'Theme wallpaper' },
 ];
 
 export default function SettingsPage() {
@@ -72,15 +74,19 @@ export default function SettingsPage() {
       const next = await providersApi.updateSettings({
         default_model_references: settings.default_model_references,
         agent_tracing_enabled: settings.agent_tracing_enabled,
+        agent_context_window_tokens: settings.agent_context_window_tokens,
+        agent_context_high_water_ratio: settings.agent_context_high_water_ratio,
+        agent_context_compaction_target_tokens: settings.agent_context_compaction_target_tokens,
+        tool_result_max_tokens: settings.tool_result_max_tokens,
+        agent_epoch_max_turns: settings.agent_epoch_max_turns,
+        agent_max_epochs: settings.agent_max_epochs,
+        agent_run_timeout_seconds: settings.agent_run_timeout_seconds,
+        tool_call_timeout_seconds: settings.tool_call_timeout_seconds,
+        tool_read_retry_attempts: settings.tool_read_retry_attempts,
         python_tool_enabled: settings.python_tool_enabled,
         python_tool_timeout_seconds: settings.python_tool_timeout_seconds,
         python_tool_memory_mb: settings.python_tool_memory_mb,
         retrieval_max_context_chars: settings.retrieval_max_context_chars,
-        ocr_engine: settings.ocr_engine,
-        docling_device: settings.docling_device,
-        docling_ocr_backend: settings.docling_ocr_backend,
-        docling_batch_size: settings.docling_batch_size,
-        docling_num_threads: settings.docling_num_threads,
         ocr_llm_enhancement_enabled: settings.ocr_llm_enhancement_enabled,
         ocr_llm_model: settings.ocr_llm_model,
         ocr_llm_triage_model: settings.ocr_llm_triage_model,
@@ -98,9 +104,8 @@ export default function SettingsPage() {
   return (
     <div className="page settings-page">
       <PageHeader
-        eyebrow="Runtime configuration"
         title="Settings"
-        description="Pick the models each capability falls back to, manage provider profiles, and tune how documents and agent runs are processed."
+        description="Models, providers, and how documents and agent runs are processed."
       />
       {error ? <ErrorNotice error={error} /> : null}
 
@@ -136,6 +141,7 @@ export default function SettingsPage() {
           {section === 'runtime' ? (
             <RuntimePanel settings={settings} onChange={setSettings} />
           ) : null}
+          {section === 'appearance' ? <AppearancePanel /> : null}
         </div>
       </div>
 

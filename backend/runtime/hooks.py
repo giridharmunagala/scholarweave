@@ -5,14 +5,19 @@ from typing import Any
 
 from agents import Agent, RunHooks
 
-from backend.runtime.context import ScholarWeaveContext
+from backend.runtime.context import ScholarWeaveContext, unwrap_scholar_context
+from backend.runtime.lifecycle import (
+    finish_agent_invocation,
+    start_agent_invocation,
+)
+from backend.runtime.priorities import advance_priority_progress, record_priority_decision
 from backend.runtime.serialization import to_jsonable
 from backend.tools.failures import consume_tool_failure
 
 
 class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
     async def on_agent_start(self, context, agent: Agent[ScholarWeaveContext]) -> None:
-        await context.context.emit("agent.started", {"agent_name": agent.name})
+        await start_agent_invocation(unwrap_scholar_context(context), agent.name)
 
     async def on_agent_end(
         self,
@@ -20,9 +25,19 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
         agent: Agent[ScholarWeaveContext],
         output: Any,
     ) -> None:
-        await context.context.emit(
-            "agent.completed",
-            {"agent_name": agent.name, "output": to_jsonable(output)},
+        scholar_context = unwrap_scholar_context(context)
+        serialized = to_jsonable(output)
+        if agent.name == "Research Work Prioritizer":
+            decision = record_priority_decision(serialized, scholar_context)
+            if decision is not None:
+                await scholar_context.emit("extended.priorities.updated", decision)
+        elif agent.name == "Focused Work Specialist":
+            advance_priority_progress(scholar_context)
+        await finish_agent_invocation(
+            scholar_context,
+            agent.name,
+            "completed",
+            output=serialized,
         )
 
     async def on_llm_start(
@@ -37,7 +52,7 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        await context.context.emit(
+        await unwrap_scholar_context(context).emit(
             "model.started",
             {
                 "agent_name": agent.name,
@@ -53,7 +68,7 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
         agent: Agent[ScholarWeaveContext],
         response,
     ) -> None:
-        await context.context.emit(
+        await unwrap_scholar_context(context).emit(
             "model.completed",
             {
                 "agent_name": agent.name,
@@ -62,7 +77,7 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
         )
 
     async def on_tool_start(self, context, agent, tool) -> None:
-        await context.context.emit(
+        await unwrap_scholar_context(context).emit(
             "tool.started",
             {
                 "agent_name": agent.name,
@@ -72,9 +87,10 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
 
     async def on_tool_end(self, context, agent, tool, result: object) -> None:
         tool_name = getattr(tool, "name", type(tool).__name__)
+        scholar_context = unwrap_scholar_context(context)
         failure = consume_tool_failure(context, tool_name)
         if failure is not None:
-            await context.context.emit(
+            await scholar_context.emit(
                 "tool.failed",
                 {
                     "agent_name": agent.name,
@@ -83,7 +99,7 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
                 },
             )
             return
-        await context.context.emit(
+        await scholar_context.emit(
             "tool.completed",
             {
                 "agent_name": agent.name,
@@ -93,7 +109,7 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
         )
 
     async def on_handoff(self, context, from_agent, to_agent) -> None:
-        await context.context.emit(
+        await unwrap_scholar_context(context).emit(
             "handoff.completed",
             {
                 "from_agent": from_agent.name,

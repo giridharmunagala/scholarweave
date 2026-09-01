@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from urllib.parse import parse_qs
-
 import httpx
 import pytest
 
@@ -23,18 +21,26 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
 
     def respond(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.url.path == "/searx/search":
+        if request.url.host == "duckduckgo.com":
+            return httpx.Response(
+                200,
+                text=(
+                    '<link id="deep_preload_link" rel="preload" as="script" '
+                    'href="https://links.duckduckgo.com/d.js?q=open%20source'
+                    '&amp;vqd=4-test&amp;dp=token">'
+                ),
+            )
+        if request.url.host == "links.duckduckgo.com":
             return httpx.Response(
                 200,
                 json={
                     "results": [
                         {
-                            "title": "Open <b>result</b>",
-                            "url": "https://example.test/result",
-                            "content": "Useful &amp; public",
-                            "engine": "example",
-                            "thumbnail": "/searx/image_proxy?url=https%3A%2F%2Fimages.example.test%2Fresult.jpg",
+                            "t": f"Open <b>result {index}</b>",
+                            "u": f"https://example.test/result-{index}",
+                            "a": "Useful &amp; public",
                         }
+                        for index in range(12)
                     ]
                 },
             )
@@ -78,7 +84,6 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
-        searxng_base_url="https://search.test/searx",
         arxiv_api_url="https://search.test/arxiv",
         wikipedia_api_url="https://search.test/wikipedia",
     )
@@ -88,39 +93,43 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
     )
     service = ResearchSearchService(settings, client=client)
     try:
-        web = await service.search_web("open source", 1)
+        web = await service.search_web("open source")
         arxiv = await service.search_arxiv("agent research", 1)
         wikipedia = await service.search_wikipedia("research", 1)
     finally:
         await client.aclose()
 
     assert web["results"][0] == {
-        "title": "Open result",
-        "url": "https://example.test/result",
+        "title": "Open result 0",
+        "url": "https://example.test/result-0",
         "snippet": "Useful & public",
-        "engine": "example",
+        "engine": "duckduckgo",
         "published_at": None,
-        "image_url": "https://search.test/searx/image_proxy?url=https%3A%2F%2Fimages.example.test%2Fresult.jpg",
+        "image_url": None,
     }
+    assert web["provider"] == "duckduckgo"
+    assert len(web["results"]) == 10
     assert arxiv["results"][0]["arxiv_id"] == "2601.00001v1"
     assert arxiv["results"][0]["authors"] == ["Ada Researcher"]
     assert arxiv["results"][0]["pdf_url"] == "https://arxiv.org/pdf/2601.00001v1"
     assert wikipedia["results"][0]["url"] == "https://en.wikipedia.org/wiki/Research"
-    assert requests[0].method == "POST"
-    assert parse_qs(requests[0].content.decode()) == {
-        "q": ["open source"],
-        "format": ["json"],
-        "categories": ["general"],
-        "language": ["auto"],
-    }
-    assert requests[1].url.params["max_results"] == "1"
-    assert requests[2].url.params["gsrlimit"] == "1"
-    assert [request.method for request in requests[1:]] == ["GET", "GET"]
-    assert all(request.headers["user-agent"] == settings.search_user_agent for request in requests)
+    assert requests[0].url.host == "duckduckgo.com"
+    assert requests[0].url.params["q"] == "open source"
+    assert requests[1].url.host == "links.duckduckgo.com"
+    assert requests[1].url.params["o"] == "json"
+    assert requests[2].url.params["max_results"] == "1"
+    assert requests[3].url.params["gsrlimit"] == "1"
+    assert [request.method for request in requests] == ["GET", "GET", "GET", "GET"]
+    assert requests[0].headers["user-agent"].startswith("Mozilla/5.0")
+    assert all(
+        request.headers["user-agent"] == settings.search_user_agent
+        for request in requests[2:]
+    )
+    assert service._limiters["web"]._interval == 2.0
 
 
 @pytest.mark.anyio
-async def test_rate_limiter_spaces_requests() -> None:
+async def test_rate_limiter_spaces_web_requests_by_two_seconds() -> None:
     now = [100.0]
     delays: list[float] = []
 
@@ -128,29 +137,33 @@ async def test_rate_limiter_spaces_requests() -> None:
         delays.append(delay)
         now[0] += delay
 
-    limiter = AsyncRateLimiter(20, clock=lambda: now[0], sleep=advance)
+    limiter = AsyncRateLimiter(30, clock=lambda: now[0], sleep=advance)
 
     await limiter.acquire()
     await limiter.acquire()
     await limiter.acquire()
 
-    assert delays == [3.0, 3.0]
+    assert delays == [2.0, 2.0]
 
 
 @pytest.mark.anyio
-async def test_searxng_json_format_error_is_actionable(tmp_path) -> None:
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        workspace_dir=tmp_path / "workspace",
-        searxng_base_url="https://search.test",
-    )
+async def test_duckduckgo_error_is_actionable(tmp_path) -> None:
     client = httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(403, request=request)),
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                text="<html>Unfortunately, bots use DuckDuckGo too.</html>",
+                request=request,
+            )
+        ),
     )
-    service = ResearchSearchService(settings, client=client)
+    service = ResearchSearchService(
+        Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace"),
+        client=client,
+    )
     try:
-        with pytest.raises(RuntimeError, match="Enable 'json' in its search.formats"):
-            await service.search_web("open source", 1)
+        with pytest.raises(RuntimeError, match="DuckDuckGo.*rate-limited"):
+            await service.search_web("open source")
     finally:
         await client.aclose()
 
@@ -180,5 +193,5 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     autonomous = autonomous_blueprint({})
     autonomous_catalog_ids = {tool.catalog_id for tool in autonomous.tools}
     assert {"web.search", "arxiv.search", "wikipedia.search", *source_tools} <= autonomous_catalog_ids
-    assert "Recursively refine queries" in autonomous.agents[0].instructions
-    assert autonomous.run.max_turns == 50
+    assert "recursively refine queries" in autonomous.agents[0].instructions
+    assert autonomous.run.max_turns == 96

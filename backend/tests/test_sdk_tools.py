@@ -10,6 +10,7 @@ from backend.core.config import Settings
 from backend.core.errors import ValidationError
 from backend.persistence import create_session_factory
 from backend.documents.models import Document
+from backend.research.sources import WebSourceUnavailable
 from backend.runtime.context import ScholarWeaveContext
 from backend.bootstrap import create_services
 from backend.tools.catalog import create_tool_catalog
@@ -50,6 +51,67 @@ async def test_builtin_catalog_builds_sdk_function_tool() -> None:
     assert tool.name == "list_documents"
 
 
+@pytest.mark.anyio
+async def test_unavailable_web_page_is_a_successful_tool_result(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    services = create_services(test_settings)
+
+    async def unavailable(url: str):
+        raise WebSourceUnavailable(url, "The remote page returned HTTP 403.")
+
+    monkeypatch.setattr(services.source_downloads, "download_web_page", unavailable)
+    try:
+        runtime = services.runs._tool_runtime
+        result = await runtime.invoke(
+            "webpage.download",
+            {"url": "https://example.com/blocked"},
+            ScholarWeaveContext(run_id="web-run", tool_runtime=runtime),
+        )
+    finally:
+        await services.close()
+
+    assert result == {
+        "status": "unavailable",
+        "source_id": None,
+        "title": None,
+        "url": "https://example.com/blocked",
+        "chunk_count": 0,
+        "reason": "The remote page returned HTTP 403.",
+        "next_action": (
+            "Use the search-result snippet or try another result URL; "
+            "the download_web_page tool remains available."
+        ),
+    }
+
+
+@pytest.mark.anyio
+async def test_webpage_download_is_not_disabled_by_remote_failures() -> None:
+    catalog = create_tool_catalog()
+    tool = catalog.build_function_tool(
+        FunctionToolSpec(id="web-page", catalog_id="webpage.download")
+    )
+
+    class FailingRuntime:
+        async def invoke(self, catalog_id, arguments, context):
+            raise RuntimeError("Remote host is unavailable.")
+
+    runtime = FailingRuntime()
+    context = ScholarWeaveContext(run_id="web-run", tool_runtime=runtime)
+    wrapper = SimpleNamespace(context=context)
+
+    for _attempt in range(3):
+        output = await tool.on_invoke_tool(
+            wrapper,
+            '{"url":"https://example.com/article"}',
+        )
+        assert "try a different tool or source" in output
+
+    assert callable(tool.is_enabled)
+    assert tool.is_enabled(wrapper, None) is True
+
+
 @pytest.mark.parametrize("catalog_id", ["workspace.write", "artifacts.write"])
 def test_builtin_json_content_tools_define_array_items(catalog_id: str) -> None:
     catalog = create_tool_catalog()
@@ -85,7 +147,7 @@ async def test_sdk_catalog_exposes_blueprint_contract(test_settings) -> None:
 
 
 @pytest.mark.anyio
-async def test_autonomous_tool_search_finds_builtin_and_custom_tools(test_settings) -> None:
+async def test_autonomous_tool_search_is_scoped_to_research_tools(test_settings) -> None:
     services = create_services(test_settings)
     try:
         services.function_tools.create(
@@ -141,8 +203,7 @@ async def test_autonomous_tool_search_finds_builtin_and_custom_tools(test_settin
         assert "create_workspace_note" in {
             tool["name"] for tool in note_tools["tools"]
         }
-        assert [tool["name"] for tool in custom["tools"]] == ["extract_claims"]
-        assert custom["tools"][0]["requires_approval"] is True
+        assert custom["tools"] == []
     finally:
         await services.close()
 

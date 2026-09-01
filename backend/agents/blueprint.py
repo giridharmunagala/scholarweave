@@ -127,8 +127,10 @@ class RunSettingsSpec(BlueprintModel):
 
 
 class SessionPolicySpec(BlueprintModel):
-    # Accept persisted pre-removal policy fields without exposing or using them.
     model_config = ConfigDict(extra="ignore")
+
+    history_max_items: int | None = Field(default=None, ge=1, le=10_000)
+    messages_only: bool = False
 
 
 class AgentBlueprint(BlueprintModel):

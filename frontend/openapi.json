@@ -1906,10 +1906,7 @@
             "type": "boolean"
           },
           "ocr_engine": {
-            "enum": [
-              "tesseract",
-              "docling"
-            ],
+            "const": "tesseract",
             "title": "Ocr Engine",
             "type": "string"
           },
@@ -2749,6 +2746,79 @@
         "title": "RunCreateRequest",
         "type": "object"
       },
+      "RunEpochResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "epoch_index": {
+            "title": "Epoch Index",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Terminal Reason"
+          },
+          "usage": {
+            "additionalProperties": true,
+            "title": "Usage",
+            "type": "object"
+          }
+        },
+        "required": [
+          "id",
+          "epoch_index",
+          "status",
+          "terminal_reason",
+          "usage",
+          "error",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "RunEpochResponse",
+        "type": "object"
+      },
       "RunEventResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2899,6 +2969,13 @@
             "title": "Created At",
             "type": "string"
           },
+          "epochs": {
+            "items": {
+              "$ref": "#/components/schemas/RunEpochResponse"
+            },
+            "title": "Epochs",
+            "type": "array"
+          },
           "error": {
             "anyOf": [
               {
@@ -2937,6 +3014,18 @@
               }
             ],
             "title": "Finished At"
+          },
+          "goal_state": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal State"
           },
           "id": {
             "title": "Id",
@@ -3048,6 +3137,13 @@
             "title": "Status",
             "type": "string"
           },
+          "tool_attempts": {
+            "items": {
+              "$ref": "#/components/schemas/ToolAttemptResponse"
+            },
+            "title": "Tool Attempts",
+            "type": "array"
+          },
           "usage": {
             "additionalProperties": true,
             "title": "Usage",
@@ -3071,7 +3167,10 @@
           "finished_at",
           "items",
           "events",
-          "interruptions"
+          "interruptions",
+          "epochs",
+          "tool_attempts",
+          "goal_state"
         ],
         "title": "RunResponse",
         "type": "object"
@@ -3227,13 +3326,56 @@
         "type": "object"
       },
       "SessionPolicySpec": {
-        "properties": {},
+        "properties": {
+          "history_max_items": {
+            "anyOf": [
+              {
+                "maximum": 10000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "History Max Items"
+          },
+          "messages_only": {
+            "default": false,
+            "title": "Messages Only",
+            "type": "boolean"
+          }
+        },
         "title": "SessionPolicySpec",
         "type": "object"
       },
       "SettingsResponse": {
         "additionalProperties": false,
         "properties": {
+          "agent_context_compaction_target_tokens": {
+            "title": "Agent Context Compaction Target Tokens",
+            "type": "integer"
+          },
+          "agent_context_high_water_ratio": {
+            "title": "Agent Context High Water Ratio",
+            "type": "number"
+          },
+          "agent_context_window_tokens": {
+            "title": "Agent Context Window Tokens",
+            "type": "integer"
+          },
+          "agent_epoch_max_turns": {
+            "title": "Agent Epoch Max Turns",
+            "type": "integer"
+          },
+          "agent_max_epochs": {
+            "title": "Agent Max Epochs",
+            "type": "integer"
+          },
+          "agent_run_timeout_seconds": {
+            "title": "Agent Run Timeout Seconds",
+            "type": "number"
+          },
           "agent_tracing_enabled": {
             "title": "Agent Tracing Enabled",
             "type": "boolean"
@@ -3257,31 +3399,6 @@
             "title": "Default Model References",
             "type": "object"
           },
-          "docling_batch_size": {
-            "title": "Docling Batch Size",
-            "type": "integer"
-          },
-          "docling_device": {
-            "enum": [
-              "auto",
-              "cuda",
-              "cpu"
-            ],
-            "title": "Docling Device",
-            "type": "string"
-          },
-          "docling_num_threads": {
-            "title": "Docling Num Threads",
-            "type": "integer"
-          },
-          "docling_ocr_backend": {
-            "enum": [
-              "onnxruntime",
-              "torch"
-            ],
-            "title": "Docling Ocr Backend",
-            "type": "string"
-          },
           "documents_dir": {
             "title": "Documents Dir",
             "type": "string"
@@ -3290,10 +3407,7 @@
             "$ref": "#/components/schemas/ModelReferenceSpec"
           },
           "ocr_engine": {
-            "enum": [
-              "tesseract",
-              "docling"
-            ],
+            "const": "tesseract",
             "title": "Ocr Engine",
             "type": "string"
           },
@@ -3354,6 +3468,18 @@
             "title": "Retrieval Max Context Chars",
             "type": "integer"
           },
+          "tool_call_timeout_seconds": {
+            "title": "Tool Call Timeout Seconds",
+            "type": "number"
+          },
+          "tool_read_retry_attempts": {
+            "title": "Tool Read Retry Attempts",
+            "type": "integer"
+          },
+          "tool_result_max_tokens": {
+            "title": "Tool Result Max Tokens",
+            "type": "integer"
+          },
           "workspace_dir": {
             "title": "Workspace Dir",
             "type": "string"
@@ -3369,6 +3495,15 @@
           "default_model_references",
           "last_chat_model_reference",
           "request_timeout_seconds",
+          "agent_context_window_tokens",
+          "agent_context_high_water_ratio",
+          "agent_context_compaction_target_tokens",
+          "tool_result_max_tokens",
+          "agent_epoch_max_turns",
+          "agent_max_epochs",
+          "agent_run_timeout_seconds",
+          "tool_call_timeout_seconds",
+          "tool_read_retry_attempts",
           "agent_tracing_enabled",
           "python_tool_enabled",
           "python_tool_timeout_seconds",
@@ -3376,10 +3511,6 @@
           "python_tool_allowed_imports",
           "retrieval_max_context_chars",
           "ocr_engine",
-          "docling_device",
-          "docling_ocr_backend",
-          "docling_batch_size",
-          "docling_num_threads",
           "ocr_llm_enhancement_enabled",
           "ocr_llm_model",
           "ocr_llm_triage_model"
@@ -3390,6 +3521,82 @@
       "SettingsUpdate": {
         "additionalProperties": false,
         "properties": {
+          "agent_context_compaction_target_tokens": {
+            "anyOf": [
+              {
+                "minimum": 512.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Context Compaction Target Tokens"
+          },
+          "agent_context_high_water_ratio": {
+            "anyOf": [
+              {
+                "maximum": 0.9,
+                "minimum": 0.5,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Context High Water Ratio"
+          },
+          "agent_context_window_tokens": {
+            "anyOf": [
+              {
+                "minimum": 4096.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Context Window Tokens"
+          },
+          "agent_epoch_max_turns": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 2.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Epoch Max Turns"
+          },
+          "agent_max_epochs": {
+            "anyOf": [
+              {
+                "maximum": 50.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Max Epochs"
+          },
+          "agent_run_timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 86400.0,
+                "minimum": 30.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Run Timeout Seconds"
+          },
           "agent_tracing_enabled": {
             "anyOf": [
               {
@@ -3415,63 +3622,6 @@
             ],
             "title": "Default Model References"
           },
-          "docling_batch_size": {
-            "anyOf": [
-              {
-                "maximum": 32.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Docling Batch Size"
-          },
-          "docling_device": {
-            "anyOf": [
-              {
-                "enum": [
-                  "auto",
-                  "cuda",
-                  "cpu"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Docling Device"
-          },
-          "docling_num_threads": {
-            "anyOf": [
-              {
-                "maximum": 64.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Docling Num Threads"
-          },
-          "docling_ocr_backend": {
-            "anyOf": [
-              {
-                "enum": [
-                  "onnxruntime",
-                  "torch"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Docling Ocr Backend"
-          },
           "last_chat_model_reference": {
             "anyOf": [
               {
@@ -3481,21 +3631,6 @@
                 "type": "null"
               }
             ]
-          },
-          "ocr_engine": {
-            "anyOf": [
-              {
-                "enum": [
-                  "tesseract",
-                  "docling"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Ocr Engine"
           },
           "ocr_llm_enhancement_enabled": {
             "anyOf": [
@@ -3617,9 +3752,64 @@
               }
             ],
             "title": "Retrieval Max Context Chars"
+          },
+          "tool_call_timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 3600.0,
+                "minimum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Call Timeout Seconds"
+          },
+          "tool_read_retry_attempts": {
+            "anyOf": [
+              {
+                "maximum": 5.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Read Retry Attempts"
+          },
+          "tool_result_max_tokens": {
+            "anyOf": [
+              {
+                "minimum": 256.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Result Max Tokens"
           }
         },
         "title": "SettingsUpdate",
+        "type": "object"
+      },
+      "StopAndAnswerResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "answer_run": {
+            "$ref": "#/components/schemas/RunResponse"
+          },
+          "stopped_run": {
+            "$ref": "#/components/schemas/RunResponse"
+          }
+        },
+        "required": [
+          "stopped_run",
+          "answer_run"
+        ],
+        "title": "StopAndAnswerResponse",
         "type": "object"
       },
       "ToolApprovalRunItem": {
@@ -3671,6 +3861,112 @@
           "item_key"
         ],
         "title": "ToolApprovalRunItem",
+        "type": "object"
+      },
+      "ToolAttemptResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "catalog_id": {
+            "title": "Catalog Id",
+            "type": "string"
+          },
+          "epoch_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Epoch Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "failure_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Category"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "result_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Ref"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "epoch_id",
+          "tool_call_id",
+          "catalog_id",
+          "attempt",
+          "status",
+          "failure_category",
+          "retryable",
+          "result_ref",
+          "error",
+          "started_at",
+          "finished_at"
+        ],
+        "title": "ToolAttemptResponse",
         "type": "object"
       },
       "ToolCallRunItem": {
@@ -6585,6 +6881,48 @@
           }
         },
         "summary": "Resolve Interruption",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}/stop-and-answer": {
+      "post": {
+        "operationId": "stop_and_answer_run_api_runs__run_id__stop_and_answer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopAndAnswerResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop And Answer Run",
         "tags": [
           "runs"
         ]

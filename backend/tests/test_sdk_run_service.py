@@ -13,7 +13,11 @@ from backend.runs.broker import EventBroker
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
 from backend.runs.repository import RunRepository
-from backend.runs.service import RunService
+from backend.runs.service import (
+    STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION,
+    STOP_AND_ANSWER_PROMPT,
+    RunService,
+)
 from backend.runtime.sessions import SdkSessionFactory
 from backend.tools.catalog import create_tool_catalog
 
@@ -48,8 +52,26 @@ class ToolRuntime:
 
 
 class FailingToolRuntime:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def invoke(self, catalog_id, arguments, context):
+        self.calls += 1
         raise RuntimeError("Remote page returned HTTP 503.")
+
+
+class BlockingToolRuntime:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+
+    async def invoke(self, catalog_id, arguments, context):
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            raise
 
 
 @pytest.fixture
@@ -181,6 +203,343 @@ async def test_tool_failure_is_returned_to_model_without_failing_run(
     assert "try a different tool or source" in tool_outputs[0]
     assert any(event.event_type == "tool.failed" for event in run.events)
     assert not any(event.event_type == "run.failed" for event in run.events)
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_repeated_information_failures_disable_only_the_failing_tool(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.tool_plans = [
+        ("Find unavailable evidence", "search_web", {"query": f"missing evidence {index}"})
+        for index in range(3)
+    ]
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Loop-aware researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Find unavailable evidence, then answer.",
+                        "tool_ids": [
+                            "web-search",
+                            "paper-list",
+                            "workspace-write",
+                        ],
+                    },
+                    {
+                        "id": "helper",
+                        "name": "Helper",
+                        "instructions": "Help with research.",
+                    },
+                ],
+                "tools": [
+                    {
+                        "id": "web-search",
+                        "kind": "function",
+                        "catalog_id": "web.search",
+                    },
+                    {
+                        "id": "workspace-write",
+                        "kind": "function",
+                        "catalog_id": "workspace.write",
+                    },
+                    {
+                        "id": "paper-list",
+                        "kind": "function",
+                        "catalog_id": "documents.list",
+                    },
+                ],
+                "agent_tools": [
+                    {
+                        "id": "helper-tool",
+                        "owner_agent_id": "researcher",
+                        "delegate_agent_id": "helper",
+                        "tool_name": "ask_research_helper",
+                        "tool_description": "Delegate research to a helper.",
+                    }
+                ],
+                "run": {"max_turns": 8},
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    runtime = FailingToolRuntime()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        runtime,
+        EventBroker(),
+    )
+
+    run = await service.run_now(compiled, "Find unavailable evidence.")
+
+    assert run.status == "completed"
+    assert runtime.calls == 3
+    outputs = [
+        item.item_json["output"]
+        for item in run.items
+        if item.item_type == "tool_call_output_item"
+    ]
+    assert len(outputs) == 3
+    assert "search_web tool is now disabled" in outputs[-1]
+    offered_tools = {
+        tool["function"]["name"]
+        for tool in stub_provider.requests[-1].get("tools", [])
+    }
+    assert "search_web" not in offered_tools
+    assert "list_documents" in offered_tools
+    assert "write_workspace_file" in offered_tools
+    assert "ask_research_helper" in offered_tools
+    failures = [
+        event.payload_json
+        for event in run.events
+        if event.event_type == "tool.failed"
+    ]
+    assert failures[-1]["failure_limit_reached"] is True
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_cancel_immediately_stops_model_stream(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.stream_delay_seconds = 10
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Answer.",
+                    }
+                ],
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ToolRuntime(),
+        EventBroker(),
+    )
+
+    pending = service.create(
+        compiled,
+        "Explain the evidence.",
+        agent_revision_id=None,
+        conversation_id="conversation-1",
+    )
+    for _attempt in range(200):
+        if stub_provider.requests:
+            break
+        await asyncio.sleep(0.01)
+
+    cancelled = await service.cancel(pending.id)
+
+    assert cancelled.status == "cancelled"
+    assert pending.id not in service._tasks
+    assert any(event.event_type == "run.cancelled" for event in cancelled.events)
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_cancel_immediately_propagates_to_active_tool(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.call_tool = "list_documents"
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "List documents.",
+                        "tool_ids": ["papers"],
+                    }
+                ],
+                "tools": [
+                    {
+                        "id": "papers",
+                        "kind": "function",
+                        "catalog_id": "documents.list",
+                    }
+                ],
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    runtime = BlockingToolRuntime()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        runtime,
+        EventBroker(),
+    )
+
+    pending = service.create(
+        compiled,
+        "List documents.",
+        agent_revision_id=None,
+        conversation_id="conversation-1",
+    )
+    await asyncio.wait_for(runtime.started.wait(), timeout=2)
+
+    cancelled = await service.cancel(pending.id)
+
+    assert cancelled.status == "cancelled"
+    assert runtime.cancelled.is_set()
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.stream_delay_seconds = 10
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Research carefully.",
+                        "tool_ids": ["papers"],
+                    }
+                ],
+                "tools": [
+                    {
+                        "id": "papers",
+                        "kind": "function",
+                        "catalog_id": "documents.list",
+                    }
+                ],
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        sessions,
+        ToolRuntime(),
+        EventBroker(),
+    )
+    session = sessions.get(
+        "conversation-1",
+        compiled.blueprint.session,
+        compiled.resolved_models[compiled.blueprint.entry_agent_id],
+    )
+    await session.add_items(
+        [
+            {"role": "user", "content": "Find every relevant source."},
+            {
+                "role": "assistant",
+                "content": "Earlier answer.",
+            },
+        ]
+    )
+    async with sessions.run_lock("conversation-1"):
+        pending = service.create(
+            compiled,
+            "Find every relevant source.",
+            agent_revision_id=None,
+            conversation_id="conversation-1",
+        )
+        await asyncio.sleep(0)
+        stub_provider.stream_delay_seconds = 0
+        stopped, answer_pending = await service.stop_and_answer(pending.id)
+    for _attempt in range(200):
+        answer = service.get(answer_pending.id)
+        if answer.status in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert stopped.status == "cancelled"
+    assert answer.status == "completed", answer.error
+    assert answer.final_output_json == "Stub answer."
+    assert stub_provider.requests[-1].get("tools") in (None, [])
+    assert "Find every relevant source." in str(
+        stub_provider.requests[-1].get("messages")
+    )
+    assert isinstance(answer.input_json, list)
+    assert answer.blueprint_json["description"] == STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION
+    assert answer.blueprint_json["tools"] == []
+    assert answer.blueprint_json["run"]["max_turns"] == 1
+    recovered_answer = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(answer.blueprint_json)
+    )
+    assert recovered_answer.max_turns == 1
+    assert recovered_answer.entry_agent.tools == []
+    session_items = await session.get_items()
+    assert all(STOP_AND_ANSWER_PROMPT not in str(item) for item in session_items)
+    assert sum(
+        "Find every relevant source." in str(item)
+        and isinstance(item, dict)
+        and item.get("role") == "user"
+        for item in session_items
+    ) == 2
+    assert any(
+        isinstance(item, dict) and item.get("role") == "assistant"
+        for item in session_items
+    )
     await client.close()
 
 

@@ -129,7 +129,7 @@ class DocumentService:
             raise DocumentProcessingError("The server is shutting down.")
         if force_ocr and not self.ocr.available():
             raise DocumentProcessingError(
-                f"The configured {self.ingestion.settings.ocr_engine} OCR runtime is unavailable."
+                "The Tesseract OCR runtime is unavailable."
             )
         previous_status = self.repository.mark_processing(document_id)
         try:

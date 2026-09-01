@@ -10,9 +10,6 @@ html { -webkit-text-size-adjust: 100%; }
 
 body {
   background: var(--bg);
-  background-image: var(--bg-accent);
-  background-attachment: fixed;
-  background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font-sans);
   font-size: var(--text-base);
@@ -46,8 +43,8 @@ pre {
   word-break: break-word;
   tab-size: 2;
 }
-code { padding: .1em .35em; border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text); }
-pre > code, pre code { padding: 0; background: none; }
+code { padding: .1em .35em; border-radius: var(--radius-sm); background: var(--inline-code-bg); color: var(--inline-code-text); }
+pre > code, pre code { padding: 0; background: none; color: inherit; }
 
 /* Scrollbars follow the active theme instead of the OS default. */
 * { scrollbar-color: var(--border-strong) transparent; scrollbar-width: thin; }

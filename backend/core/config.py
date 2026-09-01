@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,15 +27,22 @@ class Settings(BaseSettings):
     default_model_references: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
+    agent_context_window_tokens: int = Field(default=32_768, ge=4_096)
+    agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.9)
+    agent_context_compaction_target_tokens: int = Field(default=8_192, ge=512)
+    tool_result_max_tokens: int = Field(default=3_000, ge=256)
+    agent_epoch_max_turns: int = Field(default=12, ge=2, le=100)
+    agent_max_epochs: int = Field(default=8, ge=1, le=50)
+    agent_run_timeout_seconds: float = Field(default=1_800.0, ge=30.0)
+    tool_call_timeout_seconds: float = Field(default=120.0, ge=1.0)
+    tool_read_retry_attempts: int = Field(default=2, ge=1, le=5)
 
-    searxng_base_url: str = "http://127.0.0.1:32768"
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
     wikipedia_api_url: str = "https://en.wikipedia.org/w/api.php"
     search_user_agent: str = (
         "ScholarWeave/0.1 (+https://github.com/giridharmunagala/scholarweave)"
     )
     search_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
-    web_search_requests_per_minute: int = Field(default=30, ge=1, le=600)
     arxiv_search_requests_per_minute: int = Field(default=20, ge=1, le=20)
     wikipedia_search_requests_per_minute: int = Field(default=60, ge=1, le=600)
     web_source_ttl_minutes: int = Field(default=240, ge=5, le=1440)
@@ -77,11 +83,6 @@ class Settings(BaseSettings):
     max_chunks_per_document: int = 2000
     pdf_min_text_chars: int = 40
     ocr_language: str = "eng"
-    ocr_engine: Literal["tesseract", "docling"] = "docling"
-    docling_device: Literal["auto", "cuda", "cpu"] = "auto"
-    docling_ocr_backend: Literal["onnxruntime", "torch"] = "onnxruntime"
-    docling_batch_size: int = 4
-    docling_num_threads: int = 4
     ocr_llm_enhancement_enabled: bool = False
     ocr_llm_model: str | None = None
     ocr_llm_triage_model: str | None = None
@@ -95,6 +96,14 @@ class Settings(BaseSettings):
         self.documents_dir = (self.documents_dir or self.data_dir / "documents").resolve()
         self.database_path = (self.database_path or self.data_dir / "metadata.sqlite3").resolve()
         self.llm_log_path = (self.llm_log_path or self.data_dir / "llm_calls.jsonl").resolve()
+        high_water = int(
+            self.agent_context_window_tokens * self.agent_context_high_water_ratio
+        )
+        if self.agent_context_compaction_target_tokens >= high_water:
+            raise ValueError(
+                "agent_context_compaction_target_tokens must be below the context "
+                "high-water mark."
+            )
         return self
 
     def ensure_directories(self) -> None:

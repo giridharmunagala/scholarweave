@@ -4,7 +4,11 @@ import httpx
 import pytest
 
 from backend.bootstrap import create_services
-from backend.research.sources import SourceDownloadService, _is_public_address
+from backend.research.sources import (
+    SourceDownloadService,
+    WebSourceUnavailable,
+    _is_public_address,
+)
 
 
 @pytest.fixture
@@ -21,6 +25,7 @@ def _remote_client() -> httpx.AsyncClient:
                 headers={"Content-Type": "application/pdf"},
             )
         if request.url.path == "/article":
+            assert request.headers["user-agent"].startswith("Mozilla/5.0")
             return httpx.Response(
                 200,
                 text="""
@@ -39,6 +44,14 @@ def _remote_client() -> httpx.AsyncClient:
                   </body>
                 </html>
                 """,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+            )
+        if request.url.path == "/blocked":
+            return httpx.Response(403, text="Access denied")
+        if request.url.path == "/empty":
+            return httpx.Response(
+                200,
+                text="<html><head><title>Empty</title></head><body></body></html>",
                 headers={"Content-Type": "text/html; charset=utf-8"},
             )
         return httpx.Response(404)
@@ -156,6 +169,42 @@ async def test_html_page_is_temporary_searchable_and_notes_persist(
     assert "[Useful Article](https://example.com/article)" in persisted.content
     assert "Attention processes context." in persisted.content
     assert {"note", "web-source", "attention"} <= set(persisted.tags)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("path", "message"),
+    [
+        ("blocked", "HTTP 403"),
+        ("empty", "did not contain readable text"),
+    ],
+)
+async def test_unavailable_web_pages_are_classified_without_a_system_failure(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    message: str,
+) -> None:
+    services = create_services(test_settings)
+    client = _remote_client()
+    downloads = SourceDownloadService(
+        test_settings,
+        services.documents,
+        services.workspace,
+        client=client,
+    )
+
+    async def allow_public_url(_url: str) -> None:
+        return None
+
+    monkeypatch.setattr(downloads, "_validate_public_url", allow_public_url)
+    try:
+        with pytest.raises(WebSourceUnavailable, match=message):
+            await downloads.download_web_page(f"https://example.com/{path}")
+    finally:
+        await downloads.close()
+        await client.aclose()
+        await services.close()
 
 
 @pytest.mark.anyio

@@ -509,7 +509,6 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
     pdf_path = tmp_path / "scanned.pdf"
     image.save(pdf_path, "PDF", resolution=150)
 
-    test_settings.ocr_engine = "tesseract"
     client = TestClient(create_app(test_settings))
     with pdf_path.open("rb") as pdf:
         upload = client.post(
@@ -911,7 +910,6 @@ async def test_forced_ocr_uses_embedded_text_when_tesseract_fails(
     test_settings,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    test_settings.ocr_engine = "tesseract"
     services = create_services(test_settings)
 
     class FakePage:

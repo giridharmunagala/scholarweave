@@ -8,96 +8,22 @@ export function DocumentsPanel({
   settings: Settings;
   onChange: (settings: Settings) => void;
 }) {
-  const docling = settings.ocr_engine === 'docling';
   return (
     <Panel
       title="Document OCR"
-      description="Choose the local OCR engine used for scanned or text-poor PDF pages."
+      description="ScholarWeave uses embedded PDF text first, then Tesseract only for scanned or text-poor pages."
     >
       <div className="stack">
         <div className="setting-row">
           <div className="setting-label">
-            <strong>OCR engine</strong>
+            <strong>Tesseract fallback</strong>
             <small>
-              {docling
-                ? 'Docling parses every page to preserve layout and reading order, reconstructs tables, and applies RapidOCR where embedded text is insufficient.'
-                : 'Tesseract is lighter and faster, but loses complex layout and table structure.'}
+              Native text is preserved whenever a page has enough readable content. OCR runs only
+              when that text is missing or insufficient.
             </small>
           </div>
-          <div className="segmented" role="group" aria-label="OCR engine">
-            <button
-              type="button"
-              aria-pressed={!docling}
-              onClick={() => onChange({ ...settings, ocr_engine: 'tesseract' })}
-            >
-              Tesseract
-            </button>
-            <button
-              type="button"
-              aria-pressed={docling}
-              onClick={() => onChange({ ...settings, ocr_engine: 'docling' })}
-            >
-              Docling
-            </button>
-          </div>
+          <span className="status-pill neutral">Tesseract</span>
         </div>
-
-        {docling ? (
-          <div className="field-row setting-nested">
-            <label className="field">
-              Device
-              <select
-                value={settings.docling_device}
-                onChange={(event) =>
-                  onChange({ ...settings, docling_device: event.target.value as Settings['docling_device'] })
-                }
-              >
-                <option value="auto">Auto</option>
-                <option value="cuda">CUDA</option>
-                <option value="cpu">CPU</option>
-              </select>
-            </label>
-            <label className="field">
-              RapidOCR backend
-              <select
-                value={settings.docling_ocr_backend}
-                onChange={(event) =>
-                  onChange({
-                    ...settings,
-                    docling_ocr_backend: event.target.value as Settings['docling_ocr_backend'],
-                  })
-                }
-              >
-                <option value="onnxruntime">ONNX Runtime</option>
-                <option value="torch">PyTorch</option>
-              </select>
-            </label>
-            <label className="field">
-              Page batch size
-              <input
-                type="number"
-                min={1}
-                max={32}
-                value={settings.docling_batch_size}
-                onChange={(event) =>
-                  onChange({ ...settings, docling_batch_size: Number(event.target.value) })
-                }
-              />
-            </label>
-            <label className="field">
-              CPU threads
-              <input
-                type="number"
-                min={1}
-                max={64}
-                value={settings.docling_num_threads}
-                onChange={(event) =>
-                  onChange({ ...settings, docling_num_threads: Number(event.target.value) })
-                }
-              />
-            </label>
-          </div>
-        ) : null}
 
         <div className="setting-row">
           <div className="setting-label">
@@ -159,6 +85,119 @@ export function RuntimePanel({
               label="SDK tracing"
               onChange={(checked) => onChange({ ...settings, agent_tracing_enabled: checked })}
             />
+          </div>
+          <div className="field-row setting-nested">
+            <label className="field">
+              Turns per epoch
+              <input
+                type="number"
+                min={2}
+                max={100}
+                value={settings.agent_epoch_max_turns}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_epoch_max_turns: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="field">
+              Maximum epochs
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={settings.agent_max_epochs}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_max_epochs: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="field">
+              Run deadline (seconds)
+              <input
+                type="number"
+                min={30}
+                value={settings.agent_run_timeout_seconds}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_run_timeout_seconds: Number(event.target.value) })
+                }
+              />
+            </label>
+          </div>
+          <div className="field-row setting-nested">
+            <label className="field">
+              Tool deadline (seconds)
+              <input
+                type="number"
+                min={1}
+                value={settings.tool_call_timeout_seconds}
+                onChange={(event) =>
+                  onChange({ ...settings, tool_call_timeout_seconds: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="field">
+              Safe-read attempts
+              <input
+                type="number"
+                min={1}
+                max={5}
+                value={settings.tool_read_retry_attempts}
+                onChange={(event) =>
+                  onChange({ ...settings, tool_read_retry_attempts: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="field">
+              Tool result limit (tokens)
+              <input
+                type="number"
+                min={256}
+                value={settings.tool_result_max_tokens}
+                onChange={(event) =>
+                  onChange({ ...settings, tool_result_max_tokens: Number(event.target.value) })
+                }
+              />
+            </label>
+          </div>
+          <div className="field-row setting-nested">
+            <label className="field">
+              Context window fallback
+              <input
+                type="number"
+                min={4096}
+                value={settings.agent_context_window_tokens}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_context_window_tokens: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="field">
+              Compaction high-water ratio
+              <input
+                type="number"
+                min={0.5}
+                max={0.9}
+                step={0.05}
+                value={settings.agent_context_high_water_ratio}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_context_high_water_ratio: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="field">
+              Compaction target (tokens)
+              <input
+                type="number"
+                min={512}
+                value={settings.agent_context_compaction_target_tokens}
+                onChange={(event) =>
+                  onChange({
+                    ...settings,
+                    agent_context_compaction_target_tokens: Number(event.target.value),
+                  })
+                }
+              />
+            </label>
           </div>
           <div className="setting-row">
             <div className="setting-label">

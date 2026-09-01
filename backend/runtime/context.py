@@ -10,7 +10,24 @@ class ToolRuntime(Protocol):
         catalog_id: str,
         arguments: dict[str, Any],
         context: "ScholarWeaveContext",
+        *,
+        tool_call_id: str | None = None,
     ) -> Any: ...
+
+    async def bound_tool_result(
+        self,
+        catalog_id: str,
+        result: Any,
+        context: "ScholarWeaveContext",
+        *,
+        max_tokens: int | None = None,
+    ) -> Any: ...
+
+    def store_context_checkpoint(
+        self,
+        checkpoint: dict[str, Any],
+        context: "ScholarWeaveContext",
+    ) -> dict[str, Any]: ...
 
 
 class RuntimeEventSink(Protocol):
@@ -40,3 +57,21 @@ class ScholarWeaveContext:
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.event_sink is not None:
             await self.event_sink.emit(event_type, payload)
+
+
+def unwrap_scholar_context(value: Any) -> ScholarWeaveContext:
+    """Unwrap SDK and nested-agent context wrappers without depending on SDK internals."""
+
+    current = value
+    seen: set[int] = set()
+    for _ in range(8):
+        if isinstance(current, ScholarWeaveContext):
+            return current
+        marker = id(current)
+        if marker in seen:
+            break
+        seen.add(marker)
+        current = getattr(current, "context", None)
+        if current is None:
+            break
+    raise TypeError("A ScholarWeaveContext could not be found in the SDK context wrapper.")

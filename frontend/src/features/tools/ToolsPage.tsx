@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 import { Icon } from '../../shared/components/Icons';
@@ -8,6 +8,27 @@ import './tools.css';
 type Catalog = components['schemas']['SdkCatalogResponse'];
 type Tool = components['schemas']['FunctionToolResponse'];
 type WriteRequest = components['schemas']['FunctionToolWriteRequest'];
+
+const GROUPS: Array<{ label: string; prefixes: string[] }> = [
+  { label: 'Search the web', prefixes: ['web.', 'arxiv.', 'wikipedia.', 'webpage.'] },
+  { label: 'Read papers', prefixes: ['documents.', 'research.', 'retrieval.'] },
+  { label: 'Notes and files', prefixes: ['workspace.'] },
+  { label: 'Run code and recall context', prefixes: ['python.', 'conversation.', 'artifacts.', 'extended.'] },
+  { label: 'Build agents and tools', prefixes: ['agents.', 'function_tools.', 'sdk.', 'tools.', 'builder.'] },
+];
+
+type CatalogTool = Catalog['function_tools'][number];
+
+function groupTools(items: CatalogTool[]) {
+  const remaining = new Set(items);
+  const groups = GROUPS.map(({ label, prefixes }) => {
+    const tools = items.filter((tool) => prefixes.some((prefix) => tool.catalog_id.startsWith(prefix)));
+    tools.forEach((tool) => remaining.delete(tool));
+    return { label, tools };
+  });
+  if (remaining.size) groups.push({ label: 'Other', tools: [...remaining] });
+  return groups.filter((group) => group.tools.length);
+}
 
 const initial: WriteRequest = {
   name: 'echo_message',
@@ -35,6 +56,7 @@ export default function ToolsPage() {
   const [parametersText, setParametersText] = useState(JSON.stringify(initial.parameters_schema, null, 2));
   const [outputText, setOutputText] = useState(JSON.stringify(initial.output_schema, null, 2));
   const [showCreate, setShowCreate] = useState(false);
+  const [query, setQuery] = useState('');
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
 
@@ -46,10 +68,27 @@ export default function ToolsPage() {
   useEffect(() => {
     load().catch(setError).finally(() => setLoading(false));
   }, []);
+
+  const needle = query.trim().toLowerCase();
+  const matches = (haystack: Array<string | null | undefined>) =>
+    !needle || haystack.some((value) => value?.toLowerCase().includes(needle));
+  const builtInGroups = useMemo(
+    () =>
+      groupTools(
+        (catalog?.function_tools ?? []).filter((tool) =>
+          matches([tool.label, tool.description, tool.catalog_id]),
+        ),
+      ),
+    [catalog, needle],
+  );
+  const customTools = tools.filter((tool) =>
+    matches([tool.name, tool.description, tool.latest_revision.catalog_id]),
+  );
+  const builtInCount = builtInGroups.reduce((total, group) => total + group.tools.length, 0);
   if (loading)
     return (
       <div className="page">
-        <PageHeader eyebrow="SDK capabilities" title="Tools" description="Built-in capabilities and revisioned custom callbacks compile into real FunctionTool instances." />
+        <PageHeader title="Tools" description="Everything the agent can do, plus the Python tools you write yourself." />
         <SkeletonCards count={8} />
       </div>
     );
@@ -83,20 +122,19 @@ export default function ToolsPage() {
   return (
     <div className="page">
       <PageHeader
-        eyebrow="SDK capabilities"
         title="Tools"
-        description="Built-in capabilities and revisioned custom callbacks compile into real FunctionTool instances."
+        description="Everything the agent can do, plus the Python tools you write yourself."
         actions={
           <button className="button" type="button" onClick={() => setShowCreate((value) => !value)}>
             <Icon name={showCreate ? 'close' : 'plus'} size={16} />
-            {showCreate ? 'Cancel' : 'New FunctionTool'}
+            {showCreate ? 'Cancel' : 'New tool'}
           </button>
         }
       />
       {error ? <ErrorNotice error={error} /> : null}
 
       {showCreate ? (
-        <Panel title="Custom FunctionTool" description="Sandboxed Python callback stored as a new revision.">
+        <Panel title="New tool" description="A sandboxed Python callback, stored as a new revision.">
           <div className="stack">
             <div className="field-row">
               <label className="field">
@@ -143,65 +181,79 @@ export default function ToolsPage() {
         </Panel>
       ) : null}
 
-      <Panel title="Application FunctionTools" description="Shipped with ScholarWeave and always available.">
-        <div className="card-grid">
-          {catalog?.function_tools.map((tool) => (
-            <article className="card tool-card" key={tool.catalog_id}>
-              <span className="tool-badge kind-function_tool">
-                <Icon name="tools" size={14} />
-              </span>
-              <h2 className="truncate">{tool.label}</h2>
-              <p>{tool.description}</p>
-              <code className="tag truncate">{tool.catalog_id}</code>
-            </article>
-          ))}
-        </div>
-      </Panel>
+      <div className="tool-search">
+        <Icon name="search" size={15} />
+        <input
+          type="search"
+          placeholder="Search tools…"
+          aria-label="Search tools"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
 
-      <Panel title="Custom FunctionTools" description="Your revisioned Python callbacks.">
-        {tools.length ? (
-          <div className="card-grid">
-            {tools.map((tool) => (
-              <article className="card tool-card" key={tool.id}>
-                <span className="tool-badge kind-custom">
-                  <Icon name="sparkle" size={14} />
-                </span>
-                <div className="row-between">
-                  <h2 className="truncate">{tool.name}</h2>
-                  <span className="eyebrow" style={{ margin: 0 }}>
-                    rev {tool.latest_revision.revision}
-                  </span>
+      {!builtInCount && !customTools.length ? (
+        <EmptyState icon="search" title="No tools match" description={`Nothing found for “${query}”.`} />
+      ) : null}
+
+      {customTools.length ? (
+        <Panel title="Your tools" description="Sandboxed Python callbacks you wrote.">
+          <ul className="tool-list">
+            {customTools.map((tool) => (
+              <li className="tool-row" key={tool.id}>
+                <div className="tool-row-head">
+                  <strong>{tool.name}</strong>
+                  <code>{tool.latest_revision.catalog_id}</code>
+                  <span className="tool-rev">rev {tool.latest_revision.revision}</span>
                 </div>
                 <p>{tool.description}</p>
-                <code className="tag truncate">{tool.latest_revision.catalog_id}</code>
-              </article>
+              </li>
             ))}
-          </div>
-        ) : (
-          <EmptyState
-            icon="tools"
-            title="No custom tools yet"
-            description="Author a sandboxed Python callback to give your agents a new capability."
-            action={
-              <button className="button" type="button" onClick={() => setShowCreate(true)}>
-                New FunctionTool
-              </button>
-            }
-          />
-        )}
-      </Panel>
+          </ul>
+        </Panel>
+      ) : !needle ? (
+        <EmptyState
+          icon="tools"
+          title="No tools of your own yet"
+          description="Write a sandboxed Python callback to give your agents a capability they don't have."
+          action={
+            <button className="button" type="button" onClick={() => setShowCreate(true)}>
+              New tool
+            </button>
+          }
+        />
+      ) : null}
 
-      <Panel title="SDK primitive catalog" description="The building blocks the canvas can place.">
-        <div className="card-grid">
+      {builtInGroups.map((group) => (
+        <Panel key={group.label} title={group.label} description={`${group.tools.length} tools`}>
+          <ul className="tool-list">
+            {group.tools.map((tool) => (
+              <li className="tool-row" key={tool.catalog_id}>
+                <div className="tool-row-head">
+                  <strong>{tool.label}</strong>
+                  <code>{tool.catalog_id}</code>
+                </div>
+                <p>{tool.description}</p>
+              </li>
+            ))}
+          </ul>
+        </Panel>
+      ))}
+
+      <details className="tool-primitives">
+        <summary>SDK building blocks</summary>
+        <ul className="tool-list">
           {catalog?.primitives.map((primitive) => (
-            <article className="card tool-card" key={primitive.kind}>
-              <span className="eyebrow">{primitive.kind.split('_').join(' ')}</span>
-              <h2 className="truncate">{primitive.sdk_constructor}</h2>
+            <li className="tool-row" key={primitive.kind}>
+              <div className="tool-row-head">
+                <strong>{primitive.sdk_constructor}</strong>
+              </div>
               <p>{primitive.description}</p>
-            </article>
+            </li>
           ))}
-        </div>
-      </Panel>
+        </ul>
+      </details>
+
     </div>
   );
 }

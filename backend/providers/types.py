@@ -41,6 +41,7 @@ class ResolvedAgentModel:
     supports_parallel_tool_calls: bool
     model_name: str | None = None
     responses_client: AsyncOpenAI | None = None
+    context_window_tokens: int | None = None
 
 
 class AgentModelResolver(Protocol):

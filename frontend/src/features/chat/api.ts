@@ -5,6 +5,7 @@ export type Conversation = components['schemas']['ConversationResponse'];
 export type ConversationDetail = components['schemas']['ConversationDetailResponse'];
 export type SessionItem = components['schemas']['SessionItemResponse'];
 export type Run = components['schemas']['RunResponse'];
+export type StopAndAnswerResponse = components['schemas']['StopAndAnswerResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
 
 export const chatApi = {
@@ -26,4 +27,11 @@ export const chatApi = {
   runs: (conversationId: string) =>
     request<Run[]>(`/runs?conversation_id=${encodeURIComponent(conversationId)}`),
   run: (id: string) => request<Run>(`/runs/${encodeURIComponent(id)}`),
+  cancelRun: (id: string) =>
+    request<Run>(`/runs/${encodeURIComponent(id)}/cancel`, json('POST', {})),
+  stopAndAnswer: (id: string) =>
+    request<StopAndAnswerResponse>(
+      `/runs/${encodeURIComponent(id)}/stop-and-answer`,
+      json('POST', {}),
+    ),
 };

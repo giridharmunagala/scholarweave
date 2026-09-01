@@ -85,6 +85,9 @@ class ApplicationServices:
     direct_agents: DirectAgentService
     sdk_version: str = SUPPORTED_SDK_VERSION
 
+    async def start(self) -> None:
+        await self.runs.recover_incomplete(self.compiler)
+
     async def close(self) -> None:
         await self.builtin_speech.close()
         await self.documents.close()
@@ -165,7 +168,12 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     )
     tool_catalog.register_dynamic_factory(function_tools.dynamic_factory)
     guardrail_catalog = create_guardrail_catalog()
-    compiler = AgentCompiler(model_resolver, tool_catalog, guardrail_catalog)
+    compiler = AgentCompiler(
+        model_resolver,
+        tool_catalog,
+        guardrail_catalog,
+        settings=resolved,
+    )
     agents = AgentService(AgentRepository(session_factory), compiler)
 
     sdk_sessions = SdkSessionFactory(resolved.database_path)
@@ -175,6 +183,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     )
     direct_agent_repository = DirectAgentRepository(session_factory)
     events = EventBroker()
+    run_repository = RunRepository(session_factory)
     tool_runtime = ApplicationToolRuntime(
         settings=resolved,
         documents=documents,
@@ -187,12 +196,14 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         function_tool_service=function_tools,
         tool_catalog=tool_catalog,
         direct_agent_repository=direct_agent_repository,
+        run_repository=run_repository,
     )
     runs = RunService(
-        RunRepository(session_factory),
+        run_repository,
         sdk_sessions,
         tool_runtime,
         events,
+        settings=resolved,
     )
     builder = BuilderService(compiler, conversations, runs)
     autonomous = AutonomousAgentService(compiler, conversations, runs, function_tools)

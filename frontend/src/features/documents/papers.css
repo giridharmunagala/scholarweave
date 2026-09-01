@@ -169,7 +169,7 @@
 @media (min-width: 901px) {
   .paper-detail-panel {
     position: sticky;
-    top: calc(var(--topbar-height) + var(--space-4));
+    top: var(--space-4);
   }
 }
 

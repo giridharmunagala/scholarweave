@@ -15,17 +15,21 @@ PERSISTED_SETTING_KEYS = {
     "default_model_references",
     "last_chat_model_reference",
     "request_timeout_seconds",
+    "agent_context_window_tokens",
+    "agent_context_high_water_ratio",
+    "agent_context_compaction_target_tokens",
+    "tool_result_max_tokens",
+    "agent_epoch_max_turns",
+    "agent_max_epochs",
+    "agent_run_timeout_seconds",
+    "tool_call_timeout_seconds",
+    "tool_read_retry_attempts",
     "agent_tracing_enabled",
     "python_tool_enabled",
     "python_tool_timeout_seconds",
     "python_tool_memory_mb",
     "python_tool_allowed_imports",
     "retrieval_max_context_chars",
-    "ocr_engine",
-    "docling_device",
-    "docling_ocr_backend",
-    "docling_batch_size",
-    "docling_num_threads",
     "ocr_llm_enhancement_enabled",
     "ocr_llm_model",
     "ocr_llm_triage_model",
@@ -60,17 +64,22 @@ class SettingsResponse(SettingsSchema):
     default_model_references: dict[str, ModelReferenceSpec]
     last_chat_model_reference: ModelReferenceSpec
     request_timeout_seconds: float
+    agent_context_window_tokens: int
+    agent_context_high_water_ratio: float
+    agent_context_compaction_target_tokens: int
+    tool_result_max_tokens: int
+    agent_epoch_max_turns: int
+    agent_max_epochs: int
+    agent_run_timeout_seconds: float
+    tool_call_timeout_seconds: float
+    tool_read_retry_attempts: int
     agent_tracing_enabled: bool
     python_tool_enabled: bool
     python_tool_timeout_seconds: float
     python_tool_memory_mb: int
     python_tool_allowed_imports: list[str]
     retrieval_max_context_chars: int
-    ocr_engine: Literal["tesseract", "docling"]
-    docling_device: Literal["auto", "cuda", "cpu"]
-    docling_ocr_backend: Literal["onnxruntime", "torch"]
-    docling_batch_size: int
-    docling_num_threads: int
+    ocr_engine: Literal["tesseract"]
     ocr_llm_enhancement_enabled: bool
     ocr_llm_model: str | None
     ocr_llm_triage_model: str | None
@@ -81,17 +90,21 @@ class SettingsUpdate(SettingsSchema):
     default_model_references: dict[str, ModelReferenceSpec] | None = None
     last_chat_model_reference: ModelReferenceSpec | None = None
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    agent_context_window_tokens: int | None = Field(default=None, ge=4_096)
+    agent_context_high_water_ratio: float | None = Field(default=None, ge=0.5, le=0.9)
+    agent_context_compaction_target_tokens: int | None = Field(default=None, ge=512)
+    tool_result_max_tokens: int | None = Field(default=None, ge=256)
+    agent_epoch_max_turns: int | None = Field(default=None, ge=2, le=100)
+    agent_max_epochs: int | None = Field(default=None, ge=1, le=50)
+    agent_run_timeout_seconds: float | None = Field(default=None, ge=30, le=86_400)
+    tool_call_timeout_seconds: float | None = Field(default=None, ge=1, le=3_600)
+    tool_read_retry_attempts: int | None = Field(default=None, ge=1, le=5)
     agent_tracing_enabled: bool | None = None
     python_tool_enabled: bool | None = None
     python_tool_timeout_seconds: float | None = Field(default=None, gt=0, le=300)
     python_tool_memory_mb: int | None = Field(default=None, ge=32, le=8192)
     python_tool_allowed_imports: list[str] | None = None
     retrieval_max_context_chars: int | None = Field(default=None, ge=1_000, le=1_000_000)
-    ocr_engine: Literal["tesseract", "docling"] | None = None
-    docling_device: Literal["auto", "cuda", "cpu"] | None = None
-    docling_ocr_backend: Literal["onnxruntime", "torch"] | None = None
-    docling_batch_size: int | None = Field(default=None, ge=1, le=32)
-    docling_num_threads: int | None = Field(default=None, ge=1, le=64)
     ocr_llm_enhancement_enabled: bool | None = None
     ocr_llm_model: str | None = None
     ocr_llm_triage_model: str | None = None
@@ -112,9 +125,6 @@ class SettingsService:
                 record = session.get(AppSetting, key)
                 if record is not None:
                     value = record.value_json
-                    if key == "ocr_engine" and value == "surya":
-                        value = "docling"
-                        record.value_json = value
                     if key == "default_model_references":
                         value = _normalize_model_references(value)
                         record.value_json = value
@@ -127,6 +137,7 @@ class SettingsService:
                             session.delete(record)
                     setattr(self.settings, key, value)
             session.commit()
+        self.settings.derive_paths()
 
     def response(self) -> SettingsResponse:
         return SettingsResponse(
@@ -144,17 +155,24 @@ class SettingsService:
                 self.settings.last_chat_model_reference
             ),
             request_timeout_seconds=self.settings.request_timeout_seconds,
+            agent_context_window_tokens=self.settings.agent_context_window_tokens,
+            agent_context_high_water_ratio=self.settings.agent_context_high_water_ratio,
+            agent_context_compaction_target_tokens=(
+                self.settings.agent_context_compaction_target_tokens
+            ),
+            tool_result_max_tokens=self.settings.tool_result_max_tokens,
+            agent_epoch_max_turns=self.settings.agent_epoch_max_turns,
+            agent_max_epochs=self.settings.agent_max_epochs,
+            agent_run_timeout_seconds=self.settings.agent_run_timeout_seconds,
+            tool_call_timeout_seconds=self.settings.tool_call_timeout_seconds,
+            tool_read_retry_attempts=self.settings.tool_read_retry_attempts,
             agent_tracing_enabled=self.settings.agent_tracing_enabled,
             python_tool_enabled=self.settings.python_tool_enabled,
             python_tool_timeout_seconds=self.settings.python_tool_timeout_seconds,
             python_tool_memory_mb=self.settings.python_tool_memory_mb,
             python_tool_allowed_imports=self.settings.python_tool_allowed_imports,
             retrieval_max_context_chars=self.settings.retrieval_max_context_chars,
-            ocr_engine=self.settings.ocr_engine,
-            docling_device=self.settings.docling_device,
-            docling_ocr_backend=self.settings.docling_ocr_backend,
-            docling_batch_size=self.settings.docling_batch_size,
-            docling_num_threads=self.settings.docling_num_threads,
+            ocr_engine="tesseract",
             ocr_llm_enhancement_enabled=self.settings.ocr_llm_enhancement_enabled,
             ocr_llm_model=_normalize_optional_model(self.settings.ocr_llm_model),
             ocr_llm_triage_model=_normalize_optional_model(
@@ -179,6 +197,8 @@ class SettingsService:
             ):
                 value = value.model_dump(mode="json")
             normalized[key] = value
+        candidate = self.settings.model_copy(update=normalized)
+        candidate.derive_paths()
         with self._sessions() as session:
             for key, value in normalized.items():
                 setattr(self.settings, key, value)

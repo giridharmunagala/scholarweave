@@ -6,6 +6,7 @@ tool calls, model discovery, and embeddings without a live provider.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import threading
@@ -55,6 +56,7 @@ class StubProvider:
         self.call_tool: str | None = None
         self.tool_arguments: dict[str, Any] = {}
         self.tool_plans: list[tuple[str, str, dict[str, Any]]] = []
+        self.stream_delay_seconds = 0.0
         self.tool_plan_cursor = 0
         self.base_url = ""
 
@@ -150,7 +152,12 @@ def stub_provider():
     async def chat_completions(request: Request):
         payload = await request.json()
         if payload.get("stream"):
-            return StreamingResponse(iter([provider.stream(payload)]), media_type="text/event-stream")
+            async def chunks():
+                if provider.stream_delay_seconds:
+                    await asyncio.sleep(provider.stream_delay_seconds)
+                yield provider.stream(payload)
+
+            return StreamingResponse(chunks(), media_type="text/event-stream")
         return provider.responses(payload)
 
     @app.get("/v1/models")

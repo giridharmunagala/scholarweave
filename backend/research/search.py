@@ -6,8 +6,8 @@ import re
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
+from html.parser import HTMLParser
 from typing import Any
-from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -17,6 +17,29 @@ _ATOM = {"atom": "http://www.w3.org/2005/Atom"}
 _WHITESPACE = re.compile(r"\s+")
 _HTML_TAG = re.compile(r"<[^>]+>")
 _MAX_RESULTS = 10
+_WEB_SEARCH_REQUESTS_PER_MINUTE = 30
+_DUCKDUCKGO_SEARCH_URL = "https://duckduckgo.com/"
+_DUCKDUCKGO_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64; rv:142.0) "
+    "Gecko/20100101 Firefox/142.0"
+)
+
+
+class _DuckDuckGoPreloadParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.url: str | None = None
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        if tag != "link":
+            return
+        attributes = dict(attrs)
+        if attributes.get("id") == "deep_preload_link":
+            self.url = attributes.get("href")
 
 
 class AsyncRateLimiter:
@@ -60,7 +83,7 @@ class ResearchSearchService:
             follow_redirects=True,
         )
         self._limiters = {
-            "web": AsyncRateLimiter(settings.web_search_requests_per_minute),
+            "web": AsyncRateLimiter(_WEB_SEARCH_REQUESTS_PER_MINUTE),
             "arxiv": AsyncRateLimiter(settings.arxiv_search_requests_per_minute),
             "wikipedia": AsyncRateLimiter(settings.wikipedia_search_requests_per_minute),
         }
@@ -69,39 +92,53 @@ class ResearchSearchService:
         if self._owns_client:
             await self._client.aclose()
 
-    async def search_web(self, query: str, limit: int) -> dict[str, Any]:
-        query, limit = self._validated_request(query, limit)
-        search_url = f"{self._settings.searxng_base_url.rstrip('/')}/search"
-        payload = await self._post_json(
-            "web",
-            search_url,
-            data={
-                "q": query,
-                "format": "json",
-                "categories": "general",
-                "language": "auto",
-            },
+    async def search_web(self, query: str) -> dict[str, Any]:
+        query, _ = self._validated_request(query, _MAX_RESULTS)
+        await self._limiters["web"].acquire()
+        headers = {
+            "User-Agent": _DUCKDUCKGO_USER_AGENT,
+            "Accept": "*/*",
+            "Referer": _DUCKDUCKGO_SEARCH_URL,
+            "Sec-Fetch-Dest": "script",
+            "Sec-Fetch-Mode": "no-cors",
+            "Sec-Fetch-Site": "same-site",
+        }
+        landing = await self._send_get(
+            "DuckDuckGo",
+            _DUCKDUCKGO_SEARCH_URL,
+            params={"q": query, "t": "h_", "ia": "web"},
+            headers=headers,
         )
-        raw_results = payload.get("results")
+        parser = _DuckDuckGoPreloadParser()
+        parser.feed(landing.text)
+        data_url = _validated_duckduckgo_data_url(parser.url)
+        response = await self._send_get(
+            "DuckDuckGo",
+            data_url.replace("/d.js?", "/d.js?o=json&", 1),
+            params=None,
+            headers=headers,
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ValueError("DuckDuckGo search returned invalid JSON.") from exc
+        raw_results = payload.get("results") if isinstance(payload, dict) else None
         if not isinstance(raw_results, list):
-            raise ValueError("SearXNG returned an invalid results payload.")
-        results = []
-        for item in raw_results:
-            if not isinstance(item, dict) or not item.get("url"):
-                continue
-            results.append(
-                {
-                    "title": _clean_text(item.get("title")),
-                    "url": str(item["url"]),
-                    "snippet": _clean_text(item.get("content")),
-                    "engine": str(item.get("engine") or ""),
-                    "published_at": item.get("publishedDate"),
-                    "image_url": _result_image_url(item, search_url),
-                }
-            )
-            if len(results) == limit:
-                break
-        return {"query": query, "provider": "searxng", "results": results}
+            raise ValueError("DuckDuckGo search returned an invalid results payload.")
+
+        results = [
+            {
+                "title": _clean_text(item.get("t")),
+                "url": str(item["u"]),
+                "snippet": _clean_text(item.get("a")),
+                "engine": "duckduckgo",
+                "published_at": None,
+                "image_url": None,
+            }
+            for item in raw_results
+            if isinstance(item, dict) and item.get("u")
+        ][:_MAX_RESULTS]
+        return {"query": query, "provider": "duckduckgo", "results": results}
 
     async def search_arxiv(self, query: str, limit: int) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
@@ -204,22 +241,6 @@ class ResearchSearchService:
             raise ValueError(f"{provider} search returned an invalid JSON payload.")
         return payload
 
-    async def _post_json(
-        self,
-        provider: str,
-        url: str,
-        *,
-        data: dict[str, Any],
-    ) -> dict[str, Any]:
-        response = await self._post(provider, url, data=data)
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise ValueError(f"{provider} search returned invalid JSON.") from exc
-        if not isinstance(payload, dict):
-            raise ValueError(f"{provider} search returned an invalid JSON payload.")
-        return payload
-
     async def _get(
         self,
         provider: str,
@@ -228,23 +249,18 @@ class ResearchSearchService:
         params: dict[str, Any],
     ) -> httpx.Response:
         await self._limiters[provider].acquire()
-        try:
-            response = await self._client.get(url, params=params)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise self._request_error(provider, exc) from exc
-        return response
+        return await self._send_get(provider, url, params=params)
 
-    async def _post(
+    async def _send_get(
         self,
         provider: str,
         url: str,
         *,
-        data: dict[str, Any],
+        params: dict[str, Any] | None,
+        headers: dict[str, str] | None = None,
     ) -> httpx.Response:
-        await self._limiters[provider].acquire()
         try:
-            response = await self._client.post(url, data=data)
+            response = await self._client.get(url, params=params, headers=headers)
             response.raise_for_status()
         except httpx.HTTPError as exc:
             raise self._request_error(provider, exc) from exc
@@ -252,14 +268,6 @@ class ResearchSearchService:
 
     @staticmethod
     def _request_error(provider: str, exc: httpx.HTTPError) -> RuntimeError:
-        if (
-            provider == "web"
-            and isinstance(exc, httpx.HTTPStatusError)
-            and exc.response.status_code == 403
-        ):
-            return RuntimeError(
-                "SearXNG rejected the JSON response request. Enable 'json' in its search.formats setting."
-            )
         return RuntimeError(f"{provider} search request failed: {exc}")
 
     @staticmethod
@@ -282,12 +290,12 @@ def _element_text(element: ET.Element, path: str) -> str:
     return _clean_text(child.text if child is not None else "")
 
 
-def _result_image_url(item: dict[str, Any], search_url: str) -> str | None:
-    for key in ("thumbnail", "img_src", "thumbnail_src"):
-        value = item.get(key)
-        if not isinstance(value, str) or not value.strip():
-            continue
-        resolved = urljoin(search_url, value.strip())
-        if urlparse(resolved).scheme in {"http", "https"}:
-            return resolved
-    return None
+def _validated_duckduckgo_data_url(value: str | None) -> str:
+    if not value:
+        raise RuntimeError(
+            "DuckDuckGo did not return search data; the request may have been rate-limited."
+        )
+    url = httpx.URL(html.unescape(value))
+    if url.scheme != "https" or url.host != "links.duckduckgo.com" or url.path != "/d.js":
+        raise RuntimeError("DuckDuckGo returned an unexpected search data URL.")
+    return str(url)

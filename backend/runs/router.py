@@ -14,6 +14,7 @@ from backend.runs.schemas import (
     RunCreateRequest,
     RunEventResponse,
     RunResponse,
+    StopAndAnswerResponse,
     run_response,
 )
 from backend.runs.service import RunService
@@ -76,6 +77,18 @@ async def cancel_run(
     service: RunService = Depends(run_service),
 ) -> RunResponse:
     return run_response(await service.cancel(run_id))
+
+
+@router.post("/{run_id}/stop-and-answer", response_model=StopAndAnswerResponse)
+async def stop_and_answer_run(
+    run_id: str,
+    service: RunService = Depends(run_service),
+) -> StopAndAnswerResponse:
+    stopped, answer = await service.stop_and_answer(run_id)
+    return StopAndAnswerResponse(
+        stopped_run=run_response(stopped),
+        answer_run=run_response(answer),
+    )
 
 
 @router.post(

@@ -9,8 +9,7 @@ import {
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { ModelSelect } from '../../shared/components/ModelSelect';
-import { EmptyState, ErrorNotice, Loading, StatusPill } from '../../shared/components/Ui';
+import { ErrorNotice, Loading, StatusPill } from '../../shared/components/Ui';
 import { capabilityOptions } from '../providers/ModelDefaultsPanel';
 import {
   providersApi,
@@ -25,11 +24,7 @@ import {
   type ModelReference,
   type Run,
 } from './api';
-import {
-  ChatModelPicker,
-  modelReferenceLabel,
-  preferredChatModel,
-} from './ChatModelPicker';
+import { ChatModelPicker, preferredChatModel } from './ChatModelPicker';
 import {
   applyChatStreamEvent,
   emptyChatStream,
@@ -43,6 +38,7 @@ import {
   type TurnTimeline,
 } from './chatTimeline';
 import { SourceChips, SourceImages, TurnTimelineView } from './TurnTimeline';
+import { SpeechControl } from './SpeechControl';
 import './chat.css';
 
 const SUGGESTIONS = [
@@ -78,13 +74,16 @@ export default function ChatPage() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [stopping, setStopping] = useState<'stop' | 'answer' | null>(null);
   const [recording, setRecording] = useState(false);
   const [startingRecording, setStartingRecording] = useState(false);
   const [transcribing, setTranscribing] = useState(false);
   const [speechPreview, setSpeechPreview] = useState<string | null>(null);
   const [speechFinalFailed, setSpeechFinalFailed] = useState(false);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(
+    () => typeof window === 'undefined' || window.innerWidth > 900,
+  );
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -100,6 +99,7 @@ export default function ChatPage() {
   const recordingStartPendingRef = useRef(false);
   const speechMountedRef = useRef(false);
   const openRequestRef = useRef(0);
+  const runLifecycleRef = useRef(0);
 
   const refreshList = () => chatApi.list().then(setConversations);
   const open = async (id: string) => {
@@ -109,6 +109,7 @@ export default function ChatPage() {
     setStream(emptyChatStream);
     setOptimisticUser(null);
     setSending(false);
+    setStopping(null);
     setPinnedToBottom(true);
     const [conversationResult, runsResult] = await Promise.allSettled([
       chatApi.get(id),
@@ -211,8 +212,9 @@ export default function ChatPage() {
   }, [content]);
 
   useEffect(() => {
-    if (!run) return;
+    if (!run || stopping) return;
 
+    const lifecycle = ++runLifecycleRef.current;
     let cancelled = false;
     let finalizing = false;
     let polling = false;
@@ -255,7 +257,7 @@ export default function ChatPage() {
           knownRun ? Promise.resolve(knownRun) : chatApi.run(run.id),
           conversationId ? chatApi.get(conversationId) : Promise.resolve(null),
         ]);
-        if (cancelled) return;
+        if (cancelled || lifecycle !== runLifecycleRef.current) return;
         setRun(nextRun);
         setRuns((previous) => mergeRun(previous, nextRun));
         if (nextConversation) setCurrent(nextConversation);
@@ -263,9 +265,9 @@ export default function ChatPage() {
         setStream(displayStream(nextRun));
         void refreshList();
       } catch (nextError) {
-        if (!cancelled) setError(nextError);
+        if (!cancelled && lifecycle === runLifecycleRef.current) setError(nextError);
       } finally {
-        if (!cancelled) setSending(false);
+        if (!cancelled && lifecycle === runLifecycleRef.current) setSending(false);
       }
     };
 
@@ -308,7 +310,7 @@ export default function ChatPage() {
       unsubscribe();
       if (flushTimer !== undefined) window.clearTimeout(flushTimer);
     };
-  }, [run?.id, run?.status, current?.id, sending]);
+  }, [run?.id, run?.status, current?.id, sending, stopping]);
 
   const resetThread = () => {
     openRequestRef.current += 1;
@@ -317,6 +319,7 @@ export default function ChatPage() {
     setStream(emptyChatStream);
     setOptimisticUser(null);
     setSending(false);
+    setStopping(null);
     setPinnedToBottom(true);
   };
 
@@ -337,6 +340,40 @@ export default function ChatPage() {
     if (current) {
       setCurrent(null);
       resetThread();
+    }
+  };
+
+  const stopRun = async (answerWithAvailableInformation: boolean) => {
+    if (!run || !['pending', 'running'].includes(run.status) || stopping) return;
+    const request = openRequestRef.current;
+    const previousLifecycle = runLifecycleRef.current;
+    runLifecycleRef.current += 1;
+    setStopping(answerWithAvailableInformation ? 'answer' : 'stop');
+    setError(null);
+    try {
+      if (answerWithAvailableInformation) {
+        const response = await chatApi.stopAndAnswer(run.id);
+        if (request !== openRequestRef.current) return;
+        setRuns((previous) =>
+          mergeRun(mergeRun(previous, response.stopped_run), response.answer_run),
+        );
+        setRun(response.answer_run);
+        setStream(displayStream(response.answer_run));
+        setSending(true);
+      } else {
+        const stoppedRun = await chatApi.cancelRun(run.id);
+        if (request !== openRequestRef.current) return;
+        setRuns((previous) => mergeRun(previous, stoppedRun));
+        setRun(stoppedRun);
+        setStream(displayStream(stoppedRun));
+      }
+    } catch (nextError) {
+      if (request === openRequestRef.current) {
+        runLifecycleRef.current = previousLifecycle;
+        setError(nextError);
+      }
+    } finally {
+      if (request === openRequestRef.current) setStopping(null);
     }
   };
 
@@ -571,15 +608,6 @@ export default function ChatPage() {
     window.setTimeout(() => composerRef.current?.focus(), 0);
   };
 
-  const installBuiltInSpeech = async () => {
-    setError(null);
-    try {
-      setBuiltInSpeech(await providersApi.installBuiltInSpeech());
-    } catch (nextError) {
-      setError(nextError);
-    }
-  };
-
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
     if (!needle) return conversations;
@@ -622,19 +650,7 @@ export default function ChatPage() {
 
   if (loading || !settings) return <Loading label="Loading agent conversations…" />;
 
-  const activeModelLabel =
-    modelReferenceLabel(modelReference, providers)
-    || modelReferenceLabel(settings.default_model_references.chat ?? {}, providers)
-    || 'No model configured';
   const speechOptions = capabilityOptions(providers, 'speech');
-  const builtInSpeechReady =
-    builtInSpeech?.state === 'ready' || builtInSpeech?.state === 'running';
-  const speechModelConfigured = speechMode === 'builtin'
-    ? builtInSpeechReady
-    : Boolean(speechModelReference.provider_profile_id && speechModelReference.model);
-  const speechInstallProgress = builtInSpeech?.total_bytes
-    ? Math.min(100, Math.round(100 * builtInSpeech.downloaded_bytes / builtInSpeech.total_bytes))
-    : 0;
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
   // The active turn has no persisted user message yet, so its trace renders after the optimistic one.
@@ -648,32 +664,21 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="page page-wide chat-page">
+    <div className="chat-page">
       {error ? <ErrorNotice error={error} /> : null}
       <div className={`chat-layout${sidebarOpen ? '' : ' collapsed'}`}>
-        <aside className="conversation-list panel" aria-label="Conversations">
+        <aside className="conversation-list" aria-label="Conversations">
           <div className="conversation-list-head">
-            <div className="conversation-list-actions">
-              <button className="button block new-chat" type="button" onClick={create}>
-                <Icon name="plus" size={15} />
-                New chat
-              </button>
-              <button
-                type="button"
-                className="button ghost icon chat-sidebar-toggle"
-                aria-label={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
-                title={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
-                onClick={() => setSidebarOpen((value) => !value)}
-              >
-                <Icon name="sidebar" size={16} />
-              </button>
-            </div>
+            <button className="button block new-chat" type="button" onClick={create}>
+              <Icon name="plus" size={15} />
+              New chat
+            </button>
             <div className="conversation-search">
               <Icon name="search" size={14} />
               <input
                 type="search"
                 value={query}
-                placeholder="Search chats…"
+                placeholder="Search chats"
                 aria-label="Search conversations"
                 onChange={(event) => setQuery(event.target.value)}
               />
@@ -693,7 +698,6 @@ export default function ChatPage() {
                   }}
                 >
                   <strong>{conversation.title}</strong>
-                  <small>{conversation.last_message_preview || 'No messages yet'}</small>
                   <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
                 </button>
                 <button
@@ -710,304 +714,270 @@ export default function ChatPage() {
             ))}
             {!filtered.length ? (
               <p className="conversation-empty">
-                {conversations.length ? 'No chats match your search.' : 'No research chats yet.'}
+                {conversations.length ? 'No chats match your search.' : 'No chats yet.'}
               </p>
             ) : null}
           </div>
         </aside>
-        <section className="chat-surface panel">
+
+        <section className="chat-surface">
           <header className="chat-header">
-            <div className="chat-header-inner">
-              <div className="chat-header-title">
-                <strong>{current?.title ?? 'New research chat'}</strong>
-                <small>
-                  <Icon name="sparkle" size={12} />
-                  {activeModelLabel}
-                </small>
-              </div>
-              <div className="chat-header-meta">
-                {sending ? (
-                  <span className="chat-working">
-                    <span className="spinner tiny" aria-hidden="true" />
-                    Working…
-                  </span>
-                ) : null}
-                {run ? <StatusPill value={run.status} /> : null}
-              </div>
-            </div>
+            <button
+              type="button"
+              className="chat-list-toggle"
+              aria-label={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
+              title={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
+              onClick={() => setSidebarOpen((value) => !value)}
+            >
+              <Icon name="sidebar" size={16} />
+            </button>
+            <h1>{current?.title ?? 'New chat'}</h1>
+            {sending ? (
+              <span className="chat-working">
+                <span className="spinner tiny" aria-hidden="true" />
+                Working
+              </span>
+            ) : null}
+            {run && run.status !== 'completed' && !sending ? <StatusPill value={run.status} /> : null}
           </header>
-          <div className="chat-workspace">
-            <div className="chat-thread">
-              <div
-                className="message-list"
-                ref={messageListRef}
-                onScroll={(event) => {
-                  const element = event.currentTarget;
-                  const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
-                  setPinnedToBottom(distance < 80);
+
+          <div className="chat-thread">
+            <div
+              className="message-list"
+              ref={messageListRef}
+              onScroll={(event) => {
+                const element = event.currentTarget;
+                const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+                setPinnedToBottom(distance < 80);
+              }}
+            >
+              {!hasTranscript ? (
+                <div className="chat-welcome">
+                  <h2>What should we research?</h2>
+                  <p>Ask for evidence, comparisons, open questions or written notes. The agent picks its own tools.</p>
+                  <div className="suggestion-grid">
+                    {SUGGESTIONS.map((suggestion) => (
+                      <button
+                        type="button"
+                        className="suggestion"
+                        key={suggestion}
+                        disabled={sending || speechPreview !== null}
+                        onClick={() => void send(suggestion)}
+                      >
+                        {suggestion}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {current?.items.map((item, index) => {
+                if (!item.text?.trim()) return null;
+                const role = item.role ?? item.type;
+                const turnRun = reasoningAnchors.byIndex.get(index) ?? null;
+                const responseRun = reasoningAnchors.responseByIndex.get(index) ?? null;
+                // The trace sits between the question and the answer, where it happened.
+                const timeline = turnRun ? timelineFor(turnRun) : null;
+                return (
+                  <Fragment key={index}>
+                    <Message
+                      role={role}
+                      text={item.text}
+                      metrics={responseRun ? turnMetrics(responseRun) : null}
+                      sources={responseRun ? timelineFor(responseRun).sources : null}
+                      onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
+                      canRetry={!sending}
+                    />
+                    {timeline ? <TurnTimelineView timeline={timeline} /> : null}
+                  </Fragment>
+                );
+              })}
+              {optimisticUser ? (
+                <Message role="user" text={optimisticUser} className="optimistic" />
+              ) : null}
+              {pendingTimeline ? <TurnTimelineView timeline={pendingTimeline} /> : null}
+              {stream.assistant ? (
+                <Message
+                  role="assistant"
+                  text={stream.assistant}
+                  className="streaming"
+                  streaming
+                  metrics={run ? turnMetrics(run) : null}
+                  sources={liveTimeline.sources}
+                />
+              ) : null}
+              {sending && !stream.assistant && !stream.reasoning && !liveTimeline.steps.length ? (
+                <div className="thinking-bubble" role="status" aria-label="The agent is thinking">
+                  <span /> <span /> <span />
+                </div>
+              ) : null}
+              {run?.error ? <div className="notice error chat-run-error">{run.error}</div> : null}
+            </div>
+
+            {!pinnedToBottom && hasTranscript ? (
+              <button
+                type="button"
+                className="scroll-to-bottom"
+                aria-label="Jump to latest"
+                onClick={() => {
+                  setPinnedToBottom(true);
+                  messageListRef.current?.scrollTo({
+                    top: messageListRef.current.scrollHeight,
+                    behavior: 'smooth',
+                  });
                 }}
               >
-                {!hasTranscript ? (
-                  <div className="chat-welcome">
-                    <EmptyState
-                      icon="agents"
-                      title="What should we research?"
-                      description="Ask the agent to find evidence, compare papers, answer questions, identify open areas, or write research notes. It chooses and calls the tools it needs."
-                    />
-                    <div className="suggestion-grid">
-                      {SUGGESTIONS.map((suggestion) => (
-                        <button
-                          type="button"
-                          className="suggestion"
-                          key={suggestion}
-                          disabled={sending || speechPreview !== null}
-                          onClick={() => void send(suggestion)}
-                        >
-                          <Icon name="sparkle" size={14} />
-                          <span>{suggestion}</span>
-                        </button>
-                      ))}
+                <Icon name="arrowRight" size={15} />
+              </button>
+            ) : null}
+
+            <div className="composer">
+              <div className="composer-inner">
+                {speechPreview !== null ? (
+                  <section className="speech-review" aria-live="polite">
+                    <div className="speech-review-head">
+                      <strong>
+                        {recording
+                          ? 'Live transcript'
+                          : transcribing
+                            ? 'Finishing transcript'
+                            : speechFinalFailed ? 'Transcription incomplete' : 'Review transcript'}
+                      </strong>
+                      {recording ? <span className="recording-dot">Listening</span> : null}
                     </div>
-                  </div>
-                ) : null}
-                {current?.items.map((item, index) => {
-                  if (!item.text?.trim()) return null;
-                  const role = item.role ?? item.type;
-                  const turnRun = reasoningAnchors.byIndex.get(index) ?? null;
-                  const responseRun = reasoningAnchors.responseByIndex.get(index) ?? null;
-                  // The trace sits between the question and the answer, where it happened.
-                  const timeline = turnRun ? timelineFor(turnRun) : null;
-                  return (
-                    <Fragment key={index}>
-                      <Message
-                        role={role}
-                        text={item.text}
-                        metrics={responseRun ? turnMetrics(responseRun) : null}
-                        sources={responseRun ? timelineFor(responseRun).sources : null}
-                        onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
-                        canRetry={!sending}
-                      />
-                      {timeline ? <TurnTimelineView timeline={timeline} /> : null}
-                    </Fragment>
-                  );
-                })}
-                {optimisticUser ? (
-                  <Message role="user" text={optimisticUser} className="optimistic" />
-                ) : null}
-                {pendingTimeline ? <TurnTimelineView timeline={pendingTimeline} /> : null}
-                {stream.assistant ? (
-                  <Message
-                    role="assistant"
-                    text={stream.assistant}
-                    className="streaming"
-                    streaming
-                    metrics={run ? turnMetrics(run) : null}
-                    sources={liveTimeline.sources}
-                  />
-                ) : null}
-                {sending && !stream.assistant && !stream.reasoning && !liveTimeline.steps.length ? (
-                  <div className="thinking-bubble" role="status" aria-label="The agent is thinking">
-                    <span /> <span /> <span />
-                  </div>
-                ) : null}
-                {run?.error ? <div className="notice error chat-run-error">{run.error}</div> : null}
-              </div>
-              {!pinnedToBottom && hasTranscript ? (
-                <button
-                  type="button"
-                  className="scroll-to-bottom"
-                  onClick={() => {
-                    setPinnedToBottom(true);
-                    messageListRef.current?.scrollTo({
-                      top: messageListRef.current.scrollHeight,
-                      behavior: 'smooth',
-                    });
-                  }}
-                >
-                  <Icon name="arrowRight" size={14} />
-                  Jump to latest
-                </button>
-              ) : null}
-              <div className="composer">
-                <div className="composer-inner">
-                  <div className="composer-box">
                     <textarea
-                      ref={composerRef}
-                      rows={1}
-                      disabled={sending}
-                      value={content}
-                      onChange={(event) => setContent(event.target.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' && !event.shiftKey) {
-                          event.preventDefault();
-                          void send();
-                        }
-                      }}
-                      placeholder="Ask for a research outcome…"
+                      value={speechPreview}
+                      rows={3}
+                      disabled={recording || transcribing}
+                      aria-label="Speech transcript preview"
+                      placeholder={recording ? 'Start speaking…' : 'Waiting for transcription…'}
+                      onChange={(event) => setSpeechPreview(event.target.value)}
                     />
-                    <div className="composer-actions">
+                    {speechFinalFailed ? (
+                      <small className="speech-review-error">
+                        The final pass failed, so this partial transcript cannot be accepted. Retry the recording or discard it.
+                      </small>
+                    ) : null}
+                    <div className="button-row speech-review-actions">
+                      {recording ? (
+                        <button className="button small" type="button" onClick={stopRecording}>
+                          <Icon name="stop" size={14} />
+                          Stop
+                        </button>
+                      ) : (
+                        <>
+                          <button
+                            className="button small"
+                            type="button"
+                            disabled={transcribing || speechFinalFailed || !speechPreview.trim()}
+                            onClick={acceptSpeechPreview}
+                          >
+                            <Icon name="check" size={14} />
+                            Use transcript
+                          </button>
+                          <button
+                            className="button secondary small"
+                            type="button"
+                            disabled={transcribing}
+                            onClick={() => {
+                              setSpeechPreview(null);
+                              void toggleRecording();
+                            }}
+                          >
+                            <Icon name="refresh" size={14} />
+                            Retry
+                          </button>
+                          <button
+                            className="button ghost small"
+                            type="button"
+                            disabled={transcribing}
+                            onClick={() => setSpeechPreview(null)}
+                          >
+                            Discard
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </section>
+                ) : null}
+
+                {/* One control surface: what you type, what answers, and how you send it. */}
+                <div className="composer-box">
+                  <textarea
+                    ref={composerRef}
+                    rows={1}
+                    disabled={sending}
+                    value={content}
+                    onChange={(event) => setContent(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !event.shiftKey) {
+                        event.preventDefault();
+                        void send();
+                      }
+                    }}
+                    placeholder="Ask for a research outcome…"
+                  />
+                  <div className="composer-bar">
+                    <ChatModelPicker
+                      providers={providers}
+                      settings={settings}
+                      value={modelReference}
+                      disabled={sending}
+                      onChange={selectModel}
+                    />
+                    <span className="composer-hint">
+                      <kbd>Enter</kbd> to send
+                    </span>
+                    <SpeechControl
+                      mode={speechMode}
+                      onModeChange={setSpeechMode}
+                      builtIn={builtInSpeech}
+                      options={speechOptions}
+                      modelReference={speechModelReference}
+                      onModelReferenceChange={setSpeechModelReference}
+                      recording={recording}
+                      starting={startingRecording}
+                      transcribing={transcribing}
+                      busy={sending}
+                      onToggle={() => void toggleRecording()}
+                    />
+                    {sending && run && ['pending', 'running'].includes(run.status) ? (
+                      <div className="composer-run-actions">
+                        <button
+                          className="composer-run-stop"
+                          type="button"
+                          aria-label="Stop current run"
+                          disabled={stopping !== null}
+                          onClick={() => void stopRun(false)}
+                        >
+                          {stopping === 'stop'
+                            ? <span className="spinner tiny" aria-hidden="true" />
+                            : <Icon name="stop" size={13} />}
+                          Stop
+                        </button>
+                        <button
+                          className="composer-run-answer"
+                          type="button"
+                          aria-label="Stop and answer with available information"
+                          disabled={stopping !== null}
+                          onClick={() => void stopRun(true)}
+                        >
+                          {stopping === 'answer'
+                            ? <span className="spinner tiny" aria-hidden="true" />
+                            : null}
+                          Answer now
+                        </button>
+                      </div>
+                    ) : (
                       <button
-                        className={`button secondary icon composer-record${recording ? ' recording' : ''}`}
-                        type="button"
-                        aria-label={recording ? 'Stop recording and transcribe' : 'Record speech'}
-                        title={
-                          speechModelConfigured
-                            ? recording ? 'Stop and transcribe' : 'Record speech'
-                            : 'Choose a speech recognition model'
-                        }
-                        disabled={sending || startingRecording || transcribing || !speechModelConfigured}
-                        onClick={() => void toggleRecording()}
-                      >
-                        {startingRecording || transcribing
-                          ? <span className="spinner tiny" aria-hidden="true" />
-                          : <Icon name={recording ? 'stop' : 'microphone'} size={16} />}
-                      </button>
-                      <button
-                        className="button icon composer-send"
+                        className="composer-icon composer-send"
                         type="button"
                         aria-label="Send message"
                         disabled={sending || transcribing || speechPreview !== null || !content.trim()}
                         onClick={() => void send()}
                       >
-                        {sending
-                          ? <span className="spinner tiny" aria-hidden="true" />
-                          : <Icon name="arrowRight" size={16} />}
+                        <Icon name="arrowRight" size={16} />
                       </button>
-                    </div>
-                  </div>
-                  {speechPreview !== null ? (
-                    <section className="speech-review" aria-live="polite">
-                      <div className="speech-review-head">
-                        <strong>
-                          {recording
-                            ? 'Live transcript'
-                            : transcribing
-                              ? 'Finishing transcript…'
-                              : speechFinalFailed ? 'Transcription incomplete' : 'Review transcript'}
-                        </strong>
-                        {recording ? <span className="recording-dot">Listening</span> : null}
-                      </div>
-                      <textarea
-                        value={speechPreview}
-                        rows={3}
-                        disabled={recording || transcribing}
-                        aria-label="Speech transcript preview"
-                        placeholder={recording ? 'Start speaking…' : 'Waiting for transcription…'}
-                        onChange={(event) => setSpeechPreview(event.target.value)}
-                      />
-                      {speechFinalFailed ? (
-                        <small className="speech-review-error">
-                          The final pass failed, so this partial transcript cannot be accepted. Retry the recording or discard it.
-                        </small>
-                      ) : null}
-                      <div className="button-row speech-review-actions">
-                        {recording ? (
-                          <button className="button small" type="button" onClick={stopRecording}>
-                            <Icon name="stop" size={14} />
-                            Stop
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              className="button small"
-                              type="button"
-                              disabled={transcribing || speechFinalFailed || !speechPreview.trim()}
-                              onClick={acceptSpeechPreview}
-                            >
-                              <Icon name="check" size={14} />
-                              Use transcript
-                            </button>
-                            <button
-                              className="button secondary small"
-                              type="button"
-                              disabled={transcribing}
-                              onClick={() => {
-                                setSpeechPreview(null);
-                                void toggleRecording();
-                              }}
-                            >
-                              <Icon name="refresh" size={14} />
-                              Retry
-                            </button>
-                            <button
-                              className="button ghost small"
-                              type="button"
-                              disabled={transcribing}
-                              onClick={() => setSpeechPreview(null)}
-                            >
-                              Discard
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </section>
-                  ) : null}
-                  <div className="composer-footer">
-                    <div className="composer-model">
-                      <span className="composer-model-label">
-                        <Icon name="sparkle" size={13} />
-                        Model
-                      </span>
-                      <ChatModelPicker
-                        providers={providers}
-                        settings={settings}
-                        value={modelReference}
-                        disabled={sending}
-                        onChange={selectModel}
-                      />
-                    </div>
-                    <div className="composer-speech">
-                      <Icon name="microphone" size={13} />
-                      <select
-                        className="speech-source-select"
-                        aria-label="Speech recognition source"
-                        value={speechMode}
-                        disabled={recording || startingRecording || transcribing}
-                        onChange={(event) => setSpeechMode(event.target.value as 'builtin' | 'provider')}
-                      >
-                        <option value="builtin">Nemotron English local</option>
-                        <option value="provider">Provider model</option>
-                      </select>
-                      {speechMode === 'builtin' ? (
-                        !builtInSpeech?.available ? (
-                          <span title={builtInSpeech?.error ?? undefined}>Unavailable</span>
-                        ) : builtInSpeech.state === 'error' ? (
-                          <button
-                            className="button secondary small"
-                            type="button"
-                            onClick={() => void installBuiltInSpeech()}
-                          >
-                            Retry install
-                          </button>
-                        ) : builtInSpeechReady ? (
-                          <span className="speech-ready">Ready</span>
-                        ) : builtInSpeech?.state === 'installing' ? (
-                          <span>Downloading {speechInstallProgress}%</span>
-                        ) : (
-                          <button
-                            className="button secondary small"
-                            type="button"
-                            onClick={() => void installBuiltInSpeech()}
-                          >
-                            Install model
-                          </button>
-                        )
-                      ) : (
-                        <ModelSelect
-                          options={speechOptions}
-                          value={speechModelReference}
-                          disabled={recording || startingRecording || transcribing}
-                          placeholder={speechOptions.length ? 'Speech model' : 'No speech models'}
-                          onChange={(reference) => setSpeechModelReference(reference)}
-                        />
-                      )}
-                      {startingRecording ? <span>Opening microphone…</span> : null}
-                      {recording ? <span>Listening…</span> : null}
-                      {transcribing ? <span>Transcribing…</span> : null}
-                    </div>
-                    <span className="composer-hint">
-                      <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline
-                    </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1091,45 +1061,39 @@ function Message({
   canRetry?: boolean;
 }) {
   const isAssistant = role === 'assistant';
+  // No avatar, no role caption: the shape of the turn already says who is speaking.
   return (
     <article className={`message role-${role} ${className}`.trim()}>
-      <span className="message-avatar" aria-hidden="true">
-        <Icon name={role === 'user' ? 'user' : 'sparkle'} size={14} />
-      </span>
       <div className="message-body">
-        <MessageHeader
-          label={streaming ? `${role} · streaming` : role}
-          content={text}
-          showCopy={!isAssistant}
-        />
         <MarkdownViewer content={text} />
         {streaming ? <i className="stream-cursor" aria-hidden="true" /> : null}
         {isAssistant && sources?.length ? <SourceImages sources={sources} /> : null}
         {isAssistant && sources?.length ? <SourceChips sources={sources} /> : null}
-        {isAssistant ? (
-          <MessageActions
-            content={text}
-            metrics={metrics}
-            onRetry={onRetry}
-            canRetry={canRetry}
-          />
-        ) : null}
       </div>
+      <MessageActions
+        content={text}
+        metrics={isAssistant ? metrics : null}
+        onRetry={isAssistant ? onRetry : null}
+        canRetry={canRetry}
+        speakable={isAssistant}
+      />
     </article>
   );
 }
 
-/** The answer's footer: what you can do with it, and what it cost, on one line. */
+/** Everything you can do with a message, revealed only when you reach for it. */
 function MessageActions({
   content,
   metrics,
   onRetry,
   canRetry,
+  speakable,
 }: {
   content: string;
   metrics: TurnMetrics | null;
   onRetry: (() => void) | null;
   canRetry: boolean;
+  speakable: boolean;
 }) {
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
   const [speaking, setSpeaking] = useState(false);
@@ -1167,8 +1131,8 @@ function MessageActions({
       <button
         type="button"
         className={copyStatus === 'failed' ? 'failed' : ''}
-        title={copyStatus === 'copied' ? 'Copied' : 'Copy answer'}
-        aria-label={copyStatus === 'copied' ? 'Copied' : 'Copy answer'}
+        title={copyStatus === 'copied' ? 'Copied' : 'Copy'}
+        aria-label={copyStatus === 'copied' ? 'Copied' : 'Copy'}
         onClick={() => void copy()}
       >
         <Icon name={copyStatus === 'copied' ? 'check' : 'copy'} size={14} />
@@ -1184,7 +1148,7 @@ function MessageActions({
           <Icon name="refresh" size={14} />
         </button>
       ) : null}
-      {speech ? (
+      {speakable && speech ? (
         <button
           type="button"
           className={speaking ? 'active' : ''}
@@ -1395,47 +1359,6 @@ export function relativeTime(value: string): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
   if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
   return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-}
-
-function MessageHeader({
-  label,
-  content,
-  showCopy = true,
-}: {
-  label: string;
-  content: string;
-  showCopy?: boolean;
-}) {
-  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
-
-  const copy = async () => {
-    try {
-      await copyToClipboard(content);
-      setCopyStatus('copied');
-      window.setTimeout(() => setCopyStatus('idle'), 1800);
-    } catch {
-      setCopyStatus('failed');
-    }
-  };
-
-  const statusLabel = copyStatus === 'copied' ? 'Copied' : copyStatus === 'failed' ? 'Copy failed' : 'Copy message';
-  return (
-    <div className="message-header">
-      <span>{label}</span>
-      {showCopy ? (
-        <button
-          type="button"
-          className={`message-copy${copyStatus === 'failed' ? ' failed' : ''}`}
-          aria-label={statusLabel}
-          title={statusLabel}
-          onClick={() => void copy()}
-        >
-          <Icon name={copyStatus === 'copied' ? 'check' : 'copy'} size={14} />
-          <span>{copyStatus === 'idle' ? 'Copy' : statusLabel}</span>
-        </button>
-      ) : null}
-    </div>
-  );
 }
 
 async function copyToClipboard(content: string): Promise<void> {

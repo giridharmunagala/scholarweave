@@ -34,7 +34,7 @@ export function ThemeSwitcher() {
     <div className="theme-menu" ref={containerRef}>
       <button
         type="button"
-        className="button ghost icon"
+        className="theme-trigger"
         aria-haspopup="true"
         aria-expanded={open}
         aria-label={`Theme: ${preference === 'system' ? 'match system' : definition.label}`}
@@ -42,6 +42,7 @@ export function ThemeSwitcher() {
         onClick={() => setOpen((value) => !value)}
       >
         <ModeIcon scheme={preference === 'system' ? 'system' : definition.scheme} />
+        <span className="rail-label">Theme</span>
       </button>
       {open ? (
         <div className="theme-popover" role="menu" aria-label="Theme">
@@ -75,8 +76,8 @@ export function ThemeSwitcher() {
             onClick={() => choose('system')}
           >
             <span className="swatch" aria-hidden="true">
-              <i style={{ background: '#f6f3ec' }} />
-              <i style={{ background: '#0b0f16' }} />
+              <i style={{ background: '#f3ebdf' }} />
+              <i style={{ background: '#131520' }} />
             </span>
             <span className="stack-tight" style={{ gap: 0 }}>
               Match system

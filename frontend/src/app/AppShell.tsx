@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { Link, NavLink, useLocation } from './router';
+import type { ReactNode } from 'react';
+import { Link, NavLink } from './router';
 import { CommandPalette, useCommandPalette } from '../shared/components/CommandPalette';
 import { Icon, type IconName } from '../shared/components/Icons';
 import { ThemeSwitcher } from '../shared/components/ThemeSwitcher';
+import { WallpaperLayer } from '../shared/components/WallpaperLayer';
 
 interface NavEntry {
   to: string;
@@ -10,140 +11,65 @@ interface NavEntry {
   icon: IconName;
 }
 
-const NAV_GROUPS: Array<{ title: string; items: NavEntry[] }> = [
-  {
-    title: 'Research',
-    items: [
-      { to: '/', label: 'Agent', icon: 'agents' },
-      { to: '/papers', label: 'Papers', icon: 'papers' },
-      { to: '/tools', label: 'Tools', icon: 'tools' },
-      { to: '/workspace', label: 'Files', icon: 'workspace' },
-    ],
-  },
-  {
-    title: 'Operate',
-    items: [
-      { to: '/runs', label: 'Runs', icon: 'runs' },
-      { to: '/settings', label: 'Settings', icon: 'settings' },
-    ],
-  },
+/*
+ * One flat list of destinations. Grouping six items under "Research" and "Operate"
+ * headings added reading work without adding meaning, so the rail now just shows
+ * every place you can go, labelled, in one column.
+ */
+const NAV_ITEMS: NavEntry[] = [
+  { to: '/', label: 'Chat', icon: 'agents' },
+  { to: '/papers', label: 'Papers', icon: 'papers' },
+  { to: '/workspace', label: 'Files', icon: 'workspace' },
+  { to: '/tools', label: 'Tools', icon: 'tools' },
+  { to: '/runs', label: 'Runs', icon: 'runs' },
+  { to: '/settings', label: 'Settings', icon: 'settings' },
 ];
 
-const COMPACT_KEY = 'scholarweave-sidebar-compact';
-
-const TITLES: Array<[string, string]> = [
-  ['/', 'Research agent'],
-  ['/tools', 'Tools'],
-  ['/runs', 'Runs'],
-  ['/papers', 'Papers'],
-  ['/workspace', 'Files'],
-  ['/settings', 'Settings'],
-];
-
-function currentTitle(pathname: string): string {
-  const match = TITLES.find(([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`));
-  return match ? match[1] : 'Research agent';
-}
-
+/*
+ * The shell is deliberately thin: a rail of destinations and the page. Everything
+ * else a page needs to say about itself — its title, its actions, its status — is
+ * the page's own job, so there is exactly one place to read each thing.
+ */
 export function AppShell({ children }: { children: ReactNode }) {
-  const { pathname } = useLocation();
   const palette = useCommandPalette();
-  const [compact, setCompact] = useState(() => {
-    try {
-      return localStorage.getItem(COMPACT_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const [drawer, setDrawer] = useState(false);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(COMPACT_KEY, String(compact));
-    } catch {
-      /* Persisting the layout preference is best effort. */
-    }
-  }, [compact]);
-
-  // Route changes should never leave the mobile drawer covering the page.
-  useEffect(() => setDrawer(false), [pathname]);
-
-  const title = currentTitle(pathname);
-  const detail = pathname.split('/').filter(Boolean)[1];
 
   return (
-    <div className="app-shell" data-compact={compact} data-drawer={drawer}>
-      <aside className="sidebar">
-        <Link className="brand" to="/" aria-label="ScholarWeave home">
-          <span className="brand-mark">SW</span>
-          <span className="brand-text">
-            <strong>ScholarWeave</strong>
-            <small>Agents SDK workspace</small>
-          </span>
-        </Link>
-        <nav aria-label="Primary">
-          {NAV_GROUPS.map((group) => (
-            <div key={group.title}>
-              <div className="nav-group">{group.title}</div>
-              {group.items.map((item) => (
-                <NavLink key={item.to} to={item.to} title={item.label}>
-                  <Icon name={item.icon} />
-                  <span className="nav-label">{item.label}</span>
-                </NavLink>
-              ))}
-            </div>
-          ))}
-        </nav>
-        <div className="sidebar-foot">
-          <button
-            type="button"
-            className="button ghost icon sidebar-toggle"
-            aria-label={compact ? 'Expand sidebar' : 'Collapse sidebar'}
-            title={compact ? 'Expand sidebar' : 'Collapse sidebar'}
-            onClick={() => setCompact((value) => !value)}
-          >
-            <Icon name="sidebar" />
-          </button>
-          <div className="sdk-status" title="OpenAI Agents SDK 0.19.4">
-            <span className="sdk-dot" />
-            <span>OpenAI Agents SDK 0.19.4</span>
+    <>
+      <WallpaperLayer />
+      <div className="app-shell">
+        <nav className="rail" aria-label="Primary">
+          <Link className="rail-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
+            <span className="rail-mark">SW</span>
+          </Link>
+
+          <div className="rail-nav">
+            {NAV_ITEMS.map((item) => (
+              <NavLink key={item.to} to={item.to} title={item.label}>
+                <Icon name={item.icon} size={19} />
+                <span className="rail-label">{item.label}</span>
+              </NavLink>
+            ))}
           </div>
-        </div>
-      </aside>
 
-      <div className="sidebar-scrim" role="presentation" onClick={() => setDrawer(false)} />
+          <div className="rail-foot">
+            <button
+              type="button"
+              className="rail-action search-trigger"
+              aria-label="Search"
+              title="Search (⌘K)"
+              onClick={() => palette.setOpen(true)}
+            >
+              <Icon name="search" size={18} />
+              <span className="rail-label">Search</span>
+            </button>
+            <ThemeSwitcher />
+          </div>
+        </nav>
 
-      <div className="app-body">
-        <header className="topbar">
-          <button
-            type="button"
-            className="button ghost icon drawer-toggle"
-            aria-label="Open navigation"
-            onClick={() => setDrawer((value) => !value)}
-          >
-            <Icon name="menu" />
-          </button>
-          <nav className="breadcrumb" aria-label="Breadcrumb">
-            <strong>{title}</strong>
-            {detail ? (
-              <>
-                <span className="sep">/</span>
-                <span className="truncate">{detail === 'new' ? 'New' : detail}</span>
-              </>
-            ) : null}
-          </nav>
-          <span className="spacer" />
-          <button type="button" className="search-trigger" onClick={() => palette.setOpen(true)}>
-            <Icon name="search" size={16} />
-            <span className="search-label">Search…</span>
-            <kbd>⌘K</kbd>
-          </button>
-          <ThemeSwitcher />
-        </header>
         <main className="app-main">{children}</main>
-      </div>
 
-      <CommandPalette open={palette.open} onClose={palette.close} />
-    </div>
+        <CommandPalette open={palette.open} onClose={palette.close} />
+      </div>
+    </>
   );
 }

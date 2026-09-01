@@ -155,12 +155,14 @@ class FakeServer {
   runs: Record<string, any>[] = [];
   turnIndex = 0;
   listeners = new Map<string, FakeEventSource>();
+  failNextStopAndAnswer = false;
 
   reset() {
     this.sessionItems = [];
     this.runs = [];
     this.turnIndex = 0;
     this.listeners.clear();
+    this.failNextStopAndAnswer = false;
   }
 
   startRun(content: string) {
@@ -190,13 +192,37 @@ class FakeServer {
 
   /** Persist the run exactly like the backend does once the turn settles. */
   completeRun(runId: string, index: number) {
-    const run = this.runs.find((candidate) => candidate.id === runId)!;
-    run.status = 'completed';
-    run.events = BUILT[index].events;
-    run.items = BUILT[index].items;
-    run.started_at = new Date().toISOString();
-    run.finished_at = new Date().toISOString();
+    const runIndex = this.runs.findIndex((candidate) => candidate.id === runId);
+    this.runs[runIndex] = {
+      ...this.runs[runIndex],
+      status: 'completed',
+      events: BUILT[index].events,
+      items: BUILT[index].items,
+      started_at: new Date().toISOString(),
+      finished_at: new Date().toISOString(),
+    };
     this.sessionItems.push(...BUILT[index].sessionItems);
+  }
+
+  cancelRun(runId: string) {
+    const index = this.runs.findIndex((candidate) => candidate.id === runId);
+    const run = {
+      ...this.runs[index],
+      status: 'cancelled',
+      cancel_requested: true,
+      finished_at: new Date().toISOString(),
+    };
+    this.runs[index] = run;
+    return run;
+  }
+
+  stopAndAnswer(runId: string) {
+    const stoppedRun = this.cancelRun(runId);
+    const answerRun = this.startRun('Answer from available information');
+    answerRun.input = [
+      { role: 'user', content: 'Answer from available information' },
+    ];
+    return { stopped_run: stoppedRun, answer_run: answerRun };
   }
 }
 
@@ -294,6 +320,22 @@ function installFetch() {
         return respond({ ...conversationSummary(), items: server.sessionItems });
       }
       if (url.includes('/api/runs?conversation_id=')) return respond(server.runs);
+      const stopAndAnswerMatch = /\/api\/runs\/([^/?]+)\/stop-and-answer$/.exec(url);
+      if (stopAndAnswerMatch && method === 'POST') {
+        if (server.failNextStopAndAnswer) {
+          server.failNextStopAndAnswer = false;
+          throw new Error('Stop request failed');
+        }
+        const response = server.stopAndAnswer(stopAndAnswerMatch[1]);
+        server.listeners.get(stopAndAnswerMatch[1])?.deliver({
+          sequence: 9999,
+          event_type: 'run.cancelled',
+          payload: {},
+        });
+        return respond(response);
+      }
+      const cancelMatch = /\/api\/runs\/([^/?]+)\/cancel$/.exec(url);
+      if (cancelMatch && method === 'POST') return respond(server.cancelRun(cancelMatch[1]));
       const runMatch = /\/api\/runs\/([^/?]+)$/.exec(url);
       if (runMatch) return respond(server.runs.find((run) => run.id === runMatch[1]));
       throw new Error(`Unhandled request: ${method} ${url}`);
@@ -452,6 +494,69 @@ describe('chat transcript detail', () => {
     });
     await flush(1);
     expect(text(container.querySelector('.timeline-detail.reasoning'))).toContain('Step 1: weighing the evidence.');
+  });
+
+  it('stops an active run immediately', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+
+    const stop = container.querySelector('[aria-label="Stop current run"]');
+    expect(stop).not.toBeNull();
+    expect(container.querySelector('[aria-label="Stop and answer with available information"]')).not.toBeNull();
+    await act(async () => {
+      stop!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    expect(server.runs[0].status).toBe('cancelled');
+    expect(container.querySelector('[aria-label="Stop current run"]')).toBeNull();
+  });
+
+  it('stops research and transitions to an available-information answer run', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+
+    await act(async () => {
+      container
+        .querySelector('[aria-label="Stop and answer with available information"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush(2);
+
+    expect(server.runs).toHaveLength(2);
+    expect(server.runs[0].status).toBe('cancelled');
+    expect(server.runs[1].status).toBe('pending');
+    expect(container.querySelector('[aria-label="Stop current run"]')).not.toBeNull();
+  });
+
+  it('resumes tracking the active run when a stop request fails', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    server.failNextStopAndAnswer = true;
+
+    await act(async () => {
+      container
+        .querySelector('[aria-label="Stop and answer with available information"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush(2);
+    expect(container.querySelector('[aria-label="Stop current run"]')).not.toBeNull();
+
+    server.completeRun('run-1', 0);
+    await act(async () => {
+      server.listeners.get('run-1')?.deliver({
+        sequence: 9999,
+        event_type: 'run.completed',
+        payload: {},
+      });
+    });
+    await flush();
+
+    expect(container.querySelector('[aria-label="Stop current run"]')).toBeNull();
+    expect(text(container)).not.toContain('Working');
   });
 
   it('names the tool it ran and exposes the sources it found', async () => {

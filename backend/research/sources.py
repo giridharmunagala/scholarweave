@@ -25,6 +25,21 @@ _MAX_REDIRECTS = 5
 _WHITESPACE = re.compile(r"[ \t\f\v]+")
 _BLANK_LINES = re.compile(r"\n{3,}")
 _ARXIV_HOSTS = {"arxiv.org", "www.arxiv.org", "export.arxiv.org"}
+_WEB_PAGE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64; rv:142.0) "
+        "Gecko/20100101 Firefox/142.0"
+    ),
+    "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.8",
+}
+
+
+class WebSourceUnavailable(ValueError):
+    def __init__(self, url: str, reason: str) -> None:
+        super().__init__(reason)
+        self.url = url
+        self.reason = reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,22 +229,30 @@ class SourceDownloadService:
         content, final_url, headers = await self._download(
             normalized_url,
             self._settings.max_web_source_bytes,
+            request_headers=_WEB_PAGE_HEADERS,
         )
         media_type = headers.get("content-type", "").partition(";")[0].strip().casefold()
         if media_type not in {"text/html", "application/xhtml+xml"}:
-            raise ValueError(
-                f"The downloaded resource is not an HTML page (content type: {media_type or 'unknown'})."
+            raise WebSourceUnavailable(
+                final_url,
+                f"The resource is not an HTML page (content type: {media_type or 'unknown'}).",
             )
         encoding = _charset(headers.get("content-type", "")) or "utf-8"
         try:
             html = content.decode(encoding, errors="replace")
         except LookupError as exc:
-            raise ValueError(f"HTML page uses an unsupported character encoding: {encoding}.") from exc
+            raise WebSourceUnavailable(
+                final_url,
+                f"The page uses an unsupported character encoding: {encoding}.",
+            ) from exc
         parser = _ReadableHTMLParser()
         parser.feed(html)
         text = parser.text
         if not text:
-            raise ValueError("The HTML page did not contain readable text.")
+            raise WebSourceUnavailable(
+                final_url,
+                "The HTML page did not contain readable text.",
+            )
         now = utcnow()
         source = WebSource(
             id=str(uuid.uuid4()),
@@ -350,12 +373,18 @@ class SourceDownloadService:
         self,
         url: str,
         max_bytes: int,
+        *,
+        request_headers: dict[str, str] | None = None,
     ) -> tuple[bytes, str, httpx.Headers]:
         current = url
         for _ in range(_MAX_REDIRECTS + 1):
             await self._validate_public_url(current)
             try:
-                async with self._client.stream("GET", current) as response:
+                async with self._client.stream(
+                    "GET",
+                    current,
+                    headers=request_headers,
+                ) as response:
                     self._validate_connected_peer(response)
                     if response.status_code in _REDIRECT_STATUSES:
                         location = response.headers.get("location")
@@ -363,6 +392,11 @@ class SourceDownloadService:
                             raise ValueError("Remote server returned a redirect without a location.")
                         current = self._normalize_url(urljoin(current, location))
                         continue
+                    if 400 <= response.status_code < 500:
+                        raise WebSourceUnavailable(
+                            str(response.url),
+                            f"The remote page returned HTTP {response.status_code}.",
+                        )
                     response.raise_for_status()
                     declared = response.headers.get("content-length")
                     if declared:

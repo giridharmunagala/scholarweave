@@ -126,7 +126,11 @@ class FunctionToolService:
             name=tool_name,
             description=spec.description or revision.description,
             params_json_schema=revision.parameters_schema_json,
-            on_invoke_tool=recoverable_tool_invoker(tool_name, invoke),
+            on_invoke_tool=recoverable_tool_invoker(
+                tool_name,
+                invoke,
+                catalog_id=spec.catalog_id,
+            ),
             strict_json_schema=True,
             needs_approval=spec.needs_approval or revision.requires_approval,
             output_json_schema=revision.output_schema_json,

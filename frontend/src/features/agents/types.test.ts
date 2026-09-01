@@ -10,7 +10,10 @@ describe('agent blueprint helpers', () => {
     expect(blueprint.entry_agent_id).toBe('agent');
     expect(blueprint.agents).toEqual([blankAgent('agent', 'Agent')]);
     expect(blueprint.run).toMatchObject({ max_turns: 10 });
-    expect(blueprint.session).toEqual({});
+    expect(blueprint.session).toEqual({
+      history_max_items: null,
+      messages_only: false,
+    });
   });
 
   it('keeps presentation state separate and generates stable unique IDs', () => {

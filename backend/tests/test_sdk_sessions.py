@@ -65,4 +65,4 @@ def test_legacy_compaction_policy_is_ignored() -> None:
         }
     )
 
-    assert policy.model_dump() == {}
+    assert policy == SessionPolicySpec()

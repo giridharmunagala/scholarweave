@@ -74,10 +74,10 @@ export default function WorkspacePage() {
 
   return (
     <div className="page">
-      <PageHeader eyebrow="Safe storage" title="Files" description="Agent FunctionTools can list, read, and write these allowlisted files through injected workspace services." />
+      <PageHeader title="Files" description="Notes and documents the agent can read and write while it works." />
       {error ? <ErrorNotice error={error} /> : null}
       <div className="workspace-layout">
-        <Panel title="Files" description={files.length ? `${files.length} file${files.length === 1 ? '' : 's'}` : undefined}>
+        <Panel description={files.length ? `${files.length} file${files.length === 1 ? '' : 's'}` : 'No files yet'}>
           <div className="stack-tight">
             <div className="row" style={{ marginBottom: 'var(--space-1)' }}>
               <input placeholder="notes/idea.md" value={newPath} onChange={(event) => setNewPath(event.target.value)} />
@@ -177,7 +177,6 @@ function WorkspaceFolder({
         <Icon name="workspace" size={15} />
         <span className="file-tree-folder-label">
           <strong title={folder.path}>{folder.displayName ?? folder.name}</strong>
-          {folder.displayName ? <span>{folder.name}</span> : null}
         </span>
         <small>{countFiles(folder)}</small>
         {folder.path !== 'papers' ? (
