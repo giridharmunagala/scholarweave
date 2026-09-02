@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from agents import (
@@ -24,8 +25,11 @@ from backend.runs.service import (
     STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION,
     STOP_AND_ANSWER_PROMPT,
     RunService,
+    _restore_pending_steering,
 )
 from backend.runtime.sessions import SdkSessionFactory
+from backend.runtime.steering import SteeringMessage
+from backend.runtime.steering import steering_message_id
 from backend.tools.catalog import create_tool_catalog
 
 
@@ -251,6 +255,185 @@ async def test_run_service_persists_sdk_items_events_and_usage(
         "invocation_id"
     ]
     await client.close()
+
+
+@pytest.mark.anyio
+async def test_terminal_model_call_continues_with_queued_steering(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.stream_delay_seconds = 0.5
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Answer the user.",
+                        "tool_ids": [],
+                    }
+                ],
+                "tools": [],
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ToolRuntime(),
+        EventBroker(),
+        settings=settings,
+    )
+
+    pending = service.create(
+        compiled,
+        "Explain the evidence.",
+        agent_revision_id=None,
+        conversation_id="conversation-1",
+    )
+    started = await asyncio.to_thread(stub_provider.request_started.wait, 2)
+    assert started is True
+    steering = await service.steer(
+        pending.id,
+        "Stop elaborating and give the conclusion now.",
+    )
+    for _attempt in range(300):
+        completed = service.get(pending.id)
+        if completed.status in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert completed.status == "completed", completed.error
+    assert len(stub_provider.requests) == 2
+    assert "Stop elaborating" not in str(stub_provider.requests[0]["messages"])
+    assert "Stop elaborating" in str(stub_provider.requests[1]["messages"])
+    steering_events = [
+        event
+        for event in completed.events
+        if event.event_type in {"steering.queued", "steering.applied"}
+    ]
+    assert [event.event_type for event in steering_events] == [
+        "steering.queued",
+        "steering.applied",
+    ]
+    assert all(
+        event.payload_json["message_id"] == steering.id for event in steering_events
+    )
+    assert completed.epochs[0].terminal_reason == "steering_continuation"
+    await client.close()
+
+
+@pytest.mark.anyio
+async def test_steering_is_not_applied_when_run_budget_is_exhausted(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.stream_delay_seconds = 0.5
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Answer the user.",
+                        "tool_ids": [],
+                    }
+                ],
+                "tools": [],
+                "run": {"max_turns": 1},
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        sessions,
+        ToolRuntime(),
+        EventBroker(),
+        settings=settings,
+    )
+
+    pending = service.create(
+        compiled,
+        "Explain the evidence.",
+        agent_revision_id=None,
+        conversation_id="conversation-1",
+    )
+    assert await asyncio.to_thread(stub_provider.request_started.wait, 2) is True
+    steering = await service.steer(pending.id, "Give the conclusion now.")
+    for _attempt in range(300):
+        completed = service.get(pending.id)
+        if completed.status in {"completed", "failed", "cancelled"}:
+            break
+        await asyncio.sleep(0.01)
+
+    assert completed.status == "failed"
+    assert len(stub_provider.requests) == 1
+    steering_events = [
+        event.event_type
+        for event in completed.events
+        if event.payload_json.get("message_id") == steering.id
+    ]
+    assert steering_events == ["steering.queued"]
+    session = sessions.get("conversation-1", compiled.blueprint.session)
+    assert any(
+        item.get("role") == "user"
+        and steering_message_id(item) == steering.id
+        for item in await session.get_items()
+        if isinstance(item, dict)
+    )
+    await client.close()
+
+
+def test_pending_steering_is_reconstructed_from_durable_events() -> None:
+    inbox = _restore_pending_steering(
+        [
+            SimpleNamespace(
+                event_type="steering.queued",
+                payload_json={"message_id": "applied", "content": "First"},
+            ),
+            SimpleNamespace(
+                event_type="steering.applied",
+                payload_json={"message_id": "applied", "content": "First"},
+            ),
+            SimpleNamespace(
+                event_type="steering.queued",
+                payload_json={"message_id": "pending", "content": "Second"},
+            ),
+        ]
+    )
+
+    assert inbox.take_pending_or_close() == [
+        SteeringMessage(id="pending", content="Second")
+    ]
 
 
 @pytest.mark.anyio

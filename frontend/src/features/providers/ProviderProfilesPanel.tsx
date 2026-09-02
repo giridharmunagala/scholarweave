@@ -240,6 +240,28 @@ export function ProviderProfilesPanel({
       setBusy(null);
     }
   };
+  const setModelPreserveThinking = async (
+    provider: Provider,
+    modelName: string,
+    preserveThinking: boolean,
+  ) => {
+    const key = `${provider.id}:${modelName}`;
+    setBusy(`configure:${key}:preserve-thinking`);
+    try {
+      await providersApi.update(provider.id, {
+        models: provider.models.map((model) =>
+          model.name === modelName
+            ? { ...model, preserve_thinking: preserveThinking }
+            : model
+        ),
+      });
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
   const openCatalog = (providerId: string) => {
     setModelFilter('all');
     setCatalogProviderId(providerId);
@@ -510,6 +532,23 @@ export function ProviderProfilesPanel({
                               </label>
                             ))}
                           </span>
+                          {['ollama', 'openai_compatible'].includes(catalogProvider.kind) ? (
+                            <label className="provider-model-preserve-thinking">
+                              <input
+                                type="checkbox"
+                                checked={model.preserve_thinking}
+                                disabled={modelUpdateBusy}
+                                onChange={(event) =>
+                                  void setModelPreserveThinking(
+                                    catalogProvider,
+                                    model.name,
+                                    event.target.checked,
+                                  )
+                                }
+                              />
+                              Preserve thinking between model calls
+                            </label>
+                          ) : null}
                         </details>
                         <label className="provider-model-enabled">
                           <input

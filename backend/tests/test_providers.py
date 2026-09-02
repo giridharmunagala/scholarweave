@@ -74,6 +74,7 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
             "name": "embed-1",
             "capabilities": ["embedding"],
             "reasoning_efforts": None,
+            "preserve_thinking": False,
             "context_window_tokens": None,
             "enabled": False,
         }
@@ -95,6 +96,7 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
             "name": "embed-1",
             "capabilities": ["embedding"],
             "reasoning_efforts": None,
+            "preserve_thinking": False,
             "context_window_tokens": None,
             "enabled": False,
         }

@@ -768,6 +768,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/runs/{run_id}/steering": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Steer Run */
+        post: operations["steer_run_api_runs__run_id__steering_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/runs/{run_id}/stop-and-answer": {
         parameters: {
             query?: never;
@@ -1921,6 +1938,11 @@ export interface components {
             enabled: boolean;
             /** Name */
             name: string;
+            /**
+             * Preserve Thinking
+             * @default false
+             */
+            preserve_thinking: boolean;
             /** Reasoning Efforts */
             reasoning_efforts?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
         };
@@ -2338,6 +2360,23 @@ export interface components {
             user_profile?: string | null;
             /** User Timezone */
             user_timezone?: string | null;
+        };
+        /** SteeringMessageRequest */
+        SteeringMessageRequest: {
+            /** Content */
+            content: string;
+        };
+        /** SteeringMessageResponse */
+        SteeringMessageResponse: {
+            /** Content */
+            content: string;
+            /** Id */
+            id: string;
+            /**
+             * Status
+             * @constant
+             */
+            status: "queued";
         };
         /** StopAndAnswerResponse */
         StopAndAnswerResponse: {
@@ -4368,6 +4407,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    steer_run_api_runs__run_id__steering_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SteeringMessageRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SteeringMessageResponse"];
                 };
             };
             /** @description Validation Error */

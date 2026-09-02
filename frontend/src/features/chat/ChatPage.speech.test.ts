@@ -1,12 +1,47 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+  acquireMicrophone,
   encodePcm16,
   encodeWav,
   PROVIDER_TRANSCRIPTION_INTERVAL_MS,
 } from './ChatPage';
 
 describe('speech recording', () => {
+  it('falls back to a physical microphone when no default input exists', async () => {
+    const stream = {} as MediaStream;
+    const getUserMedia = vi.fn()
+      .mockRejectedValueOnce(new DOMException('Requested device not found', 'NotFoundError'))
+      .mockResolvedValueOnce(stream);
+    const mediaDevices = {
+      getUserMedia,
+      enumerateDevices: vi.fn().mockResolvedValue([
+        { kind: 'audiooutput', deviceId: 'speaker' },
+        { kind: 'audioinput', deviceId: 'default' },
+        { kind: 'audioinput', deviceId: 'microphone-1' },
+      ]),
+    } as unknown as MediaDevices;
+
+    await expect(acquireMicrophone(mediaDevices)).resolves.toBe(stream);
+    expect(getUserMedia).toHaveBeenNthCalledWith(1, { audio: true });
+    expect(getUserMedia).toHaveBeenNthCalledWith(2, {
+      audio: { deviceId: { exact: 'microphone-1' } },
+    });
+  });
+
+  it('reports an actionable error when the browser sees no microphone', async () => {
+    const mediaDevices = {
+      getUserMedia: vi.fn().mockRejectedValue(
+        new DOMException('Requested device not found', 'NotFoundError'),
+      ),
+      enumerateDevices: vi.fn().mockResolvedValue([]),
+    } as unknown as MediaDevices;
+
+    await expect(acquireMicrophone(mediaDevices)).rejects.toThrow(
+      'No microphone input is available',
+    );
+  });
+
   it('requests live transcript updates without a multi-second client delay', () => {
     expect(PROVIDER_TRANSCRIPTION_INTERVAL_MS).toBeLessThan(1_000);
   });

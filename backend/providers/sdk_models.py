@@ -11,6 +11,12 @@ from backend.providers.runtime import ModelRuntime, ResolvedModel
 from backend.providers.types import ModelReference, ResolvedAgentModel
 
 
+def _replay_same_model_reasoning(context: Any) -> bool:
+    """Replay only reasoning emitted by the exact model receiving the continuation."""
+
+    return context.reasoning.origin_model == context.model
+
+
 class SdkClientPool:
     """Owns provider clients for the application lifespan."""
 
@@ -82,6 +88,11 @@ class ProfileModelResolver:
         model = OpenAIChatCompletionsModel(
             model=resolved.model,
             openai_client=client,
+            should_replay_reasoning_content=(
+                _replay_same_model_reasoning
+                if resolved.preserve_thinking
+                else None
+            ),
             buffer_streamed_tool_calls=resolved.kind in {"ollama", "openai_compatible"},
         )
         return ResolvedAgentModel(

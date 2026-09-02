@@ -13,6 +13,7 @@ from backend.runtime.context_budget import (
     create_context_budget_filter,
 )
 from backend.runtime.lifecycle import start_agent_invocation
+from backend.runtime.steering import SteeringInbox, SteeringMessage, steering_message_id
 
 
 class Runtime:
@@ -57,6 +58,17 @@ class Sink:
         self.events.append((event_type, payload))
 
 
+class Session:
+    def __init__(self) -> None:
+        self.items: list[dict[str, str]] = []
+
+    async def add_items(self, items: list[dict[str, str]]) -> None:
+        self.items.extend(items)
+
+    async def get_items(self) -> list[dict[str, str]]:
+        return list(self.items)
+
+
 class SummaryModel:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -89,6 +101,163 @@ def test_compaction_target_scales_with_model_context_window() -> None:
 
     assert fallback_target > 8_192
     assert large_model_target > fallback_target
+
+
+@pytest.mark.anyio
+async def test_steering_is_injected_at_the_next_model_call_boundary(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+    )
+    sink = Sink()
+    context = ScholarWeaveContext(
+        run_id="run-1",
+        conversation_id="conversation-1",
+        tool_runtime=Runtime(),
+        event_sink=sink,
+    )
+    inbox = SteeringInbox()
+    session = Session()
+    inbox.bind_session(session)
+    context.metadata["_steering_inbox"] = inbox
+    budget_filter = create_context_budget_filter(settings)
+    agent = SimpleNamespace(name="Worker")
+    first_input = [{"role": "user", "content": "Research the topic."}]
+
+    first = await budget_filter(
+        CallModelData(
+            model_data=ModelInputData(input=first_input, instructions=None),
+            agent=agent,
+            context=context,
+        )
+    )
+    message = inbox.queue("Answer directly with the evidence already found.")
+    second = await budget_filter(
+        CallModelData(
+            model_data=ModelInputData(
+                input=[
+                    *first_input,
+                    {"role": "assistant", "content": "I will search first."},
+                ],
+                instructions=None,
+            ),
+            agent=agent,
+            context=context,
+        )
+    )
+
+    steering_item = {
+        "role": "user",
+        "content": "Answer directly with the evidence already found.",
+    }
+    assert steering_item not in first.input
+    assert second.input[-1] == steering_item
+    assert len(session.items) == 1
+    assert steering_message_id(session.items[0]) == message.id
+    assert ("steering.applied", {"message_id": message.id, "content": message.content}) in sink.events
+
+
+@pytest.mark.anyio
+async def test_compaction_does_not_duplicate_replayed_steering(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        agent_context_window_tokens=4_096,
+        agent_context_high_water_ratio=0.7,
+        agent_context_compaction_target_tokens=1_024,
+    )
+    context = ScholarWeaveContext(
+        run_id="run-1",
+        conversation_id="conversation-1",
+        tool_runtime=Runtime(),
+    )
+    inbox = SteeringInbox()
+    inbox.bind_session(Session())
+    context.metadata["_steering_inbox"] = inbox
+    budget_filter = create_context_budget_filter(settings)
+    agent = SimpleNamespace(name="Worker")
+    initial_input = [
+        {"role": "user", "content": "Research the topic."},
+        {"role": "assistant", "content": "Prior reasoning " * 1_000},
+    ]
+    inbox.queue("Give the conclusion as soon as this call finishes.")
+
+    first = await budget_filter(
+        CallModelData(
+            model_data=ModelInputData(input=initial_input, instructions=None),
+            agent=agent,
+            context=context,
+        )
+    )
+    second = await budget_filter(
+        CallModelData(
+            model_data=ModelInputData(
+                input=[*initial_input, {"role": "assistant", "content": "New evidence."}],
+                instructions=None,
+            ),
+            agent=agent,
+            context=context,
+        )
+    )
+
+    steering_item = {
+        "role": "user",
+        "content": "Give the conclusion as soon as this call finishes.",
+    }
+    assert first.input.count(steering_item) == 1
+    assert second.input.count(steering_item) == 1
+
+
+@pytest.mark.anyio
+async def test_steering_session_persistence_is_idempotent() -> None:
+    inbox = SteeringInbox()
+    session = Session()
+    inbox.bind_session(session)
+    message = inbox.queue("Answer directly.")
+    pending = inbox.take_pending_or_close()
+
+    await inbox.persist(pending)
+    await inbox.persist(pending)
+
+    assert session.items == [message.session_item()]
+
+
+@pytest.mark.anyio
+async def test_recovered_steering_already_in_session_is_not_replayed_twice(
+    tmp_path,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+    )
+    context = ScholarWeaveContext(
+        run_id="run-1",
+        conversation_id="conversation-1",
+        tool_runtime=Runtime(),
+    )
+    inbox = SteeringInbox()
+    session = Session()
+    message = SteeringMessage(id="steering-1", content="Answer directly.")
+    await session.add_items([message.session_item()])
+    inbox.bind_session(session)
+    inbox.restore(message.id, message.content)
+    context.metadata["_steering_inbox"] = inbox
+
+    filtered = await create_context_budget_filter(settings)(
+        CallModelData(
+            model_data=ModelInputData(
+                input=[
+                    message.session_item(),
+                    {"role": "user", "content": "Resume after restart."},
+                ],
+                instructions=None,
+            ),
+            agent=SimpleNamespace(name="Worker"),
+            context=context,
+        )
+    )
+
+    assert filtered.input.count(message.input_item()) == 1
 
 
 @pytest.mark.anyio

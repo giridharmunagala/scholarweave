@@ -691,6 +691,17 @@
   overflow-y: auto;
 }
 .composer-box textarea:focus { box-shadow: none; }
+.message.steering-queued { opacity: .72; }
+.message.steering-queued::after {
+  content: 'Queued for the next model call';
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.message.steering-applied::after {
+  content: 'Steering applied';
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+}
 .composer-bar { display: flex; align-items: center; gap: var(--space-1); }
 
 .chat-model-picker { min-width: 0; width: min(230px, 45%); }
@@ -703,6 +714,35 @@
 }
 .chat-model-picker .model-select-trigger:hover { background: var(--surface-2); color: var(--text); }
 .chat-model-picker-hint { color: var(--muted); font-size: var(--text-xs); }
+.composer-reasoning {
+  display: flex;
+  align-items: center;
+  gap: .25rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.composer-reasoning > span { display: inline-flex; align-items: center; gap: .2rem; }
+.composer-reasoning select {
+  width: auto;
+  min-width: 0;
+  padding: .3rem 1.4rem .3rem .35rem;
+  border-color: transparent;
+  background-color: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.composer-reasoning select:hover { background-color: var(--surface-2); color: var(--text); }
+.composer-work-controls { display: flex; align-items: center; gap: 2px; }
+.composer-work-controls select {
+  width: auto;
+  min-width: 0;
+  padding: .3rem 1.4rem .3rem .45rem;
+  border-color: transparent;
+  background-color: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.composer-work-controls select:hover { background-color: var(--surface-2); color: var(--text); }
 
 /* The shortcut is a reminder for the hesitant, so it appears while you type. */
 .composer-hint {
@@ -801,6 +841,11 @@
 }
 .speech-choice { display: flex; align-items: center; gap: var(--space-2); color: var(--text); font-size: var(--text-sm); cursor: pointer; }
 .speech-choice input { width: auto; margin: 0; }
+.speech-choice:has(input:disabled) { color: var(--muted); cursor: not-allowed; }
+.speech-install { display: grid; gap: var(--space-1); }
+.speech-install progress { width: 100%; }
+.speech-install small { color: var(--muted); }
+.speech-install .field-error { color: var(--danger); }
 
 .speech-review {
   display: grid;
@@ -852,6 +897,7 @@
   .chat-header, .message-list, .composer { padding-inline: var(--space-3); }
   .chat-working { display: none; }
   .chat-model-picker { width: min(160px, 45%); }
+  .composer-bar { flex-wrap: wrap; }
   .composer-hint { display: none; }
   .source-images { grid-auto-columns: 88%; }
 }

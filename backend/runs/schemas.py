@@ -199,6 +199,16 @@ class StopAndAnswerResponse(RunSchema):
     answer_run: RunResponse
 
 
+class SteeringMessageRequest(RunSchema):
+    content: str = Field(min_length=1, max_length=100_000)
+
+
+class SteeringMessageResponse(RunSchema):
+    id: str
+    content: str
+    status: Literal["queued"]
+
+
 class InterruptionResolutionRequest(RunSchema):
     approved: bool
     rejection_message: str | None = Field(default=None, max_length=2_000)

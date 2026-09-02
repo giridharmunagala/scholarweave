@@ -305,6 +305,12 @@ class ProviderService:
                 name=discovered.name,
                 capabilities=discovered.capabilities,
                 reasoning_efforts=reasoning_efforts,
+                preserve_thinking=bool(
+                    existing.get(
+                        "preserve_thinking",
+                        discovered.preserve_thinking,
+                    )
+                ),
                 context_window_tokens=(
                     existing.get("context_window_tokens")
                     or discovered.context_window_tokens

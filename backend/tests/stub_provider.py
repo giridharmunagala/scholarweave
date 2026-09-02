@@ -52,6 +52,7 @@ class StubProvider:
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.request_started = threading.Event()
         self.reply = "Stub answer."
         self.call_tool: str | None = None
         self.tool_arguments: dict[str, Any] = {}
@@ -151,6 +152,7 @@ def stub_provider():
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         payload = await request.json()
+        provider.request_started.set()
         if payload.get("stream"):
             async def chunks():
                 if provider.stream_delay_seconds:

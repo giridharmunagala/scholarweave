@@ -24,6 +24,7 @@ export function SpeechControl({
   starting,
   transcribing,
   busy,
+  onInstallBuiltIn,
   onToggle,
 }: {
   mode: SpeechMode;
@@ -36,6 +37,7 @@ export function SpeechControl({
   starting: boolean;
   transcribing: boolean;
   busy: boolean;
+  onInstallBuiltIn: () => void;
   onToggle: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -60,11 +62,13 @@ export function SpeechControl({
   const localReady = builtIn?.state === 'ready' || builtIn?.state === 'running';
   const providerReady = Boolean(modelReference.provider_profile_id && modelReference.model);
   const ready = mode === 'builtin' ? localReady : providerReady;
-  const canChoose = localReady && options.length > 0;
+  const canConfigure =
+    options.length > 0 || Boolean(builtIn?.available && !localReady);
+  const installing = builtIn?.state === 'installing';
 
   const hint = ready
     ? recording ? 'Stop and transcribe' : 'Dictate'
-    : 'Set up speech recognition in Settings';
+    : canConfigure ? 'Configure speech recognition' : 'Set up speech recognition in Settings';
 
   return (
     <div className="speech-control" ref={containerRef}>
@@ -81,7 +85,7 @@ export function SpeechControl({
           : <Icon name={recording ? 'stop' : 'microphone'} size={16} />}
       </button>
 
-      {canChoose ? (
+      {canConfigure ? (
         <button
           type="button"
           className="speech-source-toggle"
@@ -103,20 +107,45 @@ export function SpeechControl({
               type="radio"
               name="speech-source"
               checked={mode === 'builtin'}
+              disabled={!localReady}
               onChange={() => onModeChange('builtin')}
             />
             <span>On-device</span>
           </label>
+          {builtIn?.available && !localReady ? (
+            <div className="speech-install">
+              {installing ? (
+                <>
+                  <progress
+                    aria-label="Downloading built-in speech model"
+                    max={builtIn.total_bytes || 1}
+                    value={builtIn.downloaded_bytes}
+                  />
+                  <small>Downloading on-device model…</small>
+                </>
+              ) : (
+                <button
+                  className="button secondary small"
+                  type="button"
+                  onClick={onInstallBuiltIn}
+                >
+                  {builtIn.state === 'error' ? 'Retry download' : 'Download on-device model'}
+                </button>
+              )}
+              {builtIn.error ? <small className="field-error">{builtIn.error}</small> : null}
+            </div>
+          ) : null}
           <label className="speech-choice">
             <input
               type="radio"
               name="speech-source"
               checked={mode === 'provider'}
+              disabled={!options.length}
               onChange={() => onModeChange('provider')}
             />
             <span>Provider model</span>
           </label>
-          {mode === 'provider' ? (
+          {mode === 'provider' && options.length ? (
             <ModelSelect
               options={options}
               value={modelReference}

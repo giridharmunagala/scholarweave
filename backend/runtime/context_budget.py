@@ -13,6 +13,11 @@ from openai import OpenAIError
 from backend.core.config import Settings
 from backend.runtime.context import ScholarWeaveContext, unwrap_scholar_context
 from backend.runtime.serialization import to_jsonable
+from backend.runtime.steering import (
+    SteeringInbox,
+    steering_message_ids,
+    strip_steering_markers,
+)
 
 _CHECKPOINTS_KEY = "context_checkpoints"
 _COMPACTION_STATES_KEY = "_context_compaction_states"
@@ -69,8 +74,17 @@ def create_context_budget_filter(
             max(512, context_window_tokens // 4),
         )
         context = _scholar_context(data.context)
-        source_input = data.model_data.input
-        model_data = data.model_data
+        present_steering_ids = steering_message_ids(data.model_data.input)
+        clean_input = strip_steering_markers(data.model_data.input)
+        model_data = (
+            ModelInputData(
+                input=clean_input,
+                instructions=data.model_data.instructions,
+            )
+            if clean_input is not data.model_data.input
+            else data.model_data
+        )
+        source_input = model_data.input
         agent_key: str | None = None
         state_key: str | None = None
         if context is not None:
@@ -100,7 +114,11 @@ def create_context_budget_filter(
         input_chars = _serialized_characters(model_data.input)
         total_chars = input_chars + len(model_data.instructions or "")
         if total_chars < high_water_chars:
-            return model_data
+            return await _apply_steering(
+                model_data,
+                context,
+                present_message_ids=present_steering_ids,
+            )
 
         if context is None:
             return model_data
@@ -182,12 +200,34 @@ def create_context_budget_filter(
                 "storage": checkpoint.get("storage"),
             },
         )
-        return ModelInputData(
-            input=compacted_input,
-            instructions=model_data.instructions,
+        return await _apply_steering(
+            ModelInputData(
+                input=compacted_input,
+                instructions=model_data.instructions,
+            ),
+            context,
+            present_message_ids=present_steering_ids,
         )
 
     return compact_if_needed
+
+
+async def _apply_steering(
+    model_data: ModelInputData,
+    context: ScholarWeaveContext | None,
+    *,
+    present_message_ids: set[str],
+) -> ModelInputData:
+    if context is None:
+        return model_data
+    inbox = context.metadata.get("_steering_inbox")
+    if not isinstance(inbox, SteeringInbox):
+        return model_data
+    return await inbox.apply(
+        model_data,
+        context,
+        present_message_ids=present_message_ids,
+    )
 
 
 def _restore_compacted_input(

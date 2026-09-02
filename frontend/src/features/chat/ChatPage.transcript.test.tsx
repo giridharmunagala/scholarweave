@@ -43,6 +43,7 @@ function buildTurn(turn: Turn, runId: string) {
       payload,
       created_at: new Date(clock).toISOString(),
     });
+
   };
 
   /** Emit the full call/output pair the runtime produces for one tool. */
@@ -227,6 +228,9 @@ class FakeServer {
 }
 
 const server = new FakeServer();
+let lastMessageRequest: Record<string, unknown> | null = null;
+let lastSteeringRequest: Record<string, unknown> | null = null;
+let deliverAppliedBeforeSteeringResponse = false;
 
 class FakeEventSource {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
@@ -260,7 +264,11 @@ class FakeEventSource {
   }
 }
 
-const SETTINGS = { default_model_references: { chat: { provider_id: 'p1', model: 'gemini' } } };
+const SETTINGS = {
+  default_model_references: {
+    chat: { provider_profile_id: 'p1', model: 'gemini' },
+  },
+};
 const PROVIDERS = [
   {
     id: 'p1',
@@ -268,7 +276,12 @@ const PROVIDERS = [
     kind: 'openai_compatible',
     base_url: null,
     archived: false,
-    models: [{ id: 'gemini', name: 'gemini', enabled: true }],
+    models: [{
+      id: 'gemini',
+      name: 'gemini',
+      enabled: true,
+      reasoning_efforts: ['low', 'medium', 'high'],
+    }],
   },
 ];
 
@@ -313,7 +326,8 @@ function installFetch() {
         });
       }
       if (url.includes(`/api/agent/conversations/${CONVERSATION_ID}/messages`) && method === 'POST') {
-        const { content } = JSON.parse(String(init?.body));
+        lastMessageRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        const { content } = lastMessageRequest as { content: string };
         return respond({ conversation: {}, run: server.startRun(content) });
       }
       if (url.endsWith(`/api/agent/conversations/${CONVERSATION_ID}`)) {
@@ -333,6 +347,25 @@ function installFetch() {
           payload: {},
         });
         return respond(response);
+      }
+      const steeringMatch = /\/api\/runs\/([^/?]+)\/steering$/.exec(url);
+      if (steeringMatch && method === 'POST') {
+        lastSteeringRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (deliverAppliedBeforeSteeringResponse) {
+          server.listeners.get(steeringMatch[1])?.deliver({
+            sequence: 100,
+            event_type: 'steering.applied',
+            payload: {
+              message_id: 'steering-1',
+              content: lastSteeringRequest.content,
+            },
+          });
+        }
+        return respond({
+          id: 'steering-1',
+          content: lastSteeringRequest.content,
+          status: 'queued',
+        });
       }
       const cancelMatch = /\/api\/runs\/([^/?]+)\/cancel$/.exec(url);
       if (cancelMatch && method === 'POST') return respond(server.cancelRun(cancelMatch[1]));
@@ -362,6 +395,10 @@ describe('chat transcript detail', () => {
 
   beforeEach(() => {
     server.reset();
+    lastMessageRequest = null;
+    lastSteeringRequest = null;
+    deliverAppliedBeforeSteeringResponse = false;
+    window.localStorage.clear();
     installFetch();
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -394,9 +431,9 @@ describe('chat transcript detail', () => {
       textarea.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => {
-      container
-        .querySelector('.composer-send')!
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      const button = container.querySelector<HTMLButtonElement>('.composer-send')!;
+      button.focus();
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flush(2);
   };
@@ -419,6 +456,40 @@ describe('chat transcript detail', () => {
     });
     await flush();
   };
+
+  it('offers extended work scopes and sends the selected run configuration', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+
+    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Work mode"]')!;
+    const reasoning = container.querySelector<HTMLSelectElement>(
+      '[aria-label="Reasoning effort"]',
+    )!;
+    expect(mode.value).toBe('direct');
+    expect(container.querySelector('[aria-label="Extended research scope"]')).toBeNull();
+
+    await act(async () => {
+      reasoning.value = 'high';
+      reasoning.dispatchEvent(new Event('change', { bubbles: true }));
+      mode.value = 'extended';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const scope = container.querySelector<HTMLSelectElement>(
+      '[aria-label="Extended research scope"]',
+    )!;
+    await act(async () => {
+      scope.value = 'high';
+      scope.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await send('Investigate this thoroughly');
+
+    expect(lastMessageRequest).toMatchObject({
+      content: 'Investigate this thoroughly',
+      reasoning_effort: 'high',
+      work_mode: 'extended',
+      work_budget: 'high',
+    });
+  });
 
   it('keeps every turn trace inline as the thread grows', async () => {
     const { default: ChatPage } = await import('./ChatPage');
@@ -494,6 +565,59 @@ describe('chat transcript detail', () => {
     });
     await flush(1);
     expect(text(container.querySelector('.timeline-detail.reasoning'))).toContain('Step 1: weighing the evidence.');
+  });
+
+  it('keeps the composer focused and queues steering while a run is active', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+
+    const textarea = container.querySelector<HTMLTextAreaElement>('.composer-box textarea')!;
+    expect(textarea.disabled).toBe(false);
+    expect(textarea.placeholder).toContain('Steer');
+    expect(document.activeElement).toBe(textarea);
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!;
+    await act(async () => {
+      setter.call(textarea, 'Answer directly with what you have');
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      container
+        .querySelector('[aria-label="Queue steering message"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await flush();
+
+    expect(lastSteeringRequest).toEqual({
+      content: 'Answer directly with what you have',
+    });
+    expect(text(container.querySelector('.steering-queued'))).toContain(
+      'Answer directly with what you have',
+    );
+
+    server.completeRun('run-1', 0);
+    await act(async () => {
+      server.listeners.get('run-1')?.deliver({
+        sequence: 9999,
+        event_type: 'run.completed',
+        payload: {},
+      });
+    });
+    await flush();
+
+    expect(document.activeElement).toBe(textarea);
+  });
+
+  it('does not downgrade steering when its applied event beats the response', async () => {
+    deliverAppliedBeforeSteeringResponse = true;
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    await send('Use only the evidence already found');
+
+    expect(container.querySelector('.steering-applied')).not.toBeNull();
+    expect(container.querySelector('.steering-queued')).toBeNull();
   });
 
   it('stops an active run immediately', async () => {

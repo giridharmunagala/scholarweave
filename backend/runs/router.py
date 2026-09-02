@@ -14,6 +14,8 @@ from backend.runs.schemas import (
     RunCreateRequest,
     RunEventResponse,
     RunResponse,
+    SteeringMessageRequest,
+    SteeringMessageResponse,
     StopAndAnswerResponse,
     run_response,
 )
@@ -89,6 +91,27 @@ async def stop_and_answer_run(
     return StopAndAnswerResponse(
         stopped_run=run_response(stopped),
         answer_run=run_response(answer),
+    )
+
+
+@router.post(
+    "/{run_id}/steering",
+    response_model=SteeringMessageResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def steer_run(
+    run_id: str,
+    payload: SteeringMessageRequest,
+    container=Depends(services),
+) -> SteeringMessageResponse:
+    message = await container.runs.steer(run_id, payload.content)
+    conversation_id = container.runs.get(run_id).conversation_id
+    if conversation_id is not None:
+        container.conversations.touch(conversation_id, payload.content)
+    return SteeringMessageResponse(
+        id=message.id,
+        content=message.content,
+        status="queued",
     )
 
 

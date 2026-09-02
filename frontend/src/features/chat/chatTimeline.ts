@@ -208,24 +208,40 @@ export function buildTurnTimeline(
     if (event.event_type === 'tool.started') {
       const name = stringOr(event.payload.tool_name);
       if (!name) continue;
+      const callId = stringOr(event.payload.tool_call_id);
       closeReasoning(at);
-      const pending = findTool(steps, (tool) => tool.name === name && !tool.settled && tool.startedAt === null);
+      const pending =
+        (callId
+          ? findTool(steps, (tool) => tool.callId === callId && !tool.settled)
+          : null)
+        ?? findTool(
+          steps,
+          (tool) => tool.name === name && !tool.settled && tool.startedAt === null,
+        );
       if (pending) {
         pending.startedAt = at;
+        pending.callId = callId ?? pending.callId;
         continue;
       }
-      steps.push(toolStep(event.sequence, name, at));
+      const step = toolStep(event.sequence, name, at);
+      step.callId = callId;
+      steps.push(step);
       continue;
     }
 
     if (event.event_type === 'tool.completed' || event.event_type === 'tool.failed') {
       const name = stringOr(event.payload.tool_name);
       if (!name) continue;
+      const callId = stringOr(event.payload.tool_call_id);
       closeReasoning(at);
       const status = event.event_type === 'tool.failed' ? 'failed' : 'completed';
       const target =
-        findTool(steps, (tool) => tool.name === name && !tool.settled)
+        (callId
+          ? findTool(steps, (tool) => tool.callId === callId && !tool.settled)
+          : null)
+        ?? findTool(steps, (tool) => tool.name === name && !tool.settled)
         ?? pushTool(steps, toolStep(event.sequence, name, at));
+      target.callId = callId ?? target.callId;
       target.status = status;
       target.settled = true;
       target.seconds = duration(target.startedAt, at);
@@ -297,10 +313,16 @@ function applyRunItem(
     closeReasoning(at);
     const name = stringOr(raw?.name) ?? stringOr(item.title) ?? 'tool';
     const args = parseArguments(raw?.arguments);
-    const existing = findTool(steps, (tool) => tool.name === name && !tool.settled && tool.args === null);
+    const callId = stringOr(raw?.call_id) ?? stringOr(raw?.id);
+    const existing =
+      (callId ? findTool(steps, (tool) => tool.callId === callId) : null)
+      ?? findTool(
+        steps,
+        (tool) => tool.name === name && !tool.settled && tool.args === null,
+      );
     const target = existing ?? pushTool(steps, toolStep(event.sequence, name, null));
     target.args = args;
-    target.callId = stringOr(raw?.call_id) ?? stringOr(raw?.id) ?? target.callId;
+    target.callId = callId ?? target.callId;
     target.detail = stringOr(item.description) ?? target.detail;
     if (stringOr(item.title) && !stringOr(raw?.name)) target.name = stringOr(item.title)!;
     const query = primaryArgument(args);

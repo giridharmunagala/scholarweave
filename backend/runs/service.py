@@ -38,6 +38,11 @@ from backend.runtime.context import ScholarWeaveContext, ToolReceipt, ToolRuntim
 from backend.runtime.hooks import ScholarWeaveRunHooks
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
+from backend.runtime.steering import (
+    SteeringInbox,
+    SteeringMessage,
+    emit_steering_applied,
+)
 from backend.tools.failures import (
     restore_tool_failure_state,
     serialize_tool_failure_state,
@@ -78,6 +83,42 @@ def _with_reasoning_effort(
     return replace(compiled, blueprint=blueprint, run_config=run_config)
 
 
+async def _persist_result_to_session_if_needed(
+    result: RunResult | RunResultStreaming,
+    *,
+    runner_session: Any,
+    conversation_session: Any,
+) -> None:
+    if runner_session is not None or conversation_session is None:
+        return
+    original_items = (
+        [{"role": "user", "content": result.input}]
+        if isinstance(result.input, str)
+        else list(result.input)
+    )
+    continuation_items = result.to_input_list(mode="normalized")
+    await conversation_session.add_items(continuation_items[len(original_items) :])
+
+
+def _restore_pending_steering(events: list[Any]) -> SteeringInbox:
+    queued: dict[str, str] = {}
+    for event in events:
+        payload = event.payload_json
+        message_id = payload.get("message_id")
+        if not isinstance(message_id, str):
+            continue
+        if event.event_type == "steering.queued":
+            content = payload.get("content")
+            if isinstance(content, str):
+                queued[message_id] = content
+        elif event.event_type == "steering.applied":
+            queued.pop(message_id, None)
+    inbox = SteeringInbox()
+    for message_id, content in queued.items():
+        inbox.restore(message_id, content)
+    return inbox
+
+
 class RunService:
     _CLEANUP_INTERVAL_SECONDS = 60 * 60
 
@@ -106,6 +147,8 @@ class RunService:
         self._active_streams: dict[str, RunResultStreaming] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._compiled_runs: dict[str, CompiledAgent] = {}
+        self._event_sinks: dict[str, PersistedRunEventSink] = {}
+        self._steering_inboxes: dict[str, SteeringInbox] = {}
         self._stop_and_answer_in_progress: set[str] = set()
         self._cleanup_task: asyncio.Task[None] | None = None
 
@@ -116,17 +159,19 @@ class RunService:
                 if record.cancel_requested:
                     self._repository.cancel(record.id)
                     continue
+                if record.conversation_id is not None:
+                    self._steering_inboxes[record.id] = (
+                        _restore_pending_steering(
+                            self._repository.events_after(record.id)
+                        )
+                    )
                 compiled = compiler.compile(
                     AgentBlueprint.model_validate(record.blueprint_json)
                 )
                 if record.status == "pending":
                     runtime_context = None
                     if record.state_json:
-                        sink = PersistedRunEventSink(
-                            record.id,
-                            self._repository,
-                            self._broker,
-                        )
+                        sink = self._event_sink(record.id)
                         runtime_context = ScholarWeaveContext(
                             run_id=record.id,
                             conversation_id=record.conversation_id,
@@ -215,6 +260,8 @@ class RunService:
             input_value=to_jsonable(input_value),
             blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
         )
+        if conversation_id is not None:
+            self._steering_inboxes[record.id] = SteeringInbox()
         self._schedule(
             record.id,
             compiled,
@@ -236,6 +283,8 @@ class RunService:
     ) -> None:
         previous = self._tasks.get(run_id)
         self._compiled_runs[run_id] = compiled
+        if conversation_id is not None:
+            self._steering_inboxes.setdefault(run_id, SteeringInbox())
 
         async def execute_after_previous() -> None:
             if previous is not None and not previous.done():
@@ -256,6 +305,10 @@ class RunService:
             if self._tasks.get(run_id) is completed:
                 self._tasks.pop(run_id, None)
                 self._compiled_runs.pop(run_id, None)
+                self._event_sinks.pop(run_id, None)
+                inbox = self._steering_inboxes.pop(run_id, None)
+                if inbox is not None:
+                    inbox.close()
 
         task.add_done_callback(remove_if_current)
 
@@ -276,6 +329,8 @@ class RunService:
             else {"type": "run_state"},
             blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
         )
+        if conversation_id is not None:
+            self._steering_inboxes[record.id] = SteeringInbox()
         await self._execute(
             record.id,
             compiled,
@@ -283,6 +338,23 @@ class RunService:
             conversation_id=conversation_id,
         )
         return self._repository.get(record.id)
+
+    async def steer(self, run_id: str, content: str) -> SteeringMessage:
+        record = self._repository.get(run_id)
+        if record.status not in {"pending", "running"}:
+            raise ConflictError("Only an active run can accept steering messages.")
+        if record.conversation_id is None:
+            raise ConflictError("Steering requires a run associated with a conversation.")
+        inbox = self._steering_inboxes.get(run_id)
+        if inbox is None:
+            raise ConflictError("The active run is not owned by this process.")
+        message = inbox.queue(content)
+        sink = self._event_sink(run_id)
+        await sink.emit(
+            "steering.queued",
+            {"message_id": message.id, "content": message.content},
+        )
+        return message
 
     async def cancel(self, run_id: str):
         record = self._repository.get(run_id)
@@ -299,7 +371,7 @@ class RunService:
         current = self._repository.get(run_id)
         if current.status in {"pending", "running"}:
             self._repository.cancel(run_id)
-            sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+            sink = self._event_sink(run_id)
             await sink.emit("run.cancelled", {"reason": "user_requested"})
         return self._repository.get(run_id)
 
@@ -376,7 +448,7 @@ class RunService:
         interruption = self._repository.get_interruption(interruption_id)
         if interruption.run_id != run_id or interruption.status != "pending":
             raise ValueError("The interruption is not pending for this run.")
-        sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+        sink = self._event_sink(run_id)
         serialized_context = record.state_json.get("context", {}).get("context", {})
         serialized_context = serialized_context if isinstance(serialized_context, dict) else {}
         raw_metadata = serialized_context.get("metadata")
@@ -475,6 +547,7 @@ class RunService:
     def delete(self, run_id: str) -> None:
         if run_id in self._active_streams:
             raise ValueError("An active run cannot be deleted.")
+        self._event_sinks.pop(run_id, None)
         self._repository.delete(run_id)
 
     def events_after(self, run_id: str, sequence: int = -1):
@@ -515,8 +588,17 @@ class RunService:
         if self._delete_run_artifacts is not None:
             for run_id in deletable:
                 self._delete_run_artifacts(run_id)
+        for run_id in deletable:
+            self._event_sinks.pop(run_id, None)
         self._repository.delete_many(deletable)
         return len(deletable)
+
+    def _event_sink(self, run_id: str) -> PersistedRunEventSink:
+        sink = self._event_sinks.get(run_id)
+        if sink is None:
+            sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+            self._event_sinks[run_id] = sink
+        return sink
 
     async def _cleanup_loop(self) -> None:
         while True:
@@ -535,7 +617,7 @@ class RunService:
     ) -> None:
         if not self._repository.claim(run_id, self._owner_id):
             return
-        sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+        sink = self._event_sink(run_id)
         if isinstance(input_value, RunState) and runtime_context is None:
             raise ValueError("Resuming an SDK RunState requires restored live context.")
         context = runtime_context or ScholarWeaveContext(
@@ -549,11 +631,22 @@ class RunService:
             context.metadata.setdefault("internal_session_prompt", STOP_AND_ANSWER_PROMPT)
         context.event_sink = sink
         hooks = ScholarWeaveRunHooks()
-        session = (
+        conversation_session = (
             self._sessions.get(conversation_id, compiled.blueprint.session)
-            if conversation_id is not None and not isinstance(input_value, RunState)
+            if conversation_id is not None
             else None
         )
+        session = (
+            conversation_session if not isinstance(input_value, RunState) else None
+        )
+        steering_inbox = (
+            self._steering_inboxes.setdefault(run_id, SteeringInbox())
+            if conversation_id is not None
+            else None
+        )
+        if steering_inbox is not None:
+            steering_inbox.bind_session(conversation_session)
+            context.metadata["_steering_inbox"] = steering_inbox
         lock = (
             self._sessions.run_lock(conversation_id)
             if conversation_id is not None
@@ -581,6 +674,7 @@ class RunService:
                 {"reason": "process_interrupted", "strategy": "new_epoch"},
             )
         active_epoch_id: str | None = None
+        deferred_steering: list[SteeringMessage] = []
         try:
             async with asyncio.timeout(self._settings.agent_run_timeout_seconds):
                 self._raise_if_cancelled(run_id)
@@ -645,6 +739,11 @@ class RunService:
                             else "",
                         )
                         context.event_sink = stream_sink
+                        if steering_inbox is not None:
+                            steering_inbox.begin_epoch()
+                        if deferred_steering:
+                            await emit_steering_applied(context, deferred_steering)
+                            deferred_steering = []
                         try:
                             stream = Runner.run_streamed(
                                 compiled.entry_agent,
@@ -673,6 +772,11 @@ class RunService:
                                 getattr(run_data, "new_items", []),
                                 persisted_item_count if first_epoch else 0,
                             )
+                            await _persist_result_to_session_if_needed(
+                                run_data,
+                                runner_session=session,
+                                conversation_session=conversation_session,
+                            )
                             usage = to_jsonable(
                                 getattr(
                                     getattr(run_data, "context_wrapper", None),
@@ -696,11 +800,18 @@ class RunService:
                                     "usage": usage,
                                 },
                             )
-                            epoch_input = _continuation_instruction(
+                            continuation = _continuation_instruction(
                                 run_id,
                                 epoch.epoch_index + 1,
                                 self._repository.get_goal_state(run_id),
                             )
+                            if session is None:
+                                epoch_input = [
+                                    *run_data.to_input_list(mode="normalized"),
+                                    {"role": "user", "content": continuation},
+                                ]
+                            else:
+                                epoch_input = continuation
                             persisted_item_count = 0
                             consumed_turns += int(usage["model_turns"])
                             first_epoch = False
@@ -726,6 +837,61 @@ class RunService:
                             consumed_turns,
                             resumed=isinstance(epoch_input, RunState),
                         )
+                        pending_steering = (
+                            steering_inbox.take_pending_or_close()
+                            if steering_inbox is not None
+                            else []
+                        )
+                        if pending_steering:
+                            await self._persist_result_activity(
+                                run_id,
+                                stream,
+                                sink,
+                                persisted_item_count=persisted_item_count
+                                if first_epoch
+                                else 0,
+                            )
+                            await _persist_result_to_session_if_needed(
+                                stream,
+                                runner_session=session,
+                                conversation_session=conversation_session,
+                            )
+                            self._repository.finish_epoch(
+                                epoch.id,
+                                status="completed",
+                                terminal_reason="steering_continuation",
+                                usage=epoch_usage,
+                            )
+                            aggregate_usage = self._repository.aggregate_epoch_usage(
+                                run_id
+                            )
+                            self._repository.update_usage(run_id, aggregate_usage)
+                            await sink.emit(
+                                "run.epoch.completed",
+                                {
+                                    "epoch_id": epoch.id,
+                                    "epoch_index": epoch.epoch_index,
+                                    "terminal_reason": "steering_continuation",
+                                    "usage": aggregate_usage,
+                                },
+                            )
+                            await steering_inbox.persist(pending_steering)
+                            if session is None:
+                                epoch_input = [
+                                    *stream.to_input_list(mode="normalized"),
+                                    *(
+                                        message.input_item()
+                                        for message in pending_steering
+                                    ),
+                                ]
+                            else:
+                                epoch_input = []
+                            deferred_steering = pending_steering
+                            persisted_item_count = 0
+                            consumed_turns += int(epoch_usage["model_turns"])
+                            first_epoch = False
+                            active_epoch_id = None
+                            continue
                         await self._finish_result(
                             run_id,
                             stream,
@@ -737,6 +903,7 @@ class RunService:
                             if first_epoch
                             else 0,
                             session=session,
+                            conversation_session=conversation_session,
                             session_snapshot=session_snapshot,
                             epoch_usage=epoch_usage,
                         )
@@ -824,6 +991,11 @@ class RunService:
                 )
         finally:
             self._active_streams.pop(run_id, None)
+            if run_id not in self._tasks:
+                self._event_sinks.pop(run_id, None)
+            inbox = self._steering_inboxes.pop(run_id, None)
+            if inbox is not None:
+                inbox.close()
             if active_epoch_id is not None:
                 self._repository.abandon_incomplete_epochs(run_id)
             self._repository.release_claim(run_id, self._owner_id)
@@ -843,25 +1015,22 @@ class RunService:
         context: ScholarWeaveContext,
         persisted_item_count: int,
         session: Any,
+        conversation_session: Any,
         session_snapshot: list[TResponseInputItem] | None,
         epoch_usage: dict[str, Any],
     ) -> None:
-        projected_items = [
-            project_run_item(item)
-            for item in result.new_items[persisted_item_count:]
-        ]
-        self._repository.add_items(run_id, projected_items)
-        for kind, guardrail_results in (
-            ("input", result.input_guardrail_results),
-            ("output", result.output_guardrail_results),
-            ("tool_input", result.tool_input_guardrail_results),
-            ("tool_output", result.tool_output_guardrail_results),
-        ):
-            for guardrail_result in guardrail_results:
-                await sink.emit(
-                    "guardrail.result",
-                    _guardrail_result_payload(kind, guardrail_result),
-                )
+        await self._persist_result_activity(
+            run_id,
+            result,
+            sink,
+            persisted_item_count=persisted_item_count,
+        )
+        await _persist_result_to_session_if_needed(
+            result,
+            runner_session=session,
+            conversation_session=conversation_session,
+        )
+
         if result.interruptions:
             await ScholarWeaveRunHooks().supersede_active(context, "run_paused")
             state = result.to_state().to_json(
@@ -935,6 +1104,31 @@ class RunService:
                 "usage": usage,
             },
         )
+
+    async def _persist_result_activity(
+        self,
+        run_id: str,
+        result: RunResult | RunResultStreaming,
+        sink: PersistedRunEventSink,
+        *,
+        persisted_item_count: int,
+    ) -> None:
+        projected_items = [
+            project_run_item(item)
+            for item in result.new_items[persisted_item_count:]
+        ]
+        self._repository.add_items(run_id, projected_items)
+        for kind, guardrail_results in (
+            ("input", result.input_guardrail_results),
+            ("output", result.output_guardrail_results),
+            ("tool_input", result.tool_input_guardrail_results),
+            ("tool_output", result.tool_output_guardrail_results),
+        ):
+            for guardrail_result in guardrail_results:
+                await sink.emit(
+                    "guardrail.result",
+                    _guardrail_result_payload(kind, guardrail_result),
+                )
 
 
 class _null_async_context:
@@ -1172,7 +1366,12 @@ class RunBudgetExceeded(RuntimeError):
 
 
 def _persistable_runtime_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    ephemeral_keys = {"active_epoch_id", "epoch_index", "goal_state"}
+    ephemeral_keys = {
+        "_steering_inbox",
+        "active_epoch_id",
+        "epoch_index",
+        "goal_state",
+    }
     return {key: value for key, value in metadata.items() if key not in ephemeral_keys}
 
 

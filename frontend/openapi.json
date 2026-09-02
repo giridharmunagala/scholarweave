@@ -2446,6 +2446,11 @@
             "title": "Name",
             "type": "string"
           },
+          "preserve_thinking": {
+            "default": false,
+            "title": "Preserve Thinking",
+            "type": "boolean"
+          },
           "reasoning_efforts": {
             "anyOf": [
               {
@@ -3980,6 +3985,47 @@
           }
         },
         "title": "SettingsUpdate",
+        "type": "object"
+      },
+      "SteeringMessageRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "SteeringMessageRequest",
+        "type": "object"
+      },
+      "SteeringMessageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "const": "queued",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "content",
+          "status"
+        ],
+        "title": "SteeringMessageResponse",
         "type": "object"
       },
       "StopAndAnswerResponse": {
@@ -7068,6 +7114,58 @@
           }
         },
         "summary": "Resolve Interruption",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}/steering": {
+      "post": {
+        "operationId": "steer_run_api_runs__run_id__steering_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SteeringMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SteeringMessageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Steer Run",
         "tags": [
           "runs"
         ]

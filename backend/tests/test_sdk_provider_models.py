@@ -5,13 +5,18 @@ from agents import OpenAIChatCompletionsModel, OpenAIResponsesModel
 from openai import AsyncOpenAI
 
 from backend.providers.runtime import ResolvedModel
-from backend.providers.sdk_models import ProfileModelResolver, SdkClientPool
+from backend.providers.sdk_models import (
+    ProfileModelResolver,
+    SdkClientPool,
+    _replay_same_model_reasoning,
+)
 from backend.providers.types import ModelReference
 
 
 class Runtime:
-    def __init__(self, kind: str) -> None:
+    def __init__(self, kind: str, *, preserve_thinking: bool = False) -> None:
         self.kind = kind
+        self.preserve_thinking = preserve_thinking
         self.client_calls = 0
         self.capabilities: list[str] = []
 
@@ -24,6 +29,7 @@ class Runtime:
             base_url="https://api.openai.com/v1",
             api_key="test",
             model=model_reference.model or "test-model",
+            preserve_thinking=self.preserve_thinking,
         )
 
     def client(self, resolved):
@@ -48,6 +54,37 @@ async def test_openai_profile_uses_responses_and_reuses_client() -> None:
     assert first.supports_responses is True
     assert runtime.capabilities == ["chat", "chat"]
     assert runtime.client_calls == 1
+    await pool.close()
+
+
+@pytest.mark.anyio
+async def test_compatible_profile_can_replay_same_model_reasoning() -> None:
+    runtime = Runtime("openai_compatible", preserve_thinking=True)
+    pool = SdkClientPool(runtime)  # type: ignore[arg-type]
+    resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
+
+    resolved = resolver.resolve_agent_model(ModelReference("profile", "local-qwen"))
+
+    assert isinstance(resolved.model, OpenAIChatCompletionsModel)
+    assert resolved.model.should_replay_reasoning_content is _replay_same_model_reasoning
+    same_model = type(
+        "ReplayContext",
+        (),
+        {
+            "model": "local-qwen",
+            "reasoning": type("Reasoning", (), {"origin_model": "local-qwen"})(),
+        },
+    )()
+    other_model = type(
+        "ReplayContext",
+        (),
+        {
+            "model": "local-qwen",
+            "reasoning": type("Reasoning", (), {"origin_model": "other-model"})(),
+        },
+    )()
+    assert resolved.model.should_replay_reasoning_content(same_model) is True
+    assert resolved.model.should_replay_reasoning_content(other_model) is False
     await pool.close()
 
 

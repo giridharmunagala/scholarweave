@@ -23,8 +23,18 @@ import {
   type ConversationDetail,
   type ModelReference,
   type Run,
+  type SteeringMessage,
+  type WorkBudget,
+  type WorkMode,
 } from './api';
 import { ChatModelPicker, preferredChatModel } from './ChatModelPicker';
+import {
+  readStoredReasoningEffort,
+  reasoningEffortsForModel,
+  ReasoningEffortSelect,
+  storeReasoningEffort,
+  type ReasoningEffort,
+} from './ReasoningEffortSelect';
 import {
   applyChatStreamEvent,
   emptyChatStream,
@@ -47,6 +57,8 @@ const SUGGESTIONS = [
   'What open research questions remain in this area?',
   'Draft research notes with citations for my current topic.',
 ];
+const WORK_MODE_STORAGE_KEY = 'scholarweave:chat-work-mode';
+const WORK_BUDGET_STORAGE_KEY = 'scholarweave:chat-work-budget';
 
 export const PROVIDER_TRANSCRIPTION_INTERVAL_MS = 750;
 
@@ -65,15 +77,24 @@ export default function ChatPage() {
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [speechModelReference, setSpeechModelReference] = useState<ModelReference>({});
   const [speechMode, setSpeechMode] = useState<'builtin' | 'provider'>('builtin');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
+    readStoredReasoningEffort,
+  );
+  const [workMode, setWorkMode] = useState<WorkMode>(readStoredWorkMode);
+  const [workBudget, setWorkBudget] = useState<WorkBudget>(readStoredWorkBudget);
   const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
   const [optimisticUser, setOptimisticUser] = useState<string | null>(null);
+  const [steeringMessages, setSteeringMessages] = useState<
+    (Omit<SteeringMessage, 'status'> & { status: 'queued' | 'applied' })[]
+  >([]);
   const [content, setContent] = useState('');
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [queueingSteering, setQueueingSteering] = useState(false);
   const [stopping, setStopping] = useState<'stop' | 'answer' | null>(null);
   const [recording, setRecording] = useState(false);
   const [startingRecording, setStartingRecording] = useState(false);
@@ -100,6 +121,10 @@ export default function ChatPage() {
   const speechMountedRef = useRef(false);
   const openRequestRef = useRef(0);
   const runLifecycleRef = useRef(0);
+  const supportedReasoningEfforts = useMemo(
+    () => reasoningEffortsForModel(providers, modelReference),
+    [providers, modelReference.provider_profile_id, modelReference.model],
+  );
 
   const refreshList = () => chatApi.list().then(setConversations);
   const open = async (id: string) => {
@@ -108,6 +133,7 @@ export default function ChatPage() {
     setRuns([]);
     setStream(emptyChatStream);
     setOptimisticUser(null);
+    setSteeringMessages([]);
     setSending(false);
     setStopping(null);
     setPinnedToBottom(true);
@@ -172,6 +198,18 @@ export default function ChatPage() {
     }, 750);
     return () => window.clearInterval(timer);
   }, [builtInSpeech?.state]);
+
+  useEffect(() => {
+    if (
+      reasoningEffort
+      && modelReference.provider_profile_id
+      && modelReference.model
+      && !supportedReasoningEfforts?.includes(reasoningEffort)
+    ) {
+      setReasoningEffort(null);
+      storeReasoningEffort(null);
+    }
+  }, [reasoningEffort, supportedReasoningEfforts]);
 
   useEffect(() => {
     speechMountedRef.current = true;
@@ -262,12 +300,16 @@ export default function ChatPage() {
         setRuns((previous) => mergeRun(previous, nextRun));
         if (nextConversation) setCurrent(nextConversation);
         setOptimisticUser(null);
+        setSteeringMessages([]);
         setStream(displayStream(nextRun));
         void refreshList();
       } catch (nextError) {
         if (!cancelled && lifecycle === runLifecycleRef.current) setError(nextError);
       } finally {
-        if (!cancelled && lifecycle === runLifecycleRef.current) setSending(false);
+        if (!cancelled && lifecycle === runLifecycleRef.current) {
+          setSending(false);
+          window.setTimeout(() => composerRef.current?.focus(), 0);
+        }
       }
     };
 
@@ -296,6 +338,27 @@ export default function ChatPage() {
       run.id,
       lastSequence,
       (event) => {
+        if (
+          event.event_type === 'steering.queued'
+          || event.event_type === 'steering.applied'
+        ) {
+          const messageId = String(event.payload.message_id ?? '');
+          const messageContent = String(event.payload.content ?? '');
+          const status = event.event_type === 'steering.applied' ? 'applied' : 'queued';
+          setSteeringMessages((messages) =>
+            messages.some((message) => message.id === messageId)
+              ? messages.map((message) =>
+                  message.id === messageId
+                    ? {
+                        ...message,
+                        content: messageContent || message.content,
+                        status: status === 'applied' ? 'applied' : message.status,
+                      }
+                    : message
+                )
+              : [...messages, { id: messageId, content: messageContent, status }]
+          );
+        }
         if (isTerminalEvent(event.event_type)) {
           void finish();
           return;
@@ -318,6 +381,7 @@ export default function ChatPage() {
     setRuns([]);
     setStream(emptyChatStream);
     setOptimisticUser(null);
+    setSteeringMessages([]);
     setSending(false);
     setStopping(null);
     setPinnedToBottom(true);
@@ -340,6 +404,20 @@ export default function ChatPage() {
     if (current) {
       setCurrent(null);
       resetThread();
+    }
+  };
+
+  const selectReasoningEffort = (effort: ReasoningEffort | null) => {
+    setReasoningEffort(effort);
+    storeReasoningEffort(effort);
+  };
+
+  const installBuiltInSpeech = async () => {
+    setError(null);
+    try {
+      setBuiltInSpeech(await providersApi.installBuiltInSpeech());
+    } catch (nextError) {
+      setError(nextError);
     }
   };
 
@@ -394,7 +472,33 @@ export default function ChatPage() {
 
   const send = async (override?: string) => {
     const submitted = (override ?? content).trim();
-    if (!submitted || sending || recording || startingRecording || transcribing || speechPreview !== null) return;
+    if (!submitted || recording || startingRecording || transcribing || speechPreview !== null) return;
+    if (sending) {
+      if (
+        !run
+        || !['pending', 'running'].includes(run.status)
+        || queueingSteering
+      ) return;
+      setQueueingSteering(true);
+      setError(null);
+      setContent('');
+      try {
+        const message = await chatApi.steer(run.id, submitted);
+        setSteeringMessages((messages) =>
+          messages.some((item) => item.id === message.id)
+            ? messages
+            : [...messages, { ...message, status: 'queued' }]
+        );
+        setPinnedToBottom(true);
+      } catch (nextError) {
+        setContent(submitted);
+        setError(nextError);
+      } finally {
+        setQueueingSteering(false);
+        window.setTimeout(() => composerRef.current?.focus(), 0);
+      }
+      return;
+    }
     const request = openRequestRef.current;
     setSending(true);
     setError(null);
@@ -414,12 +518,19 @@ export default function ChatPage() {
         setModelReference(conversation.model_reference);
         void refreshList();
       }
-      const response = await chatApi.send(conversation.id, submitted);
+      const response = await chatApi.send(
+        conversation.id,
+        submitted,
+        reasoningEffort,
+        workMode,
+        workBudget,
+      );
       if (request !== openRequestRef.current) return;
       setRun(response.run);
       setRuns((previous) => mergeRun(previous, response.run));
       setStream(displayStream(response.run));
       void refreshList();
+      window.setTimeout(() => composerRef.current?.focus(), 0);
     } catch (nextError) {
       if (request !== openRequestRef.current) return;
       setContent(submitted);
@@ -499,7 +610,7 @@ export default function ChatPage() {
       setError(null);
       setSpeechPreview('');
       setSpeechFinalFailed(false);
-      const microphone = navigator.mediaDevices.getUserMedia({ audio: true });
+      const microphone = acquireMicrophone(navigator.mediaDevices);
       const speechWarmup = speechMode === 'builtin'
         ? providersApi.startBuiltInSpeech()
         : Promise.resolve(null);
@@ -794,6 +905,14 @@ export default function ChatPage() {
               {optimisticUser ? (
                 <Message role="user" text={optimisticUser} className="optimistic" />
               ) : null}
+              {steeringMessages.map((message) => (
+                <Message
+                  role="user"
+                  text={message.content}
+                  className={`optimistic steering-${message.status}`}
+                  key={message.id}
+                />
+              ))}
               {pendingTimeline ? <TurnTimelineView timeline={pendingTimeline} /> : null}
               {stream.assistant ? (
                 <Message
@@ -905,7 +1024,7 @@ export default function ChatPage() {
                   <textarea
                     ref={composerRef}
                     rows={1}
-                    disabled={sending}
+                    disabled={recording || transcribing}
                     value={content}
                     onChange={(event) => setContent(event.target.value)}
                     onKeyDown={(event) => {
@@ -914,7 +1033,11 @@ export default function ChatPage() {
                         void send();
                       }
                     }}
-                    placeholder="Ask for a research outcome…"
+                    placeholder={
+                      sending
+                        ? 'Steer the next model call…'
+                        : 'Ask for a research outcome…'
+                    }
                   />
                   <div className="composer-bar">
                     <ChatModelPicker
@@ -924,6 +1047,45 @@ export default function ChatPage() {
                       disabled={sending}
                       onChange={selectModel}
                     />
+                    <ReasoningEffortSelect
+                      value={reasoningEffort}
+                      supportedEfforts={supportedReasoningEfforts}
+                      disabled={sending}
+                      onChange={selectReasoningEffort}
+                    />
+                    <div className="composer-work-controls">
+                      <select
+                        aria-label="Work mode"
+                        title="Choose direct or extended work"
+                        value={workMode}
+                        disabled={sending}
+                        onChange={(event) => {
+                          const mode = event.target.value as WorkMode;
+                          setWorkMode(mode);
+                          window.localStorage.setItem(WORK_MODE_STORAGE_KEY, mode);
+                        }}
+                      >
+                        <option value="direct">Direct</option>
+                        <option value="extended">Extended</option>
+                      </select>
+                      {workMode === 'extended' ? (
+                        <select
+                          aria-label="Extended research scope"
+                          title="Choose extended research scope"
+                          value={workBudget}
+                          disabled={sending}
+                          onChange={(event) => {
+                            const budget = event.target.value as WorkBudget;
+                            setWorkBudget(budget);
+                            window.localStorage.setItem(WORK_BUDGET_STORAGE_KEY, budget);
+                          }}
+                        >
+                          <option value="low">Low scope</option>
+                          <option value="medium">Medium scope</option>
+                          <option value="high">High scope</option>
+                        </select>
+                      ) : null}
+                    </div>
                     <span className="composer-hint">
                       <kbd>Enter</kbd> to send
                     </span>
@@ -938,35 +1100,49 @@ export default function ChatPage() {
                       starting={startingRecording}
                       transcribing={transcribing}
                       busy={sending}
+                      onInstallBuiltIn={() => void installBuiltInSpeech()}
                       onToggle={() => void toggleRecording()}
                     />
                     {sending && run && ['pending', 'running'].includes(run.status) ? (
-                      <div className="composer-run-actions">
+                      <>
+                        <div className="composer-run-actions">
+                          <button
+                            className="composer-run-stop"
+                            type="button"
+                            aria-label="Stop current run"
+                            disabled={stopping !== null}
+                            onClick={() => void stopRun(false)}
+                          >
+                            {stopping === 'stop'
+                              ? <span className="spinner tiny" aria-hidden="true" />
+                              : <Icon name="stop" size={13} />}
+                            Stop
+                          </button>
+                          <button
+                            className="composer-run-answer"
+                            type="button"
+                            aria-label="Stop and answer with available information"
+                            disabled={stopping !== null}
+                            onClick={() => void stopRun(true)}
+                          >
+                            {stopping === 'answer'
+                              ? <span className="spinner tiny" aria-hidden="true" />
+                              : null}
+                            Answer now
+                          </button>
+                        </div>
                         <button
-                          className="composer-run-stop"
+                          className="composer-icon composer-send"
                           type="button"
-                          aria-label="Stop current run"
-                          disabled={stopping !== null}
-                          onClick={() => void stopRun(false)}
+                          aria-label="Queue steering message"
+                          disabled={queueingSteering || transcribing || !content.trim()}
+                          onClick={() => void send()}
                         >
-                          {stopping === 'stop'
+                          {queueingSteering
                             ? <span className="spinner tiny" aria-hidden="true" />
-                            : <Icon name="stop" size={13} />}
-                          Stop
+                            : <Icon name="arrowRight" size={16} />}
                         </button>
-                        <button
-                          className="composer-run-answer"
-                          type="button"
-                          aria-label="Stop and answer with available information"
-                          disabled={stopping !== null}
-                          onClick={() => void stopRun(true)}
-                        >
-                          {stopping === 'answer'
-                            ? <span className="spinner tiny" aria-hidden="true" />
-                            : null}
-                          Answer now
-                        </button>
-                      </div>
+                      </>
                     ) : (
                       <button
                         className="composer-icon composer-send"
@@ -987,6 +1163,42 @@ export default function ChatPage() {
       </div>
     </div>
   );
+}
+
+type MicrophoneDevices = Pick<MediaDevices, 'enumerateDevices' | 'getUserMedia'>;
+
+export async function acquireMicrophone(
+  mediaDevices: MicrophoneDevices,
+): Promise<MediaStream> {
+  try {
+    return await mediaDevices.getUserMedia({ audio: true });
+  } catch (error) {
+    if (!isUnavailableMicrophone(error)) throw error;
+  }
+
+  const inputs = (await mediaDevices.enumerateDevices()).filter(
+    (device) =>
+      device.kind === 'audioinput'
+      && device.deviceId
+      && device.deviceId !== 'default',
+  );
+  for (const input of inputs) {
+    try {
+      return await mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: input.deviceId } },
+      });
+    } catch (error) {
+      if (!isUnavailableMicrophone(error)) throw error;
+    }
+  }
+  throw new Error(
+    'No microphone input is available. Select a system input device and allow microphone access, then try again.',
+  );
+}
+
+function isUnavailableMicrophone(error: unknown): boolean {
+  return error instanceof DOMException
+    && ['NotFoundError', 'OverconstrainedError', 'NotReadableError'].includes(error.name);
 }
 
 export function encodePcm16(
@@ -1175,6 +1387,19 @@ function isTerminalEvent(eventType: string): boolean {
 function displayStream(run: Run): ChatStreamState {
   const restored = restoreChatStream(run.events);
   return run.status === 'completed' ? { ...restored, assistant: '' } : restored;
+}
+
+function readStoredWorkMode(): WorkMode {
+  if (typeof window === 'undefined') return 'direct';
+  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'extended'
+    ? 'extended'
+    : 'direct';
+}
+
+function readStoredWorkBudget(): WorkBudget {
+  if (typeof window === 'undefined') return 'medium';
+  const stored = window.localStorage.getItem(WORK_BUDGET_STORAGE_KEY);
+  return stored === 'low' || stored === 'high' ? stored : 'medium';
 }
 
 function runsForConversation(runs: Run[], conversationId: string): Run[] {

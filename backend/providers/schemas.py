@@ -25,6 +25,7 @@ class ProviderModel(ProviderSchema):
     name: str = Field(min_length=1, max_length=255)
     capabilities: set[ModelCapability] = Field(default_factory=set)
     reasoning_efforts: list[ReasoningEffort] | None = None
+    preserve_thinking: bool = False
     context_window_tokens: int | None = Field(default=None, ge=4_096, le=2_000_000)
     enabled: bool = True
 

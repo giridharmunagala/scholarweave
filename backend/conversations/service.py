@@ -9,6 +9,7 @@ from backend.conversations.models import ConversationRecord
 from backend.conversations.repository import ConversationRepository
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
+from backend.runtime.steering import strip_steering_marker
 
 
 class ConversationService:
@@ -77,6 +78,8 @@ def _project_session_item(item: TResponseInputItem) -> dict[str, Any]:
     content = raw.get("content")
     text_parts: list[str] = []
     if isinstance(content, str):
+        content = strip_steering_marker(content)
+        raw["content"] = content
         text_parts.append(content)
     elif isinstance(content, list):
         for part in content:

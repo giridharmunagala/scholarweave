@@ -47,6 +47,64 @@ describe('sub-agent timeline activity', () => {
       output: 'The focused evidence agrees across two sources.',
       seconds: 4,
     });
+
+    describe('tool timeline activity', () => {
+      it('matches concurrent repeated tool calls by call ID', () => {
+        const timeline = buildTurnTimeline([
+          event(1, 'run.item', {
+            item: {
+              type: 'tool_call_item',
+              raw_item: {
+                name: 'search_papers',
+                call_id: 'call-first',
+                arguments: '{"query":"first"}',
+              },
+            },
+          }),
+          event(2, 'run.item', {
+            item: {
+              type: 'tool_call_item',
+              raw_item: {
+                name: 'search_papers',
+                call_id: 'call-second',
+                arguments: '{"query":"second"}',
+              },
+            },
+          }),
+          event(3, 'tool.started', {
+            tool_name: 'search_papers',
+            tool_call_id: 'call-first',
+          }),
+          event(4, 'tool.started', {
+            tool_name: 'search_papers',
+            tool_call_id: 'call-second',
+          }),
+          event(5, 'tool.completed', {
+            tool_name: 'search_papers',
+            tool_call_id: 'call-second',
+            result: { result: 'second result' },
+          }),
+          event(6, 'tool.completed', {
+            tool_name: 'search_papers',
+            tool_call_id: 'call-first',
+            result: { result: 'first result' },
+          }),
+        ], { settled: true });
+
+        expect(timeline.steps.filter((step) => step.kind === 'tool')).toMatchObject([
+          {
+            query: 'first',
+            result: { result: 'first result' },
+            status: 'completed',
+          },
+          {
+            query: 'second',
+            result: { result: 'second result' },
+            status: 'completed',
+          },
+        ]);
+      });
+    });
   });
 
   it('tracks repeated focused workers as separate calls', () => {

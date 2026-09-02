@@ -37,6 +37,7 @@ class ResolvedModel:
     api_key: str | None
     model: str
     context_window_tokens: int | None = None
+    preserve_thinking: bool = False
 
     @property
     def agent_base_url(self) -> str:
@@ -149,6 +150,10 @@ class ModelRuntime:
                 and isinstance(declared_model.get("context_window_tokens"), int)
                 else None
             ),
+            preserve_thinking=bool(
+                declared_model is not None
+                and declared_model.get("preserve_thinking", False)
+            ),
         )
 
     def client(self, resolved: ResolvedModel) -> AsyncOpenAI:
@@ -254,6 +259,11 @@ class ModelRuntime:
                     manual_by_name[entry.name].reasoning_efforts
                     if entry.name in manual_by_name
                     else entry.reasoning_efforts
+                ),
+                preserve_thinking=(
+                    manual_by_name[entry.name].preserve_thinking
+                    if entry.name in manual_by_name
+                    else entry.preserve_thinking
                 ),
                 context_window_tokens=(
                     manual_by_name[entry.name].context_window_tokens
