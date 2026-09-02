@@ -44,8 +44,13 @@ def with_global_agent_instructions(
     instructions: str,
     *,
     at: datetime | None = None,
+    timezone_name: str | None = None,
+    user_profile: str | None = None,
 ) -> str:
     combined = instructions.rstrip()
     if GLOBAL_AGENT_INSTRUCTIONS not in combined:
         combined = f"{combined}\n\n{GLOBAL_AGENT_INSTRUCTIONS}"
-    return f"{combined}\n\n{current_system_information(at)}"
+    return (
+        f"{combined}\n\n"
+        f"{current_system_information(at, timezone_name=timezone_name, user_profile=user_profile)}"
+    )

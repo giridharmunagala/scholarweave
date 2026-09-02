@@ -315,7 +315,7 @@ async def test_safe_reads_retry_but_failed_writes_remain_unknown(test_settings) 
         )
         calls = 0
 
-        async def flaky_search(_query: str):
+        async def flaky_search(_query: str, _limit: int = 10):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -329,7 +329,8 @@ async def test_safe_reads_retry_but_failed_writes_remain_unknown(test_settings) 
             context,
             tool_call_id="read-call",
         )
-        assert result == {"results": []}
+        assert result["results"] == []
+        assert result["cached"] is False
 
         with pytest.raises(ValueError):
             await services.runs._tool_runtime.invoke(

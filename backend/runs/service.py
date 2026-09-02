@@ -4,11 +4,14 @@ import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
+from datetime import timedelta
 from typing import Any
 
 from agents import (
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelSettings,
     OutputGuardrailTripwireTriggered,
     RunContextWrapper,
     Runner,
@@ -20,16 +23,18 @@ from agents import (
     ToolOutputGuardrailTripwireTriggered,
 )
 
+from backend.agents.blueprint import ReasoningEffort, ReasoningSpec
 from backend.agents.compiler import CompiledAgent
 from backend.agents.blueprint import AgentBlueprint
 from backend.agents.compiler import AgentCompiler
 from backend.core.config import Settings
 from backend.core.errors import ConflictError
+from backend.core.time import utcnow
 from backend.runs.broker import EventBroker
 from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
 from backend.runs.repository import RunRepository
-from backend.runtime.context import ScholarWeaveContext, ToolRuntime
+from backend.runtime.context import ScholarWeaveContext, ToolReceipt, ToolRuntime
 from backend.runtime.hooks import ScholarWeaveRunHooks
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
@@ -54,7 +59,28 @@ GuardrailTripwire = (
 )
 
 
+def _with_reasoning_effort(
+    compiled: CompiledAgent,
+    reasoning_effort: ReasoningEffort | None,
+) -> CompiledAgent:
+    if reasoning_effort is None:
+        return compiled
+
+    reasoning = {"effort": reasoning_effort}
+    inherited = compiled.run_config.model_settings or ModelSettings()
+    run_config = replace(
+        compiled.run_config,
+        model_settings=inherited.resolve(ModelSettings(reasoning=reasoning)),
+    )
+    blueprint = compiled.blueprint.model_copy(deep=True)
+    for agent in blueprint.agents:
+        agent.model_settings.reasoning = ReasoningSpec(effort=reasoning_effort)
+    return replace(compiled, blueprint=blueprint, run_config=run_config)
+
+
 class RunService:
+    _CLEANUP_INTERVAL_SECONDS = 60 * 60
+
     def __init__(
         self,
         repository: RunRepository,
@@ -63,18 +89,25 @@ class RunService:
         event_broker: EventBroker,
         *,
         settings: Settings | None = None,
+        retention_days: int | None = None,
+        delete_run_artifacts: Callable[[str], None] | None = None,
     ) -> None:
         self._repository = repository
         self._sessions = sessions
         self._tool_runtime = tool_runtime
         self._broker = event_broker
         self._settings = settings or Settings()
+        self._retention = timedelta(
+            days=retention_days or self._settings.run_retention_days
+        )
+        self._delete_run_artifacts = delete_run_artifacts
         self._owner_id = str(uuid.uuid4())
         self._closing = False
         self._active_streams: dict[str, RunResultStreaming] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._compiled_runs: dict[str, CompiledAgent] = {}
         self._stop_and_answer_in_progress: set[str] = set()
+        self._cleanup_task: asyncio.Task[None] | None = None
 
     async def recover_incomplete(self, compiler: AgentCompiler) -> None:
         self._repository.clear_stale_claims(self._owner_id)
@@ -171,8 +204,10 @@ class RunService:
         *,
         agent_revision_id: str | None,
         conversation_id: str | None,
+        reasoning_effort: ReasoningEffort | None = None,
         runtime_metadata: dict[str, Any] | None = None,
     ):
+        compiled = _with_reasoning_effort(compiled, reasoning_effort)
         record = self._repository.create(
             agent_revision_id=agent_revision_id,
             conversation_id=conversation_id,
@@ -342,11 +377,29 @@ class RunService:
         if interruption.run_id != run_id or interruption.status != "pending":
             raise ValueError("The interruption is not pending for this run.")
         sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+        serialized_context = record.state_json.get("context", {}).get("context", {})
+        serialized_context = serialized_context if isinstance(serialized_context, dict) else {}
+        raw_metadata = serialized_context.get("metadata")
+        raw_receipts = serialized_context.get("receipts")
         live_context = ScholarWeaveContext(
             run_id=run_id,
             conversation_id=record.conversation_id,
             tool_runtime=self._tool_runtime,
             event_sink=sink,
+            metadata=dict(raw_metadata) if isinstance(raw_metadata, dict) else {},
+            receipts=[
+                ToolReceipt(
+                    kind=str(receipt.get("kind") or ""),
+                    title=str(receipt.get("title") or ""),
+                    description=str(receipt.get("description") or ""),
+                    href=receipt.get("href")
+                    if isinstance(receipt.get("href"), str)
+                    else None,
+                    metadata=dict(receipt.get("metadata") or {}),
+                )
+                for receipt in raw_receipts or []
+                if isinstance(receipt, dict)
+            ],
         )
         _restore_tool_failure_state_from_run_state(
             live_context,
@@ -385,6 +438,19 @@ class RunService:
             context_serializer=lambda context: {
                 "run_id": context.run_id,
                 "conversation_id": context.conversation_id,
+                "metadata": to_jsonable(
+                    _persistable_runtime_metadata(context.metadata)
+                ),
+                "receipts": [
+                    {
+                        "kind": receipt.kind,
+                        "title": receipt.title,
+                        "description": receipt.description,
+                        "href": receipt.href,
+                        "metadata": to_jsonable(receipt.metadata),
+                    }
+                    for receipt in context.receipts
+                ],
                 "tool_failure_state": serialize_tool_failure_state(
                     context.metadata
                 ),
@@ -415,13 +481,47 @@ class RunService:
         self._repository.get(run_id)
         return self._repository.events_after(run_id, sequence)
 
+    async def start(self) -> None:
+        if self._cleanup_task is not None:
+            return
+        await asyncio.to_thread(self.prune_expired)
+        self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    def prune_expired(self) -> int:
+        cutoff = utcnow() - self._retention
+        return self._delete_history(self._repository.ids_created_before(cutoff))
+
+    def clear_history(self) -> int:
+        return self._delete_history(self._repository.ids_created_before())
+
     async def close(self) -> None:
         self._closing = True
+        cleanup_task = self._cleanup_task
+        self._cleanup_task = None
+        if cleanup_task is not None:
+            cleanup_task.cancel()
+            await asyncio.gather(cleanup_task, return_exceptions=True)
+        for stream in tuple(self._active_streams.values()):
+            stream.cancel("immediate")
         tasks = tuple(self._tasks.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _delete_history(self, run_ids: list[str]) -> int:
+        active_ids = set(self._active_streams) | set(self._tasks)
+        deletable = [run_id for run_id in run_ids if run_id not in active_ids]
+        if self._delete_run_artifacts is not None:
+            for run_id in deletable:
+                self._delete_run_artifacts(run_id)
+        self._repository.delete_many(deletable)
+        return len(deletable)
+
+    async def _cleanup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._CLEANUP_INTERVAL_SECONDS)
+            await asyncio.to_thread(self.prune_expired)
 
     async def _execute(
         self,
@@ -449,9 +549,8 @@ class RunService:
             context.metadata.setdefault("internal_session_prompt", STOP_AND_ANSWER_PROMPT)
         context.event_sink = sink
         hooks = ScholarWeaveRunHooks()
-        entry_model = compiled.resolved_models[compiled.blueprint.entry_agent_id]
         session = (
-            self._sessions.get(conversation_id, compiled.blueprint.session, entry_model)
+            self._sessions.get(conversation_id, compiled.blueprint.session)
             if conversation_id is not None and not isinstance(input_value, RunState)
             else None
         )
@@ -674,9 +773,11 @@ class RunService:
                     "run.interrupted",
                     {"reason": "process_shutdown", "recoverable": True},
                 )
-            elif self._repository.get(run_id).status != "cancelled":
-                self._repository.cancel(run_id)
-                await sink.emit("run.cancelled", {"reason": "user_requested"})
+            else:
+                await hooks.supersede_active(context, "run_cancelled")
+                if self._repository.get(run_id).status != "cancelled":
+                    self._repository.cancel(run_id)
+                    await sink.emit("run.cancelled", {"reason": "user_requested"})
             raise
         except TimeoutError:
             await _cleanup_internal_prompt_if_needed(context, session)
@@ -704,9 +805,11 @@ class RunService:
         except Exception as exc:
             await _cleanup_internal_prompt_if_needed(context, session)
             if self._repository.get(run_id).cancel_requested:
+                await hooks.supersede_active(context, "run_cancelled")
                 self._repository.cancel(run_id)
                 await sink.emit("run.cancelled", {})
             else:
+                await hooks.fail_active(context, exc)
                 self._repository.fail(run_id, f"{type(exc).__name__}: {exc}")
                 await sink.emit(
                     "run.failed",
@@ -760,10 +863,24 @@ class RunService:
                     _guardrail_result_payload(kind, guardrail_result),
                 )
         if result.interruptions:
+            await ScholarWeaveRunHooks().supersede_active(context, "run_paused")
             state = result.to_state().to_json(
                 context_serializer=lambda context: {
                     "run_id": context.run_id,
                     "conversation_id": context.conversation_id,
+                    "metadata": to_jsonable(
+                        _persistable_runtime_metadata(context.metadata)
+                    ),
+                    "receipts": [
+                        {
+                            "kind": receipt.kind,
+                            "title": receipt.title,
+                            "description": receipt.description,
+                            "href": receipt.href,
+                            "metadata": to_jsonable(receipt.metadata),
+                        }
+                        for receipt in context.receipts
+                    ],
                     "tool_failure_state": serialize_tool_failure_state(
                         context.metadata
                     ),
@@ -783,6 +900,7 @@ class RunService:
             )
             return
         if self._repository.get(run_id).cancel_requested:
+            await ScholarWeaveRunHooks().supersede_active(context, "run_cancelled")
             self._repository.cancel(run_id)
             await sink.emit("run.cancelled", {})
             return
@@ -1051,6 +1169,11 @@ def _persisted_stream_text(events: list[Any]) -> tuple[str, str]:
 
 class RunBudgetExceeded(RuntimeError):
     pass
+
+
+def _persistable_runtime_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    ephemeral_keys = {"active_epoch_id", "epoch_index", "goal_state"}
+    return {key: value for key, value in metadata.items() if key not in ephemeral_keys}
 
 
 async def _flush_preserving_cancellation(stream_sink: BufferedRunEventSink) -> None:

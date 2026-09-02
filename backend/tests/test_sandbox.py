@@ -86,8 +86,10 @@ def test_runaway_code_is_stopped_by_the_timeout() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
 async def test_cancelling_tool_execution_kills_its_subprocess(
     monkeypatch: pytest.MonkeyPatch,
+    anyio_backend: str,
 ) -> None:
     original = asyncio.create_subprocess_exec
     captured: list[asyncio.subprocess.Process] = []

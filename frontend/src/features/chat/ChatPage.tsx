@@ -801,7 +801,7 @@ export default function ChatPage() {
                   text={stream.assistant}
                   className="streaming"
                   streaming
-                  metrics={run ? turnMetrics(run) : null}
+                  metrics={run ? turnMetrics(run, stream.events) : null}
                   sources={liveTimeline.sources}
                 />
               ) : null}
@@ -1266,8 +1266,11 @@ interface TurnMetrics {
   durationSeconds: number | null;
 }
 
-export function turnMetrics(run: Run): TurnMetrics | null {
-  const usage = run.usage as Record<string, unknown>;
+export function turnMetrics(
+  run: Run,
+  events: readonly RunStreamEvent[] = [],
+): TurnMetrics | null {
+  const usage = latestUsageUpdate(events) ?? run.usage as Record<string, unknown>;
   const performance = isRecord(usage.performance) ? usage.performance : null;
   const inputTokens = performance
     ? metricNumber(performance.input_tokens)
@@ -1286,6 +1289,18 @@ export function turnMetrics(run: Run): TurnMetrics | null {
     generationRate: metricNumber(performance?.generation_tokens_per_second),
     durationSeconds,
   };
+}
+
+function latestUsageUpdate(
+  events: readonly RunStreamEvent[],
+): Record<string, unknown> | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.event_type === 'usage.updated' && isRecord(event.payload.performance)) {
+      return event.payload;
+    }
+  }
+  return null;
 }
 
 function TurnMetadata({ metrics }: { metrics: TurnMetrics }) {

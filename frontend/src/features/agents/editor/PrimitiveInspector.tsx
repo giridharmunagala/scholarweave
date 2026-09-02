@@ -15,6 +15,7 @@ import {
 } from './RelationshipInspectors';
 import { StructuredOutputEditor } from './StructuredOutputEditor';
 import { modelIsEnabled, type Provider } from '../../providers/api';
+import { reasoningEffortsForModel } from '../../chat/ReasoningEffortSelect';
 
 export function PrimitiveInspector({
   blueprint,
@@ -85,6 +86,10 @@ export function PrimitiveInspector({
         modelIsEnabled(model)
         && (!model.capabilities?.length || model.capabilities.includes('chat')),
     );
+    const supportedReasoningEfforts = reasoningEffortsForModel(
+      providers,
+      agent.model ?? {},
+    );
     const update = (patch: Partial<AgentSpec>) =>
       setBlueprint((current) => ({
         ...current,
@@ -116,6 +121,7 @@ export function PrimitiveInspector({
                     provider_profile_id: event.target.value || null,
                     model: null,
                   },
+                  model_settings: { ...settings, reasoning: null },
                 })
               }
             >
@@ -133,7 +139,10 @@ export function PrimitiveInspector({
               value={agent.model?.model ?? ''}
               disabled={!selectedProvider}
               onChange={(event) =>
-                update({ model: { ...agent.model, model: event.target.value || null } })
+                update({
+                  model: { ...agent.model, model: event.target.value || null },
+                  model_settings: { ...settings, reasoning: null },
+                })
               }
             >
               <option value="">Default model</option>
@@ -147,7 +156,11 @@ export function PrimitiveInspector({
             </select>
           </label>
         </div>
-        <ModelSettingsEditor settings={settings} onChange={updateSettings} />
+        <ModelSettingsEditor
+          settings={settings}
+          supportedReasoningEfforts={supportedReasoningEfforts}
+          onChange={updateSettings}
+        />
         <StructuredOutputEditor output={agent.output ?? null} onChange={(output) => update({ output })} />
         <label className="check-row">
           <input

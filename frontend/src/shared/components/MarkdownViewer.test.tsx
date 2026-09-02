@@ -64,4 +64,48 @@ describe('MarkdownViewer', () => {
     expect(html).not.toContain('<script');
     expect(html).not.toContain('javascript:');
   });
+
+  it('presents a fenced code block as a labelled, highlighted artefact', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownViewer content={'```python\n# note\ndef run():\n    return 1\n```'} />,
+    );
+
+    expect(html).toContain('class="code-card"');
+    expect(html).toContain('Python');
+    expect(html).toContain('3 lines');
+    expect(html).toContain('class="tok tok-comment"');
+    expect(html).toContain('class="tok tok-keyword"');
+  });
+
+  it('draws a chart fence instead of printing its JSON', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownViewer
+        content={
+          '```chart\n{"type":"bar","title":"Citations","labels":["2021","2022"],"series":[{"name":"Ours","data":[3,8]}]}\n```'
+        }
+      />,
+    );
+
+    expect(html).toContain('class="chart-card"');
+    expect(html).toContain('<svg');
+    expect(html).toContain('Citations');
+    expect(html).toContain('2021');
+    expect(html).not.toContain('"series"');
+  });
+
+  it('falls back to the source when a chart cannot be read', () => {
+    const html = renderToStaticMarkup(<MarkdownViewer content={'```chart\n{oops\n```'} />);
+
+    expect(html).toContain('chart-card-error');
+    expect(html).toContain('not valid JSON');
+    expect(html).toContain('{oops');
+  });
+
+  it('still renders plain fences and inline code', () => {
+    const html = renderToStaticMarkup(<MarkdownViewer content={'Use `npm run dev`.\n\n```\nraw text\n```'} />);
+
+    expect(html).toContain('<code>npm run dev</code>');
+    expect(html).toContain('raw text');
+    expect(html).toContain('Text');
+  });
 });

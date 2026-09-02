@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -27,10 +28,18 @@ class Settings(BaseSettings):
     default_model_references: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 60.0
-    agent_context_window_tokens: int = Field(default=32_768, ge=4_096)
-    agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.9)
-    agent_context_compaction_target_tokens: int = Field(default=8_192, ge=512)
-    tool_result_max_tokens: int = Field(default=3_000, ge=256)
+    agent_context_window_tokens: int = Field(default=32_768, ge=4_096, le=2_000_000)
+    agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.95)
+    agent_context_compaction_target_tokens: int = Field(
+        default=8_192,
+        ge=1_024,
+        le=500_000,
+        description=(
+            "Minimum preferred post-compaction context size. The runtime scales the actual target "
+            "with each selected model's context window."
+        ),
+    )
+    tool_result_max_tokens: int = Field(default=3_000, ge=512, le=16_000)
     agent_epoch_max_turns: int = Field(default=12, ge=2, le=100)
     agent_max_epochs: int = Field(default=8, ge=1, le=50)
     agent_run_timeout_seconds: float = Field(default=1_800.0, ge=30.0)
@@ -43,6 +52,7 @@ class Settings(BaseSettings):
         "ScholarWeave/0.1 (+https://github.com/giridharmunagala/scholarweave)"
     )
     search_request_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+    web_search_max_requests_per_session: int = Field(default=100, ge=1, le=100)
     arxiv_search_requests_per_minute: int = Field(default=20, ge=1, le=20)
     wikipedia_search_requests_per_minute: int = Field(default=60, ge=1, le=600)
     web_source_ttl_minutes: int = Field(default=240, ge=5, le=1440)
@@ -50,6 +60,9 @@ class Settings(BaseSettings):
     max_temporary_web_sources: int = Field(default=20, ge=1, le=100)
 
     agent_tracing_enabled: bool = False
+    run_retention_days: int = Field(default=2, ge=1, le=365)
+    user_timezone: str = "Asia/Kolkata"
+    user_profile: str = "Based in Hyderabad, Telangana, India."
 
     python_tool_enabled: bool = True
     python_tool_timeout_seconds: float = 10.0
@@ -89,6 +102,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_paths(self) -> "Settings":
+        high_water_tokens = int(
+            self.agent_context_window_tokens * self.agent_context_high_water_ratio
+        )
+        if self.agent_context_compaction_target_tokens >= high_water_tokens:
+            raise ValueError(
+                "agent_context_compaction_target_tokens must be below the fallback context "
+                "high-water mark."
+            )
+        try:
+            ZoneInfo(self.user_timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown user timezone '{self.user_timezone}'.") from exc
         self.data_dir = self.data_dir.resolve()
         self.workspace_dir = self.workspace_dir.resolve()
         self.frontend_dist_dir = self.frontend_dist_dir.resolve()
@@ -96,14 +121,6 @@ class Settings(BaseSettings):
         self.documents_dir = (self.documents_dir or self.data_dir / "documents").resolve()
         self.database_path = (self.database_path or self.data_dir / "metadata.sqlite3").resolve()
         self.llm_log_path = (self.llm_log_path or self.data_dir / "llm_calls.jsonl").resolve()
-        high_water = int(
-            self.agent_context_window_tokens * self.agent_context_high_water_ratio
-        )
-        if self.agent_context_compaction_target_tokens >= high_water:
-            raise ValueError(
-                "agent_context_compaction_target_tokens must be below the context "
-                "high-water mark."
-            )
         return self
 
     def ensure_directories(self) -> None:

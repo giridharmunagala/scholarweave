@@ -283,6 +283,37 @@ async def test_stream_performance_uses_reported_tokens_and_measured_phases() -> 
         "prompt_tokens_per_second": 100.0,
         "generation_tokens_per_second": 40.0,
     }
+    assert downstream.timeline[-1] == (
+        "persisted",
+        "usage.updated",
+        {"performance": sink.performance()},
+    )
+
+
+@pytest.mark.anyio
+async def test_stream_performance_emits_cumulative_usage_after_each_model_call() -> None:
+    downstream = RecordingSink()
+    sink = BufferedRunEventSink(downstream)
+
+    await sink.emit("model.started", {"input_character_count": 40})
+    await sink.emit(
+        "model.completed",
+        {"usage": {"input_tokens": 10, "output_tokens": 4}},
+    )
+    await sink.emit("model.started", {"input_character_count": 80})
+    await sink.emit(
+        "model.completed",
+        {"usage": {"input_tokens": 20, "output_tokens": 6}},
+    )
+
+    updates = [
+        payload["performance"]
+        for _, event_type, payload in downstream.timeline
+        if event_type == "usage.updated"
+    ]
+    assert [update["model_calls"] for update in updates] == [1, 2]
+    assert updates[-1]["input_tokens"] == 30
+    assert updates[-1]["output_tokens"] == 10
 
 
 @pytest.mark.anyio

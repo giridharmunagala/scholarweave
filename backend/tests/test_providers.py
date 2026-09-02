@@ -13,9 +13,27 @@ from backend.core.models import AppSetting
 from backend.providers.errors import ProviderRuntimeError
 from backend.providers.ollama import OllamaClient
 from backend.providers.repository import ProviderRepository
-from backend.providers.runtime import ResolvedModel
+from backend.providers.runtime import ResolvedModel, _compatible_context_window
 from backend.providers.schemas import ProviderCreate, ProviderModel
 from backend.providers.types import AgentModelDefaults, ModelReference
+
+
+def test_compatible_model_context_is_read_from_llama_cpp_metadata() -> None:
+    class Model:
+        def model_dump(self, *, mode):
+            assert mode == "python"
+            return {
+                "id": "muse-glimmer",
+                "status": {
+                    "args": [
+                        "llama-server",
+                        "--ctx-size",
+                        "131072",
+                    ]
+                },
+            }
+
+    assert _compatible_context_window(Model()) == 131_072
 
 
 def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) -> None:
@@ -52,7 +70,13 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     )
     assert updated.status_code == 200
     assert updated.json()["models"] == [
-        {"name": "embed-1", "capabilities": ["embedding"], "enabled": False}
+        {
+            "name": "embed-1",
+            "capabilities": ["embedding"],
+            "reasoning_efforts": None,
+            "context_window_tokens": None,
+            "enabled": False,
+        }
     ]
 
     restarted = TestClient(
@@ -67,7 +91,13 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     restarted_profile = restarted.get(f"/api/providers/{profile_id}").json()
     assert restarted_profile["api_key_set"] is True
     assert restarted_profile["models"] == [
-        {"name": "embed-1", "capabilities": ["embedding"], "enabled": False}
+        {
+            "name": "embed-1",
+            "capabilities": ["embedding"],
+            "reasoning_efforts": None,
+            "context_window_tokens": None,
+            "enabled": False,
+        }
     ]
     archived = restarted.delete(f"/api/providers/{profile_id}")
     assert archived.status_code == 200
@@ -100,6 +130,68 @@ def test_last_chat_model_reference_persists_across_restarts(test_settings) -> No
         )
     )
     assert restarted.get("/api/settings").json()["last_chat_model_reference"] == reference
+
+
+def test_provider_models_expose_model_specific_reasoning_efforts(test_settings) -> None:
+    client = TestClient(create_app(test_settings))
+    luna = client.post(
+        "/api/providers",
+        json={
+            "name": "Azure reasoning",
+            "kind": "azure_openai",
+            "base_url": "https://azure.example.test/openai/v1",
+            "api_key": "test-key",
+            "models": [{"name": "gpt-5.6-luna"}],
+        },
+    ).json()["models"][0]
+    compatible = client.post(
+        "/api/providers",
+        json={
+            "name": "Local reasoning",
+            "kind": "openai_compatible",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "models": [
+                {"name": "qwen3.8-27b-q3-vision-long"},
+                {"name": "gemma-4-12b-q6-bf16-long"},
+                {"name": "gemma-4-12b-q8-long"},
+                {"name": "custom-model"},
+            ],
+        },
+    ).json()["models"]
+
+    assert luna["reasoning_efforts"] == [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert compatible[0]["reasoning_efforts"] == ["low", "medium", "xhigh"]
+    assert compatible[1]["reasoning_efforts"] == ["none", "high"]
+    assert compatible[2]["reasoning_efforts"] == ["none", "high"]
+    assert compatible[3]["reasoning_efforts"] is None
+
+
+def test_user_profile_and_timezone_settings_persist(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        updated = client.put(
+            "/api/settings",
+            json={
+                "user_timezone": "Asia/Kolkata",
+                "user_profile": "Based in Hyderabad, India.",
+            },
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["user_timezone"] == "Asia/Kolkata"
+        assert updated.json()["user_profile"] == "Based in Hyderabad, India."
+
+        invalid = client.put(
+            "/api/settings",
+            json={"user_timezone": "Not/A_Timezone"},
+        )
+        assert invalid.status_code == 422
 
 
 def test_legacy_empty_ocr_model_references_migrate_to_null(test_settings) -> None:
@@ -344,13 +436,18 @@ async def test_ollama_discovery_lists_every_installed_model_with_capabilities(
             {"name": "chat-model:12b"},
         ]
 
-    async def show_model(_client: OllamaClient, model: str) -> dict[str, list[str]]:
+    async def show_model(_client: OllamaClient, model: str) -> dict:
         return {
             "capabilities": (
                 ["embedding"]
                 if model == "embed-model:latest"
                 else ["completion", "vision", "tools"]
-            )
+            ),
+            "model_info": {
+                "llama.context_length": (
+                    8_192 if model == "embed-model:latest" else 131_072
+                )
+            },
         }
 
     monkeypatch.setattr(OllamaClient, "list_models", list_models)
@@ -365,6 +462,20 @@ async def test_ollama_discovery_lists_every_installed_model_with_capabilities(
     }
     by_name = {entry.name: entry.capabilities for entry in entries}
     assert by_name["embed-model:latest"] == {"embedding"}
+    assert {
+        entry.name: entry.context_window_tokens
+        for entry in entries
+    } == {
+        "embed-model:latest": 8_192,
+        "chat-model:12b": 131_072,
+    }
+    resolved = services.model_resolver.resolve_agent_model(
+        ModelReference(
+            provider_profile_id=profile.id,
+            model="chat-model:12b",
+        )
+    )
+    assert resolved.context_window_tokens == 131_072
     assert by_name["chat-model:12b"] == {"chat", "vision", "tools"}
     assert {
         item["name"] for item in repository.get(profile.id).models_json

@@ -61,10 +61,11 @@
 .web-note-form small { color: var(--muted); }
 
 .paper-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: var(--space-2);
+  min-width: 0;
   width: 100%;
   padding: .55rem .6rem;
   border: 1px solid transparent;
@@ -76,8 +77,20 @@
   transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 .paper-row > div { min-width: 0; }
-.paper-row strong { display: block; font-size: var(--text-sm); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.paper-row small { display: block; color: var(--muted); font-size: var(--text-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paper-row strong {
+  display: block;
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.paper-row small {
+  display: block;
+  margin-top: .15rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
 .paper-row:hover { background: var(--surface-2); }
 .paper-row.active { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--accent-soft); }
 .paper-row.active strong { color: var(--accent-strong); }

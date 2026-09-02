@@ -25,17 +25,20 @@ from backend.agents.blueprint import (
 )
 from backend.agents.catalog import GuardrailCatalog, ToolCatalog
 from backend.agents.instructions import with_global_agent_instructions
-from backend.agents.output import JsonSchemaOutput
+from backend.agents.output import JsonSchemaOutput, with_json_schema_output_instructions
 from backend.core.errors import ValidationError
 from backend.core.config import Settings
 from backend.providers.errors import ProviderRuntimeError
 from backend.providers.types import AgentModelResolver, ModelReference, ResolvedAgentModel
 from backend.runtime.context import ScholarWeaveContext
 from backend.runtime.context_budget import create_context_budget_filter
+from backend.runtime.hooks import ScholarWeaveRunHooks
+from backend.runtime.priorities import ResearchPriorityRequest, prioritizer_enabled
 from backend.runtime.sdk_compat import assert_supported_sdk
+from backend.tools.failures import nested_agent_failure_handler
 
-UNLIMITED_AGENT_TOOL_TURNS = 1_000_000_000
-
+UNLIMITED_AGENT_TOOL_TURNS = 2_147_483_647
+MAX_AGENT_TOOL_DEPTH = 2
 
 @dataclass(frozen=True, slots=True)
 class CompiledAgent:
@@ -59,7 +62,7 @@ class AgentCompiler:
         self._models = model_resolver
         self._tools = tool_catalog
         self._guardrails = guardrail_catalog or GuardrailCatalog()
-        self._settings = settings or Settings()
+        self._settings = settings
 
     def compile(self, blueprint: AgentBlueprint) -> CompiledAgent:
         assert_supported_sdk()
@@ -89,10 +92,21 @@ class AgentCompiler:
                 if spec.output is not None
                 else None
             )
+            instructions = with_global_agent_instructions(
+                spec.instructions,
+                timezone_name=self._settings.user_timezone if self._settings else None,
+                user_profile=self._settings.user_profile if self._settings else None,
+            )
+            if spec.output is not None:
+                instructions = with_json_schema_output_instructions(
+                    instructions,
+                    spec.output.name,
+                    spec.output.schema_,
+                )
             agents_by_id[spec.id] = Agent[ScholarWeaveContext](
                 name=spec.name,
                 handoff_description=spec.description,
-                instructions=with_global_agent_instructions(spec.instructions),
+                instructions=instructions,
                 model=resolved.model,
                 model_settings=self._model_settings(spec.model_settings, resolved),
                 output_type=output_type,
@@ -128,11 +142,24 @@ class AgentCompiler:
 
         agent_tools_by_owner: dict[str, list[Tool]] = {agent_id: [] for agent_id in agents_by_id}
         for spec in blueprint.agent_tools:
+            is_prioritizer = spec.tool_name == "prioritize_research_work"
             agent_tools_by_owner[spec.owner_agent_id].append(
                 agents_by_id[spec.delegate_agent_id].as_tool(
                     tool_name=spec.tool_name,
                     tool_description=spec.tool_description,
-                    max_turns=spec.max_turns,
+                    is_enabled=(
+                        prioritizer_enabled
+                        if is_prioritizer
+                        else True
+                    ),
+                    parameters=ResearchPriorityRequest if is_prioritizer else None,
+                    include_input_schema=is_prioritizer,
+                    max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
+                    hooks=ScholarWeaveRunHooks(),
+                    failure_error_function=nested_agent_failure_handler(
+                        spec.tool_name,
+                        agents_by_id[spec.delegate_agent_id].name,
+                    ),
                     needs_approval=spec.needs_approval,
                 )
             )
@@ -141,6 +168,18 @@ class AgentCompiler:
             spec = agent_specs[agent_id]
             bound_tools = [tools_by_id[tool_id] for tool_id in spec.tool_ids]
             bound_tools.extend(agent_tools_by_owner[agent_id])
+            if self._settings is not None and bound_tools and not any(
+                getattr(tool, "name", None) == "read_tool_result"
+                for tool in bound_tools
+            ):
+                bound_tools.append(
+                    self._tools.build_function_tool(
+                        FunctionToolSpec(
+                            id="context-result-reader",
+                            catalog_id="tool.results.read",
+                        )
+                    )
+                )
             self._validate_tool_names(agent_id, bound_tools)
             self._validate_hosted_tools(agent_id, bound_tools, resolved_models[agent_id])
             agent.tools = bound_tools
@@ -162,17 +201,6 @@ class AgentCompiler:
             run_config=RunConfig(
                 workflow_name=blueprint.name,
                 tracing_disabled=not blueprint.run.tracing_enabled,
-                call_model_input_filter=create_context_budget_filter(
-                    self._settings,
-                    {
-                        id(agents_by_id[agent_id]): (
-                            resolved_models[agent_id].context_window_tokens
-                            or self._settings.agent_context_window_tokens
-                        )
-                        for agent_id in agents_by_id
-                    },
-                    {id(agent): agent_id for agent_id, agent in agents_by_id.items()},
-                ),
                 session_settings=SessionSettings(
                     limit=blueprint.session.history_max_items
                 ),
@@ -180,6 +208,23 @@ class AgentCompiler:
                 tool_name_collision_policy="error",
                 tool_execution=ToolExecutionConfig(
                     max_function_tool_concurrency=blueprint.run.max_tool_concurrency
+                ),
+                call_model_input_filter=(
+                    create_context_budget_filter(
+                        self._settings,
+                        {
+                            id(agents_by_id[agent_id]): context_window
+                            for agent_id, resolved in resolved_models.items()
+                            if (context_window := resolved.context_window_tokens)
+                            is not None
+                        },
+                        {
+                            id(agent): agent_id
+                            for agent_id, agent in agents_by_id.items()
+                        },
+                    )
+                    if self._settings is not None
+                    else None
                 ),
             ),
             max_turns=blueprint.run.max_turns,
@@ -243,6 +288,11 @@ class AgentCompiler:
             parallel_tool_calls=parallel,
             truncation=spec.truncation,
             max_tokens=spec.max_tokens,
+            reasoning=(
+                spec.reasoning.model_dump(exclude_none=True)
+                if spec.reasoning is not None
+                else None
+            ),
             verbosity=spec.verbosity,
             include_usage=True,
         )
@@ -330,6 +380,86 @@ class AgentCompiler:
                 issues.append(f"Agent tool '{spec.id}' has missing delegate agent '{spec.delegate_agent_id}'.")
             if spec.owner_agent_id == spec.delegate_agent_id:
                 issues.append(f"Agent tool '{spec.id}' cannot delegate to its owner agent.")
+        issues.extend(AgentCompiler._agent_tool_topology_issues(blueprint, agent_ids))
+        return issues
+
+    @staticmethod
+    def _agent_tool_topology_issues(
+        blueprint: AgentBlueprint,
+        agent_ids: set[str],
+    ) -> list[str]:
+        graph: dict[str, list[tuple[str, int]]] = {
+            agent_id: [] for agent_id in agent_ids
+        }
+        for relation in blueprint.handoffs:
+            source = relation.source_agent_id
+            target = relation.target_agent_id
+            if source not in agent_ids or target not in agent_ids or source == target:
+                continue
+            graph[source].append((target, 0))
+        for relation in blueprint.agent_tools:
+            owner = relation.owner_agent_id
+            delegate = relation.delegate_agent_id
+            if owner not in agent_ids or delegate not in agent_ids or owner == delegate:
+                continue
+            graph[owner].append((delegate, 1))
+
+        issues: list[str] = []
+        seen_states: set[tuple[str, int]] = set()
+
+        def validate_path(
+            agent_id: str,
+            *,
+            depth: int,
+            path: list[str],
+            path_depths: dict[str, int],
+        ) -> None:
+            state = (agent_id, depth)
+            if state in seen_states:
+                return
+            seen_states.add(state)
+            current_path = [*path, agent_id]
+            current_depths = {**path_depths, agent_id: depth}
+            for delegate, edge_depth in graph[agent_id]:
+                next_depth = depth + edge_depth
+                delegation_path = [*current_path, delegate]
+                if delegate in current_depths:
+                    cycle_depth = next_depth - current_depths[delegate]
+                    if cycle_depth > 0:
+                        cycle_start = current_path.index(delegate)
+                        cycle = [*current_path[cycle_start:], delegate]
+                        message = (
+                            "Agent-tool delegation contains a cycle with recursive nesting: "
+                            + " -> ".join(f"'{item}'" for item in cycle)
+                            + "."
+                        )
+                        if message not in issues:
+                            issues.append(message)
+                    continue
+                if next_depth > MAX_AGENT_TOOL_DEPTH:
+                    message = (
+                        f"Agent-tool delegation exceeds maximum depth "
+                        f"{MAX_AGENT_TOOL_DEPTH}: "
+                        + " -> ".join(f"'{item}'" for item in delegation_path)
+                        + "."
+                    )
+                    if message not in issues:
+                        issues.append(message)
+                    continue
+                validate_path(
+                    delegate,
+                    depth=next_depth,
+                    path=current_path,
+                    path_depths=current_depths,
+                )
+
+        for agent_id in agent_ids:
+            validate_path(
+                agent_id,
+                depth=0,
+                path=[],
+                path_depths={},
+            )
         return issues
 
     @staticmethod

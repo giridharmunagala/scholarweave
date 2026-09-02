@@ -4,17 +4,26 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from agents import FunctionTool, Model, ModelResponse, ModelSettings, TResponseInputItem, Usage
+from agents import (
+    FunctionTool,
+    Model,
+    ModelBehaviorError,
+    ModelResponse,
+    ModelSettings,
+    TResponseInputItem,
+    Usage,
+)
 
-from backend.agents.blueprint import AgentBlueprint
+from backend.agents.blueprint import AgentBlueprint, ReasoningSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
-from backend.agents.compiler import AgentCompiler
+from backend.agents.compiler import AgentCompiler, MAX_AGENT_TOOL_DEPTH
 from backend.agents.export import export_agent
 from backend.agents.guardrails import create_guardrail_catalog
 from backend.agents.instructions import (
     GLOBAL_AGENT_INSTRUCTIONS,
     with_global_agent_instructions,
 )
+from backend.agents.output import JsonSchemaOutput
 from backend.core.errors import ValidationError
 from backend.providers.types import ModelReference, ResolvedAgentModel
 
@@ -150,10 +159,51 @@ def test_compiler_builds_real_sdk_topology() -> None:
     assert compiled.agents_by_id["researcher"].output_type is not None
     assert GLOBAL_AGENT_INSTRUCTIONS in compiled.entry_agent.instructions
     assert GLOBAL_AGENT_INSTRUCTIONS in compiled.agents_by_id["researcher"].instructions
+    assert "Structured output requirement:" in compiled.agents_by_id["researcher"].instructions
+    assert "Return only one JSON value matching the Finding schema" in (
+        compiled.agents_by_id["researcher"].instructions
+    )
+    assert '"required":["answer"]' in compiled.agents_by_id["researcher"].instructions
     assert "System information:\nCurrent date:" in compiled.entry_agent.instructions
     assert "\nCurrent time:" in compiled.entry_agent.instructions
     assert compiled.entry_agent.model_settings.include_usage is True
     assert compiled.max_turns == 10
+
+
+def test_json_schema_output_accepts_fenced_json() -> None:
+    output = JsonSchemaOutput(
+        "Finding",
+        {
+            "type": "object",
+            "properties": {"answer": {"type": "string"}},
+            "required": ["answer"],
+            "additionalProperties": False,
+        },
+        strict=True,
+    )
+
+    assert output.validate_json('```json\n{"answer":"done"}\n```') == {"answer": "done"}
+
+
+def test_json_schema_output_reports_plain_text_as_model_behavior_error() -> None:
+    output = JsonSchemaOutput(
+        "Finding",
+        {"type": "object"},
+        strict=True,
+    )
+
+    with pytest.raises(ModelBehaviorError, match="invalid JSON.*response started with"):
+        output.validate_json("Here is the requested analysis.")
+
+
+def test_compiler_maps_reasoning_effort_to_sdk_settings() -> None:
+    source = blueprint()
+    source.agents[0].model_settings.reasoning = ReasoningSpec(effort="xhigh")
+
+    compiled = AgentCompiler(Resolver(), tool_catalog()).compile(source)
+
+    assert compiled.entry_agent.model_settings.reasoning is not None
+    assert compiled.entry_agent.model_settings.reasoning.effort == "xhigh"
 
 
 def test_global_instructions_include_current_date_and_time() -> None:
@@ -214,6 +264,152 @@ def test_compiler_rejects_self_referencing_relationships(
     with pytest.raises(ValidationError) as raised:
         AgentCompiler(Resolver(), tool_catalog()).compile(invalid)
     assert expected_issue in raised.value.issues
+
+
+def test_compiler_allows_two_nested_agent_tool_levels() -> None:
+    source = blueprint()
+    source.agents.append(
+        source.agents[1].model_copy(
+            update={
+                "id": "reviewer",
+                "name": "Reviewer",
+                "instructions": "Review the focused result.",
+                "output": None,
+            }
+        )
+    )
+    source.agent_tools.append(
+        source.agent_tools[0].model_copy(
+            update={
+                "id": "review-tool",
+                "owner_agent_id": "researcher",
+                "delegate_agent_id": "reviewer",
+                "tool_name": "ask_reviewer",
+                "tool_description": "Ask the reviewer to check the focused result.",
+            }
+        )
+    )
+
+    compiled = AgentCompiler(Resolver(), tool_catalog()).compile(source)
+
+    assert MAX_AGENT_TOOL_DEPTH == 2
+    assert [tool.name for tool in compiled.agents_by_id["researcher"].tools] == [
+        "ask_reviewer"
+    ]
+
+
+def test_compiler_rejects_third_nested_agent_tool_level() -> None:
+    source = blueprint()
+    for agent_id in ("reviewer", "critic"):
+        source.agents.append(
+            source.agents[1].model_copy(
+                update={
+                    "id": agent_id,
+                    "name": agent_id.title(),
+                    "instructions": f"Act as the {agent_id}.",
+                    "output": None,
+                }
+            )
+        )
+    source.agent_tools.extend(
+        [
+            source.agent_tools[0].model_copy(
+                update={
+                    "id": "review-tool",
+                    "owner_agent_id": "researcher",
+                    "delegate_agent_id": "reviewer",
+                    "tool_name": "ask_reviewer",
+                }
+            ),
+            source.agent_tools[0].model_copy(
+                update={
+                    "id": "critic-tool",
+                    "owner_agent_id": "reviewer",
+                    "delegate_agent_id": "critic",
+                    "tool_name": "ask_critic",
+                }
+            ),
+        ]
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        AgentCompiler(Resolver(), tool_catalog()).compile(source)
+
+    assert any(
+        "exceeds maximum depth 2" in issue
+        for issue in raised.value.issues
+    )
+
+
+def test_compiler_rejects_agent_tool_cycles() -> None:
+    source = blueprint()
+    source.agent_tools.append(
+        source.agent_tools[0].model_copy(
+            update={
+                "id": "return-tool",
+                "owner_agent_id": "researcher",
+                "delegate_agent_id": "triage",
+                "tool_name": "ask_triage",
+            }
+        )
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        AgentCompiler(Resolver(), tool_catalog()).compile(source)
+
+    assert any("contains a cycle" in issue for issue in raised.value.issues)
+
+
+def test_handoffs_cannot_bridge_around_agent_tool_depth_limit() -> None:
+    source = blueprint()
+    for agent_id in ("reviewer", "critic", "leaf"):
+        source.agents.append(
+            source.agents[1].model_copy(
+                update={
+                    "id": agent_id,
+                    "name": agent_id.title(),
+                    "instructions": f"Act as the {agent_id}.",
+                    "output": None,
+                }
+            )
+        )
+    source.handoffs.append(
+        source.handoffs[0].model_copy(
+            update={
+                "id": "researcher-to-reviewer",
+                "source_agent_id": "researcher",
+                "target_agent_id": "reviewer",
+            }
+        )
+    )
+    source.agent_tools.extend(
+        [
+            source.agent_tools[0].model_copy(
+                update={
+                    "id": "review-tool",
+                    "owner_agent_id": "reviewer",
+                    "delegate_agent_id": "critic",
+                    "tool_name": "ask_critic",
+                }
+            ),
+            source.agent_tools[0].model_copy(
+                update={
+                    "id": "critic-tool",
+                    "owner_agent_id": "critic",
+                    "delegate_agent_id": "leaf",
+                    "tool_name": "ask_leaf",
+                }
+            ),
+        ]
+    )
+
+    with pytest.raises(ValidationError) as raised:
+        AgentCompiler(Resolver(), tool_catalog()).compile(source)
+
+    assert any(
+        "exceeds maximum depth 2" in issue
+        for issue in raised.value.issues
+    )
 
 
 def test_compiler_rejects_hosted_tool_for_local_model() -> None:

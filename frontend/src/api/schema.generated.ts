@@ -1290,6 +1290,20 @@ export interface components {
         ConversationMessageRequest: {
             /** Content */
             content: string;
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
+            /**
+             * Work Budget
+             * @default medium
+             * @enum {string}
+             */
+            work_budget: "low" | "medium" | "high";
+            /**
+             * Work Mode
+             * @default direct
+             * @enum {string}
+             */
+            work_mode: "direct" | "extended";
         };
         /** ConversationMessageResponse */
         ConversationMessageResponse: {
@@ -1397,6 +1411,8 @@ export interface components {
         DirectConversationMessageRequest: {
             /** Content */
             content: string;
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
         };
         /** DirectConversationMessageResponse */
         DirectConversationMessageResponse: {
@@ -1855,6 +1871,7 @@ export interface components {
             parallel_tool_calls?: boolean | null;
             /** Presence Penalty */
             presence_penalty?: number | null;
+            reasoning?: components["schemas"]["ReasoningSpec"] | null;
             /** Temperature */
             temperature?: number | null;
             /** Tool Choice */
@@ -1895,6 +1912,8 @@ export interface components {
         ProviderModel: {
             /** Capabilities */
             capabilities?: ("chat" | "embedding" | "vision" | "tools" | "speech")[];
+            /** Context Window Tokens */
+            context_window_tokens?: number | null;
             /**
              * Enabled
              * @default true
@@ -1902,6 +1921,8 @@ export interface components {
             enabled: boolean;
             /** Name */
             name: string;
+            /** Reasoning Efforts */
+            reasoning_efforts?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max")[] | null;
         };
         /** ProviderModelsResponse */
         ProviderModelsResponse: {
@@ -1998,6 +2019,11 @@ export interface components {
              */
             type: "reasoning_item";
         };
+        /** ReasoningSpec */
+        ReasoningSpec: {
+            /** Effort */
+            effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
+        };
         /** RemotePdfDownloadRequest */
         RemotePdfDownloadRequest: {
             /** Title */
@@ -2016,6 +2042,8 @@ export interface components {
             input: string | {
                 [key: string]: unknown;
             }[];
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
         };
         /** RunEpochResponse */
         RunEpochResponse: {
@@ -2252,6 +2280,10 @@ export interface components {
             tool_read_retry_attempts: number;
             /** Tool Result Max Tokens */
             tool_result_max_tokens: number;
+            /** User Profile */
+            user_profile: string;
+            /** User Timezone */
+            user_timezone: string;
             /** Workspace Dir */
             workspace_dir: string;
         };
@@ -2302,6 +2334,10 @@ export interface components {
             tool_read_retry_attempts?: number | null;
             /** Tool Result Max Tokens */
             tool_result_max_tokens?: number | null;
+            /** User Profile */
+            user_profile?: string | null;
+            /** User Timezone */
+            user_timezone?: string | null;
         };
         /** StopAndAnswerResponse */
         StopAndAnswerResponse: {

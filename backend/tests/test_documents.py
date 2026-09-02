@@ -98,6 +98,30 @@ def test_artifact_records_are_idempotent_by_owned_path(test_settings) -> None:
         )
 
 
+def test_delete_run_artifacts_removes_records_and_files(test_settings) -> None:
+    services = create_services(test_settings)
+    run_id = "run-to-delete"
+    path = f"runs/{run_id}/result.md"
+    stored = services.storage.write_text(
+        test_settings.artifacts_dir,
+        path,
+        "generated result",
+    )
+    artifact = services.documents.create_artifact_record(
+        owner_type="agent_run",
+        kind="generated",
+        relative_path=path,
+        media_type="text/markdown",
+        stored=stored,
+        metadata={"agent_run_id": run_id},
+    )
+
+    services.documents.delete_run_artifacts(run_id)
+
+    assert not stored.absolute_path.exists()
+    assert services.documents.get_artifact(artifact.id) is None
+
+
 def test_artifact_responses_are_not_cached(test_settings) -> None:
     services = create_services(test_settings)
     stored = services.storage.write_text(

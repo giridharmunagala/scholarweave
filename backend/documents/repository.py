@@ -354,13 +354,33 @@ class DocumentRepository:
             session.commit()
         return True
 
-    def delete_run_artifact_files(self, run_id: str) -> None:
+    def delete_run_artifacts(self, run_id: str) -> None:
         with self.session_factory() as session:
-            artifacts = list(
-                session.scalars(select(Artifact).where(Artifact.run_id == run_id))
+            candidates = list(
+                session.scalars(
+                    select(Artifact).where(Artifact.owner_type == "agent_run")
+                )
             )
+        artifacts = [
+            artifact
+            for artifact in candidates
+            if artifact.run_id == run_id
+            or (artifact.metadata_json or {}).get("agent_run_id") == run_id
+        ]
         for artifact in artifacts:
             self._delete_artifact_file(artifact)
+        if artifacts:
+            with self.session_factory() as session:
+                session.execute(
+                    delete(Artifact).where(
+                        Artifact.id.in_([artifact.id for artifact in artifacts])
+                    )
+                )
+                session.commit()
+        self.storage.delete_stored_tree(
+            self.settings.artifacts_dir,
+            f"runs/{run_id}",
+        )
 
     def clear_generated_document_outputs(self, document_id: str) -> None:
         with self.session_factory() as session:

@@ -3,18 +3,17 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from agents import SQLiteSession, Session, TResponseInputItem
 
 from backend.agents.blueprint import SessionPolicySpec
-from backend.providers.types import ResolvedAgentModel
 
 
 class SdkSessionFactory:
     def __init__(self, database_path: Path) -> None:
         self._database_path = database_path
-        self._sessions: dict[tuple[object, ...], Session] = {}
+        self._sessions: dict[str, Session] = {}
         self._run_locks: dict[str, asyncio.Lock] = {}
 
     def get(
@@ -41,9 +40,8 @@ class SdkSessionFactory:
         self,
         conversation_id: str,
         policy: SessionPolicySpec,
-        primary_model: ResolvedAgentModel,
     ) -> None:
-        await self.get(conversation_id, policy, primary_model).clear_session()
+        await self.get(conversation_id, policy).clear_session()
 
     @asynccontextmanager
     async def run_lock(self, conversation_id: str) -> AsyncIterator[None]:

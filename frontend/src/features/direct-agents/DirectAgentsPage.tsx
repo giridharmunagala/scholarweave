@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { subscribeToRun } from '../../api/events';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
@@ -10,6 +10,13 @@ import {
   StatusPill,
 } from '../../shared/components/Ui';
 import { ChatModelPicker, preferredChatModel } from '../chat/ChatModelPicker';
+import {
+  readStoredReasoningEffort,
+  reasoningEffortsForModel,
+  ReasoningEffortSelect,
+  storeReasoningEffort,
+  type ReasoningEffort,
+} from '../chat/ReasoningEffortSelect';
 import {
   applyChatStreamEvent,
   emptyChatStream,
@@ -38,6 +45,9 @@ export default function DirectAgentsPage() {
   const [selectedDocumentId, setSelectedDocumentId] = useState('');
   const [modelReference, setModelReference] = useState<ModelReference>({});
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
+    readStoredReasoningEffort,
+  );
   const [current, setCurrent] = useState<DirectConversationDetail | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
@@ -50,6 +60,22 @@ export default function DirectAgentsPage() {
 
   const readyDocuments = documents.filter((document) => document.status === 'ready');
   const selectedAgent = agents.find((agent) => agent.key === selectedAgentKey);
+  const supportedReasoningEfforts = useMemo(
+    () => reasoningEffortsForModel(providers, modelReference),
+    [providers, modelReference.provider_profile_id, modelReference.model],
+  );
+
+  useEffect(() => {
+    if (
+      reasoningEffort
+      && modelReference.provider_profile_id
+      && modelReference.model
+      && !supportedReasoningEfforts?.includes(reasoningEffort)
+    ) {
+      setReasoningEffort(null);
+      storeReasoningEffort(null);
+    }
+  }, [reasoningEffort, supportedReasoningEfforts]);
 
   const refreshConversations = () =>
     directAgentsApi.conversations().then(setConversations);
@@ -145,6 +171,11 @@ export default function DirectAgentsPage() {
     newChat();
   };
 
+  const selectReasoningEffort = (effort: ReasoningEffort | null) => {
+    setReasoningEffort(effort);
+    storeReasoningEffort(effort);
+  };
+
   const send = async () => {
     const submitted = content.trim();
     if (!submitted || sending || !selectedAgent) return;
@@ -172,7 +203,11 @@ export default function DirectAgentsPage() {
         setModelReference(conversation.model_reference);
         void refreshConversations();
       }
-      const response = await directAgentsApi.send(conversation.id, submitted);
+      const response = await directAgentsApi.send(
+        conversation.id,
+        submitted,
+        reasoningEffort,
+      );
       setRun(response.run);
     } catch (nextError) {
       setContent(submitted);
@@ -373,6 +408,12 @@ export default function DirectAgentsPage() {
                   value={modelReference}
                   disabled={sending || Boolean(current)}
                   onChange={selectModel}
+                />
+                <ReasoningEffortSelect
+                  value={reasoningEffort}
+                  supportedEfforts={supportedReasoningEfforts}
+                  disabled={sending}
+                  onChange={selectReasoningEffort}
                 />
                 <span className="composer-hint">
                   <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline

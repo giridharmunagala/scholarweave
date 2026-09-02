@@ -3,6 +3,10 @@ import { createPortal } from 'react-dom';
 import { Icon } from '../../shared/components/Icons';
 import { Panel, StatusPill } from '../../shared/components/Ui';
 import {
+  REASONING_EFFORTS,
+  type ReasoningEffort,
+} from '../chat/ReasoningEffortSelect';
+import {
   providersApi,
   type Provider,
   type ProviderCreate,
@@ -45,7 +49,7 @@ export function ProviderProfilesPanel({
     ? catalogProvider.models.filter((model) => {
         const matchesQuery =
           !normalizedCatalogQuery
-          || `${model.name} ${model.capabilities?.join(' ') ?? ''}`
+          || `${model.name} ${model.capabilities?.join(' ') ?? ''} ${model.reasoning_efforts?.join(' ') ?? ''}`
             .toLocaleLowerCase()
             .includes(normalizedCatalogQuery);
         const matchesState =
@@ -176,6 +180,58 @@ export function ProviderProfilesPanel({
           else capabilities.delete(capability);
           return { ...model, capabilities: [...capabilities] };
         }),
+      });
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const setModelReasoningEffort = async (
+    provider: Provider,
+    modelName: string,
+    effort: ReasoningEffort,
+    enabled: boolean,
+  ) => {
+    const key = `${provider.id}:${modelName}`;
+    setBusy(`configure:${key}:reasoning`);
+    try {
+      await providersApi.update(provider.id, {
+        models: provider.models.map((model) => {
+          if (model.name !== modelName) return model;
+          const reasoningEfforts = new Set(model.reasoning_efforts ?? []);
+          if (enabled) reasoningEfforts.add(effort);
+          else reasoningEfforts.delete(effort);
+          return {
+            ...model,
+            reasoning_efforts: REASONING_EFFORTS.filter((item) =>
+              reasoningEfforts.has(item)
+            ),
+          };
+        }),
+      });
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const setModelContextWindow = async (
+    provider: Provider,
+    modelName: string,
+    contextWindowTokens: number | null,
+  ) => {
+    const key = `${provider.id}:${modelName}`;
+    setBusy(`configure:${key}:context`);
+    try {
+      await providersApi.update(provider.id, {
+        models: provider.models.map((model) =>
+          model.name === modelName
+            ? { ...model, context_window_tokens: contextWindowTokens }
+            : model
+        ),
       });
       await onRefresh();
     } catch (error) {
@@ -384,6 +440,77 @@ export function ProviderProfilesPanel({
                             </label>
                           ))}
                         </span>
+                        <label className="provider-model-context-window">
+                          Context
+                          <input
+                            type="number"
+                            min={4096}
+                            max={2000000}
+                            step={1024}
+                            defaultValue={model.context_window_tokens ?? ''}
+                            placeholder="fallback"
+                            disabled={modelUpdateBusy}
+                            aria-label={`${model.name} context window tokens`}
+                            onBlur={(event) => {
+                              const nextValue = event.target.value
+                                ? Number(event.target.value)
+                                : null;
+                              if (
+                                nextValue !== (model.context_window_tokens ?? null)
+                                && (
+                                  nextValue === null
+                                  || (
+                                    Number.isInteger(nextValue)
+                                    && nextValue >= 4096
+                                    && nextValue <= 2000000
+                                  )
+                                )
+                              ) {
+                                void setModelContextWindow(
+                                  catalogProvider,
+                                  model.name,
+                                  nextValue,
+                                );
+                              }
+                            }}
+                          />
+                          tokens
+                        </label>
+                        <details className="provider-model-reasoning">
+                          <summary>
+                            Thinking: {
+                              model.reasoning_efforts?.length
+                                ? model.reasoning_efforts.join(', ')
+                                : model.reasoning_efforts === null
+                                  ? 'not configured'
+                                  : 'off'
+                            }
+                          </summary>
+                          <span
+                            className="provider-model-reasoning-options"
+                            role="group"
+                            aria-label={`${model.name} supported reasoning levels`}
+                          >
+                            {REASONING_EFFORTS.map((effort) => (
+                              <label key={effort}>
+                                <input
+                                  type="checkbox"
+                                  checked={model.reasoning_efforts?.includes(effort) ?? false}
+                                  disabled={modelUpdateBusy}
+                                  onChange={(event) =>
+                                    void setModelReasoningEffort(
+                                      catalogProvider,
+                                      model.name,
+                                      effort,
+                                      event.target.checked,
+                                    )
+                                  }
+                                />
+                                {effort}
+                              </label>
+                            ))}
+                          </span>
+                        </details>
                         <label className="provider-model-enabled">
                           <input
                             type="checkbox"

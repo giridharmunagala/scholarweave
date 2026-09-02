@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session, sessionmaker
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.core.config import Settings
@@ -25,6 +26,8 @@ PERSISTED_SETTING_KEYS = {
     "tool_call_timeout_seconds",
     "tool_read_retry_attempts",
     "agent_tracing_enabled",
+    "user_timezone",
+    "user_profile",
     "python_tool_enabled",
     "python_tool_timeout_seconds",
     "python_tool_memory_mb",
@@ -74,6 +77,8 @@ class SettingsResponse(SettingsSchema):
     tool_call_timeout_seconds: float
     tool_read_retry_attempts: int
     agent_tracing_enabled: bool
+    user_timezone: str
+    user_profile: str
     python_tool_enabled: bool
     python_tool_timeout_seconds: float
     python_tool_memory_mb: int
@@ -100,6 +105,8 @@ class SettingsUpdate(SettingsSchema):
     tool_call_timeout_seconds: float | None = Field(default=None, ge=1, le=3_600)
     tool_read_retry_attempts: int | None = Field(default=None, ge=1, le=5)
     agent_tracing_enabled: bool | None = None
+    user_timezone: str | None = Field(default=None, min_length=1, max_length=100)
+    user_profile: str | None = Field(default=None, max_length=2_000)
     python_tool_enabled: bool | None = None
     python_tool_timeout_seconds: float | None = Field(default=None, gt=0, le=300)
     python_tool_memory_mb: int | None = Field(default=None, ge=32, le=8192)
@@ -108,6 +115,17 @@ class SettingsUpdate(SettingsSchema):
     ocr_llm_enhancement_enabled: bool | None = None
     ocr_llm_model: str | None = None
     ocr_llm_triage_model: str | None = None
+
+    @field_validator("user_timezone")
+    @classmethod
+    def _validate_timezone(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone '{value}'.") from exc
+        return value
 
 
 class SettingsService:
@@ -167,6 +185,8 @@ class SettingsService:
             tool_call_timeout_seconds=self.settings.tool_call_timeout_seconds,
             tool_read_retry_attempts=self.settings.tool_read_retry_attempts,
             agent_tracing_enabled=self.settings.agent_tracing_enabled,
+            user_timezone=self.settings.user_timezone,
+            user_profile=self.settings.user_profile,
             python_tool_enabled=self.settings.python_tool_enabled,
             python_tool_timeout_seconds=self.settings.python_tool_timeout_seconds,
             python_tool_memory_mb=self.settings.python_tool_memory_mb,
@@ -184,6 +204,8 @@ class SettingsService:
         values = payload.model_dump(exclude_unset=True)
         normalized: dict[str, Any] = {}
         for key, value in values.items():
+            if key in {"user_timezone", "user_profile"} and value is None:
+                continue
             if key == "default_model_references" and value is not None:
                 value = {
                     capability: reference.model_dump(mode="json")

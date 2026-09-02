@@ -1,6 +1,11 @@
-.stat-link { text-decoration: none; transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease); }
-.stat-link:hover { border-color: var(--border-strong); transform: translateY(-2px); text-decoration: none; }
-.stat-link:hover .stat-icon { opacity: .8; color: var(--accent); }
+.stat-link { text-decoration: none; transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease); }
+.stat-link:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+  text-decoration: none;
+}
+.stat-link:hover .stat-icon { opacity: .9; color: var(--accent); }
 
 .quick-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: var(--space-3); }
 .quick-action {
@@ -11,12 +16,15 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
+  box-shadow: var(--elev-1);
   color: var(--text);
   transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease),
     box-shadow var(--dur-fast) var(--ease);
 }
+.quick-action:nth-child(2) .quick-icon { background: color-mix(in srgb, var(--hosted) 16%, var(--surface)); color: var(--hosted); }
+.quick-action:nth-child(3) .quick-icon { background: color-mix(in srgb, var(--tool) 16%, var(--surface)); color: var(--tool); }
 .quick-action:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
   text-decoration: none;
@@ -38,6 +46,7 @@
 .quick-action:hover .quick-arrow { transform: translateX(3px); color: var(--accent); }
 
 .list-row {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -46,9 +55,15 @@
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   color: var(--text);
-  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
 }
-.list-row:hover { border-color: var(--border); background: var(--surface-2); text-decoration: none; }
+.list-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+  transform: translateX(2px);
+  text-decoration: none;
+}
 .list-main { display: grid; min-width: 0; }
 .list-main strong { font-size: var(--text-sm); font-weight: 600; }
 .list-main small { color: var(--muted); font-size: var(--text-xs); }

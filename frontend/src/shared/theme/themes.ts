@@ -1,6 +1,18 @@
 /** Theme catalogue and the small amount of DOM plumbing a theme needs. */
 
-export type ThemeId = 'paper' | 'cloud' | 'slate' | 'amoled' | 'forest';
+export type ThemeId =
+  | 'paper'
+  | 'cloud'
+  | 'snow'
+  | 'mint'
+  | 'blossom'
+  | 'citrus'
+  | 'sunrise'
+  | 'slate'
+  | 'nord'
+  | 'aurora'
+  | 'forest'
+  | 'amoled';
 export type ThemePreference = ThemeId | 'system';
 
 export interface ThemeDefinition {
@@ -28,11 +40,60 @@ export const THEMES: ThemeDefinition[] = [
     swatch: ['#0e3f45', '#f2ece1', '#e2603c'],
   },
   {
+    id: 'snow',
+    label: 'Snow',
+    description: 'Pure white, vivid indigo',
+    scheme: 'light',
+    swatch: ['#ffffff', '#f3f4ff', '#4f46e5'],
+  },
+  {
+    id: 'mint',
+    label: 'Mint',
+    description: 'Fresh teal with layered greens',
+    scheme: 'light',
+    swatch: ['#eaf6f1', '#fbfffd', '#0b8f6b'],
+  },
+  {
+    id: 'blossom',
+    label: 'Blossom',
+    description: 'White with rose and violet',
+    scheme: 'light',
+    swatch: ['#fdf4f8', '#ffffff', '#d43f8d'],
+  },
+  {
+    id: 'citrus',
+    label: 'Citrus',
+    description: 'White with amber and lime',
+    scheme: 'light',
+    swatch: ['#fdfaf0', '#ffffff', '#c2740a'],
+  },
+  {
+    id: 'sunrise',
+    label: 'Sunrise',
+    description: 'Warm light with coral accents',
+    scheme: 'light',
+    swatch: ['#fdf4ef', '#fbeee5', '#e0533f'],
+  },
+  {
     id: 'slate',
     label: 'Slate',
     description: 'Indigo, charcoal and cyan',
     scheme: 'dark',
     swatch: ['#241b56', '#1b1f2a', '#3ec9e0'],
+  },
+  {
+    id: 'nord',
+    label: 'Nord',
+    description: 'Cool arctic dark',
+    scheme: 'dark',
+    swatch: ['#2e3440', '#3f4757', '#88c0d0'],
+  },
+  {
+    id: 'aurora',
+    label: 'Aurora',
+    description: 'Deep indigo, vivid violet',
+    scheme: 'dark',
+    swatch: ['#0c0a1b', '#282349', '#a77bff'],
   },
   {
     id: 'forest',

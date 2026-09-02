@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { RunStreamEvent } from '../../api/events';
 import { anchorRunsToItems, turnMetrics } from './ChatPage';
 import { restoreChatStream } from './chatStream';
 import type { ConversationDetail, Run } from './api';
@@ -152,5 +153,36 @@ describe('turnMetrics', () => {
     expect(turnMetrics(candidate)?.inputTokens).toBeNull();
     expect(turnMetrics(candidate)?.outputTokens).toBeNull();
     expect(turnMetrics(candidate)?.durationSeconds).toBe(2);
+  });
+
+  it('uses the latest streamed usage update while a run is active', () => {
+    const candidate = run('run-1', 'Question', 'Reasoning');
+    candidate.status = 'running';
+    candidate.usage = {};
+    const events: RunStreamEvent[] = [
+      {
+        sequence: 8,
+        event_type: 'usage.updated',
+        payload: {
+          performance: {
+            input_tokens: 240,
+            output_tokens: 60,
+            input_tokens_estimated: false,
+            output_tokens_estimated: true,
+            prompt_tokens_per_second: 80,
+            generation_tokens_per_second: 30,
+          },
+        },
+      },
+    ];
+
+    expect(turnMetrics(candidate, events)).toMatchObject({
+      inputTokens: 240,
+      outputTokens: 60,
+      inputEstimated: false,
+      outputEstimated: true,
+      promptRate: 80,
+      generationRate: 30,
+    });
   });
 });

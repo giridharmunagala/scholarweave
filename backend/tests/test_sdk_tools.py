@@ -132,6 +132,7 @@ def test_builtin_json_content_tools_define_array_items(catalog_id: str) -> None:
 
 @pytest.mark.anyio
 async def test_sdk_catalog_exposes_blueprint_contract(test_settings) -> None:
+    test_settings.tool_result_max_tokens = 16_000
     services = create_services(test_settings)
     try:
         runtime = services.runs._tool_runtime

@@ -1,6 +1,42 @@
 import { Panel } from '../../shared/components/Ui';
 import type { Settings } from './api';
 
+export function ProfilePanel({
+  settings,
+  onChange,
+}: {
+  settings: Settings;
+  onChange: (settings: Settings) => void;
+}) {
+  return (
+    <Panel
+      title="User context"
+      description="Included in every agent, planner, and worker prompt together with the current localized time."
+    >
+      <div className="stack">
+        <label className="field">
+          Timezone
+          <input
+            value={settings.user_timezone}
+            placeholder="Asia/Kolkata"
+            onChange={(event) => onChange({ ...settings, user_timezone: event.target.value })}
+          />
+          <small>Use an IANA timezone such as Asia/Kolkata.</small>
+        </label>
+        <label className="field">
+          Profile
+          <textarea
+            rows={5}
+            value={settings.user_profile}
+            placeholder="Location, preferences, background, and recurring constraints."
+            onChange={(event) => onChange({ ...settings, user_profile: event.target.value })}
+          />
+        </label>
+      </div>
+    </Panel>
+  );
+}
+
 export function DocumentsPanel({
   settings,
   onChange,

@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type ComponentPropsWithoutRef } from 'react';
+import {
+  Children,
+  isValidElement,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
@@ -7,9 +15,16 @@ import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import 'katex/dist/katex.min.css';
+import { ChartBlock } from './Chart';
+import { isChartLanguage } from './chartSpec';
+import { CodeBlock } from './CodeBlock';
 import { Icon } from './Icons';
 
-const MARKDOWN_COMPONENTS: Components = { img: MarkdownImage, table: MarkdownTable };
+const MARKDOWN_COMPONENTS: Components = {
+  img: MarkdownImage,
+  table: MarkdownTable,
+  pre: MarkdownPre,
+};
 const SAFE_HTML_SCHEMA = {
   ...defaultSchema,
   attributes: {
@@ -95,6 +110,32 @@ function looksLikeLatex(value: string): boolean {
 }
 
 type MarkdownImageProps = ComponentPropsWithoutRef<'img'> & { node?: unknown };
+
+type MarkdownPreProps = ComponentPropsWithoutRef<'pre'> & { node?: unknown };
+
+/**
+ * A fenced block is never just text. Depending on its info string it is code
+ * worth colouring, or a chart worth drawing, so the `pre` element is replaced
+ * wholesale rather than styled.
+ */
+function MarkdownPre({ children, node: _node, ...props }: MarkdownPreProps) {
+  const child = Children.toArray(children)[0];
+  if (isValidElement<{ className?: string; children?: ReactNode }>(child)) {
+    const language = /language-([\w+#.-]+)/.exec(child.props.className ?? '')?.[1] ?? '';
+    const source = textOf(child.props.children);
+    if (isChartLanguage(language)) return <ChartBlock source={source} />;
+    return <CodeBlock code={source} language={language} />;
+  }
+  return <pre {...props}>{children}</pre>;
+}
+
+function textOf(node: ReactNode): string {
+  if (node === null || node === undefined || typeof node === 'boolean') return '';
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join('');
+  if (isValidElement<{ children?: ReactNode }>(node)) return textOf(node.props.children);
+  return '';
+}
 
 type MarkdownTableProps = ComponentPropsWithoutRef<'table'> & { node?: unknown };
 

@@ -32,7 +32,7 @@ def _object_schema(
 
 APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
-        "extended.plan.update",
+        "goal.plan.update",
         "update_goal_plan",
         "Replace the durable goal plan and mark completed steps.",
         _object_schema(
@@ -90,7 +90,7 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
         True,
     ),
     (
-        "tool.result.read",
+        "tool.results.read",
         "read_tool_result",
         "Read a bounded slice of a large tool result by its result_ref.",
         _object_schema(
@@ -132,8 +132,15 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
                         {
                             "id": {"type": "string", "minLength": 1},
                             "title": {"type": "string", "minLength": 1},
+                            "instructions": {"type": "string", "minLength": 1},
+                            "expected_output": {"type": "string", "minLength": 1},
                         },
-                        required=["id", "title"],
+                        required=[
+                            "id",
+                            "title",
+                            "instructions",
+                            "expected_output",
+                        ],
                     ),
                 }
             },
@@ -414,10 +421,31 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
         "web.search",
         "search_web",
-        "Search DuckDuckGo and return up to 10 results.",
+        (
+            "Search DuckDuckGo and return 10 titles, snippets, and source URLs. Use one broad, "
+            "high-signal keyword query for wide coverage before narrowing; avoid quoted exact "
+            "phrases unless looking for a known title or unique wording. The 100-request session "
+            "budget is intentionally finite, requests are limited to one per second, and the same "
+            "normalized query is never requested twice."
+        ),
         _object_schema(
-            {"query": {"type": "string", "minLength": 1}},
-            required=["query"],
+            {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "A concise keyword query combining the distinctive topic, entities, and "
+                        "useful synonyms. Prefer coverage over exact-phrase variants."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 10,
+                    "description": "Always request 10 results to maximize coverage per search.",
+                },
+            },
+            required=["query", "limit"],
         ),
         True,
     ),
@@ -642,6 +670,158 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
                 },
             },
             required=["path", "content", "media_type"],
+        ),
+        True,
+    ),
+    (
+        "conversation.memory.search",
+        "search_conversation_memory",
+        (
+            "Search completed turns from older local conversations. Results are lexical candidates, "
+            "not proof of equivalence; reuse only a clearly matching result."
+        ),
+        _object_schema(
+            {
+                "query": {"type": "string", "minLength": 3, "maxLength": 500},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+            },
+            required=["query", "limit"],
+        ),
+        True,
+    ),
+    (
+        "conversation.memory.read",
+        "read_conversation_memory",
+        "Read the request and answer for one clearly matching completed conversation turn.",
+        _object_schema(
+            {"run_id": {"type": "string", "minLength": 1}},
+            required=["run_id"],
+        ),
+        True,
+    ),
+    (
+        "python.execute",
+        "execute_python",
+        (
+            "Run transient sandboxed Python for exact calculations, simulations, and chart data. "
+            "Code must define compute(inputs) and return a JSON-serializable value."
+        ),
+        _object_schema(
+            {
+                "code": {"type": "string", "minLength": 1, "maxLength": 20_000},
+                "inputs": {"type": "object"},
+            },
+            required=["code", "inputs"],
+        ),
+        True,
+    ),
+    (
+        "extended.budget.status",
+        "extended_work_budget_status",
+        "Show soft scope guidance and the remaining external-search runaway safety capacity.",
+        _object_schema({}),
+        True,
+    ),
+    (
+        "extended.priorities.list",
+        "list_research_priority_decisions",
+        (
+            "List model-made research reallocations shared across the coordinator and focused "
+            "workers, including intentionally deferred or stopped work."
+        ),
+        _object_schema({}),
+        True,
+    ),
+    (
+        "extended.plan.create",
+        "create_extended_work_plan",
+        "Create the ordered plan for one extended-work run.",
+        _object_schema(
+            {
+                "tasks": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "items": _object_schema(
+                        {
+                            "id": {"type": "string", "minLength": 1},
+                            "title": {"type": "string", "minLength": 1},
+                            "instructions": {"type": "string", "minLength": 1},
+                            "expected_output": {"type": "string", "minLength": 1},
+                            "effort": {
+                                "type": "string",
+                                "enum": ["low", "medium", "high"],
+                            },
+                            "source_target": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 300,
+                            },
+                            "rationale": {"type": "string", "minLength": 1},
+                        },
+                        required=[
+                            "id",
+                            "title",
+                            "instructions",
+                            "expected_output",
+                            "effort",
+                            "source_target",
+                            "rationale",
+                        ],
+                    ),
+                }
+            },
+            required=["tasks"],
+        ),
+        True,
+    ),
+    (
+        "extended.plan.update",
+        "update_extended_work_item",
+        "Complete or block the current extended work item and advance the plan.",
+        _object_schema(
+            {
+                "id": {"type": "string", "minLength": 1},
+                "status": {"type": "string", "enum": ["completed", "blocked"]},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
+            },
+            required=["id", "status", "summary"],
+        ),
+        True,
+    ),
+    (
+        "extended.notes.save",
+        "save_extended_work_note",
+        "Save detailed intermediate findings outside the coordinator prompt.",
+        _object_schema(
+            {
+                "task_id": {"type": "string", "minLength": 1},
+                "title": {"type": "string", "minLength": 1, "maxLength": 300},
+                "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
+                "content": {"type": "string", "minLength": 1, "maxLength": 100_000},
+                "sources": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            required=["task_id", "title", "summary", "content", "sources"],
+        ),
+        True,
+    ),
+    (
+        "extended.notes.list",
+        "list_extended_work_notes",
+        "List compact summaries of intermediate notes from the current extended run.",
+        _object_schema({}),
+        True,
+    ),
+    (
+        "extended.notes.read",
+        "read_extended_work_note",
+        "Read one selected intermediate note from the current extended run.",
+        _object_schema(
+            {"note_id": {"type": "string", "minLength": 1}},
+            required=["note_id"],
         ),
         True,
     ),

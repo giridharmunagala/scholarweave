@@ -14,6 +14,7 @@ from backend.autonomous import AutonomousAgentService
 from backend.builder.service import BuilderService
 from backend.core.config import Settings
 from backend.conversations.repository import ConversationRepository
+from backend.conversations.memory import ConversationMemoryService
 from backend.conversations.service import ConversationService
 from backend.core.settings_service import SettingsService
 from backend.documents import DocumentService
@@ -78,6 +79,7 @@ class ApplicationServices:
     agents: AgentService
     sdk_sessions: SdkSessionFactory
     conversations: ConversationService
+    conversation_memory: ConversationMemoryService
     events: EventBroker
     runs: RunService
     builder: BuilderService
@@ -181,6 +183,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         ConversationRepository(session_factory),
         sdk_sessions,
     )
+    conversation_memory = ConversationMemoryService(session_factory)
     direct_agent_repository = DirectAgentRepository(session_factory)
     events = EventBroker()
     run_repository = RunRepository(session_factory)
@@ -197,6 +200,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         tool_catalog=tool_catalog,
         direct_agent_repository=direct_agent_repository,
         run_repository=run_repository,
+        conversation_memory=conversation_memory,
     )
     runs = RunService(
         run_repository,
@@ -204,6 +208,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         tool_runtime,
         events,
         settings=resolved,
+        retention_days=resolved.run_retention_days,
+        delete_run_artifacts=documents.delete_run_artifacts,
     )
     builder = BuilderService(compiler, conversations, runs)
     autonomous = AutonomousAgentService(compiler, conversations, runs, function_tools)
@@ -250,6 +256,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         agents=agents,
         sdk_sessions=sdk_sessions,
         conversations=conversations,
+        conversation_memory=conversation_memory,
         events=events,
         runs=runs,
         builder=builder,

@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from backend.agents.blueprint import AgentBlueprint, ModelReferenceSpec, SessionPolicySpec
+from backend.agents.blueprint import (
+    AgentBlueprint,
+    ModelReferenceSpec,
+    ReasoningEffort,
+    SessionPolicySpec,
+)
 from backend.agents.compiler import AgentCompiler
 from backend.builder.todos import validate_builder_completion
 from backend.conversations.service import ConversationService
@@ -56,12 +61,15 @@ class BuilderService:
         return self._conversations.get(conversation_id)
 
     async def conversation_items(self, conversation_id: str):
-        record = self.get_conversation(conversation_id)
-        compiled = self._compile(record.model_reference_json)
-        primary = compiled.resolved_models[compiled.blueprint.entry_agent_id]
-        return await self._conversations.items(conversation_id, primary)
+        return await self._conversations.items(conversation_id)
 
-    def start_message(self, conversation_id: str, message: str):
+    def start_message(
+        self,
+        conversation_id: str,
+        message: str,
+        *,
+        reasoning_effort: ReasoningEffort | None = None,
+    ):
         record = self.get_conversation(conversation_id)
         compiled = self._compile(record.model_reference_json)
         self._conversations.touch(conversation_id, message)
@@ -70,6 +78,7 @@ class BuilderService:
             message,
             agent_revision_id=None,
             conversation_id=conversation_id,
+            reasoning_effort=reasoning_effort,
         )
 
     async def send_message(self, conversation_id: str, message: str):

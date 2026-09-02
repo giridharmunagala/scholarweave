@@ -36,6 +36,7 @@ class ResolvedModel:
     base_url: str
     api_key: str | None
     model: str
+    context_window_tokens: int | None = None
 
     @property
     def agent_base_url(self) -> str:
@@ -142,6 +143,12 @@ class ModelRuntime:
             base_url=profile.base_url,
             api_key=profile.api_key,
             model=model,
+            context_window_tokens=(
+                int(declared_model["context_window_tokens"])
+                if declared_model is not None
+                and isinstance(declared_model.get("context_window_tokens"), int)
+                else None
+            ),
         )
 
     def client(self, resolved: ResolvedModel) -> AsyncOpenAI:
@@ -178,6 +185,7 @@ class ModelRuntime:
                         continue
                     reported = set(item.get("capabilities") or [])
                     capabilities: set[Capability] = set()
+                    details: dict[str, Any] = {}
                     try:
                         details = await client.show_model(name)
                         reported.update(details.get("capabilities") or [])
@@ -203,7 +211,11 @@ class ModelRuntime:
                             else "chat"
                         )
                     discovered.append(
-                        ProviderModelEntry(name=name, capabilities=capabilities)
+                        ProviderModelEntry(
+                            name=name,
+                            capabilities=capabilities,
+                            context_window_tokens=_ollama_context_window(details),
+                        )
                     )
             else:
                 resolved = ResolvedModel(
@@ -215,30 +227,57 @@ class ModelRuntime:
                     "discovery",
                 )
                 result = await self.client(resolved).models.list()
-                discovered = [ProviderModelEntry(name=item.id, capabilities=set()) for item in result.data if item.id]
+                discovered = [
+                    ProviderModelEntry(
+                        name=item.id,
+                        capabilities=set(),
+                        context_window_tokens=_compatible_context_window(item),
+                    )
+                    for item in result.data
+                    if item.id
+                ]
         except (OllamaError, OpenAIError, ProviderRuntimeError) as exc:
             raise ProviderDiscoveryError(
                 str(exc),
                 manual_models=manual,
             ) from exc
-        if profile.kind == "ollama":
-            manual_by_name = {entry.name: entry for entry in manual}
-            merged = {
-                entry.name: ProviderModelEntry(
-                    name=entry.name,
-                    capabilities=entry.capabilities
-                    | manual_by_name.get(
-                        entry.name,
-                        ProviderModelEntry(name=entry.name),
-                    ).capabilities,
-                )
-                for entry in discovered
-            }
-        else:
-            merged = {entry.name: entry for entry in discovered}
-            merged.update({entry.name: entry for entry in manual})
+        manual_by_name = {entry.name: entry for entry in manual}
+        merged = {
+            entry.name: ProviderModelEntry(
+                name=entry.name,
+                capabilities=entry.capabilities
+                | manual_by_name.get(
+                    entry.name,
+                    ProviderModelEntry(name=entry.name),
+                ).capabilities,
+                reasoning_efforts=(
+                    manual_by_name[entry.name].reasoning_efforts
+                    if entry.name in manual_by_name
+                    else entry.reasoning_efforts
+                ),
+                context_window_tokens=(
+                    manual_by_name[entry.name].context_window_tokens
+                    if entry.name in manual_by_name
+                    and manual_by_name[entry.name].context_window_tokens is not None
+                    else entry.context_window_tokens
+                ),
+                enabled=(
+                    manual_by_name[entry.name].enabled
+                    if entry.name in manual_by_name
+                    else entry.enabled
+                ),
+            )
+            for entry in discovered
+        }
+        if profile.kind != "ollama":
+            merged.update(
+                {
+                    entry.name: entry
+                    for entry in manual
+                    if entry.name not in merged
+                }
+            )
         return list(merged.values())
-
     async def transcribe(
         self,
         resolved: ResolvedModel,
@@ -367,6 +406,45 @@ class ModelRuntime:
             return response
         response = await self.client(resolved).embeddings.create(model=resolved.model, input=inputs)
         return [item.embedding for item in response.data]
+
+
+def _ollama_context_window(details: dict[str, Any]) -> int | None:
+    model_info = details.get("model_info")
+    if not isinstance(model_info, dict):
+        return None
+    candidates = [
+        value
+        for key, value in model_info.items()
+        if str(key).endswith(".context_length") or key == "context_length"
+    ]
+    for value in candidates:
+        if isinstance(value, int) and 4_096 <= value <= 2_000_000:
+            return value
+    return None
+
+
+def _compatible_context_window(model: Any) -> int | None:
+    model_dump = getattr(model, "model_dump", None)
+    payload = model_dump(mode="python") if callable(model_dump) else model
+    if not isinstance(payload, dict):
+        return None
+    status = payload.get("status")
+    arguments = status.get("args") if isinstance(status, dict) else None
+    if not isinstance(arguments, list):
+        return None
+    for flag in ("--ctx-size", "-c"):
+        if flag not in arguments:
+            continue
+        index = arguments.index(flag) + 1
+        if index >= len(arguments):
+            continue
+        try:
+            value = int(arguments[index])
+        except (TypeError, ValueError):
+            continue
+        if 4_096 <= value <= 2_000_000:
+            return value
+    return None
 
 
 def _options(temperature: float | None) -> dict[str, Any] | None:

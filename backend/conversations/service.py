@@ -7,7 +7,6 @@ from agents import TResponseInputItem
 from backend.agents.blueprint import SessionPolicySpec
 from backend.conversations.models import ConversationRecord
 from backend.conversations.repository import ConversationRepository
-from backend.providers.types import ResolvedAgentModel
 from backend.runtime.serialization import to_jsonable
 from backend.runtime.sessions import SdkSessionFactory
 
@@ -47,11 +46,10 @@ class ConversationService:
     async def items(
         self,
         conversation_id: str,
-        primary_model: ResolvedAgentModel,
     ) -> list[dict[str, Any]]:
         record = self.get(conversation_id)
         policy = SessionPolicySpec.model_validate(record.session_policy_json)
-        items = await self._sessions.get(record.id, policy, primary_model).get_items()
+        items = await self._sessions.get(record.id, policy).get_items()
         return [_project_session_item(item) for item in items]
 
     def touch(self, conversation_id: str, preview: str) -> ConversationRecord:
@@ -60,11 +58,10 @@ class ConversationService:
     async def delete(
         self,
         conversation_id: str,
-        primary_model: ResolvedAgentModel,
     ) -> None:
         record = self.get(conversation_id)
         policy = SessionPolicySpec.model_validate(record.session_policy_json)
-        await self._sessions.clear(record.id, policy, primary_model)
+        await self._sessions.clear(record.id, policy)
         self._repository.delete(conversation_id)
 
 

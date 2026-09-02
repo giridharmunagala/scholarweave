@@ -7,6 +7,7 @@ import {
   encodeModelReference,
   preferredChatModel,
 } from './ChatModelPicker';
+import { reasoningEffortsForModel } from './ReasoningEffortSelect';
 
 describe('builder chat model picker', () => {
   it('offers tool-capable and undeclared models but not embedding-only models', () => {
@@ -65,5 +66,34 @@ describe('builder chat model picker', () => {
       provider_profile_id: 'provider-1',
       model: 'default-model',
     });
+  });
+
+  it('uses only the selected model declared reasoning levels', () => {
+    const providers = [
+      {
+        id: 'provider-1',
+        models: [
+          {
+            name: 'qwen',
+            enabled: true,
+            reasoning_efforts: ['low', 'medium', 'xhigh'],
+          },
+          { name: 'unknown', enabled: true, reasoning_efforts: null },
+        ],
+      },
+    ] as Provider[];
+
+    expect(
+      reasoningEffortsForModel(providers, {
+        provider_profile_id: 'provider-1',
+        model: 'qwen',
+      }),
+    ).toEqual(['low', 'medium', 'xhigh']);
+    expect(
+      reasoningEffortsForModel(providers, {
+        provider_profile_id: 'provider-1',
+        model: 'unknown',
+      }),
+    ).toBeNull();
   });
 });

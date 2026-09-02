@@ -1,13 +1,19 @@
 import type { AgentSpec } from '../types';
+import {
+  ReasoningEffortSelect,
+  type ReasoningEffort,
+} from '../../chat/ReasoningEffortSelect';
 import { OptionalNumber } from './InspectorFields';
 
 type ModelSettings = NonNullable<AgentSpec['model_settings']>;
 
 export function ModelSettingsEditor({
   settings,
+  supportedReasoningEfforts,
   onChange,
 }: {
   settings: ModelSettings;
+  supportedReasoningEfforts: readonly ReasoningEffort[] | null;
   onChange: (patch: Partial<ModelSettings>) => void;
 }) {
   return (
@@ -43,6 +49,13 @@ export function ModelSettingsEditor({
             </select>
           </label>
         </div>
+        <ReasoningEffortSelect
+          value={settings.reasoning?.effort ?? null}
+          supportedEfforts={supportedReasoningEfforts}
+          onChange={(effort) => onChange({
+            reasoning: effort === null ? null : { effort },
+          })}
+        />
         <label className="field">
           Verbosity
           <select value={settings.verbosity ?? ''} onChange={(event) => onChange({ verbosity: event.target.value === '' ? null : event.target.value as ModelSettings['verbosity'] })}>

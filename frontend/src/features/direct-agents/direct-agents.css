@@ -74,8 +74,10 @@
 }
 
 .message .markdown-viewer {
-  font-size: var(--text-sm);
+  font-size: var(--text-base);
 }
+
+.direct-agents-page .composer-reasoning { flex: none; }
 
 .message .markdown-viewer > :first-child {
   margin-top: 0;

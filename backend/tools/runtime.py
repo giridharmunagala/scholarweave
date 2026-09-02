@@ -12,24 +12,42 @@ from backend.agents.blueprint import AgentBlueprint
 from backend.agents.catalog import ToolCatalog
 from backend.agents.service import AgentService
 from backend.agents.templates import starter_blueprints
+from backend.autonomous.work import (
+    budget_status,
+    consume_tool_safety_limit,
+    create_work_plan,
+    list_work_notes,
+    read_work_note,
+    save_work_note,
+    update_work_item,
+)
 from backend.builder.todos import (
     create_builder_todo_plan,
     finish_builder_run,
     update_builder_todo,
 )
 from backend.core.config import Settings
+from backend.core.text import clean_filename
+from backend.conversations.memory import ConversationMemoryService
 from backend.documents import DocumentService
 from backend.documents.paper import manifest_pages
 from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
+from backend.runtime.priorities import list_priority_decisions
 from backend.runs.repository import RunRepository
 from backend.persistence.files import SafeStorage
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService, WebSourceUnavailable
 from backend.tools.service import FunctionToolService
+from backend.tools.sandbox import SandboxLimits, run_python
 from backend.core.json import dumps_json
 from backend.workspace.service import WorkspaceService
+
+
+_WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
+_WEB_SEARCH_CACHE_KEY = "web_search_results"
+_WEB_SEARCH_ATTEMPTS_KEY = "web_search_attempted_queries"
 
 
 class ApplicationToolRuntime:
@@ -48,6 +66,7 @@ class ApplicationToolRuntime:
         tool_catalog: ToolCatalog | None = None,
         direct_agent_repository: DirectAgentRepository | None = None,
         run_repository: RunRepository | None = None,
+        conversation_memory: ConversationMemoryService | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -61,6 +80,7 @@ class ApplicationToolRuntime:
         self._catalog = tool_catalog
         self._direct_agents = direct_agent_repository
         self._runs = run_repository
+        self._conversation_memory = conversation_memory
 
     async def invoke(
         self,
@@ -71,13 +91,20 @@ class ApplicationToolRuntime:
         tool_call_id: str | None = None,
     ) -> Any:
         handlers = {
-            "extended.plan.update": self._update_goal_plan,
+            "goal.plan.update": self._update_goal_plan,
             "extended.block": self._block_goal,
             "extended.finish": self._finish_goal,
-            "tool.result.read": self._read_tool_result,
+            "tool.results.read": self._read_tool_result,
             "builder.todos.create": create_builder_todo_plan,
             "builder.todos.update": update_builder_todo,
             "builder.finish": finish_builder_run,
+            "extended.budget.status": budget_status,
+            "extended.priorities.list": list_priority_decisions,
+            "extended.plan.create": create_work_plan,
+            "extended.plan.update": update_work_item,
+            "extended.notes.save": self._save_extended_work_note,
+            "extended.notes.list": list_work_notes,
+            "extended.notes.read": read_work_note,
             "tools.search": self._search_tools,
             "research.pages.read_all": self._read_all_paper_pages,
             "research.pages.read_retained": self._read_retained_paper_pages,
@@ -111,6 +138,9 @@ class ApplicationToolRuntime:
             "workspace.paper.ensure": self._ensure_paper_workspace,
             "workspace.paper.name.set": self._set_paper_workspace_name,
             "artifacts.write": self._write_artifact,
+            "conversation.memory.search": self._search_conversation_memory,
+            "conversation.memory.read": self._read_conversation_memory,
+            "python.execute": self._execute_python,
             "sdk.catalog": self._sdk_catalog,
             "agents.list": self._list_agents,
             "agents.get": self._get_agent,
@@ -184,7 +214,7 @@ class ApplicationToolRuntime:
                 if catalog_id in {"builder.todos.create", "builder.todos.update"}:
                     await context.emit("builder.todos.updated", result)
                 goal_event = {
-                    "extended.plan.update": "goal.plan.updated",
+                    "goal.plan.update": "goal.plan.updated",
                     "extended.block": "goal.blocked",
                     "extended.finish": "goal.completed",
                 }.get(catalog_id)
@@ -311,7 +341,7 @@ class ApplicationToolRuntime:
         if not result_ref.startswith(f"runs/{context.run_id}/"):
             raise ValueError("result_ref does not belong to the active run.")
         offset = int(arguments["offset"])
-        limit = int(arguments["limit"])
+        limit = int(arguments.get("limit", 10))
         content = self._storage.read_artifact(result_ref).decode("utf-8")
         return {
             "result_ref": result_ref,
@@ -821,9 +851,101 @@ class ApplicationToolRuntime:
     async def _search_web(
         self,
         arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
+        context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        return await self._research_search.search_web(str(arguments["query"]))
+        query = " ".join(
+            str(arguments["query"])
+            .translate(str.maketrans("", "", "\"\u201c\u201d"))
+            .split()
+        )
+        limit = int(arguments.get("limit", 10))
+        if not query:
+            raise ValueError("Search query cannot be empty.")
+        if limit != 10:
+            raise ValueError("Agent web searches must request exactly 10 results.")
+
+        cache = context.metadata.setdefault(_WEB_SEARCH_CACHE_KEY, {})
+        if not isinstance(cache, dict):
+            raise ValueError("The web-search session cache is invalid.")
+        cache_key = query.casefold()
+        attempts = context.metadata.setdefault(_WEB_SEARCH_ATTEMPTS_KEY, [])
+        if not isinstance(attempts, list) or any(
+            not isinstance(item, str) for item in attempts
+        ):
+            raise ValueError("The web-search session attempt history is invalid.")
+        cached = cache.get(cache_key)
+        if cached is not None:
+            if not isinstance(cached, dict):
+                raise ValueError("The cached web-search result is invalid.")
+            cached_limit = cached.get("limit")
+            cached_result = cached.get("result")
+            cached_results = (
+                cached_result.get("results") if isinstance(cached_result, dict) else None
+            )
+            if (
+                isinstance(cached_limit, int)
+                and cached_limit >= limit
+                and isinstance(cached_result, dict)
+                and isinstance(cached_results, list)
+            ):
+                return self._web_search_result(
+                    {
+                        **cached_result,
+                        "query": query,
+                        "results": cached_results[:limit],
+                    },
+                    context,
+                    cached=True,
+                )
+        if cache_key in attempts:
+            raise ValueError(
+                "This normalized web query was already attempted in the current session. "
+                "Use its earlier results instead of retrying it with a different result limit."
+            )
+
+        used = self._web_search_requests_used(context)
+        maximum = self._settings.web_search_max_requests_per_session
+        if used >= maximum:
+            raise ValueError(
+                f"The web-search session limit was reached ({used}/{maximum}). "
+                "Use the results already gathered instead of rephrasing or retrying searches."
+            )
+        context.metadata[_WEB_SEARCH_USAGE_KEY] = used + 1
+        attempts.append(cache_key)
+        try:
+            result = await self._research_search.search_web(query, limit)
+        except Exception:
+            attempts.remove(cache_key)
+            context.metadata[_WEB_SEARCH_USAGE_KEY] = used
+            raise
+        cache[cache_key] = {"limit": limit, "result": result}
+        return self._web_search_result(result, context, cached=False)
+
+    def _web_search_result(
+        self,
+        result: dict[str, Any],
+        context: ScholarWeaveContext,
+        *,
+        cached: bool,
+    ) -> dict[str, Any]:
+        used = self._web_search_requests_used(context)
+        maximum = self._settings.web_search_max_requests_per_session
+        return {
+            **result,
+            "cached": cached,
+            "search_budget": {
+                "used": used,
+                "limit": maximum,
+                "remaining": max(0, maximum - used),
+            },
+        }
+
+    @staticmethod
+    def _web_search_requests_used(context: ScholarWeaveContext) -> int:
+        value = context.metadata.get(_WEB_SEARCH_USAGE_KEY, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError("The web-search session usage counter is invalid.")
+        return value
 
     async def _search_arxiv(
         self,
@@ -1001,6 +1123,38 @@ class ApplicationToolRuntime:
             "kind": document.kind,
         }
 
+    def _save_extended_work_note(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        result = save_work_note(arguments, context)
+        sources = list(result["sources"])
+        source_section = (
+            "\n\n## Sources\n\n" + "\n".join(f"- {source}" for source in sources)
+            if sources
+            else ""
+        )
+        folder = clean_filename(context.run_id)
+        filename = clean_filename(f"{result['note_id']}-{result['title']}")
+        path = f"extended-work-notes/{folder}/{filename}.md"
+        try:
+            document = self._workspace.write_file(
+                path,
+                f"# {result['title']}\n\n{result['content']}{source_section}\n",
+                tags=["extended-work", f"run:{context.run_id}"],
+            )
+        except Exception:
+            notes = context.metadata.get("extended_work_notes")
+            if isinstance(notes, dict):
+                notes.pop(result["note_id"], None)
+            raise
+        self._append_workspace_receipt(context, document, "Created")
+        return {
+            **result,
+            "workspace_path": document.path,
+        }
+
     def _set_paper_workspace_name(
         self,
         arguments: dict[str, Any],
@@ -1039,7 +1193,6 @@ class ApplicationToolRuntime:
                 metadata={"sha256": document.sha256},
             )
         )
-
     def _write_artifact(
         self,
         arguments: dict[str, Any],
@@ -1232,6 +1385,52 @@ class ApplicationToolRuntime:
             "catalog_id": f"custom:{document.latest_revision.id}",
         }
 
+    def _search_conversation_memory(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        query = str(arguments["query"]).strip()
+        matches = self._require_conversation_memory().search(
+            query,
+            exclude_conversation_id=context.conversation_id,
+            limit=int(arguments["limit"]),
+        )
+        return {
+            "query": query,
+            "matches": matches,
+            "reuse_guidance": (
+                "Read and reuse only when the request, assumptions, and evidence clearly match. "
+                "Otherwise update the work."
+            ),
+        }
+
+    def _read_conversation_memory(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return self._require_conversation_memory().read(str(arguments["run_id"]))
+
+    async def _execute_python(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        if not self._settings.python_tool_enabled:
+            raise ValueError("Sandboxed Python execution is disabled in Settings.")
+        result = await run_python(
+            str(arguments["code"]),
+            dict(arguments["inputs"]),
+            limits=SandboxLimits(
+                timeout_seconds=self._settings.python_tool_timeout_seconds,
+                memory_mb=self._settings.python_tool_memory_mb,
+            ),
+            allowed_imports=self._settings.python_tool_allowed_imports,
+            entrypoint="compute",
+        )
+        return {"output": result.value, "stdout": result.stdout}
+
     def _require_agents(self) -> AgentService:
         if self._agents is None:
             raise RuntimeError("Agent tools are not configured.")
@@ -1241,6 +1440,11 @@ class ApplicationToolRuntime:
         if self._function_tools is None:
             raise RuntimeError("Function-tool authoring is not configured.")
         return self._function_tools
+
+    def _require_conversation_memory(self) -> ConversationMemoryService:
+        if self._conversation_memory is None:
+            raise RuntimeError("Conversation memory is unavailable.")
+        return self._conversation_memory
 
     def _require_direct_agents(self) -> DirectAgentRepository:
         if self._direct_agents is None:
@@ -1275,7 +1479,7 @@ _SAFE_READ_PREFIXES = (
     "agents.list",
     "agents.get",
     "agents.validate",
-    "tool.result.read",
+    "tool.results.read",
 )
 
 

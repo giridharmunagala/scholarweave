@@ -756,6 +756,45 @@
             "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          },
+          "work_budget": {
+            "default": "medium",
+            "enum": [
+              "low",
+              "medium",
+              "high"
+            ],
+            "title": "Work Budget",
+            "type": "string"
+          },
+          "work_mode": {
+            "default": "direct",
+            "enum": [
+              "direct",
+              "extended"
+            ],
+            "title": "Work Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -1016,6 +1055,26 @@
             "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
           }
         },
         "required": [
@@ -2177,6 +2236,16 @@
             ],
             "title": "Presence Penalty"
           },
+          "reasoning": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReasoningSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "temperature": {
             "anyOf": [
               {
@@ -2353,6 +2422,19 @@
             "type": "array",
             "uniqueItems": true
           },
+          "context_window_tokens": {
+            "anyOf": [
+              {
+                "maximum": 2000000.0,
+                "minimum": 4096.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window Tokens"
+          },
           "enabled": {
             "default": true,
             "title": "Enabled",
@@ -2363,6 +2445,29 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "reasoning_efforts": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Efforts"
           }
         },
         "required": [
@@ -2661,6 +2766,33 @@
         "title": "ReasoningRunItem",
         "type": "object"
       },
+      "ReasoningSpec": {
+        "additionalProperties": false,
+        "properties": {
+          "effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effort"
+          }
+        },
+        "title": "ReasoningSpec",
+        "type": "object"
+      },
       "RemotePdfDownloadRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2738,6 +2870,26 @@
               }
             ],
             "title": "Input"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
           }
         },
         "required": [
@@ -3480,6 +3632,14 @@
             "title": "Tool Result Max Tokens",
             "type": "integer"
           },
+          "user_profile": {
+            "title": "User Profile",
+            "type": "string"
+          },
+          "user_timezone": {
+            "title": "User Timezone",
+            "type": "string"
+          },
           "workspace_dir": {
             "title": "Workspace Dir",
             "type": "string"
@@ -3505,6 +3665,8 @@
           "tool_call_timeout_seconds",
           "tool_read_retry_attempts",
           "agent_tracing_enabled",
+          "user_timezone",
+          "user_profile",
           "python_tool_enabled",
           "python_tool_timeout_seconds",
           "python_tool_memory_mb",
@@ -3790,6 +3952,31 @@
               }
             ],
             "title": "Tool Result Max Tokens"
+          },
+          "user_profile": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Profile"
+          },
+          "user_timezone": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Timezone"
           }
         },
         "title": "SettingsUpdate",
