@@ -187,7 +187,12 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     tmp_path,
     stub_provider,
 ) -> None:
-    stub_provider.call_tool = "list_documents"
+    stub_provider.call_tool = "search_research_library"
+    stub_provider.tool_arguments = {
+        "query": None,
+        "document_id": None,
+        "limit": 10,
+    }
     client = AsyncOpenAI(
         api_key="test",
         base_url=f"{stub_provider.base_url}/v1",
@@ -211,7 +216,7 @@ async def test_run_service_persists_sdk_items_events_and_usage(
                     {
                         "id": "papers",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                     }
                 ],
             }
@@ -241,7 +246,12 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     assert any(item.item_type == "tool_call_item" for item in run.items)
     assert any(item.item_type == "tool_call_output_item" for item in run.items)
     assert any(event.event_type == "run.completed" for event in run.events)
-    assert tool_runtime.calls == [("documents.list", {})]
+    assert tool_runtime.calls == [
+        (
+            "research.library.search",
+            {"query": None, "document_id": None, "limit": 10},
+        )
+    ]
     lifecycle = [
         event
         for event in run.events
@@ -442,7 +452,11 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
     stub_provider,
 ) -> None:
     stub_provider.tool_plans = [
-        ("Gather evidence", "list_documents", {}),
+        (
+            "Gather evidence",
+            "search_research_library",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
         (
             "retained-result",
             "read_tool_result",
@@ -485,7 +499,7 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
                     {
                         "id": "papers",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                     }
                 ],
             }
@@ -505,7 +519,10 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
 
     assert run.status == "completed"
     assert tool_runtime.calls == [
-        ("documents.list", {}),
+        (
+            "research.library.search",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
         (
             "tool.results.read",
             {
@@ -688,8 +705,12 @@ async def test_tool_failure_is_returned_to_model_without_failing_run(
     tmp_path,
     stub_provider,
 ) -> None:
-    stub_provider.call_tool = "download_web_page"
-    stub_provider.tool_arguments = {"url": "https://example.com/unavailable"}
+    stub_provider.call_tool = "acquire_research_source"
+    stub_provider.tool_arguments = {
+        "kind": "web_page",
+        "url": "https://example.com/unavailable",
+        "title": None,
+    }
     client = AsyncOpenAI(
         api_key="test",
         base_url=f"{stub_provider.base_url}/v1",
@@ -712,7 +733,7 @@ async def test_tool_failure_is_returned_to_model_without_failing_run(
                     {
                         "id": "web-page",
                         "kind": "function",
-                        "catalog_id": "webpage.download",
+                        "catalog_id": "research.sources.acquire",
                     }
                 ],
             }
@@ -753,7 +774,11 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
     stub_provider,
 ) -> None:
     stub_provider.tool_plans = [
-        ("Find unavailable evidence", "search_web", {"query": f"missing evidence {index}"})
+        (
+            "Find unavailable evidence",
+            "search_research_sources",
+            {"provider": "web", "query": f"missing evidence {index}"},
+        )
         for index in range(3)
     ]
     client = AsyncOpenAI(
@@ -787,17 +812,17 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
                     {
                         "id": "web-search",
                         "kind": "function",
-                        "catalog_id": "web.search",
+                        "catalog_id": "research.sources.search",
                     },
                     {
                         "id": "workspace-write",
                         "kind": "function",
-                        "catalog_id": "workspace.write",
+                        "catalog_id": "research.notes.save",
                     },
                     {
                         "id": "paper-list",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                     },
                 ],
                 "agent_tools": [
@@ -837,14 +862,14 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
         if item.item_type == "tool_call_output_item"
     ]
     assert len(outputs) == 3
-    assert "search_web tool is now disabled" in outputs[-1]
+    assert "search_research_sources tool is now disabled" in outputs[-1]
     offered_tools = {
         tool["function"]["name"]
         for tool in stub_provider.requests[-1].get("tools", [])
     }
-    assert "search_web" not in offered_tools
-    assert "list_documents" in offered_tools
-    assert "write_workspace_file" in offered_tools
+    assert "search_research_sources" not in offered_tools
+    assert "search_research_library" in offered_tools
+    assert "save_research_note" in offered_tools
     assert "ask_research_helper" in offered_tools
     failures = [
         event.payload_json
@@ -918,7 +943,12 @@ async def test_cancel_immediately_propagates_to_active_tool(
     tmp_path,
     stub_provider,
 ) -> None:
-    stub_provider.call_tool = "list_documents"
+    stub_provider.call_tool = "search_research_library"
+    stub_provider.tool_arguments = {
+        "query": None,
+        "document_id": None,
+        "limit": 10,
+    }
     client = AsyncOpenAI(
         api_key="test",
         base_url=f"{stub_provider.base_url}/v1",
@@ -941,7 +971,7 @@ async def test_cancel_immediately_propagates_to_active_tool(
                     {
                         "id": "papers",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                     }
                 ],
             }
@@ -1004,7 +1034,7 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
                     {
                         "id": "papers",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                     }
                 ],
             }
@@ -1089,7 +1119,12 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
     tmp_path,
     stub_provider,
 ) -> None:
-    stub_provider.call_tool = "list_documents"
+    stub_provider.call_tool = "search_research_library"
+    stub_provider.tool_arguments = {
+        "query": None,
+        "document_id": None,
+        "limit": 10,
+    }
     client = AsyncOpenAI(
         api_key="test",
         base_url=f"{stub_provider.base_url}/v1",
@@ -1112,7 +1147,7 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
                     {
                         "id": "papers",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                         "needs_approval": True,
                     }
                 ],
@@ -1170,7 +1205,12 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
 
     assert resumed.status == "completed", resumed.error
     assert resumed.interruptions[0].status == "approved"
-    assert tool_runtime.calls == [("documents.list", {})]
+    assert tool_runtime.calls == [
+        (
+            "research.library.search",
+            {"query": None, "document_id": None, "limit": 10},
+        )
+    ]
     assert tool_runtime.context_metadata[0]["extended_work_notes"] == [
         {"summary": "Keep this finding."}
     ]
@@ -1220,5 +1260,10 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
         "approved": False,
         "message": "The paper list is not needed.",
     }
-    assert tool_runtime.calls == [("documents.list", {})]
+    assert tool_runtime.calls == [
+        (
+            "research.library.search",
+            {"query": None, "document_id": None, "limit": 10},
+        )
+    ]
     await client.close()

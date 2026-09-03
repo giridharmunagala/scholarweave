@@ -28,8 +28,10 @@ class DocumentOCR:
             import pypdfium2  # noqa: F401
         except ImportError:
             return False
-        if shutil.which("tesseract") is None:
+        tesseract_path = self._tesseract_path()
+        if tesseract_path is None:
             return False
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
         try:
             return self.settings.ocr_language in pytesseract.get_languages(
                 config=self._tesseract_config()
@@ -173,6 +175,10 @@ class DocumentOCR:
         import pytesseract
         from PIL import Image
 
+        tesseract_path = self._tesseract_path()
+        if tesseract_path is None:
+            raise self._unavailable_error(page_number)
+        pytesseract.pytesseract.tesseract_cmd = tesseract_path
         try:
             with Image.open(io.BytesIO(image_png)) as image:
                 return await anyio.to_thread.run_sync(
@@ -244,8 +250,23 @@ class DocumentOCR:
             "/usr/share/tesseract-ocr/5/tessdata",
             "/usr/share/tessdata",
             "/usr/local/share/tessdata",
+            r"C:\Program Files\Tesseract-OCR\tessdata",
+            r"C:\Program Files (x86)\Tesseract-OCR\tessdata",
         ]
         for candidate in candidates:
             if candidate and Path(candidate).is_dir():
                 return f'--tessdata-dir "{candidate}"'
         return ""
+
+    @staticmethod
+    def _tesseract_path() -> str | None:
+        candidates = [
+            shutil.which("tesseract"),
+            os.environ.get("TESSERACT_CMD"),
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                return str(Path(candidate))
+        return None

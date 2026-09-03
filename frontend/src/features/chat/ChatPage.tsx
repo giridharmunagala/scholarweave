@@ -19,13 +19,12 @@ import {
 } from '../providers/api';
 import {
   chatApi,
+  deepWorkApi,
   type Conversation,
   type ConversationDetail,
   type ModelReference,
   type Run,
   type SteeringMessage,
-  type WorkBudget,
-  type WorkMode,
 } from './api';
 import { ChatModelPicker, preferredChatModel } from './ChatModelPicker';
 import {
@@ -47,7 +46,12 @@ import {
   type TimelineSource,
   type TurnTimeline,
 } from './chatTimeline';
-import { SourceChips, SourceImages, TurnTimelineView } from './TurnTimeline';
+import {
+  ActivitySidebar,
+  SourceChips,
+  SourceImages,
+  TurnTimelineView,
+} from './TurnTimeline';
 import { SpeechControl } from './SpeechControl';
 import './chat.css';
 
@@ -57,9 +61,6 @@ const SUGGESTIONS = [
   'What open research questions remain in this area?',
   'Draft research notes with citations for my current topic.',
 ];
-const WORK_MODE_STORAGE_KEY = 'scholarweave:chat-work-mode';
-const WORK_BUDGET_STORAGE_KEY = 'scholarweave:chat-work-budget';
-
 export const PROVIDER_TRANSCRIPTION_INTERVAL_MS = 750;
 
 interface BuiltInSpeechMessage {
@@ -68,7 +69,8 @@ interface BuiltInSpeechMessage {
   message?: string;
 }
 
-export default function ChatPage() {
+export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'deep-work' }) {
+  const activeChatApi = mode === 'deep-work' ? deepWorkApi : chatApi;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -80,8 +82,9 @@ export default function ChatPage() {
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
     readStoredReasoningEffort,
   );
-  const [workMode, setWorkMode] = useState<WorkMode>(readStoredWorkMode);
-  const [workBudget, setWorkBudget] = useState<WorkBudget>(readStoredWorkBudget);
+  const [webEnabled, setWebEnabled] = useState(true);
+  const [fastAnswer, setFastAnswer] = useState(false);
+  const [webSearchLimit, setWebSearchLimit] = useState(1);
   const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -105,6 +108,7 @@ export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(
     () => typeof window === 'undefined' || window.innerWidth > 900,
   );
+  const [activityOpen, setActivityOpen] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -126,7 +130,7 @@ export default function ChatPage() {
     [providers, modelReference.provider_profile_id, modelReference.model],
   );
 
-  const refreshList = () => chatApi.list().then(setConversations);
+  const refreshList = () => activeChatApi.list().then(setConversations);
   const open = async (id: string) => {
     const request = ++openRequestRef.current;
     setRun(null);
@@ -138,8 +142,8 @@ export default function ChatPage() {
     setStopping(null);
     setPinnedToBottom(true);
     const [conversationResult, runsResult] = await Promise.allSettled([
-      chatApi.get(id),
-      chatApi.runs(id),
+      activeChatApi.get(id),
+      activeChatApi.runs(id),
     ]);
     if (request !== openRequestRef.current) return;
     if (conversationResult.status === 'rejected') throw conversationResult.reason;
@@ -163,7 +167,7 @@ export default function ChatPage() {
 
   useEffect(() => {
     Promise.all([
-      chatApi.list(),
+      activeChatApi.list(),
       providersApi.list(),
       providersApi.settings(),
       providersApi.builtInSpeechStatus(),
@@ -292,8 +296,8 @@ export default function ChatPage() {
       }
       try {
         const [nextRun, nextConversation] = await Promise.all([
-          knownRun ? Promise.resolve(knownRun) : chatApi.run(run.id),
-          conversationId ? chatApi.get(conversationId) : Promise.resolve(null),
+          knownRun ? Promise.resolve(knownRun) : activeChatApi.run(run.id),
+          conversationId ? activeChatApi.get(conversationId) : Promise.resolve(null),
         ]);
         if (cancelled || lifecycle !== runLifecycleRef.current) return;
         setRun(nextRun);
@@ -317,7 +321,7 @@ export default function ChatPage() {
       if (polling || finalizing || cancelled) return;
       polling = true;
       try {
-        const nextRun = await chatApi.run(run.id);
+        const nextRun = await activeChatApi.run(run.id);
         if (isTerminalRun(nextRun)) await finish(nextRun);
       } catch (nextError) {
         if (!cancelled) setError(nextError);
@@ -359,6 +363,7 @@ export default function ChatPage() {
               : [...messages, { id: messageId, content: messageContent, status }]
           );
         }
+
         if (isTerminalEvent(event.event_type)) {
           void finish();
           return;
@@ -430,7 +435,7 @@ export default function ChatPage() {
     setError(null);
     try {
       if (answerWithAvailableInformation) {
-        const response = await chatApi.stopAndAnswer(run.id);
+        const response = await activeChatApi.stopAndAnswer(run.id);
         if (request !== openRequestRef.current) return;
         setRuns((previous) =>
           mergeRun(mergeRun(previous, response.stopped_run), response.answer_run),
@@ -439,7 +444,7 @@ export default function ChatPage() {
         setStream(displayStream(response.answer_run));
         setSending(true);
       } else {
-        const stoppedRun = await chatApi.cancelRun(run.id);
+        const stoppedRun = await activeChatApi.cancelRun(run.id);
         if (request !== openRequestRef.current) return;
         setRuns((previous) => mergeRun(previous, stoppedRun));
         setRun(stoppedRun);
@@ -457,8 +462,8 @@ export default function ChatPage() {
 
   const remove = async (id: string) => {
     try {
-      await chatApi.remove(id);
-      const remaining = await chatApi.list();
+      await activeChatApi.remove(id);
+      const remaining = await activeChatApi.list();
       setConversations(remaining);
       if (current?.id === id) {
         resetThread();
@@ -483,7 +488,7 @@ export default function ChatPage() {
       setError(null);
       setContent('');
       try {
-        const message = await chatApi.steer(run.id, submitted);
+        const message = await activeChatApi.steer(run.id, submitted);
         setSteeringMessages((messages) =>
           messages.some((item) => item.id === message.id)
             ? messages
@@ -510,20 +515,21 @@ export default function ChatPage() {
     try {
       let conversation = current;
       if (!conversation) {
-        const created = await chatApi.create(submitted.slice(0, 50), modelReference);
+        const created = await activeChatApi.create(submitted.slice(0, 50), modelReference);
         if (request !== openRequestRef.current) return;
-        conversation = await chatApi.get(created.id);
+        conversation = await activeChatApi.get(created.id);
         if (request !== openRequestRef.current) return;
         setCurrent(conversation);
         setModelReference(conversation.model_reference);
         void refreshList();
       }
-      const response = await chatApi.send(
+      const response = await activeChatApi.send(
         conversation.id,
         submitted,
         reasoningEffort,
-        workMode,
-        workBudget,
+        webEnabled,
+        mode === 'research' && fastAnswer,
+        webSearchLimit,
       );
       if (request !== openRequestRef.current) return;
       setRun(response.run);
@@ -752,6 +758,18 @@ export default function ChatPage() {
     if (candidate.id !== run?.id) return persisted;
     return liveTimeline.steps.length >= persisted.steps.length ? liveTimeline : persisted;
   };
+  const activityTimelines = runs
+    .map((candidate, index) => ({
+      id: candidate.id,
+      label: `Run ${index + 1}`,
+      timeline: activityTimeline(timelineFor(candidate)),
+    }))
+    .filter(({ timeline }) => timeline.steps.length > 0);
+  const activityCount = activityTimelines.reduce(
+    (total, { timeline }) => total + timeline.steps.length,
+    0,
+  );
+  const streamingTimeline = liveReasoningTimeline(liveTimeline);
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
@@ -764,10 +782,6 @@ export default function ChatPage() {
   const speechOptions = capabilityOptions(providers, 'speech');
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
-  // The active turn has no persisted user message yet, so its trace renders after the optimistic one.
-  const pendingRun = run && !reasoningAnchors.anchored.has(run.id) ? run : null;
-  const pendingTimeline = pendingRun ? timelineFor(pendingRun) : null;
-
   /** Re-asking is the only way to redo a turn, since the transcript itself is append-only. */
   const retry = (prompt: string) => {
     if (sending || !prompt.trim()) return;
@@ -777,7 +791,7 @@ export default function ChatPage() {
   return (
     <div className="chat-page">
       {error ? <ErrorNotice error={error} /> : null}
-      <div className={`chat-layout${sidebarOpen ? '' : ' collapsed'}`}>
+      <div className={`chat-layout${sidebarOpen ? '' : ' collapsed'}${activityOpen ? ' activity-open' : ''}`}>
         <aside className="conversation-list" aria-label="Conversations">
           <div className="conversation-list-head">
             <button className="button block new-chat" type="button" onClick={create}>
@@ -842,7 +856,17 @@ export default function ChatPage() {
             >
               <Icon name="sidebar" size={16} />
             </button>
-            <h1>{current?.title ?? 'New chat'}</h1>
+            <h1>{current?.title ?? (mode === 'deep-work' ? 'New deep work' : 'New research')}</h1>
+            <button
+              type="button"
+              className={`activity-toggle${activityOpen ? ' active' : ''}`}
+              aria-label={activityOpen ? 'Hide run activity' : 'Show run activity'}
+              aria-expanded={activityOpen}
+              onClick={() => setActivityOpen((value) => !value)}
+            >
+              <Icon name="tools" size={15} />
+              {activityCount ? <span>{activityCount}</span> : null}
+            </button>
             {sending ? (
               <span className="chat-working">
                 <span className="spinner tiny" aria-hidden="true" />
@@ -864,8 +888,12 @@ export default function ChatPage() {
             >
               {!hasTranscript ? (
                 <div className="chat-welcome">
-                  <h2>What should we research?</h2>
-                  <p>Ask for evidence, comparisons, open questions or written notes. The agent picks its own tools.</p>
+                  <h2>{mode === 'deep-work' ? 'What needs deeper research?' : 'What should we research?'}</h2>
+                  <p>
+                    {mode === 'deep-work'
+                      ? 'Use focused workers for broad comparisons, literature reviews, and multi-source synthesis.'
+                      : 'Ask for evidence, comparisons, open questions, or written notes.'}
+                  </p>
                   <div className="suggestion-grid">
                     {SUGGESTIONS.map((suggestion) => (
                       <button
@@ -884,10 +912,7 @@ export default function ChatPage() {
               {current?.items.map((item, index) => {
                 if (!item.text?.trim()) return null;
                 const role = item.role ?? item.type;
-                const turnRun = reasoningAnchors.byIndex.get(index) ?? null;
                 const responseRun = reasoningAnchors.responseByIndex.get(index) ?? null;
-                // The trace sits between the question and the answer, where it happened.
-                const timeline = turnRun ? timelineFor(turnRun) : null;
                 return (
                   <Fragment key={index}>
                     <Message
@@ -898,7 +923,6 @@ export default function ChatPage() {
                       onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
                       canRetry={!sending}
                     />
-                    {timeline ? <TurnTimelineView timeline={timeline} /> : null}
                   </Fragment>
                 );
               })}
@@ -913,7 +937,7 @@ export default function ChatPage() {
                   key={message.id}
                 />
               ))}
-              {pendingTimeline ? <TurnTimelineView timeline={pendingTimeline} /> : null}
+              {streamingTimeline ? <TurnTimelineView timeline={streamingTimeline} /> : null}
               {stream.assistant ? (
                 <Message
                   role="assistant"
@@ -1053,39 +1077,62 @@ export default function ChatPage() {
                       disabled={sending}
                       onChange={selectReasoningEffort}
                     />
-                    <div className="composer-work-controls">
-                      <select
-                        aria-label="Work mode"
-                        title="Choose direct or extended work"
-                        value={workMode}
-                        disabled={sending}
-                        onChange={(event) => {
-                          const mode = event.target.value as WorkMode;
-                          setWorkMode(mode);
-                          window.localStorage.setItem(WORK_MODE_STORAGE_KEY, mode);
-                        }}
-                      >
-                        <option value="direct">Direct</option>
-                        <option value="extended">Extended</option>
-                      </select>
-                      {workMode === 'extended' ? (
-                        <select
-                          aria-label="Extended research scope"
-                          title="Choose extended research scope"
-                          value={workBudget}
+                    <button
+                      className={`composer-capability${webEnabled ? ' active' : ''}`}
+                      type="button"
+                      aria-label="Toggle web access"
+                      aria-pressed={webEnabled}
+                      title={webEnabled ? 'Web access enabled' : 'Web access disabled'}
+                      disabled={sending}
+                      onClick={() => {
+                        setWebEnabled((enabled) => {
+                          if (enabled) setFastAnswer(false);
+                          return !enabled;
+                        });
+                      }}
+                    >
+                      <Icon name="globe" size={13} />
+                      Web
+                    </button>
+                    {mode === 'research' ? (
+                      <div className={`fast-answer-control${fastAnswer ? ' active' : ''}`}>
+                        <button
+                          className="composer-capability"
+                          type="button"
+                          aria-label="Toggle fast answer"
+                          aria-pressed={fastAnswer}
+                          title="Search only this many times, download result pages, then answer"
                           disabled={sending}
-                          onChange={(event) => {
-                            const budget = event.target.value as WorkBudget;
-                            setWorkBudget(budget);
-                            window.localStorage.setItem(WORK_BUDGET_STORAGE_KEY, budget);
+                          onClick={() => {
+                            setFastAnswer((enabled) => {
+                              if (!enabled) setWebEnabled(true);
+                              return !enabled;
+                            });
                           }}
                         >
-                          <option value="low">Low scope</option>
-                          <option value="medium">Medium scope</option>
-                          <option value="high">High scope</option>
-                        </select>
-                      ) : null}
-                    </div>
+                          <Icon name="bulb" size={13} />
+                          Fast answer
+                        </button>
+                        {fastAnswer ? (
+                          <input
+                            type="number"
+                            min={1}
+                            max={100}
+                            step={1}
+                            value={webSearchLimit}
+                            aria-label="Fast answer web search limit"
+                            title="Maximum web searches"
+                            disabled={sending}
+                            onChange={(event) => {
+                              const value = Number.parseInt(event.target.value, 10);
+                              if (Number.isFinite(value)) {
+                                setWebSearchLimit(Math.min(100, Math.max(1, value)));
+                              }
+                            }}
+                          />
+                        ) : null}
+                      </div>
+                    ) : null}
                     <span className="composer-hint">
                       <kbd>Enter</kbd> to send
                     </span>
@@ -1160,9 +1207,18 @@ export default function ChatPage() {
             </div>
           </div>
         </section>
+        <ActivitySidebar
+          open={activityOpen}
+          timelines={activityTimelines}
+          onClose={() => setActivityOpen(false)}
+        />
       </div>
     </div>
   );
+}
+
+export default function ChatPage() {
+  return <ResearchChatPage />;
 }
 
 type MicrophoneDevices = Pick<MediaDevices, 'enumerateDevices' | 'getUserMedia'>;
@@ -1389,17 +1445,28 @@ function displayStream(run: Run): ChatStreamState {
   return run.status === 'completed' ? { ...restored, assistant: '' } : restored;
 }
 
-function readStoredWorkMode(): WorkMode {
-  if (typeof window === 'undefined') return 'direct';
-  return window.localStorage.getItem(WORK_MODE_STORAGE_KEY) === 'extended'
-    ? 'extended'
-    : 'direct';
+function liveReasoningTimeline(timeline: TurnTimeline): TurnTimeline | null {
+  const steps = timeline.steps.filter(
+    (step) => step.kind === 'reasoning' && step.streaming,
+  );
+  if (!steps.length) return null;
+  return {
+    ...timeline,
+    steps,
+    sources: [],
+    toolCount: 0,
+    agentCount: 0,
+    running: true,
+  };
 }
 
-function readStoredWorkBudget(): WorkBudget {
-  if (typeof window === 'undefined') return 'medium';
-  const stored = window.localStorage.getItem(WORK_BUDGET_STORAGE_KEY);
-  return stored === 'low' || stored === 'high' ? stored : 'medium';
+function activityTimeline(timeline: TurnTimeline): TurnTimeline {
+  return {
+    ...timeline,
+    steps: timeline.steps.filter(
+      (step) => step.kind !== 'reasoning' || !step.streaming,
+    ),
+  };
 }
 
 function runsForConversation(runs: Run[], conversationId: string): Run[] {

@@ -1,13 +1,12 @@
 # ScholarWeave
 
-**A local-first autonomous research agent, built directly on the OpenAI Agents SDK.**
+**A focused local-first research workspace built on the OpenAI Agents SDK.**
 
 ScholarWeave is a self-hosted research workspace: you point it at PDFs and the open web, it
 ingests and indexes them, and an autonomous agent does the actual work — searching, reading
-primary text, tracing evidence, computing exact results, and writing durable, cited notes into
-a local workspace. Direct chat uses one agent; optional Extended work uses the same selected
-model in sequential, fresh-context planner and worker calls. Every model call can stay on your
-machine.
+primary text, tracing evidence, and writing durable, cited notes into a local workspace. Research
+uses one lean agent; Deep Work adds a focused worker and higher tool-call budgets on a separate
+page and conversation history. Every model call can stay on your machine.
 
 ![Research agent](docs/screenshots/research-chat.png)
 
@@ -90,7 +89,8 @@ reading the paper.
 
 ```mermaid
 flowchart TD
-    U["You: 'compare linear attention variants and write notes'"] --> A["Autonomous agent<br/>(single SDK Agent, max 50 turns)"]
+    U["You: 'compare linear attention variants and write notes'"] --> A["Research agent<br/>(8 tools, max 16 turns)"]
+    U --> D["Deep Work coordinator<br/>(focused worker, max 48 turns)"]
     A -->|search_arxiv / search_web / search_wikipedia| EXT["arXiv · DuckDuckGo · Wikipedia"]
     A -->|download_paper| ING["Ingestion: native PDF text / Tesseract fallback → pages, figures, chunks, manifest"]
     A -->|download_web_page| TMP["Temporary in-memory page cache (4h TTL)"]
@@ -109,11 +109,10 @@ Markdown into the workspace — preferring exact replacements and appends over r
 It keeps going until the outcome is complete or it hits a concrete blocker.
 
 **Runtime model.** Conversation history is owned by the SDK `Session` contract — one SQLite-backed
-session per conversation. Direct mode retains the full history. Extended work gives its coordinator
-a bounded message-only view, decomposes broad requests into ordered work items, executes each item
-sequentially through `Agent.as_tool`, stores detailed findings in run-scoped notes, and then reads
-only the notes needed for final synthesis. Completed turns from older conversations are available
-through conservative lexical search; the agent reuses them only when the match is clear.
+session per conversation. Research and Deep Work have separate histories. Research uses one agent
+with a 16-turn limit and two concurrent tool calls. Deep Work gives a coordinator a bounded
+message-only history plus one reusable focused worker, a 48-turn limit, and three concurrent tool
+calls.
 `ScholarWeaveContext` carries repositories, IDs, services, and event sinks through
 `RunContextWrapper`; that local context is never injected into model input unless a tool or the
 instructions deliberately expose it. Pause and resume use serialized SDK `RunState`.
@@ -133,7 +132,13 @@ limitation only when those alternatives are exhausted.
 
 ![Research agent](docs/screenshots/research-chat.png)
 
-### Papers
+### Deep Work
+
+Deep Work is a separate page and conversation namespace for broad research tasks. Its coordinator
+can use every Research capability directly and delegate independent evidence-gathering tracks to a
+focused worker before producing one synthesis.
+
+### Library
 
 Upload a PDF or hand it a public PDF URL. ScholarWeave inspects the text layer, recommends
 embedded extraction or OCR, and produces `extracted.md`, figures, chunks, and a versioned
@@ -142,28 +147,12 @@ them become durable workspace files with their source URL.
 
 ![Papers](docs/screenshots/papers.png)
 
-### Tools
-
-Every built-in capability and every custom sandboxed Python `FunctionTool` compiles into a real
-SDK `FunctionTool`. Custom tools are revisioned and can require approval before execution.
-
-![Tools](docs/screenshots/tools.png)
-
-### Files
+### Notes
 
 The safe workspace. Agents list, read, write, append, tag, and search these files through injected
 services — there is no arbitrary filesystem access.
 
 ![Files](docs/screenshots/workspace.png)
-
-### Runs
-
-Every execution is recorded. The inspector shows the semantic SDK run-item timeline — reasoning
-items, tool calls, tool outputs, handoffs, guardrails, interruptions — alongside final output and
-usage.
-
-![Runs](docs/screenshots/runs.png)
-![Run inspector](docs/screenshots/run-inspector.png)
 
 ### Settings
 
@@ -191,11 +180,9 @@ flowchart LR
     TOOLS --> WORKSPACE["Safe workspace + sandbox"]
 ```
 
-The backend is organised by feature under `backend/agents`, `autonomous`, `builder`,
-`conversations`, `direct_agents`, `documents`, `providers`, `research`, `runs`, `tools`, and
-`workspace`. `backend/bootstrap.py` is the composition root. The frontend mirrors those features
-under `frontend/src/features`; API types are generated from the FastAPI OpenAPI document rather
-than hand-maintained.
+The active backend is organised by feature under `backend/agents`, `autonomous`, `conversations`,
+`documents`, `providers`, `research`, `runs`, `tools`, and `workspace`. `backend/bootstrap.py` is
+the composition root. The frontend is focused on Research, Deep Work, Library, Notes, and Settings.
 
 The whole application is a **single Uvicorn process** that also serves the built frontend. Some
 state (the temporary web-page cache, GPU serialization locks) is process-local by design, so do
@@ -232,8 +219,8 @@ Open <http://127.0.0.1:8000>. Then:
 
 1. **Settings → Providers** — add a provider profile and discover its models.
 2. **Settings → Models** — set the chat/reasoning and embedding defaults (vision is optional).
-3. **Papers** — upload or download a PDF and let it ingest.
-4. **Agent** — ask for a research outcome.
+3. **Library** — upload or download a PDF and let it ingest.
+4. **Research** — ask a focused question, or use **Deep Work** for a broad investigation.
 
 Confirm the backend is healthy at any time:
 
@@ -522,7 +509,7 @@ SCHOLARWEAVE_REQUEST_TIMEOUT_SECONDS=120
 
 | Path | Contents |
 | --- | --- |
-| `local_data/metadata.sqlite3` | Settings, provider profiles, blueprints, custom tools, conversations, sessions, runs, documents, chunks, vectors |
+| `local_data/metadata.sqlite3` | Settings, providers, conversations, sessions, runs, documents, chunks, vectors, and retained legacy records |
 | `local_data/documents/` | Retained source PDFs |
 | `local_data/artifacts/` | Extracted documents, figures, generated artifacts, full oversized tool results, and context checkpoints |
 | `local_data/llm_calls.jsonl` | Credential-redacted model request audit log |
@@ -548,30 +535,17 @@ Everything under `local_data/` and `workspace/` is git-ignored.
 
 ## Agent tool surface
 
-The autonomous agent is a single SDK `Agent` with a research-scoped tool set and serialized tool
-execution. A durable supervisor divides long work into bounded epochs, persists goal progress and
-tool attempts, recovers interrupted conversation runs at startup, and compacts history before the
-model window is exhausted. Browse the live catalogue at `GET /api/sdk/catalog` or in **Tools**.
+The model-facing catalogue contains eight domain tools:
 
-| Group | Representative tools |
+| Area | Tools |
 | --- | --- |
-| External research | `search_arxiv`, `search_web`, `search_wikipedia`, `download_paper`, `download_web_page`, `read_downloaded_web_page`, `search_downloaded_web_page`, `save_web_page_note` |
-| Paper corpus | `list_documents`, `inspect_paper`, `ingest_paper`, `read_paper_pages`, `read_document_chunks`, `search_papers`, `read_retained_paper_pages`, `save_paper_page_decisions` |
-| Summaries | `list_paper_summaries`, `save_paper_summary` |
-| Workspace | `ensure_paper_workspace`, `create_workspace_note`, `read_workspace_file`, `write_workspace_file`, `append_workspace_markdown`, `replace_workspace_markdown`, `search_workspace`, `set_workspace_file_tags` |
-| Goal control | `update_goal_plan`, `request_clarification_or_block`, `finish_goal`, `read_tool_result` |
-| Discovery | `search_available_tools` |
+| Sources | `search_sources`, `acquire_source`, `read_web_page` |
+| Library | `search_library`, `read_paper` |
+| Notes | `search_notes`, `read_note`, `save_note` |
 
-Agent authoring and custom Python remain available in their dedicated builder/tools experiences;
-they are intentionally excluded from the default research coordinator.
-
-Extended work adds a coordinator, a structured planner, and one reusable focused worker as
-`Agent.as_tool` relations. Calls remain sequential (`parallel_tool_calls: false`, tool concurrency
-`1`); the planner and each worker use the same configured model with isolated prompts.
-
-Fixed, single-purpose agents are also exposed over the API (`GET /api/research-agents`): a paper
-**Summary agent**, an **Open areas identification agent**, a per-paper **Q&A bot**, and a
-**Research paper cleaner** that records keep / no-keep decisions per page.
+An internal ninth tool, `read_tool_result`, retrieves oversized results retained as artifacts.
+Research permits two concurrent tool calls; Deep Work permits three and adds one
+`focused_research_worker` delegation tool.
 
 ## Development
 

@@ -15,8 +15,10 @@
   min-height: 0;
   transition: grid-template-columns var(--dur-med) var(--ease);
 }
+.chat-layout.activity-open { grid-template-columns: 272px minmax(0, 1fr) 320px; }
 /* Hiding the list hides it completely: a 44px stub was neither list nor space. */
 .chat-layout.collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+.chat-layout.collapsed.activity-open { grid-template-columns: 0 minmax(0, 1fr) 320px; }
 .chat-layout.collapsed .conversation-list {
   border-right-color: transparent;
   opacity: 0;
@@ -159,8 +161,34 @@
   cursor: pointer;
 }
 .chat-list-toggle:hover { background: var(--surface-2); color: var(--text); }
+.activity-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  min-height: 1.9rem;
+  margin-left: auto;
+  padding: 0 .5rem;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.activity-toggle:hover, .activity-toggle.active { background: var(--surface-2); color: var(--text); }
+.activity-toggle span {
+  min-width: 1.15rem;
+  padding: .06rem .3rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: .65rem;
+  font-weight: 700;
+  text-align: center;
+}
 .chat-working { display: inline-flex; align-items: center; gap: var(--space-2); margin-left: auto; color: var(--muted); font-size: var(--text-xs); }
+.activity-toggle + .chat-working { margin-left: 0; }
 .chat-header .status-pill { margin-left: auto; }
+.activity-toggle + .status-pill { margin-left: 0; }
 .chat-working + .status-pill { margin-left: 0; }
 .spinner.tiny { width: 13px; height: 13px; border-width: 2px; }
 
@@ -530,6 +558,61 @@
 .timeline-detail .button { width: fit-content; }
 .tool-detail-note { margin: 0; color: var(--muted); font-size: var(--text-xs); }
 
+/* ------------------------------------------------------ Activity sidebar --- */
+
+.activity-sidebar {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--divider);
+  background: var(--glass-list);
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+}
+.activity-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: 52px;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--divider);
+}
+.activity-sidebar-head div { display: grid; gap: 1px; }
+.activity-sidebar-head strong { color: var(--text-strong); font-size: var(--text-sm); }
+.activity-sidebar-head span { color: var(--muted); font-size: var(--text-xs); }
+.activity-sidebar-head button {
+  display: grid;
+  place-items: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.activity-sidebar-head button:hover { background: var(--surface-2); color: var(--text); }
+.activity-sidebar-scroll {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  height: calc(100% - 52px);
+  padding: var(--space-3);
+  overflow-y: auto;
+}
+.activity-turn { display: grid; gap: var(--space-1); }
+.activity-turn h2 {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.activity-sidebar-empty { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+
 /* ------------------------------------------------------------- Sources --- */
 
 .source-images {
@@ -743,6 +826,41 @@
   font-size: var(--text-xs);
 }
 .composer-work-controls select:hover { background-color: var(--surface-2); color: var(--text); }
+.composer-capability {
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  min-height: 1.8rem;
+  padding: .25rem .45rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.composer-capability:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.composer-capability.active,
+.fast-answer-control.active .composer-capability {
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.composer-capability:disabled { cursor: not-allowed; opacity: .5; }
+.fast-answer-control { display: inline-flex; align-items: center; }
+.fast-answer-control input {
+  width: 2.8rem;
+  height: 1.8rem;
+  margin-left: 2px;
+  padding: .2rem .25rem;
+  border-color: var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: var(--text-xs);
+  text-align: center;
+}
 
 /* The shortcut is a reminder for the hesitant, so it appears while you type. */
 .composer-hint {
@@ -879,6 +997,9 @@
 
 @media (max-width: 900px) {
   .chat-layout { position: relative; grid-template-columns: minmax(0, 1fr); }
+  .chat-layout.activity-open, .chat-layout.collapsed.activity-open {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .chat-layout .conversation-list {
     position: absolute;
     top: 0;
@@ -890,6 +1011,15 @@
     box-shadow: var(--shadow-lg);
   }
   .chat-layout.collapsed .conversation-list { display: none; }
+  .activity-sidebar {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 21;
+    width: min(320px, 92vw);
+    box-shadow: var(--shadow-lg);
+  }
   .message.role-user .message-body { max-width: 100%; }
 }
 

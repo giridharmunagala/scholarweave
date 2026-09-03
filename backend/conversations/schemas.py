@@ -29,15 +29,15 @@ class ConversationCreateRequest(ConversationSchema):
     agent_revision_id: str
 
 
-class BuilderConversationCreateRequest(ConversationSchema):
-    title: str = Field(default="New builder chat", min_length=1, max_length=120)
+class ResearchConversationCreateRequest(ConversationSchema):
+    title: str = Field(default="New research", min_length=1, max_length=120)
     model_reference: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
 
 
 class ConversationResponse(ConversationSchema):
     id: str
     title: str
-    kind: Literal["agent", "autonomous", "builder", "direct_agent"]
+    kind: Literal["agent", "autonomous", "deep_work", "builder", "direct_agent"]
     agent_revision_id: str | None
     model_reference: ModelReferenceSpec
     session_policy: SessionPolicySpec
@@ -54,8 +54,9 @@ class ConversationDetailResponse(ConversationResponse):
 class ConversationMessageRequest(ConversationSchema):
     content: str = Field(min_length=1, max_length=100_000)
     reasoning_effort: ReasoningEffort | None = None
-    work_mode: Literal["direct", "extended"] = "direct"
-    work_budget: Literal["low", "medium", "high"] = "medium"
+    web_enabled: bool = True
+    fast_answer: bool = False
+    web_search_limit: int = Field(default=1, ge=1, le=100)
 
 
 class ConversationMessageResponse(ConversationSchema):

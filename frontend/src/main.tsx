@@ -3,7 +3,6 @@ import ReactDOM from 'react-dom/client';
 import App from './app/App';
 import { RouterProvider } from './app/router';
 import { ThemeProvider } from './shared/theme/ThemeProvider';
-import '@xyflow/react/dist/style.css';
 import './shared/styles/tokens.css';
 import './shared/styles/base.css';
 import './shared/styles/components.css';

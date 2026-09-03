@@ -47,8 +47,8 @@ describe('application shell', () => {
     const labels = Array.from(container.querySelectorAll('.rail .nav-link .rail-label')).map(
       (node) => node.textContent,
     );
-    expect(labels).toEqual(['Chat', 'Papers', 'Files', 'Tools', 'Runs', 'Settings']);
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Chat');
+    expect(labels).toEqual(['Research', 'Deep Work', 'Library', 'Settings']);
+    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Research');
 
     // The rail is the only navigation chrome: no top bar, no breadcrumb, no drawer.
     expect(container.querySelector('.topbar')).toBeNull();
@@ -59,13 +59,40 @@ describe('application shell', () => {
     // Conversations are listed by the chat page alone, never mirrored in the rail.
     expect(container.querySelector('.nav-chat-tree')).toBeNull();
 
-    expect(container.querySelector('.search-trigger')?.getAttribute('aria-label')).toBe('Search');
+    expect(container.querySelector('.search-trigger')).toBeNull();
     expect(container.querySelector('.theme-trigger')).not.toBeNull();
   });
 
   it('marks the rail entry for the current section', async () => {
-    await render('/papers/123');
+    await render('/library/123');
 
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Papers');
+    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Library');
+  });
+
+  it('opens the compact theme picker and supports matching the system theme', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    await render('/');
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.theme-trigger')!.click();
+    });
+    const options = [...container.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+    expect(options.map((option) => option.textContent)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Paper'),
+        expect.stringContaining('Slate'),
+        expect.stringContaining('Match system'),
+      ]),
+    );
+
+    await act(async () => {
+      options.find((option) => option.textContent?.includes('Match system'))!.click();
+    });
+    expect(localStorage.getItem('scholarweave-theme')).toBe('system');
+    expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 });

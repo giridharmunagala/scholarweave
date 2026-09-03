@@ -34,7 +34,7 @@ class DocumentChunkResponse(ResearchSchema):
     metadata: dict[str, Any]
 
 
-class DocumentResponse(ResearchSchema):
+class DocumentSummaryResponse(ResearchSchema):
     id: str
     title: str
     source_filename: str
@@ -42,10 +42,13 @@ class DocumentResponse(ResearchSchema):
     status: str
     page_count: int | None
     metadata: dict[str, Any]
-    artifacts: list[ArtifactResponse]
-    chunks: list[DocumentChunkResponse]
     created_at: datetime
     updated_at: datetime
+
+
+class DocumentResponse(DocumentSummaryResponse):
+    artifacts: list[ArtifactResponse]
+    chunks: list[DocumentChunkResponse]
 
 
 class IngestionOptionsResponse(ResearchSchema):

@@ -103,6 +103,7 @@ backend/runtime/priorities.py
 backend/runtime/sdk_compat.py
 backend/runtime/serialization.py
 backend/runtime/sessions.py
+backend/runtime/steering.py
 backend/tests/conftest.py
 backend/tests/stub_provider.py
 backend/tests/test_architecture.py

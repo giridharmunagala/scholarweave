@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { EmptyState, ErrorNotice, Loading, PageHeader, Panel } from '../../shared/components/Ui';
-import './workspace.css';
+import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel } from '../../shared/components/Ui';
+import '../library.css';
 
 type WorkspaceFile = components['schemas']['WorkspaceFileResponse'];
 type WorkspaceContent = components['schemas']['WorkspaceFileContentResponse'];
@@ -28,7 +28,14 @@ export default function WorkspacePage() {
   const [loading, setLoading] = useState(true);
   const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
   const load = () => request<WorkspaceFile[]>('/workspace/files').then(setFiles);
-  const fileTree = buildFileTree(files);
+  const fileTree = useMemo(() => buildFileTree(files), [files]);
+  const targetPath = selected?.path ?? notePath(newPath);
+  const resetEditor = () => {
+    setSelected(null);
+    setDraft('');
+    setTagsDraft('');
+    setNewPath('');
+  };
   useEffect(() => { load().catch(setError).finally(() => setLoading(false)); }, []);
   if (loading) return <Loading label="Loading workspace…" />;
 
@@ -41,9 +48,9 @@ export default function WorkspacePage() {
         setView(file.media_type === 'text/markdown' ? 'preview' : 'edit');
       })
       .catch(setError);
-  const save = (path: string) =>
+  const save = () =>
     request<WorkspaceContent>('/workspace/files/content', json('PUT', {
-      path,
+      path: targetPath,
       content: draft,
       tags: tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean),
     }))
@@ -60,9 +67,7 @@ export default function WorkspacePage() {
         { method: 'DELETE' },
       );
       if (selected?.path.startsWith(`${folder.path}/`)) {
-        setSelected(null);
-        setDraft('');
-        setTagsDraft('');
+        resetEditor();
       }
       await load();
     } catch (nextError) {
@@ -71,21 +76,49 @@ export default function WorkspacePage() {
       setDeletingFolder(null);
     }
   };
+  const deleteFile = async () => {
+    if (!selected || !window.confirm(`Delete "${selected.path}"? This cannot be undone.`)) return;
+    setError(null);
+    try {
+      await request<void>(
+        `/workspace/files/content?path=${encodeURIComponent(selected.path)}`,
+        { method: 'DELETE' },
+      );
+      resetEditor();
+      await load();
+    } catch (nextError) {
+      setError(nextError);
+    }
+  };
 
   return (
     <div className="page">
-      <PageHeader title="Files" description="Notes and documents the agent can read and write while it works." />
+      <PageHeader
+        title="Notes"
+        description="Durable research notes and paper summaries."
+      />
+      <LibraryTabs active="notes" />
       {error ? <ErrorNotice error={error} /> : null}
       <div className="workspace-layout">
         <Panel description={files.length ? `${files.length} file${files.length === 1 ? '' : 's'}` : 'No files yet'}>
           <div className="stack-tight">
-            <div className="row" style={{ marginBottom: 'var(--space-1)' }}>
-              <input placeholder="notes/idea.md" value={newPath} onChange={(event) => setNewPath(event.target.value)} />
+            <div className="row new-note">
+              <input
+                aria-label="New note name"
+                placeholder="New note name"
+                value={newPath}
+                onChange={(event) => setNewPath(event.target.value)}
+              />
               <button
                 className="button small"
                 type="button"
                 disabled={!newPath.trim()}
-                onClick={() => { setSelected(null); setDraft(''); setTagsDraft(''); setView('edit'); }}
+                onClick={() => {
+                  setSelected(null);
+                  setDraft('');
+                  setTagsDraft('');
+                  setView('edit');
+                }}
               >
                 <Icon name="plus" size={13} />
                 New
@@ -114,22 +147,9 @@ export default function WorkspacePage() {
             </div>
           </div>
         </Panel>
-        <Panel title={(selected?.path ?? newPath) || 'Editor'}>
+        <Panel title={targetPath || 'Editor'}>
           {selected || newPath ? (
             <div className="stack">
-              <label className="field workspace-tags">
-                <span>Tags</span>
-                <input
-                  placeholder="transformers, evaluation, paper:…"
-                  value={tagsDraft}
-                  onChange={(event) => setTagsDraft(event.target.value)}
-                />
-              </label>
-              {selected?.tags.length ? (
-                <div className="workspace-tag-list" aria-label="File tags">
-                  {selected.tags.map((tag) => <span className="tag" key={tag}>{tag}</span>)}
-                </div>
-              ) : null}
               {isMarkdown(selected?.media_type, selected?.path ?? newPath) ? (
                 <div className="segmented workspace-view-toggle" aria-label="File view">
                   <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button>
@@ -143,7 +163,26 @@ export default function WorkspacePage() {
               ) : (
                 <textarea className="workspace-editor mono" value={draft} onChange={(event) => setDraft(event.target.value)} />
               )}
-              <div className="button-row"><button className="button" type="button" onClick={() => void save(selected?.path ?? newPath)}><Icon name="save" size={15} />Save</button>{selected ? <button className="button danger" type="button" onClick={() => void request<void>(`/workspace/files/content?path=${encodeURIComponent(selected.path)}`, { method: 'DELETE' }).then(() => { setSelected(null); setDraft(''); setTagsDraft(''); return load(); }).catch(setError)}>Delete</button> : null}</div>
+              <details className="workspace-options">
+                <summary>Tags{tagsDraft ? ` · ${tagsDraft.split(',').filter(Boolean).length}` : ''}</summary>
+                <input
+                  aria-label="Tags"
+                  placeholder="transformers, evaluation"
+                  value={tagsDraft}
+                  onChange={(event) => setTagsDraft(event.target.value)}
+                />
+              </details>
+              <div className="button-row">
+                <button className="button" type="button" onClick={() => void save()}>
+                  <Icon name="save" size={15} />
+                  Save
+                </button>
+                {selected ? (
+                  <button className="button danger" type="button" onClick={() => void deleteFile()}>
+                    Delete
+                  </button>
+                ) : null}
+              </div>
             </div>
           ) : (
             <EmptyState
@@ -289,6 +328,13 @@ function countFiles(node: FileTreeNode): number {
 
 function isMarkdown(mediaType: string | undefined, path: string): boolean {
   return mediaType === 'text/markdown' || path.toLowerCase().endsWith('.md');
+}
+
+function notePath(value: string): string {
+  const name = value.trim();
+  if (!name) return '';
+  const path = name.includes('/') ? name : `notes/${name}`;
+  return path.toLowerCase().endsWith('.md') ? path : `${path}.md`;
 }
 
 function formatBytes(size: number): string {

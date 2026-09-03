@@ -1,9 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, NavLink } from './router';
-import { CommandPalette, useCommandPalette } from '../shared/components/CommandPalette';
 import { Icon, type IconName } from '../shared/components/Icons';
 import { ThemeSwitcher } from '../shared/components/ThemeSwitcher';
-import { WallpaperLayer } from '../shared/components/WallpaperLayer';
 
 interface NavEntry {
   to: string;
@@ -17,11 +15,9 @@ interface NavEntry {
  * every place you can go, labelled, in one column.
  */
 const NAV_ITEMS: NavEntry[] = [
-  { to: '/', label: 'Chat', icon: 'agents' },
-  { to: '/papers', label: 'Papers', icon: 'papers' },
-  { to: '/workspace', label: 'Files', icon: 'workspace' },
-  { to: '/tools', label: 'Tools', icon: 'tools' },
-  { to: '/runs', label: 'Runs', icon: 'runs' },
+  { to: '/', label: 'Research', icon: 'search' },
+  { to: '/deep-work', label: 'Deep Work', icon: 'agents' },
+  { to: '/library', label: 'Library', icon: 'papers' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
 ];
 
@@ -31,11 +27,8 @@ const NAV_ITEMS: NavEntry[] = [
  * the page's own job, so there is exactly one place to read each thing.
  */
 export function AppShell({ children }: { children: ReactNode }) {
-  const palette = useCommandPalette();
-
   return (
     <>
-      <WallpaperLayer />
       <div className="app-shell">
         <nav className="rail" aria-label="Primary">
           <Link className="rail-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
@@ -52,23 +45,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
 
           <div className="rail-foot">
-            <button
-              type="button"
-              className="rail-action search-trigger"
-              aria-label="Search"
-              title="Search (⌘K)"
-              onClick={() => palette.setOpen(true)}
-            >
-              <Icon name="search" size={18} />
-              <span className="rail-label">Search</span>
-            </button>
             <ThemeSwitcher />
           </div>
         </nav>
 
         <main className="app-main">{children}</main>
-
-        <CommandPalette open={palette.open} onClose={palette.close} />
       </div>
     </>
   );

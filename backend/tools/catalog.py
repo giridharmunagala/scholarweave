@@ -11,10 +11,7 @@ from agents.tool_context import ToolContext
 from backend.agents.blueprint import FunctionToolSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.runtime.context import ScholarWeaveContext
-from backend.tools.failures import (
-    recoverable_tool_invoker,
-    tool_enabled_after_failures,
-)
+from backend.tools.failures import recoverable_tool_invoker, tool_enabled_after_failures
 
 
 def _object_schema(
@@ -32,460 +29,86 @@ def _object_schema(
 
 APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
     (
-        "goal.plan.update",
-        "update_goal_plan",
-        "Replace the durable goal plan and mark completed steps.",
+        "research.sources.search",
+        "search_research_sources",
+        "Search one external source: the web, arXiv, or Wikipedia.",
         _object_schema(
             {
-                "steps": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 12,
-                    "items": _object_schema(
-                        {
-                            "id": {"type": "string", "minLength": 1},
-                            "title": {"type": "string", "minLength": 1},
-                            "status": {
-                                "type": "string",
-                                "enum": ["pending", "in_progress", "completed", "blocked"],
-                            },
-                        },
-                        required=["id", "title", "status"],
-                    ),
-                },
-                "summary": {"type": ["string", "null"]},
-            },
-            required=["steps", "summary"],
-        ),
-        True,
-    ),
-    (
-        "extended.block",
-        "request_clarification_or_block",
-        "Record a blocker only when progress requires missing user input or access.",
-        _object_schema(
-            {
-                "reason": {"type": "string", "minLength": 1},
-                "question": {"type": ["string", "null"]},
-            },
-            required=["reason", "question"],
-        ),
-        True,
-    ),
-    (
-        "extended.finish",
-        "finish_goal",
-        "Mark the goal complete with a concise outcome and durable result references.",
-        _object_schema(
-            {
-                "summary": {"type": "string", "minLength": 1},
-                "result_refs": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "maxItems": 20,
-                },
-            },
-            required=["summary", "result_refs"],
-        ),
-        True,
-    ),
-    (
-        "tool.results.read",
-        "read_tool_result",
-        "Read a bounded slice of a large tool result by its result_ref.",
-        _object_schema(
-            {
-                "result_ref": {"type": "string", "minLength": 1},
-                "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 256, "maximum": 16_000},
-            },
-            required=["result_ref", "offset", "limit"],
-        ),
-        True,
-    ),
-    (
-        "tools.search",
-        "search_available_tools",
-        "Find tools available to the autonomous agent by keyword, name, or catalog ID.",
-        _object_schema(
-            {
-                "query": {
-                    "type": ["string", "null"],
-                    "description": "Keyword to search for, or null to list every available tool.",
-                }
-            },
-            required=["query"],
-        ),
-        True,
-    ),
-    (
-        "builder.todos.create",
-        "create_builder_todo_plan",
-        "Create the ordered TODO plan for one actionable builder request.",
-        _object_schema(
-            {
-                "tasks": {
-                    "type": "array",
-                    "minItems": 2,
-                    "maxItems": 12,
-                    "items": _object_schema(
-                        {
-                            "id": {"type": "string", "minLength": 1},
-                            "title": {"type": "string", "minLength": 1},
-                            "instructions": {"type": "string", "minLength": 1},
-                            "expected_output": {"type": "string", "minLength": 1},
-                        },
-                        required=[
-                            "id",
-                            "title",
-                            "instructions",
-                            "expected_output",
-                        ],
-                    ),
-                }
-            },
-            required=["tasks"],
-        ),
-        True,
-    ),
-    (
-        "builder.todos.update",
-        "update_builder_todo",
-        "Complete or block the current builder TODO and advance the plan.",
-        _object_schema(
-            {
-                "id": {"type": "string", "minLength": 1},
-                "status": {"type": "string", "enum": ["completed", "blocked"]},
-                "note": {"type": ["string", "null"]},
-            },
-            required=["id", "status", "note"],
-        ),
-        True,
-    ),
-    (
-        "builder.finish",
-        "finish_builder_run",
-        "Finish a builder request only after its TODOs and save are complete.",
-        _object_schema(
-            {
-                "outcome": {
+                "provider": {
                     "type": "string",
-                    "enum": ["saved", "informational"],
+                    "enum": ["web", "arxiv", "wikipedia"],
                 },
-                "summary": {"type": "string", "minLength": 1},
+                "query": {"type": "string", "minLength": 1},
             },
-            required=["outcome", "summary"],
+            required=["provider", "query"],
         ),
         True,
     ),
     (
-        "research.pages.read_all",
-        "read_all_paper_pages",
-        "Read exact extracted page text, including pages previously marked no-keep.",
+        "research.sources.acquire",
+        "acquire_research_source",
+        "Download and prepare either a public PDF or an HTML web page.",
         _object_schema(
             {
-                "document_id": {"type": "string"},
-                "start_page": {"type": "integer", "minimum": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                "kind": {"type": "string", "enum": ["paper", "web_page"]},
+                "url": {"type": "string", "minLength": 1},
+                "title": {"type": ["string", "null"], "maxLength": 300},
             },
-            required=["document_id", "start_page", "limit"],
+            required=["kind", "url", "title"],
         ),
         True,
     ),
     (
-        "research.pages.read_retained",
-        "read_retained_paper_pages",
-        "Read exact page text while excluding pages marked no-keep by the paper cleaner.",
+        "research.library.search",
+        "search_research_library",
+        "List papers, inspect one paper, or search indexed paper text.",
         _object_schema(
             {
-                "document_id": {"type": "string"},
-                "start_page": {"type": "integer", "minimum": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                "query": {"type": ["string", "null"]},
+                "document_id": {"type": ["string", "null"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
-            required=["document_id", "start_page", "limit"],
+            required=["query", "document_id", "limit"],
         ),
         True,
     ),
     (
-        "research.page_decisions.save",
-        "save_paper_page_decisions",
-        "Persist keep or no-keep decisions for reviewed paper pages.",
-        _object_schema(
-            {
-                "document_id": {"type": "string"},
-                "decisions": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 10,
-                    "items": _object_schema(
-                        {
-                            "page_number": {"type": "integer", "minimum": 1},
-                            "decision": {"type": "string", "enum": ["keep", "no_keep"]},
-                            "reason": {"type": "string", "minLength": 1},
-                        },
-                        required=["page_number", "decision", "reason"],
-                    ),
-                },
-            },
-            required=["document_id", "decisions"],
-        ),
-        True,
-    ),
-    (
-        "research.summaries.save",
-        "save_paper_summary",
-        "Persist the fixed four-part summary for a paper.",
-        _object_schema(
-            {
-                "document_id": {"type": "string"},
-                "contribution": {"type": "string", "minLength": 1},
-                "contributions_detail": {"type": "string", "minLength": 1},
-                "experimentation_results": {"type": "string", "minLength": 1},
-                "open_areas": {
-                    "type": "array",
-                    "items": _object_schema(
-                        {
-                            "statement": {"type": "string", "minLength": 1},
-                            "citation": {"type": "string", "minLength": 1},
-                        },
-                        required=["statement", "citation"],
-                    ),
-                },
-            },
-            required=[
-                "document_id",
-                "contribution",
-                "contributions_detail",
-                "experimentation_results",
-                "open_areas",
-            ],
-        ),
-        True,
-    ),
-    (
-        "research.summaries.list",
-        "list_paper_summaries",
-        "List all saved four-part paper summaries in the repository.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "documents.list",
-        "list_documents",
-        "List papers and report whether each one has readable extracted content.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "documents.inspect",
-        "inspect_paper",
-        "Inspect a paper's source, ingestion state, content statistics, and section outline.",
-        _object_schema(
-            {"document_id": {"type": "string", "minLength": 1}},
-            required=["document_id"],
-        ),
-        True,
-    ),
-    (
-        "documents.ingest",
-        "ingest_paper",
-        "Extract and index a paper, preserving native PDF text and using OCR only where needed.",
-        _object_schema(
-            {"document_id": {"type": "string", "minLength": 1}},
-            required=["document_id"],
-        ),
-        True,
-    ),
-    (
-        "documents.read_pages",
-        "read_paper_pages",
-        "Read exact paper text by page with stable page citations.",
+        "research.paper.read",
+        "read_research_paper",
+        "Inspect, prepare, or read cited pages or chunks from one paper.",
         _object_schema(
             {
                 "document_id": {"type": "string", "minLength": 1},
-                "start_page": {"type": "integer", "minimum": 1},
+                "action": {
+                    "type": "string",
+                    "enum": ["inspect", "prepare", "pages", "chunks"],
+                },
+                "start": {"type": ["integer", "null"], "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 10},
             },
-            required=["document_id", "start_page", "limit"],
+            required=["document_id", "action", "start", "limit"],
         ),
         True,
     ),
     (
-        "documents.read_chunks",
-        "read_document_chunks",
-        "Read ordered section-aware text chunks with stable page citations.",
-        _object_schema(
-            {
-                "document_id": {"type": "string"},
-                "start": {"type": ["integer", "null"], "minimum": 0},
-                "limit": {"type": ["integer", "null"], "minimum": 1, "maximum": 100},
-            },
-            required=["document_id", "start", "limit"],
-        ),
-        True,
-    ),
-    (
-        "retrieval.keyword_search",
-        "search_papers",
-        "Search indexed paper text using keywords.",
-        _object_schema(
-            {
-                "query": {"type": "string", "minLength": 1},
-                "document_id": {"type": ["string", "null"]},
-                "top_k": {"type": ["integer", "null"], "minimum": 1, "maximum": 20},
-            },
-            required=["query", "document_id", "top_k"],
-        ),
-        True,
-    ),
-    (
-        "documents.download",
-        "download_paper",
-        "Download a public PDF URL, extract and index it, and add it to the paper library.",
-        _object_schema(
-            {
-                "pdf_url": {"type": "string", "minLength": 1},
-                "title": {"type": ["string", "null"], "maxLength": 300},
-            },
-            required=["pdf_url", "title"],
-        ),
-        True,
-    ),
-    (
-        "webpage.download",
-        "download_web_page",
-        (
-            "Temporarily download and extract a public HTML page for chat Q&A. "
-            "Inaccessible or empty pages return status 'unavailable' without disabling this tool."
-        ),
-        _object_schema(
-            {"url": {"type": "string", "minLength": 1}},
-            required=["url"],
-        ),
-        True,
-    ),
-    (
-        "webpage.list",
-        "list_downloaded_web_pages",
-        "List HTML pages currently available in temporary chat storage.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "webpage.read",
-        "read_downloaded_web_page",
-        "Read ordered extracted chunks from a temporarily downloaded HTML page.",
+        "research.web.read",
+        "read_research_web_page",
+        "Read or search a previously acquired web page, retaining its source URL.",
         _object_schema(
             {
                 "source_id": {"type": "string", "minLength": 1},
+                "query": {"type": ["string", "null"]},
                 "start": {"type": "integer", "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 20},
             },
-            required=["source_id", "start", "limit"],
+            required=["source_id", "query", "start", "limit"],
         ),
         True,
     ),
     (
-        "webpage.search",
-        "search_downloaded_web_page",
-        "Search one temporarily downloaded HTML page for relevant extracted text.",
-        _object_schema(
-            {
-                "source_id": {"type": "string", "minLength": 1},
-                "query": {"type": "string", "minLength": 1},
-                "top_k": {"type": "integer", "minimum": 1, "maximum": 20},
-            },
-            required=["source_id", "query", "top_k"],
-        ),
-        True,
-    ),
-    (
-        "webpage.notes.save",
-        "save_web_page_note",
-        "Persist a Markdown note with the temporary page's title and source URL.",
-        _object_schema(
-            {
-                "source_id": {"type": "string", "minLength": 1},
-                "name": {"type": "string", "minLength": 1, "maxLength": 300},
-                "content": {"type": "string", "minLength": 1, "maxLength": 200000},
-                "tags": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
-                },
-            },
-            required=["source_id", "name", "content", "tags"],
-        ),
-        True,
-    ),
-    (
-        "web.search",
-        "search_web",
-        (
-            "Search DuckDuckGo and return 10 titles, snippets, and source URLs. Use one broad, "
-            "high-signal keyword query for wide coverage before narrowing; avoid quoted exact "
-            "phrases unless looking for a known title or unique wording. The 100-request session "
-            "budget is intentionally finite, requests are limited to one per second, and the same "
-            "normalized query is never requested twice."
-        ),
-        _object_schema(
-            {
-                "query": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": (
-                        "A concise keyword query combining the distinctive topic, entities, and "
-                        "useful synonyms. Prefer coverage over exact-phrase variants."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 10,
-                    "maximum": 10,
-                    "description": "Always request 10 results to maximize coverage per search.",
-                },
-            },
-            required=["query", "limit"],
-        ),
-        True,
-    ),
-    (
-        "arxiv.search",
-        "search_arxiv",
-        "Search arXiv papers and return metadata, abstracts, and source URLs.",
-        _object_schema(
-            {
-                "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-            },
-            required=["query", "limit"],
-        ),
-        True,
-    ),
-    (
-        "wikipedia.search",
-        "search_wikipedia",
-        "Search Wikipedia and return introductory extracts with article URLs.",
-        _object_schema(
-            {
-                "query": {"type": "string", "minLength": 1},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-            },
-            required=["query", "limit"],
-        ),
-        True,
-    ),
-    (
-        "workspace.list",
-        "list_workspace_files",
-        "List every indexed workspace file. Prefer workspace search for discovery in large repositories.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "workspace.search",
-        "search_workspace",
-        "Search indexed notes and paper files by name, content, tags, or document kind.",
+        "research.notes.search",
+        "search_research_notes",
+        "Search durable research notes by content, type, or tags.",
         _object_schema(
             {
                 "query": {"type": ["string", "null"]},
@@ -506,17 +129,16 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
                     "type": "array",
                     "items": {"type": "string", "minLength": 1, "maxLength": 64},
                 },
-                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
             },
-            required=["query", "kinds", "tags", "limit", "offset"],
+            required=["query", "kinds", "tags", "limit"],
         ),
         True,
     ),
     (
-        "workspace.read",
-        "read_workspace_file",
-        "Read one safe workspace file.",
+        "research.notes.read",
+        "read_research_note",
+        "Read one durable research note.",
         _object_schema(
             {"path": {"type": "string", "minLength": 1}},
             required=["path"],
@@ -524,386 +146,51 @@ APPLICATION_TOOLS: tuple[tuple[str, str, str, dict[str, Any], bool], ...] = (
         True,
     ),
     (
-        "workspace.write",
-        "write_workspace_file",
-        "Write one safe text, Markdown, or JSON workspace file.",
+        "research.notes.save",
+        "save_research_note",
+        "Create a note, or append to or overwrite a paper note or known note path.",
         _object_schema(
             {
-                "path": {"type": "string", "minLength": 1},
-                "content": {
-                    "type": ["object", "array", "string", "number", "boolean", "null"],
-                    "items": {
-                        "type": ["object", "string", "number", "boolean", "null"]
-                    },
-                },
-            },
-            required=["path", "content"],
-        ),
-        True,
-    ),
-    (
-        "workspace.markdown.replace",
-        "replace_workspace_markdown",
-        "Replace one exact Markdown selection without rewriting the rest of the file.",
-        _object_schema(
-            {
-                "path": {"type": "string", "minLength": 1},
-                "old_text": {"type": "string", "minLength": 1},
-                "new_text": {"type": "string"},
-                "replace_all": {"type": "boolean"},
-            },
-            required=["path", "old_text", "new_text", "replace_all"],
-        ),
-        True,
-    ),
-    (
-        "workspace.markdown.append",
-        "append_workspace_markdown",
-        "Append text to an existing Markdown file without rewriting its current content.",
-        _object_schema(
-            {
-                "path": {"type": "string", "minLength": 1},
-                "content": {"type": "string", "minLength": 1},
-            },
-            required=["path", "content"],
-        ),
-        True,
-    ),
-    (
-        "workspace.tags.set",
-        "set_workspace_file_tags",
-        "Replace the searchable tags associated with one workspace file.",
-        _object_schema(
-            {
-                "path": {"type": "string", "minLength": 1},
-                "tags": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
-                },
-            },
-            required=["path", "tags"],
-        ),
-        True,
-    ),
-    (
-        "workspace.tags.search",
-        "search_workspace_file_tags",
-        "Find workspace files that contain all requested tags.",
-        _object_schema(
-            {
-                "tags": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 32,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
-                },
-            },
-            required=["tags"],
-        ),
-        True,
-    ),
-    (
-        "workspace.note.create",
-        "create_workspace_note",
-        (
-            "Create a named generic Markdown note under notes/<server-generated-uuid>/note.md. "
-            "The server generates the ID; provide a concise human-readable name."
-        ),
-        _object_schema(
-            {
-                "name": {"type": "string", "minLength": 1, "maxLength": 300},
-                "content": {"type": "string"},
-                "tags": {
-                    "type": "array",
-                    "maxItems": 32,
-                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
-                },
-            },
-            required=["name", "content", "tags"],
-        ),
-        True,
-    ),
-    (
-        "workspace.paper.ensure",
-        "ensure_paper_workspace",
-        "Create or resolve the canonical summary and notes folder for one stored paper.",
-        _object_schema(
-            {"document_id": {"type": "string", "minLength": 1}},
-            required=["document_id"],
-        ),
-        True,
-    ),
-    (
-        "workspace.paper.name.set",
-        "set_paper_workspace_name",
-        "Set the human-readable display name for a paper's canonical workspace folder.",
-        _object_schema(
-            {
-                "document_id": {"type": "string", "minLength": 1},
-                "paper_name": {
+                "target": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 300,
+                    "enum": ["new_note", "paper_notes", "path"],
                 },
-            },
-            required=["document_id", "paper_name"],
-        ),
-        True,
-    ),
-    (
-        "artifacts.write",
-        "write_artifact",
-        "Write a generated text, Markdown, or JSON artifact.",
-        _object_schema(
-            {
-                "path": {"type": "string", "minLength": 1},
-                "content": {
-                    "type": ["object", "array", "string", "number", "boolean", "null"],
-                    "items": {
-                        "type": ["object", "string", "number", "boolean", "null"]
-                    },
-                },
-                "media_type": {
-                    "type": "string",
-                    "enum": ["text/plain", "text/markdown", "application/json"],
-                },
-            },
-            required=["path", "content", "media_type"],
-        ),
-        True,
-    ),
-    (
-        "conversation.memory.search",
-        "search_conversation_memory",
-        (
-            "Search completed turns from older local conversations. Results are lexical candidates, "
-            "not proof of equivalence; reuse only a clearly matching result."
-        ),
-        _object_schema(
-            {
-                "query": {"type": "string", "minLength": 3, "maxLength": 500},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
-            },
-            required=["query", "limit"],
-        ),
-        True,
-    ),
-    (
-        "conversation.memory.read",
-        "read_conversation_memory",
-        "Read the request and answer for one clearly matching completed conversation turn.",
-        _object_schema(
-            {"run_id": {"type": "string", "minLength": 1}},
-            required=["run_id"],
-        ),
-        True,
-    ),
-    (
-        "python.execute",
-        "execute_python",
-        (
-            "Run transient sandboxed Python for exact calculations, simulations, and chart data. "
-            "Code must define compute(inputs) and return a JSON-serializable value."
-        ),
-        _object_schema(
-            {
-                "code": {"type": "string", "minLength": 1, "maxLength": 20_000},
-                "inputs": {"type": "object"},
-            },
-            required=["code", "inputs"],
-        ),
-        True,
-    ),
-    (
-        "extended.budget.status",
-        "extended_work_budget_status",
-        "Show soft scope guidance and the remaining external-search runaway safety capacity.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "extended.priorities.list",
-        "list_research_priority_decisions",
-        (
-            "List model-made research reallocations shared across the coordinator and focused "
-            "workers, including intentionally deferred or stopped work."
-        ),
-        _object_schema({}),
-        True,
-    ),
-    (
-        "extended.plan.create",
-        "create_extended_work_plan",
-        "Create the ordered plan for one extended-work run.",
-        _object_schema(
-            {
-                "tasks": {
+                "mode": {"type": "string", "enum": ["append", "overwrite"]},
+                "document_id": {"type": ["string", "null"]},
+                "path": {"type": ["string", "null"]},
+                "name": {"type": ["string", "null"], "maxLength": 300},
+                "content": {"type": "string", "minLength": 1, "maxLength": 200000},
+                "tags": {
                     "type": "array",
-                    "minItems": 1,
-                    "maxItems": 10,
-                    "items": _object_schema(
-                        {
-                            "id": {"type": "string", "minLength": 1},
-                            "title": {"type": "string", "minLength": 1},
-                            "instructions": {"type": "string", "minLength": 1},
-                            "expected_output": {"type": "string", "minLength": 1},
-                            "effort": {
-                                "type": "string",
-                                "enum": ["low", "medium", "high"],
-                            },
-                            "source_target": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 300,
-                            },
-                            "rationale": {"type": "string", "minLength": 1},
-                        },
-                        required=[
-                            "id",
-                            "title",
-                            "instructions",
-                            "expected_output",
-                            "effort",
-                            "source_target",
-                            "rationale",
-                        ],
-                    ),
-                }
-            },
-            required=["tasks"],
-        ),
-        True,
-    ),
-    (
-        "extended.plan.update",
-        "update_extended_work_item",
-        "Complete or block the current extended work item and advance the plan.",
-        _object_schema(
-            {
-                "id": {"type": "string", "minLength": 1},
-                "status": {"type": "string", "enum": ["completed", "blocked"]},
-                "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
-            },
-            required=["id", "status", "summary"],
-        ),
-        True,
-    ),
-    (
-        "extended.notes.save",
-        "save_extended_work_note",
-        "Save detailed intermediate findings outside the coordinator prompt.",
-        _object_schema(
-            {
-                "task_id": {"type": "string", "minLength": 1},
-                "title": {"type": "string", "minLength": 1, "maxLength": 300},
-                "summary": {"type": "string", "minLength": 1, "maxLength": 2_000},
-                "content": {"type": "string", "minLength": 1, "maxLength": 100_000},
-                "sources": {
-                    "type": "array",
-                    "items": {"type": "string"},
+                    "maxItems": 32,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
                 },
-            },
-            required=["task_id", "title", "summary", "content", "sources"],
-        ),
-        True,
-    ),
-    (
-        "extended.notes.list",
-        "list_extended_work_notes",
-        "List compact summaries of intermediate notes from the current extended run.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "extended.notes.read",
-        "read_extended_work_note",
-        "Read one selected intermediate note from the current extended run.",
-        _object_schema(
-            {"note_id": {"type": "string", "minLength": 1}},
-            required=["note_id"],
-        ),
-        True,
-    ),
-    (
-        "sdk.catalog",
-        "list_sdk_primitives",
-        "List the OpenAI Agents SDK primitives and ScholarWeave function tools available to the builder.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "agents.list",
-        "list_saved_agents",
-        "List saved SDK agent blueprints.",
-        _object_schema({}),
-        True,
-    ),
-    (
-        "agents.get",
-        "get_saved_agent",
-        "Get one saved SDK agent blueprint.",
-        _object_schema(
-            {"agent_id": {"type": "string", "minLength": 1}},
-            required=["agent_id"],
-        ),
-        True,
-    ),
-    (
-        "agents.validate",
-        "validate_agent_blueprint",
-        (
-            "Validate a complete nested SDK agent blueprint before saving it. Required top-level "
-            "fields include name, entry_agent_id, and agents; tool entries use kind, not type."
-        ),
-        _object_schema(
-            {"blueprint": {"type": "object"}},
-            required=["blueprint"],
-        ),
-        False,
-    ),
-    (
-        "agents.save",
-        "save_agent_blueprint",
-        (
-            "Create or revise a complete, validated nested SDK agent blueprint. Keep instructions, "
-            "model, model_settings, and output inside each agents entry."
-        ),
-        _object_schema(
-            {
-                "agent_id": {"type": ["string", "null"]},
-                "blueprint": {"type": "object"},
-                "presentation": {"type": "object"},
-            },
-            required=["agent_id", "blueprint", "presentation"],
-        ),
-        False,
-    ),
-    (
-        "function_tools.save",
-        "save_custom_function_tool",
-        "Create or revise a sandboxed SDK FunctionTool.",
-        _object_schema(
-            {
-                "definition_id": {"type": ["string", "null"]},
-                "name": {"type": "string", "minLength": 1},
-                "description": {"type": "string"},
-                "parameters_schema": {"type": "object"},
-                "output_schema": {"type": ["object", "null"]},
-                "code": {"type": "string", "minLength": 1},
-                "requires_approval": {"type": "boolean"},
             },
             required=[
-                "definition_id",
+                "target",
+                "mode",
+                "document_id",
+                "path",
                 "name",
-                "description",
-                "parameters_schema",
-                "output_schema",
-                "code",
-                "requires_approval",
+                "content",
+                "tags",
             ],
         ),
-        False,
+        True,
+    ),
+    (
+        "tool.results.read",
+        "read_tool_result",
+        "Read a bounded slice of a large tool result by its result reference.",
+        _object_schema(
+            {
+                "result_ref": {"type": "string", "minLength": 1},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 256, "maximum": 16_000},
+            },
+            required=["result_ref", "offset", "limit"],
+        ),
+        True,
     ),
 )
 

@@ -2,82 +2,18 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response, status
 
-from backend.agents.blueprint import AgentBlueprint, ModelReferenceSpec, SessionPolicySpec
+from backend.agents.blueprint import ModelReferenceSpec, SessionPolicySpec
 from backend.api.dependencies import services
-from backend.builder.service import builder_blueprint
 from backend.conversations.schemas import (
-    BuilderConversationCreateRequest,
-    ConversationCreateRequest,
     ConversationDetailResponse,
     ConversationMessageRequest,
     ConversationMessageResponse,
     ConversationResponse,
+    ResearchConversationCreateRequest,
 )
 from backend.runs.schemas import run_response
 
-router = APIRouter(tags=["conversations"])
-
-
-@router.get("/conversations", response_model=list[ConversationResponse])
-def list_conversations(container=Depends(services)) -> list[ConversationResponse]:
-    return [_response(record) for record in container.conversations.list()]
-
-
-@router.post(
-    "/conversations",
-    response_model=ConversationResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-def create_conversation(
-    payload: ConversationCreateRequest,
-    container=Depends(services),
-) -> ConversationResponse:
-    revision, blueprint = container.agents.get_revision(payload.agent_revision_id)
-    entry = next(agent for agent in blueprint.agents if agent.id == blueprint.entry_agent_id)
-    record = container.conversations.create(
-        title=payload.title,
-        kind="agent",
-        agent_revision_id=revision.id,
-        model_reference=entry.model.model_dump(mode="json"),
-        session_policy=blueprint.session,
-    )
-    return _response(record)
-
-
-@router.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
-async def get_conversation(
-    conversation_id: str,
-    container=Depends(services),
-) -> ConversationDetailResponse:
-    record = container.conversations.get(conversation_id)
-    items = await container.conversations.items(record.id)
-    return ConversationDetailResponse(**_response(record).model_dump(), items=items)
-
-
-@router.post(
-    "/conversations/{conversation_id}/messages",
-    response_model=ConversationMessageResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def send_conversation_message(
-    conversation_id: str,
-    payload: ConversationMessageRequest,
-    container=Depends(services),
-) -> ConversationMessageResponse:
-    record = container.conversations.get(conversation_id)
-    compiled = _compile_conversation(record, container)
-    container.conversations.touch(conversation_id, payload.content)
-    run = container.runs.create(
-        compiled,
-        payload.content,
-        agent_revision_id=record.agent_revision_id,
-        conversation_id=conversation_id,
-        reasoning_effort=payload.reasoning_effort,
-    )
-    return ConversationMessageResponse(
-        conversation=_response(container.conversations.get(conversation_id)),
-        run=run_response(container.runs.get(run.id)),
-    )
+router = APIRouter(tags=["research conversations"])
 
 
 @router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -85,12 +21,13 @@ async def delete_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> Response:
+    await container.runs.cancel_conversation_runs(conversation_id)
     await container.conversations.delete(conversation_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/agent/conversations", response_model=list[ConversationResponse])
-def list_autonomous_conversations(container=Depends(services)) -> list[ConversationResponse]:
+def list_research_conversations(container=Depends(services)) -> list[ConversationResponse]:
     return [_response(record) for record in container.autonomous.list_conversations()]
 
 
@@ -99,8 +36,8 @@ def list_autonomous_conversations(container=Depends(services)) -> list[Conversat
     response_model=ConversationResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_autonomous_conversation(
-    payload: BuilderConversationCreateRequest,
+def create_research_conversation(
+    payload: ResearchConversationCreateRequest,
     container=Depends(services),
 ) -> ConversationResponse:
     return _response(
@@ -115,13 +52,11 @@ def create_autonomous_conversation(
     "/agent/conversations/{conversation_id}",
     response_model=ConversationDetailResponse,
 )
-async def get_autonomous_conversation(
+async def get_research_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> ConversationDetailResponse:
     record = container.autonomous.get_conversation(conversation_id)
-    if record.kind != "autonomous":
-        raise ValueError("Conversation is not an autonomous-agent chat.")
     items = await container.autonomous.conversation_items(conversation_id)
     return ConversationDetailResponse(**_response(record).model_dump(), items=items)
 
@@ -131,20 +66,18 @@ async def get_autonomous_conversation(
     response_model=ConversationMessageResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def send_autonomous_message(
+async def send_research_message(
     conversation_id: str,
     payload: ConversationMessageRequest,
     container=Depends(services),
 ) -> ConversationMessageResponse:
-    record = container.autonomous.get_conversation(conversation_id)
-    if record.kind != "autonomous":
-        raise ValueError("Conversation is not an autonomous-agent chat.")
     run = container.autonomous.start_message(
         conversation_id,
         payload.content,
         reasoning_effort=payload.reasoning_effort,
-        work_mode=payload.work_mode,
-        work_budget=payload.work_budget,
+        web_enabled=payload.web_enabled,
+        fast_answer=payload.fast_answer,
+        web_search_limit=payload.web_search_limit,
     )
     return ConversationMessageResponse(
         conversation=_response(container.autonomous.get_conversation(conversation_id)),
@@ -152,22 +85,25 @@ async def send_autonomous_message(
     )
 
 
-@router.get("/builder/conversations", response_model=list[ConversationResponse])
-def list_builder_conversations(container=Depends(services)) -> list[ConversationResponse]:
-    return [_response(record) for record in container.builder.list_conversations()]
+@router.get("/deep-work/conversations", response_model=list[ConversationResponse])
+def list_deep_work_conversations(container=Depends(services)) -> list[ConversationResponse]:
+    return [
+        _response(record)
+        for record in container.autonomous.list_deep_work_conversations()
+    ]
 
 
 @router.post(
-    "/builder/conversations",
+    "/deep-work/conversations",
     response_model=ConversationResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def create_builder_conversation(
-    payload: BuilderConversationCreateRequest,
+def create_deep_work_conversation(
+    payload: ResearchConversationCreateRequest,
     container=Depends(services),
 ) -> ConversationResponse:
     return _response(
-        container.builder.create_conversation(
+        container.autonomous.create_deep_work_conversation(
             title=payload.title,
             model_reference=payload.model_reference,
         )
@@ -175,52 +111,40 @@ def create_builder_conversation(
 
 
 @router.get(
-    "/builder/conversations/{conversation_id}",
+    "/deep-work/conversations/{conversation_id}",
     response_model=ConversationDetailResponse,
 )
-async def get_builder_conversation(
+async def get_deep_work_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> ConversationDetailResponse:
-    record = container.builder.get_conversation(conversation_id)
-    if record.kind != "builder":
-        raise ValueError("Conversation is not a builder chat.")
-    items = await container.builder.conversation_items(conversation_id)
+    record = container.autonomous.get_deep_work_conversation(conversation_id)
+    items = await container.autonomous.conversation_items(conversation_id)
     return ConversationDetailResponse(**_response(record).model_dump(), items=items)
 
 
 @router.post(
-    "/builder/conversations/{conversation_id}/messages",
+    "/deep-work/conversations/{conversation_id}/messages",
     response_model=ConversationMessageResponse,
     status_code=status.HTTP_202_ACCEPTED,
 )
-async def send_builder_message(
+async def send_deep_work_message(
     conversation_id: str,
     payload: ConversationMessageRequest,
     container=Depends(services),
 ) -> ConversationMessageResponse:
-    record = container.builder.get_conversation(conversation_id)
-    if record.kind != "builder":
-        raise ValueError("Conversation is not a builder chat.")
-    run = container.builder.start_message(
+    run = container.autonomous.start_deep_work_message(
         conversation_id,
         payload.content,
         reasoning_effort=payload.reasoning_effort,
+        web_enabled=payload.web_enabled,
     )
     return ConversationMessageResponse(
-        conversation=_response(container.builder.get_conversation(conversation_id)),
+        conversation=_response(
+            container.autonomous.get_deep_work_conversation(conversation_id)
+        ),
         run=run_response(container.runs.get(run.id)),
     )
-
-
-def _compile_conversation(record, container):
-    if record.kind == "autonomous":
-        return container.autonomous.compile_conversation(record.id)
-    if record.kind == "builder":
-        return container.compiler.compile(builder_blueprint(record.model_reference_json))
-    if record.agent_revision_id is None:
-        raise ValueError("Agent conversation has no agent revision.")
-    return container.agents.compile_revision(record.agent_revision_id)
 
 
 def _response(record) -> ConversationResponse:

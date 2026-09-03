@@ -8,13 +8,9 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.agents.compiler import AgentCompiler
 from backend.agents.guardrails import create_guardrail_catalog
-from backend.agents.repository import AgentRepository
-from backend.agents.service import AgentService
 from backend.autonomous import AutonomousAgentService
-from backend.builder.service import BuilderService
 from backend.core.config import Settings
 from backend.conversations.repository import ConversationRepository
-from backend.conversations.memory import ConversationMemoryService
 from backend.conversations.service import ConversationService
 from backend.core.settings_service import SettingsService
 from backend.documents import DocumentService
@@ -24,8 +20,6 @@ from backend.documents.ingestion import DocumentIngestion
 from backend.documents.ocr import DocumentOCR
 from backend.documents.repository import DocumentRepository
 from backend.documents.vision import VisionEnhancer
-from backend.direct_agents import DirectAgentService
-from backend.direct_agents.repository import DirectAgentRepository
 from backend.runs.broker import EventBroker
 from backend.providers.ollama import OllamaClient
 from backend.persistence import create_session_factory
@@ -42,9 +36,7 @@ from backend.runtime.sdk_compat import SUPPORTED_SDK_VERSION, assert_supported_s
 from backend.runtime.sessions import SdkSessionFactory
 from backend.persistence.files import SafeStorage
 from backend.tools.catalog import create_tool_catalog
-from backend.tools.repository import FunctionToolRepository
 from backend.tools.runtime import ApplicationToolRuntime
-from backend.tools.service import FunctionToolService
 from backend.workspace.service import WorkspaceService
 from backend.workspace.repository import WorkspaceRepository
 
@@ -74,17 +66,12 @@ class ApplicationServices:
     workspace: WorkspaceService
     tool_catalog: Any
     guardrail_catalog: Any
-    function_tools: FunctionToolService
     compiler: AgentCompiler
-    agents: AgentService
     sdk_sessions: SdkSessionFactory
     conversations: ConversationService
-    conversation_memory: ConversationMemoryService
     events: EventBroker
     runs: RunService
-    builder: BuilderService
     autonomous: AutonomousAgentService
-    direct_agents: DirectAgentService
     sdk_version: str = SUPPORTED_SDK_VERSION
 
     async def start(self) -> None:
@@ -164,11 +151,6 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     )
 
     tool_catalog = create_tool_catalog()
-    function_tools = FunctionToolService(
-        FunctionToolRepository(session_factory),
-        resolved,
-    )
-    tool_catalog.register_dynamic_factory(function_tools.dynamic_factory)
     guardrail_catalog = create_guardrail_catalog()
     compiler = AgentCompiler(
         model_resolver,
@@ -176,15 +158,11 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         guardrail_catalog,
         settings=resolved,
     )
-    agents = AgentService(AgentRepository(session_factory), compiler)
-
     sdk_sessions = SdkSessionFactory(resolved.database_path)
     conversations = ConversationService(
         ConversationRepository(session_factory),
         sdk_sessions,
     )
-    conversation_memory = ConversationMemoryService(session_factory)
-    direct_agent_repository = DirectAgentRepository(session_factory)
     events = EventBroker()
     run_repository = RunRepository(session_factory)
     tool_runtime = ApplicationToolRuntime(
@@ -195,12 +173,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         research_search=research_search,
         source_downloads=source_downloads,
         storage=storage,
-        agent_service=agents,
-        function_tool_service=function_tools,
-        tool_catalog=tool_catalog,
-        direct_agent_repository=direct_agent_repository,
         run_repository=run_repository,
-        conversation_memory=conversation_memory,
     )
     runs = RunService(
         run_repository,
@@ -211,15 +184,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         retention_days=resolved.run_retention_days,
         delete_run_artifacts=documents.delete_run_artifacts,
     )
-    builder = BuilderService(compiler, conversations, runs)
-    autonomous = AutonomousAgentService(compiler, conversations, runs, function_tools)
-    direct_agents = DirectAgentService(
-        direct_agent_repository,
-        conversations,
-        compiler,
-        documents,
-        workspace,
-    )
+    autonomous = AutonomousAgentService(compiler, conversations, runs)
     providers = ProviderService(
         provider_repository,
         model_runtime,
@@ -251,15 +216,10 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         workspace=workspace,
         tool_catalog=tool_catalog,
         guardrail_catalog=guardrail_catalog,
-        function_tools=function_tools,
         compiler=compiler,
-        agents=agents,
         sdk_sessions=sdk_sessions,
         conversations=conversations,
-        conversation_memory=conversation_memory,
         events=events,
         runs=runs,
-        builder=builder,
         autonomous=autonomous,
-        direct_agents=direct_agents,
     )

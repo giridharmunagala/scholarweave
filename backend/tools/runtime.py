@@ -6,41 +6,16 @@ import json
 import uuid
 from typing import Any
 
-from pydantic import ValidationError as PydanticValidationError
-
-from backend.agents.blueprint import AgentBlueprint
-from backend.agents.catalog import ToolCatalog
-from backend.agents.service import AgentService
-from backend.agents.templates import starter_blueprints
-from backend.autonomous.work import (
-    budget_status,
-    consume_tool_safety_limit,
-    create_work_plan,
-    list_work_notes,
-    read_work_note,
-    save_work_note,
-    update_work_item,
-)
-from backend.builder.todos import (
-    create_builder_todo_plan,
-    finish_builder_run,
-    update_builder_todo,
-)
 from backend.core.config import Settings
 from backend.core.text import clean_filename
-from backend.conversations.memory import ConversationMemoryService
 from backend.documents import DocumentService
 from backend.documents.paper import manifest_pages
-from backend.direct_agents.repository import DirectAgentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.runtime.context import ScholarWeaveContext, ToolReceipt
-from backend.runtime.priorities import list_priority_decisions
 from backend.runs.repository import RunRepository
 from backend.persistence.files import SafeStorage
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService, WebSourceUnavailable
-from backend.tools.service import FunctionToolService
-from backend.tools.sandbox import SandboxLimits, run_python
 from backend.core.json import dumps_json
 from backend.workspace.service import WorkspaceService
 
@@ -61,12 +36,7 @@ class ApplicationToolRuntime:
         workspace: WorkspaceService,
         research_search: ResearchSearchService,
         source_downloads: SourceDownloadService,
-        agent_service: AgentService | None = None,
-        function_tool_service: FunctionToolService | None = None,
-        tool_catalog: ToolCatalog | None = None,
-        direct_agent_repository: DirectAgentRepository | None = None,
         run_repository: RunRepository | None = None,
-        conversation_memory: ConversationMemoryService | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -75,12 +45,7 @@ class ApplicationToolRuntime:
         self._workspace = workspace
         self._research_search = research_search
         self._source_downloads = source_downloads
-        self._agents = agent_service
-        self._function_tools = function_tool_service
-        self._catalog = tool_catalog
-        self._direct_agents = direct_agent_repository
         self._runs = run_repository
-        self._conversation_memory = conversation_memory
 
     async def invoke(
         self,
@@ -91,62 +56,15 @@ class ApplicationToolRuntime:
         tool_call_id: str | None = None,
     ) -> Any:
         handlers = {
-            "goal.plan.update": self._update_goal_plan,
-            "extended.block": self._block_goal,
-            "extended.finish": self._finish_goal,
+            "research.sources.search": self._search_research_sources,
+            "research.sources.acquire": self._acquire_research_source,
+            "research.library.search": self._search_research_library,
+            "research.paper.read": self._read_research_paper,
+            "research.web.read": self._read_research_web_page,
+            "research.notes.search": self._search_research_notes,
+            "research.notes.read": self._read_research_note,
+            "research.notes.save": self._save_research_note,
             "tool.results.read": self._read_tool_result,
-            "builder.todos.create": create_builder_todo_plan,
-            "builder.todos.update": update_builder_todo,
-            "builder.finish": finish_builder_run,
-            "extended.budget.status": budget_status,
-            "extended.priorities.list": list_priority_decisions,
-            "extended.plan.create": create_work_plan,
-            "extended.plan.update": update_work_item,
-            "extended.notes.save": self._save_extended_work_note,
-            "extended.notes.list": list_work_notes,
-            "extended.notes.read": read_work_note,
-            "tools.search": self._search_tools,
-            "research.pages.read_all": self._read_all_paper_pages,
-            "research.pages.read_retained": self._read_retained_paper_pages,
-            "research.page_decisions.save": self._save_page_decisions,
-            "research.summaries.save": self._save_paper_summary,
-            "research.summaries.list": self._list_paper_summaries,
-            "documents.list": self._list_documents,
-            "documents.inspect": self._inspect_paper,
-            "documents.ingest": self._ingest_paper,
-            "documents.read_pages": self._read_paper_pages,
-            "documents.read_chunks": self._read_document_chunks,
-            "retrieval.keyword_search": self._keyword_search,
-            "documents.download": self._download_paper,
-            "webpage.download": self._download_web_page,
-            "webpage.list": self._list_web_pages,
-            "webpage.read": self._read_web_page,
-            "webpage.search": self._search_web_page,
-            "webpage.notes.save": self._save_web_page_note,
-            "web.search": self._search_web,
-            "arxiv.search": self._search_arxiv,
-            "wikipedia.search": self._search_wikipedia,
-            "workspace.list": self._list_workspace,
-            "workspace.search": self._search_workspace,
-            "workspace.read": self._read_workspace,
-            "workspace.write": self._write_workspace,
-            "workspace.markdown.replace": self._replace_workspace_markdown,
-            "workspace.markdown.append": self._append_workspace_markdown,
-            "workspace.tags.set": self._set_workspace_tags,
-            "workspace.tags.search": self._search_workspace_tags,
-            "workspace.note.create": self._create_workspace_note,
-            "workspace.paper.ensure": self._ensure_paper_workspace,
-            "workspace.paper.name.set": self._set_paper_workspace_name,
-            "artifacts.write": self._write_artifact,
-            "conversation.memory.search": self._search_conversation_memory,
-            "conversation.memory.read": self._read_conversation_memory,
-            "python.execute": self._execute_python,
-            "sdk.catalog": self._sdk_catalog,
-            "agents.list": self._list_agents,
-            "agents.get": self._get_agent,
-            "agents.validate": self._validate_agent,
-            "agents.save": self._save_agent,
-            "function_tools.save": self._save_function_tool,
         }
         handler = handlers.get(catalog_id)
         if handler is None:
@@ -578,6 +496,213 @@ class ApplicationToolRuntime:
         )
         context.metadata["paper_pages_read"] = sorted(read_pages)
 
+    async def _search_research_sources(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        provider = str(arguments["provider"])
+        query = str(arguments["query"])
+        if context.metadata.get("fast_answer"):
+            if context.metadata.get("fast_answer_page_acquired"):
+                raise ValueError(
+                    "Fast-answer mode cannot search again after acquiring a result page."
+                )
+            if provider != "web":
+                raise ValueError("Fast-answer mode only permits web searches.")
+        if provider == "web":
+            result = await self._search_web({"query": query, "limit": 10}, context)
+            if context.metadata.get("fast_answer"):
+                urls = context.metadata.setdefault("fast_answer_result_urls", [])
+                if not isinstance(urls, list):
+                    raise ValueError("The fast-answer result URL list is invalid.")
+                urls.extend(
+                    str(item["url"])
+                    for item in result.get("results", [])
+                    if isinstance(item, dict) and item.get("url")
+                )
+            return result
+        if provider == "arxiv":
+            return await self._search_arxiv({"query": query, "limit": 10}, context)
+        if provider == "wikipedia":
+            return await self._search_wikipedia({"query": query, "limit": 10}, context)
+        raise ValueError(f"Unknown research source provider '{provider}'.")
+
+    async def _acquire_research_source(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        kind = str(arguments["kind"])
+        url = str(arguments["url"])
+        if context.metadata.get("fast_answer"):
+            allowed_urls = context.metadata.get("fast_answer_result_urls", [])
+            if kind != "web_page" or not isinstance(allowed_urls, list) or url not in allowed_urls:
+                raise ValueError(
+                    "Fast-answer mode can only acquire web pages returned by its web search."
+                )
+            context.metadata["fast_answer_page_acquired"] = True
+        if kind == "paper":
+            return await self._download_paper(
+                {"pdf_url": url, "title": arguments.get("title")},
+                context,
+            )
+        if kind == "web_page":
+            return await self._download_web_page({"url": url}, context)
+        raise ValueError(f"Unknown research source kind '{kind}'.")
+
+    def _search_research_library(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> Any:
+        query_value = arguments.get("query")
+        query = str(query_value).strip() if query_value is not None else ""
+        document_value = arguments.get("document_id")
+        document_id = str(document_value) if document_value is not None else None
+        if query:
+            return self._keyword_search(
+                {
+                    "query": query,
+                    "document_id": document_id,
+                    "top_k": int(arguments["limit"]),
+                },
+                context,
+            )
+        if document_id:
+            return self._inspect_paper({"document_id": document_id}, context)
+        return self._list_documents({}, context)
+
+    async def _read_research_paper(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> Any:
+        document_id = str(arguments["document_id"])
+        action = str(arguments["action"])
+        if action == "inspect":
+            return self._inspect_paper({"document_id": document_id}, context)
+        if action == "prepare":
+            inspection = self._inspect_paper({"document_id": document_id}, context)
+            if inspection["readable"]:
+                return inspection
+            return await self._ingest_paper({"document_id": document_id}, context)
+        start = arguments.get("start")
+        limit = int(arguments["limit"])
+        if action == "pages":
+            return self._read_paper_pages(
+                {
+                    "document_id": document_id,
+                    "start_page": max(1, int(start or 1)),
+                    "limit": limit,
+                },
+                context,
+            )
+        if action == "chunks":
+            return self._read_document_chunks(
+                {
+                    "document_id": document_id,
+                    "start": max(0, int(start or 0)),
+                    "limit": limit,
+                },
+                context,
+            )
+        raise ValueError(f"Unknown paper read action '{action}'.")
+
+    async def _read_research_web_page(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> Any:
+        query_value = arguments.get("query")
+        query = str(query_value).strip() if query_value is not None else ""
+        if query:
+            return await self._search_web_page(
+                {
+                    "source_id": arguments["source_id"],
+                    "query": query,
+                    "top_k": arguments["limit"],
+                },
+                context,
+            )
+        return await self._read_web_page(
+            {
+                "source_id": arguments["source_id"],
+                "start": arguments["start"],
+                "limit": arguments["limit"],
+            },
+            context,
+        )
+
+    def _search_research_notes(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> list[dict[str, Any]]:
+        return self._search_workspace(
+            {
+                "query": arguments.get("query"),
+                "kinds": arguments["kinds"],
+                "tags": arguments["tags"],
+                "limit": arguments["limit"],
+                "offset": 0,
+            },
+            context,
+        )
+
+    def _read_research_note(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return self._read_workspace(arguments, context)
+
+    def _save_research_note(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        target = str(arguments["target"])
+        mode = str(arguments["mode"])
+        content = str(arguments["content"])
+        tags = list(arguments["tags"])
+        if target == "new_note":
+            name = str(arguments.get("name") or "").strip()
+            if not name:
+                raise ValueError("A new research note requires a name.")
+            return self._create_workspace_note(
+                {"name": name, "content": content, "tags": tags},
+                context,
+            )
+
+        if target == "paper_notes":
+            document_id = str(arguments.get("document_id") or "").strip()
+            if not document_id:
+                raise ValueError("Paper notes require a document_id.")
+            paper = self._ensure_paper_workspace({"document_id": document_id}, context)
+            path = str(paper["notes_path"])
+        elif target == "path":
+            path = str(arguments.get("path") or "").strip()
+            if not path:
+                raise ValueError("Updating a research note by path requires a path.")
+        else:
+            raise ValueError(f"Unknown research note target '{target}'.")
+
+        if mode == "append":
+            document = self._workspace.append_markdown(path, content)
+        elif mode == "overwrite":
+            document = self._workspace.write_file(
+                path,
+                content,
+                tags=tags if tags else None,
+            )
+        else:
+            raise ValueError(f"Unknown research note save mode '{mode}'.")
+        if tags and mode == "append":
+            document = self._workspace.set_tags(path, tags)
+        self._append_workspace_receipt(context, document, "Updated")
+        return self._workspace_result(document)
+
     def _list_documents(
         self,
         _arguments: dict[str, Any],
@@ -758,7 +883,6 @@ class ApplicationToolRuntime:
         document = await self._source_downloads.download_pdf(
             str(arguments["pdf_url"]),
             title=str(arguments["title"]) if arguments.get("title") else None,
-            arxiv_only=True,
         )
         return self._inspect_paper({"document_id": document.id}, context)
 
@@ -904,7 +1028,7 @@ class ApplicationToolRuntime:
             )
 
         used = self._web_search_requests_used(context)
-        maximum = self._settings.web_search_max_requests_per_session
+        maximum = self._web_search_limit(context)
         if used >= maximum:
             raise ValueError(
                 f"The web-search session limit was reached ({used}/{maximum}). "
@@ -929,7 +1053,7 @@ class ApplicationToolRuntime:
         cached: bool,
     ) -> dict[str, Any]:
         used = self._web_search_requests_used(context)
-        maximum = self._settings.web_search_max_requests_per_session
+        maximum = self._web_search_limit(context)
         return {
             **result,
             "cached": cached,
@@ -946,6 +1070,13 @@ class ApplicationToolRuntime:
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise ValueError("The web-search session usage counter is invalid.")
         return value
+
+    def _web_search_limit(self, context: ScholarWeaveContext) -> int:
+        configured = self._settings.web_search_max_requests_per_session
+        value = context.metadata.get("web_search_limit", configured)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise ValueError("The web-search run limit is invalid.")
+        return min(configured, value)
 
     async def _search_arxiv(
         self,
@@ -1458,6 +1589,12 @@ def _active_epoch_id(context: ScholarWeaveContext) -> str | None:
 
 
 _SAFE_READ_PREFIXES = (
+    "research.sources.search",
+    "research.library.search",
+    "research.paper.read",
+    "research.web.read",
+    "research.notes.search",
+    "research.notes.read",
     "tools.",
     "documents.list",
     "documents.inspect",

@@ -32,6 +32,8 @@ class FigureExtractor:
                 width, height = image.size
                 if width < 128 or height < 128 or width * height < 40_000:
                     continue
+                if image.mode not in {"1", "L", "LA", "P", "RGB", "RGBA"}:
+                    image = image.convert("RGB")
                 figure_number += 1
                 output = io.BytesIO()
                 image.save(output, format="PNG")

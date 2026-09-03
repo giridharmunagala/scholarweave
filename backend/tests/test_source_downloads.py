@@ -106,14 +106,12 @@ async def test_remote_pdf_is_persisted_ingested_and_searchable(
 
     try:
         document = await downloads.download_pdf(
-            "https://arxiv.org/paper.pdf",
+            "https://papers.test/paper.pdf",
             title="Sparse Attention",
-            arxiv_only=True,
         )
         duplicate = await downloads.download_pdf(
-            "https://arxiv.org/paper.pdf",
+            "https://papers.test/paper.pdf",
             title="Sparse Attention",
-            arxiv_only=True,
         )
     finally:
         await downloads.close()
@@ -122,7 +120,8 @@ async def test_remote_pdf_is_persisted_ingested_and_searchable(
 
     assert document.status == "ready"
     assert duplicate.id == document.id
-    assert document.metadata_json["source_url"] == "https://arxiv.org/paper.pdf"
+    assert document.metadata_json["source_url"] == "https://papers.test/paper.pdf"
+    assert document.metadata_json["source_kind"] == "remote_pdf"
     assert services.retrieval.keyword_search("sparse attention", document.id)[0]["citation"] == "p.1"
     assert (test_settings.documents_dir / document.id / "source" / "paper.pdf").is_file()
 

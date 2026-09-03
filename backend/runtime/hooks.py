@@ -12,7 +12,6 @@ from backend.runtime.lifecycle import (
     finish_all_agent_invocations,
     start_agent_invocation,
 )
-from backend.runtime.priorities import advance_priority_progress, record_priority_decision
 from backend.runtime.serialization import to_jsonable
 from backend.tools.failures import consume_tool_failure
 
@@ -20,8 +19,6 @@ from backend.tools.failures import consume_tool_failure
 class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
     async def on_agent_start(self, context, agent: Agent[ScholarWeaveContext]) -> None:
         scholar_context = unwrap_scholar_context(context)
-        if agent.name == "Focused Work Specialist":
-            advance_priority_progress(scholar_context)
         await start_agent_invocation(scholar_context, agent.name)
 
     async def on_agent_end(
@@ -32,10 +29,6 @@ class ScholarWeaveRunHooks(RunHooks[ScholarWeaveContext]):
     ) -> None:
         scholar_context = unwrap_scholar_context(context)
         serialized_output = to_jsonable(output)
-        if agent.name == "Research Work Prioritizer":
-            decision = record_priority_decision(serialized_output, scholar_context)
-            if decision is not None:
-                await scholar_context.emit("extended.priorities.updated", decision)
         await finish_agent_invocation(
             scholar_context,
             agent.name,

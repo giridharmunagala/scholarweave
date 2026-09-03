@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import shutil
+from pathlib import Path
 
 import anyio
 import pytest
@@ -145,6 +146,42 @@ def test_artifact_responses_are_not_cached(test_settings) -> None:
     assert content.headers["cache-control"] == "no-store"
     assert raw.status_code == 200
     assert raw.headers["cache-control"] == "no-store"
+
+
+def test_document_list_returns_summaries_without_loading_details(
+    test_settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = create_app(test_settings)
+    with app.state.services.session_factory() as session:
+        session.add(
+            Document(
+                id="summary-only",
+                title="Lightweight list item",
+                source_filename="paper.pdf",
+                content_type="application/pdf",
+                status="ready",
+                page_count=12,
+                metadata_json={},
+            )
+        )
+        session.commit()
+
+    def fail_if_details_are_loaded(_document_id: str):
+        raise AssertionError("Document details should not be loaded for the list.")
+
+    monkeypatch.setattr(
+        app.state.services.documents,
+        "get_document_details",
+        fail_if_details_are_loaded,
+    )
+
+    response = TestClient(app).get("/api/documents")
+
+    assert response.status_code == 200
+    assert response.json()[0]["title"] == "Lightweight list item"
+    assert "artifacts" not in response.json()[0]
+    assert "chunks" not in response.json()[0]
 
 
 def test_text_layer_inspection_recommends_an_ingestion_mode(
@@ -558,6 +595,40 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
     assert len(reingested.json()["artifacts"]) == 4
 
 
+def test_cmyk_embedded_figure_is_saved_as_png(test_settings, monkeypatch) -> None:
+    image_module = pytest.importorskip("PIL.Image")
+    from backend.documents.figures import FigureExtractor
+    from backend.documents.repository import DocumentRepository
+    from backend.persistence.database import create_session_factory
+    from backend.persistence.files import SafeStorage
+
+    class EmbeddedImage:
+        name = "cmyk-figure"
+        image = image_module.new("CMYK", (256, 256), (0, 128, 128, 0))
+
+    class Page:
+        images = [EmbeddedImage()]
+
+    class Reader:
+        pages = [Page()]
+
+        def __init__(self, _path: str) -> None:
+            pass
+
+    monkeypatch.setattr("backend.documents.figures.PdfReader", Reader)
+    session_factory = create_session_factory(test_settings)
+    storage = SafeStorage(test_settings)
+    repository = DocumentRepository(session_factory, test_settings, storage)
+    extractor = FigureExtractor(test_settings, storage, repository)
+
+    try:
+        figures = extractor.extract(Path("paper.pdf"), "document-id")
+        assert len(figures) == 1
+        artifact = repository.get_artifact(figures[0]["artifact_id"])
+        assert artifact is not None
+        assert repository.artifact_bytes(artifact).startswith(b"\x89PNG")
+    finally:
+        session_factory.kw["bind"].dispose()
 @pytest.mark.anyio
 async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
     services = create_services(test_settings)

@@ -3,7 +3,6 @@ import { Icon, ModeIcon } from './Icons';
 import { useTheme } from '../theme/ThemeProvider';
 import { THEMES, type ThemePreference } from '../theme/themes';
 
-/** Compact theme picker: a popover of themes plus a "match system" option. */
 export function ThemeSwitcher() {
   const { preference, definition, setPreference } = useTheme();
   const [open, setOpen] = useState(false);
@@ -35,7 +34,7 @@ export function ThemeSwitcher() {
       <button
         type="button"
         className="theme-trigger"
-        aria-haspopup="true"
+        aria-haspopup="menu"
         aria-expanded={open}
         aria-label={`Theme: ${preference === 'system' ? 'match system' : definition.label}`}
         title="Change theme"

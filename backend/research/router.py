@@ -15,6 +15,7 @@ from backend.research.schemas import (
     ArtifactResponse,
     DocumentChunkResponse,
     DocumentResponse,
+    DocumentSummaryResponse,
     IngestionOptionsResponse,
     RemotePdfDownloadRequest,
     SavedWebSourceNoteResponse,
@@ -26,10 +27,10 @@ from backend.research.schemas import (
 router = APIRouter(tags=["research"])
 
 
-@router.get("/documents", response_model=list[DocumentResponse])
-def list_documents(container=Depends(services)) -> list[DocumentResponse]:
+@router.get("/documents", response_model=list[DocumentSummaryResponse])
+def list_documents(container=Depends(services)) -> list[DocumentSummaryResponse]:
     return [
-        _document_response(container, document.id)
+        _document_summary(document)
         for document in container.documents.list_documents()
     ]
 
@@ -145,7 +146,6 @@ def get_document(document_id: str, container=Depends(services)) -> DocumentRespo
 
 @router.delete("/documents/{document_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_document(document_id: str, container=Depends(services)) -> Response:
-    container.direct_agents.repository.clear_document_analysis(document_id)
     if not container.documents.delete_document(document_id):
         raise HTTPException(status_code=404, detail="Document was not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -173,7 +173,6 @@ async def ingest_document(
     container=Depends(services),
 ) -> DocumentResponse:
     await container.documents.ingest_document(document_id, force_ocr=mode == "ocr")
-    container.direct_agents.repository.clear_document_analysis(document_id)
     return _document_response(container, document_id)
 
 
@@ -281,6 +280,20 @@ def _document_response(container, document_id: str) -> DocumentResponse:
             )
             for chunk in chunks
         ],
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
+
+
+def _document_summary(document) -> DocumentSummaryResponse:
+    return DocumentSummaryResponse(
+        id=document.id,
+        title=document.title,
+        source_filename=document.source_filename,
+        content_type=document.content_type,
+        status=document.status,
+        page_count=document.page_count,
+        metadata=document.metadata_json or {},
         created_at=document.created_at,
         updated_at=document.updated_at,
     )

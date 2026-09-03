@@ -5,6 +5,7 @@ Summary: Local-first research workspace and visual agent builder
 Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: brotli<2,>=1.1
+Requires-Dist: ddgs<10,>=9.11.2
 Requires-Dist: fastapi<1,>=0.115
 Requires-Dist: httpx<1,>=0.27
 Requires-Dist: jsonschema<5,>=4.23
@@ -27,9 +28,11 @@ Requires-Dist: pytest<9,>=8.3; extra == "dev"
 **A local-first autonomous research agent, built directly on the OpenAI Agents SDK.**
 
 ScholarWeave is a self-hosted research workspace: you point it at PDFs and the open web, it
-ingests and indexes them, and a single autonomous agent does the actual work — searching,
-reading primary text, tracing evidence, and writing durable, cited notes into a local
-workspace. Every model call can stay on your machine.
+ingests and indexes them, and an autonomous agent does the actual work — searching, reading
+primary text, tracing evidence, computing exact results, and writing durable, cited notes into
+a local workspace. Direct chat uses one agent; optional Extended work uses the same selected
+model in sequential, fresh-context planner and worker calls. Every model call can stay on your
+machine.
 
 ![Research agent](docs/screenshots/research-chat.png)
 
@@ -130,8 +133,12 @@ readable text), reads exact pages or section-aware chunks, cross-checks claims, 
 Markdown into the workspace — preferring exact replacements and appends over rewriting a file.
 It keeps going until the outcome is complete or it hits a concrete blocker.
 
-**Runtime model.** Conversation history is owned exclusively by the SDK `Session` contract — one
-SQLite-backed session per conversation, retained without automatic summarization or replacement.
+**Runtime model.** Conversation history is owned by the SDK `Session` contract — one SQLite-backed
+session per conversation. Direct mode retains the full history. Extended work gives its coordinator
+a bounded message-only view, decomposes broad requests into ordered work items, executes each item
+sequentially through `Agent.as_tool`, stores detailed findings in run-scoped notes, and then reads
+only the notes needed for final synthesis. Completed turns from older conversations are available
+through conservative lexical search; the agent reuses them only when the match is clear.
 `ScholarWeaveContext` carries repositories, IDs, services, and event sinks through
 `RunContextWrapper`; that local context is never injected into model input unless a tool or the
 instructions deliberately expose it. Pause and resume use serialized SDK `RunState`.
@@ -145,8 +152,9 @@ between the question and the answer, expandable to its request and result — pl
 turn consulted and token/throughput accounting. The chat model is selectable per conversation from
 any enabled provider model. While a run is active, **Stop** cancels model and tool work immediately;
 **Answer now** stops research and starts a tool-free answer from the evidence already collected.
-After three consecutive information-retrieval failures, tools are disabled for the next model turn
-and the agent answers with an explicit limitation instead of looping.
+After three consecutive failures from the same information tool, only that tool is disabled for the
+remainder of the run. The agent continues with other tools or sources, and answers with an explicit
+limitation only when those alternatives are exhausted.
 
 ![Research agent](docs/screenshots/research-chat.png)
 
@@ -184,8 +192,9 @@ usage.
 
 ### Settings
 
-Per-capability model defaults (chat/reasoning, embeddings, vision enhancement) and provider
-profiles. Unavailable models are flagged rather than silently substituted.
+Per-capability model defaults (chat/reasoning, embeddings, vision enhancement), provider profiles,
+and a user profile with an IANA timezone. Every compiled agent receives the current localized date
+and time plus the saved profile. Unavailable models are flagged rather than silently substituted.
 
 ![Model defaults](docs/screenshots/settings.png)
 ![Provider profiles](docs/screenshots/settings-providers.png)
@@ -473,6 +482,9 @@ DuckDuckGo returns titles, snippets, and source URLs — not page bodies. When f
 needed the agent calls `download_web_page`, which performs a plain HTTP **`GET`** on the selected
 public URL, extracts readable text, and returns a temporary source ID; it then uses
 `search_downloaded_web_page` / `read_downloaded_web_page` before answering.
+The fetch uses browser-like request headers because some public sites reject bot-style user agents.
+Blocked, missing, non-HTML, or empty pages return `status: "unavailable"` to the agent rather than a
+tool failure; the agent can keep using `download_web_page` with another search result.
 
 Downloaded pages live in a **process-local in-memory cache** and expire after 4 hours by default,
 capped at 20 sources and 5 MB each. Use `save_web_page_note` to keep a durable workspace note that
@@ -537,7 +549,7 @@ SCHOLARWEAVE_REQUEST_TIMEOUT_SECONDS=120
 | --- | --- |
 | `local_data/metadata.sqlite3` | Settings, provider profiles, blueprints, custom tools, conversations, sessions, runs, documents, chunks, vectors |
 | `local_data/documents/` | Retained source PDFs |
-| `local_data/artifacts/` | `extracted.md`, figures, manifests, generated artifacts |
+| `local_data/artifacts/` | Extracted documents, figures, generated artifacts, full oversized tool results, and context checkpoints |
 | `local_data/llm_calls.jsonl` | Credential-redacted model request audit log |
 | `workspace/` | Agent-writable Markdown: `notes/<uuid>/note.md`, `papers/<document-id>/{summary.md,notes.md}` |
 
@@ -577,6 +589,10 @@ model window is exhausted. Browse the live catalogue at `GET /api/sdk/catalog` o
 
 Agent authoring and custom Python remain available in their dedicated builder/tools experiences;
 they are intentionally excluded from the default research coordinator.
+
+Extended work adds a coordinator, a structured planner, and one reusable focused worker as
+`Agent.as_tool` relations. Calls remain sequential (`parallel_tool_calls: false`, tool concurrency
+`1`); the planner and each worker use the same configured model with isolated prompts.
 
 Fixed, single-purpose agents are also exposed over the API (`GET /api/research-agents`): a paper
 **Summary agent**, an **Open areas identification agent**, a per-paper **Q&A bot**, and a

@@ -64,6 +64,31 @@
 .segmented button:hover { color: var(--text); }
 .segmented button[aria-pressed='true'] { background: var(--surface); color: var(--text-strong); box-shadow: var(--shadow-sm); }
 
+.page-tabs {
+  display: inline-flex;
+  gap: 3px;
+  margin-bottom: var(--space-4);
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+.page-tabs a {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: .4rem;
+  min-width: 7rem;
+  padding: .4rem .8rem;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  text-decoration: none;
+}
+.page-tabs a:hover { color: var(--text); }
+.page-tabs a.active { background: var(--surface); color: var(--text-strong); box-shadow: var(--shadow-sm); }
+
 /* -------------------------------------------------------- Surfaces/cards --- */
 
 /* Panels are the glass sheets the wallpaper reads through. The lighter top

@@ -457,55 +457,60 @@ describe('chat transcript detail', () => {
     await flush();
   };
 
-  it('offers extended work scopes and sends the selected run configuration', async () => {
+  it('sends the selected reasoning effort and bounded fast-answer controls', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
-    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Work mode"]')!;
     const reasoning = container.querySelector<HTMLSelectElement>(
       '[aria-label="Reasoning effort"]',
     )!;
-    expect(mode.value).toBe('direct');
-    expect(container.querySelector('[aria-label="Extended research scope"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Work mode"]')).toBeNull();
 
     await act(async () => {
       reasoning.value = 'high';
       reasoning.dispatchEvent(new Event('change', { bubbles: true }));
-      mode.value = 'extended';
-      mode.dispatchEvent(new Event('change', { bubbles: true }));
+      container
+        .querySelector('[aria-label="Toggle fast answer"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
-    const scope = container.querySelector<HTMLSelectElement>(
-      '[aria-label="Extended research scope"]',
+    const searchLimit = container.querySelector<HTMLInputElement>(
+      '[aria-label="Fast answer web search limit"]',
     )!;
+    const inputSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      'value',
+    )!.set!;
     await act(async () => {
-      scope.value = 'high';
-      scope.dispatchEvent(new Event('change', { bubbles: true }));
+      inputSetter.call(searchLimit, '4');
+      searchLimit.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await send('Investigate this thoroughly');
 
     expect(lastMessageRequest).toMatchObject({
       content: 'Investigate this thoroughly',
       reasoning_effort: 'high',
-      work_mode: 'extended',
-      work_budget: 'high',
+      web_enabled: true,
+      fast_answer: true,
+      web_search_limit: 4,
     });
+    expect(lastMessageRequest).not.toHaveProperty('work_mode');
+    expect(lastMessageRequest).not.toHaveProperty('work_budget');
   });
 
-  it('keeps every turn trace inline as the thread grows', async () => {
+  it('keeps completed activity out of the transcript as the thread grows', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
     for (let turn = 0; turn < TURNS.length; turn += 1) {
       await runTurn(turn);
 
-      // Every settled turn keeps its own trace, because every turn reasoned even without tools.
-      expect(container.querySelectorAll('.turn-timeline')).toHaveLength(turn + 1);
-      // Traces collapse once the turn is done, so the transcript stays answer-first.
+      expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
+      expect(container.querySelectorAll('.activity-sidebar .turn-timeline')).toHaveLength(turn + 1);
       expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
       expect(container.querySelectorAll('.timeline-row.live')).toHaveLength(0);
     }
 
-    const traces = container.querySelectorAll('.turn-timeline');
+    const traces = container.querySelectorAll('.activity-sidebar .turn-timeline');
     // The tool-heavy first turn shows its calls; the tool-free last turn shows thinking only.
     expect(text(traces[0])).toContain('Searched');
     expect(text(traces[0])).toContain('tool calls');
@@ -516,12 +521,13 @@ describe('chat transcript detail', () => {
     act(() => root.unmount());
     await mount(ChatPage as () => JSX.Element);
 
-    expect(container.querySelectorAll('.turn-timeline')).toHaveLength(TURNS.length);
+    expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
+    expect(container.querySelectorAll('.activity-sidebar .turn-timeline')).toHaveLength(TURNS.length);
     expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
     expect(text(container.querySelectorAll('.turn-timeline')[0])).toContain('Searched');
   });
 
-  it('streams the trace live and keeps it expandable once settled', async () => {
+  it('shows live reasoning in the transcript then moves it to activity', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     await send(TURNS[0].input);
@@ -534,7 +540,7 @@ describe('chat transcript detail', () => {
     await flush(2);
 
     // Mid-run the reader watches thinking unfold in place, already expanded.
-    const live = container.querySelector('.timeline-row.live');
+    const live = container.querySelector('.message-list .timeline-row.live');
     expect(live).not.toBeNull();
     expect(text(live)).toContain('Thinking');
     expect(text(container.querySelector('.timeline-detail.reasoning'))).toContain('weighing the evidence');
@@ -552,14 +558,20 @@ describe('chat transcript detail', () => {
     });
     await flush();
 
-    // Settled turns collapse to one-line summaries that carry their own duration.
-    expect(container.querySelector('.timeline-row.live')).toBeNull();
+    expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
     expect(container.querySelector('.timeline-detail')).toBeNull();
-    const rows = container.querySelectorAll('.turn-timeline .timeline-row');
+    const rows = container.querySelectorAll('.activity-sidebar .turn-timeline .timeline-row');
     expect(rows.length).toBeGreaterThan(1);
     expect(text(rows[0])).toMatch(/Thought for \d/);
 
-    // The trace is still there on demand, reasoning text and all.
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(true);
+    await act(async () => {
+      container
+        .querySelector('[aria-label="Show run activity"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(false);
+
     await act(async () => {
       rows[0].querySelector('.timeline-head')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
@@ -688,7 +700,8 @@ describe('chat transcript detail', () => {
     await mount(ChatPage as () => JSX.Element);
     await runTurn(0);
 
-    const toolRow = [...container.querySelectorAll('.timeline-row')].find((row) =>
+    expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
+    const toolRow = [...container.querySelectorAll('.activity-sidebar .timeline-row')].find((row) =>
       text(row).includes('Searched'),
     );
     expect(toolRow).toBeDefined();
@@ -719,7 +732,7 @@ describe('chat transcript detail', () => {
 
     for (let turn = 0; turn < TURNS.length; turn += 1) await runTurn(turn, { stream: false });
 
-    const traces = container.querySelectorAll('.turn-timeline');
+    const traces = container.querySelectorAll('.activity-sidebar .turn-timeline');
     expect(traces).toHaveLength(TURNS.length);
     expect(text(traces[0])).toContain('Searched');
     expect(text(traces[0])).toContain('Thought for');

@@ -33,7 +33,6 @@ from backend.providers.types import AgentModelResolver, ModelReference, Resolved
 from backend.runtime.context import ScholarWeaveContext
 from backend.runtime.context_budget import create_context_budget_filter
 from backend.runtime.hooks import ScholarWeaveRunHooks
-from backend.runtime.priorities import ResearchPriorityRequest, prioritizer_enabled
 from backend.runtime.sdk_compat import assert_supported_sdk
 from backend.tools.failures import nested_agent_failure_handler
 
@@ -142,18 +141,10 @@ class AgentCompiler:
 
         agent_tools_by_owner: dict[str, list[Tool]] = {agent_id: [] for agent_id in agents_by_id}
         for spec in blueprint.agent_tools:
-            is_prioritizer = spec.tool_name == "prioritize_research_work"
             agent_tools_by_owner[spec.owner_agent_id].append(
                 agents_by_id[spec.delegate_agent_id].as_tool(
                     tool_name=spec.tool_name,
                     tool_description=spec.tool_description,
-                    is_enabled=(
-                        prioritizer_enabled
-                        if is_prioritizer
-                        else True
-                    ),
-                    parameters=ResearchPriorityRequest if is_prioritizer else None,
-                    include_input_schema=is_prioritizer,
                     max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
                     hooks=ScholarWeaveRunHooks(),
                     failure_error_function=nested_agent_failure_handler(

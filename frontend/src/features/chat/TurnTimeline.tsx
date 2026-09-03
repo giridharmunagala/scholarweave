@@ -1,5 +1,4 @@
 import { Fragment, useLayoutEffect, useRef, useState } from 'react';
-import { Link } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import {
@@ -46,6 +45,40 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
         );
       })}
     </div>
+  );
+}
+
+export function ActivitySidebar({
+  open,
+  timelines,
+  onClose,
+}: {
+  open: boolean;
+  timelines: { id: string; label: string; timeline: TurnTimeline }[];
+  onClose: () => void;
+}) {
+  return (
+    <aside className="activity-sidebar" aria-label="Run activity" hidden={!open}>
+      <header className="activity-sidebar-head">
+        <div>
+          <strong>Activity</strong>
+          <span>Tools and completed reasoning</span>
+        </div>
+        <button type="button" aria-label="Close activity" onClick={onClose}>
+          <Icon name="close" size={15} />
+        </button>
+      </header>
+      <div className="activity-sidebar-scroll">
+        {timelines.length ? timelines.map(({ id, label, timeline }) => (
+          <section className="activity-turn" key={id}>
+            <h2>{label}</h2>
+            <TurnTimelineView timeline={timeline} />
+          </section>
+        )) : (
+          <p className="activity-sidebar-empty">Tool calls and reasoning will appear here.</p>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -177,7 +210,6 @@ function previewNames(steps: ToolStep[]): string {
 }
 
 function ToolDetail({ step }: { step: ToolStep }) {
-  const savedId = savedAgentId(step.result);
   return (
     <div className="timeline-detail tool">
       {step.detail ? <p className="tool-detail-note">{step.detail}</p> : null}
@@ -193,24 +225,12 @@ function ToolDetail({ step }: { step: ToolStep }) {
           <pre>{formatPayload(step.result)}</pre>
         </section>
       ) : null}
-      {savedId ? (
-        <Link className="button secondary small" to={`/agents/${savedId}`}>
-          Open saved agent
-        </Link>
-      ) : null}
       {step.sources.length ? <SourceChips sources={step.sources} compact /> : null}
       {step.args == null && step.result == null && !step.detail ? (
         <p className="tool-detail-note">No payload was recorded for this call.</p>
       ) : null}
     </div>
   );
-}
-
-/** Builder turns save agents, and the reader should be able to jump straight to one. */
-function savedAgentId(result: unknown): string | null {
-  if (typeof result !== 'object' || result === null) return null;
-  const agentId = (result as Record<string, unknown>).agent_id;
-  return typeof agentId === 'string' ? agentId : null;
 }
 
 function formatPayload(value: unknown): string {

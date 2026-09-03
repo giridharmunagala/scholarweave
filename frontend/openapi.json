@@ -1,439 +1,6 @@
 {
   "components": {
     "schemas": {
-      "AgentBlueprint": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_tools": {
-            "items": {
-              "$ref": "#/components/schemas/AgentToolSpec"
-            },
-            "maxItems": 200,
-            "title": "Agent Tools",
-            "type": "array"
-          },
-          "agents": {
-            "items": {
-              "$ref": "#/components/schemas/AgentSpec"
-            },
-            "maxItems": 100,
-            "minItems": 1,
-            "title": "Agents",
-            "type": "array"
-          },
-          "description": {
-            "anyOf": [
-              {
-                "maxLength": 4000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "entry_agent_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Entry Agent Id",
-            "type": "string"
-          },
-          "guardrails": {
-            "items": {
-              "$ref": "#/components/schemas/GuardrailSpec"
-            },
-            "maxItems": 100,
-            "title": "Guardrails",
-            "type": "array"
-          },
-          "handoffs": {
-            "items": {
-              "$ref": "#/components/schemas/HandoffSpec"
-            },
-            "maxItems": 200,
-            "title": "Handoffs",
-            "type": "array"
-          },
-          "name": {
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Name",
-            "type": "string"
-          },
-          "run": {
-            "$ref": "#/components/schemas/RunSettingsSpec"
-          },
-          "schema_version": {
-            "const": 1,
-            "default": 1,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "sdk_version": {
-            "const": "0.19.4",
-            "default": "0.19.4",
-            "title": "Sdk Version",
-            "type": "string"
-          },
-          "session": {
-            "$ref": "#/components/schemas/SessionPolicySpec"
-          },
-          "tools": {
-            "items": {
-              "discriminator": {
-                "mapping": {
-                  "file_search": "#/components/schemas/FileSearchToolSpec",
-                  "function": "#/components/schemas/FunctionToolSpec",
-                  "web_search": "#/components/schemas/WebSearchToolSpec"
-                },
-                "propertyName": "kind"
-              },
-              "oneOf": [
-                {
-                  "$ref": "#/components/schemas/FunctionToolSpec"
-                },
-                {
-                  "$ref": "#/components/schemas/WebSearchToolSpec"
-                },
-                {
-                  "$ref": "#/components/schemas/FileSearchToolSpec"
-                }
-              ]
-            },
-            "maxItems": 200,
-            "title": "Tools",
-            "type": "array"
-          }
-        },
-        "required": [
-          "name",
-          "entry_agent_id",
-          "agents"
-        ],
-        "title": "AgentBlueprint",
-        "type": "object"
-      },
-      "AgentResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "description": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "is_template": {
-            "title": "Is Template",
-            "type": "boolean"
-          },
-          "latest_revision": {
-            "$ref": "#/components/schemas/AgentRevisionResponse"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "description",
-          "is_template",
-          "created_at",
-          "updated_at",
-          "latest_revision"
-        ],
-        "title": "AgentResponse",
-        "type": "object"
-      },
-      "AgentRevisionResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_id": {
-            "title": "Agent Id",
-            "type": "string"
-          },
-          "blueprint": {
-            "$ref": "#/components/schemas/AgentBlueprint"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "presentation": {
-            "additionalProperties": true,
-            "title": "Presentation",
-            "type": "object"
-          },
-          "revision": {
-            "title": "Revision",
-            "type": "integer"
-          },
-          "sdk_version": {
-            "title": "Sdk Version",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "agent_id",
-          "revision",
-          "blueprint",
-          "presentation",
-          "sdk_version",
-          "created_at"
-        ],
-        "title": "AgentRevisionResponse",
-        "type": "object"
-      },
-      "AgentSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "anyOf": [
-              {
-                "maxLength": 4000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
-            "type": "string"
-          },
-          "input_guardrail_ids": {
-            "items": {
-              "maxLength": 128,
-              "minLength": 1,
-              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-              "type": "string"
-            },
-            "maxItems": 50,
-            "title": "Input Guardrail Ids",
-            "type": "array"
-          },
-          "instructions": {
-            "maxLength": 100000,
-            "minLength": 1,
-            "title": "Instructions",
-            "type": "string"
-          },
-          "model": {
-            "$ref": "#/components/schemas/ModelReferenceSpec"
-          },
-          "model_settings": {
-            "$ref": "#/components/schemas/ModelSettingsSpec"
-          },
-          "name": {
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Name",
-            "type": "string"
-          },
-          "output": {
-            "anyOf": [
-              {
-                "discriminator": {
-                  "mapping": {
-                    "json_schema": "#/components/schemas/JsonOutputSpec"
-                  },
-                  "propertyName": "kind"
-                },
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/JsonOutputSpec"
-                  }
-                ]
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output"
-          },
-          "output_guardrail_ids": {
-            "items": {
-              "maxLength": 128,
-              "minLength": 1,
-              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-              "type": "string"
-            },
-            "maxItems": 50,
-            "title": "Output Guardrail Ids",
-            "type": "array"
-          },
-          "reset_tool_choice": {
-            "default": true,
-            "title": "Reset Tool Choice",
-            "type": "boolean"
-          },
-          "tool_ids": {
-            "items": {
-              "maxLength": 128,
-              "minLength": 1,
-              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-              "type": "string"
-            },
-            "maxItems": 100,
-            "title": "Tool Ids",
-            "type": "array"
-          },
-          "tool_use_behavior": {
-            "default": "run_llm_again",
-            "enum": [
-              "run_llm_again",
-              "stop_on_first_tool"
-            ],
-            "title": "Tool Use Behavior",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "instructions"
-        ],
-        "title": "AgentSpec",
-        "type": "object"
-      },
-      "AgentToolSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "delegate_agent_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Delegate Agent Id",
-            "type": "string"
-          },
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
-            "type": "string"
-          },
-          "max_turns": {
-            "anyOf": [
-              {
-                "maximum": 100.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Turns"
-          },
-          "needs_approval": {
-            "default": false,
-            "title": "Needs Approval",
-            "type": "boolean"
-          },
-          "owner_agent_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Owner Agent Id",
-            "type": "string"
-          },
-          "tool_description": {
-            "maxLength": 2000,
-            "minLength": 1,
-            "title": "Tool Description",
-            "type": "string"
-          },
-          "tool_name": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Tool Name",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "owner_agent_id",
-          "delegate_agent_id",
-          "tool_name",
-          "tool_description"
-        ],
-        "title": "AgentToolSpec",
-        "type": "object"
-      },
-      "AgentValidationResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "issues": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Issues",
-            "type": "array"
-          },
-          "valid": {
-            "title": "Valid",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "valid"
-        ],
-        "title": "AgentValidationResponse",
-        "type": "object"
-      },
-      "AgentWriteRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "blueprint": {
-            "$ref": "#/components/schemas/AgentBlueprint"
-          },
-          "presentation": {
-            "additionalProperties": true,
-            "title": "Presentation",
-            "type": "object"
-          }
-        },
-        "required": [
-          "blueprint"
-        ],
-        "title": "AgentWriteRequest",
-        "type": "object"
-      },
       "ArtifactContentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -568,23 +135,6 @@
         "title": "Body_upload_document_api_documents_post",
         "type": "object"
       },
-      "BuilderConversationCreateRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "model_reference": {
-            "$ref": "#/components/schemas/ModelReferenceSpec"
-          },
-          "title": {
-            "default": "New builder chat",
-            "maxLength": 120,
-            "minLength": 1,
-            "title": "Title",
-            "type": "string"
-          }
-        },
-        "title": "BuilderConversationCreateRequest",
-        "type": "object"
-      },
       "BuiltInSpeechStatus": {
         "additionalProperties": false,
         "properties": {
@@ -647,27 +197,6 @@
         "title": "BuiltInSpeechStatus",
         "type": "object"
       },
-      "ConversationCreateRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_revision_id": {
-            "title": "Agent Revision Id",
-            "type": "string"
-          },
-          "title": {
-            "default": "New conversation",
-            "maxLength": 120,
-            "minLength": 1,
-            "title": "Title",
-            "type": "string"
-          }
-        },
-        "required": [
-          "agent_revision_id"
-        ],
-        "title": "ConversationCreateRequest",
-        "type": "object"
-      },
       "ConversationDetailResponse": {
         "additionalProperties": false,
         "properties": {
@@ -702,6 +231,7 @@
             "enum": [
               "agent",
               "autonomous",
+              "deep_work",
               "builder",
               "direct_agent"
             ],
@@ -757,6 +287,11 @@
             "title": "Content",
             "type": "string"
           },
+          "fast_answer": {
+            "default": false,
+            "title": "Fast Answer",
+            "type": "boolean"
+          },
           "reasoning_effort": {
             "anyOf": [
               {
@@ -777,24 +312,17 @@
             ],
             "title": "Reasoning Effort"
           },
-          "work_budget": {
-            "default": "medium",
-            "enum": [
-              "low",
-              "medium",
-              "high"
-            ],
-            "title": "Work Budget",
-            "type": "string"
+          "web_enabled": {
+            "default": true,
+            "title": "Web Enabled",
+            "type": "boolean"
           },
-          "work_mode": {
-            "default": "direct",
-            "enum": [
-              "direct",
-              "extended"
-            ],
-            "title": "Work Mode",
-            "type": "string"
+          "web_search_limit": {
+            "default": 1,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Web Search Limit",
+            "type": "integer"
           }
         },
         "required": [
@@ -847,6 +375,7 @@
             "enum": [
               "agent",
               "autonomous",
+              "deep_work",
               "builder",
               "direct_agent"
             ],
@@ -890,288 +419,6 @@
           "updated_at"
         ],
         "title": "ConversationResponse",
-        "type": "object"
-      },
-      "DirectAgentResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "key": {
-            "enum": [
-              "summary",
-              "open_areas",
-              "qa",
-              "paper_cleaner"
-            ],
-            "title": "Key",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "requires_document": {
-            "title": "Requires Document",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "key",
-          "name",
-          "description",
-          "requires_document"
-        ],
-        "title": "DirectAgentResponse",
-        "type": "object"
-      },
-      "DirectConversationCreateRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_key": {
-            "enum": [
-              "summary",
-              "open_areas",
-              "qa",
-              "paper_cleaner"
-            ],
-            "title": "Agent Key",
-            "type": "string"
-          },
-          "document_ids": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 1,
-            "title": "Document Ids",
-            "type": "array"
-          },
-          "model_reference": {
-            "$ref": "#/components/schemas/ModelReferenceSpec"
-          },
-          "title": {
-            "default": "New agent chat",
-            "maxLength": 120,
-            "minLength": 1,
-            "title": "Title",
-            "type": "string"
-          }
-        },
-        "required": [
-          "agent_key"
-        ],
-        "title": "DirectConversationCreateRequest",
-        "type": "object"
-      },
-      "DirectConversationDetailResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_key": {
-            "enum": [
-              "summary",
-              "open_areas",
-              "qa",
-              "paper_cleaner"
-            ],
-            "title": "Agent Key",
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "document_ids": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Document Ids",
-            "type": "array"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/SessionItemResponse"
-            },
-            "title": "Items",
-            "type": "array"
-          },
-          "kind": {
-            "const": "direct_agent",
-            "title": "Kind",
-            "type": "string"
-          },
-          "last_message_preview": {
-            "title": "Last Message Preview",
-            "type": "string"
-          },
-          "model_reference": {
-            "$ref": "#/components/schemas/ModelReferenceSpec"
-          },
-          "session_policy": {
-            "$ref": "#/components/schemas/SessionPolicySpec"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "kind",
-          "agent_key",
-          "document_ids",
-          "model_reference",
-          "session_policy",
-          "status",
-          "last_message_preview",
-          "created_at",
-          "updated_at",
-          "items"
-        ],
-        "title": "DirectConversationDetailResponse",
-        "type": "object"
-      },
-      "DirectConversationMessageRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "content": {
-            "maxLength": 100000,
-            "minLength": 1,
-            "title": "Content",
-            "type": "string"
-          },
-          "reasoning_effort": {
-            "anyOf": [
-              {
-                "enum": [
-                  "none",
-                  "minimal",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reasoning Effort"
-          }
-        },
-        "required": [
-          "content"
-        ],
-        "title": "DirectConversationMessageRequest",
-        "type": "object"
-      },
-      "DirectConversationMessageResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "conversation": {
-            "$ref": "#/components/schemas/DirectConversationResponse"
-          },
-          "run": {
-            "$ref": "#/components/schemas/RunResponse"
-          }
-        },
-        "required": [
-          "conversation",
-          "run"
-        ],
-        "title": "DirectConversationMessageResponse",
-        "type": "object"
-      },
-      "DirectConversationResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "agent_key": {
-            "enum": [
-              "summary",
-              "open_areas",
-              "qa",
-              "paper_cleaner"
-            ],
-            "title": "Agent Key",
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "document_ids": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Document Ids",
-            "type": "array"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "kind": {
-            "const": "direct_agent",
-            "title": "Kind",
-            "type": "string"
-          },
-          "last_message_preview": {
-            "title": "Last Message Preview",
-            "type": "string"
-          },
-          "model_reference": {
-            "$ref": "#/components/schemas/ModelReferenceSpec"
-          },
-          "session_policy": {
-            "$ref": "#/components/schemas/SessionPolicySpec"
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "title": {
-            "title": "Title",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "title",
-          "kind",
-          "agent_key",
-          "document_ids",
-          "model_reference",
-          "session_policy",
-          "status",
-          "last_message_preview",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "DirectConversationResponse",
         "type": "object"
       },
       "DocumentChunkResponse": {
@@ -1303,132 +550,56 @@
           "status",
           "page_count",
           "metadata",
-          "artifacts",
-          "chunks",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "artifacts",
+          "chunks"
         ],
         "title": "DocumentResponse",
         "type": "object"
       },
-      "FileSearchToolSpec": {
+      "DocumentSummaryResponse": {
         "additionalProperties": false,
         "properties": {
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
+          "content_type": {
+            "title": "Content Type",
             "type": "string"
-          },
-          "include_search_results": {
-            "default": false,
-            "title": "Include Search Results",
-            "type": "boolean"
-          },
-          "kind": {
-            "const": "file_search",
-            "default": "file_search",
-            "title": "Kind",
-            "type": "string"
-          },
-          "max_num_results": {
-            "anyOf": [
-              {
-                "maximum": 100.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Num Results"
-          },
-          "vector_store_ids": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 20,
-            "minItems": 1,
-            "title": "Vector Store Ids",
-            "type": "array"
-          }
-        },
-        "required": [
-          "id",
-          "vector_store_ids"
-        ],
-        "title": "FileSearchToolSpec",
-        "type": "object"
-      },
-      "FunctionToolCatalogEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "catalog_id": {
-            "title": "Catalog Id",
-            "type": "string"
-          },
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "label": {
-            "title": "Label",
-            "type": "string"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "parameters_schema": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parameters Schema"
-          }
-        },
-        "required": [
-          "catalog_id",
-          "name",
-          "label",
-          "description",
-          "parameters_schema"
-        ],
-        "title": "FunctionToolCatalogEntry",
-        "type": "object"
-      },
-      "FunctionToolResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "archived": {
-            "title": "Archived",
-            "type": "boolean"
           },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
             "type": "string"
           },
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
           "id": {
             "title": "Id",
             "type": "string"
           },
-          "latest_revision": {
-            "$ref": "#/components/schemas/FunctionToolRevisionResponse"
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
           },
-          "name": {
-            "title": "Name",
+          "page_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "source_filename": {
+            "title": "Source Filename",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
             "type": "string"
           },
           "updated_at": {
@@ -1439,335 +610,16 @@
         },
         "required": [
           "id",
-          "name",
-          "description",
-          "archived",
+          "title",
+          "source_filename",
+          "content_type",
+          "status",
+          "page_count",
+          "metadata",
           "created_at",
-          "updated_at",
-          "latest_revision"
+          "updated_at"
         ],
-        "title": "FunctionToolResponse",
-        "type": "object"
-      },
-      "FunctionToolRevisionResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "catalog_id": {
-            "title": "Catalog Id",
-            "type": "string"
-          },
-          "code": {
-            "title": "Code",
-            "type": "string"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "definition_id": {
-            "title": "Definition Id",
-            "type": "string"
-          },
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "output_schema": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output Schema"
-          },
-          "parameters_schema": {
-            "additionalProperties": true,
-            "title": "Parameters Schema",
-            "type": "object"
-          },
-          "requires_approval": {
-            "title": "Requires Approval",
-            "type": "boolean"
-          },
-          "revision": {
-            "title": "Revision",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "id",
-          "definition_id",
-          "revision",
-          "description",
-          "parameters_schema",
-          "output_schema",
-          "code",
-          "requires_approval",
-          "catalog_id",
-          "created_at"
-        ],
-        "title": "FunctionToolRevisionResponse",
-        "type": "object"
-      },
-      "FunctionToolSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "catalog_id": {
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Catalog Id",
-            "type": "string"
-          },
-          "config": {
-            "additionalProperties": true,
-            "title": "Config",
-            "type": "object"
-          },
-          "description": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Description"
-          },
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
-            "type": "string"
-          },
-          "input_guardrail_ids": {
-            "items": {
-              "maxLength": 128,
-              "minLength": 1,
-              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-              "type": "string"
-            },
-            "maxItems": 50,
-            "title": "Input Guardrail Ids",
-            "type": "array"
-          },
-          "kind": {
-            "const": "function",
-            "default": "function",
-            "title": "Kind",
-            "type": "string"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "minLength": 1,
-                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "needs_approval": {
-            "default": false,
-            "title": "Needs Approval",
-            "type": "boolean"
-          },
-          "output_guardrail_ids": {
-            "items": {
-              "maxLength": 128,
-              "minLength": 1,
-              "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-              "type": "string"
-            },
-            "maxItems": 50,
-            "title": "Output Guardrail Ids",
-            "type": "array"
-          }
-        },
-        "required": [
-          "id",
-          "catalog_id"
-        ],
-        "title": "FunctionToolSpec",
-        "type": "object"
-      },
-      "FunctionToolTestRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "arguments": {
-            "additionalProperties": true,
-            "title": "Arguments",
-            "type": "object"
-          },
-          "definition": {
-            "$ref": "#/components/schemas/FunctionToolWriteRequest"
-          }
-        },
-        "required": [
-          "definition"
-        ],
-        "title": "FunctionToolTestRequest",
-        "type": "object"
-      },
-      "FunctionToolTestResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "output": {
-            "title": "Output"
-          },
-          "stdout": {
-            "title": "Stdout",
-            "type": "string"
-          }
-        },
-        "required": [
-          "output",
-          "stdout"
-        ],
-        "title": "FunctionToolTestResponse",
-        "type": "object"
-      },
-      "FunctionToolWriteRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "maxLength": 100000,
-            "minLength": 1,
-            "title": "Code",
-            "type": "string"
-          },
-          "description": {
-            "default": "",
-            "maxLength": 4000,
-            "title": "Description",
-            "type": "string"
-          },
-          "name": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_]*$",
-            "title": "Name",
-            "type": "string"
-          },
-          "output_schema": {
-            "anyOf": [
-              {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output Schema"
-          },
-          "parameters_schema": {
-            "additionalProperties": true,
-            "title": "Parameters Schema",
-            "type": "object"
-          },
-          "requires_approval": {
-            "default": false,
-            "title": "Requires Approval",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "name",
-          "parameters_schema",
-          "code"
-        ],
-        "title": "FunctionToolWriteRequest",
-        "type": "object"
-      },
-      "GuardrailCatalogEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "catalog_id": {
-            "title": "Catalog Id",
-            "type": "string"
-          },
-          "config_schema": {
-            "additionalProperties": true,
-            "title": "Config Schema",
-            "type": "object"
-          },
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "kind": {
-            "title": "Kind",
-            "type": "string"
-          },
-          "label": {
-            "title": "Label",
-            "type": "string"
-          }
-        },
-        "required": [
-          "catalog_id",
-          "kind",
-          "label",
-          "description",
-          "config_schema"
-        ],
-        "title": "GuardrailCatalogEntry",
-        "type": "object"
-      },
-      "GuardrailSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "catalog_id": {
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Catalog Id",
-            "type": "string"
-          },
-          "config": {
-            "additionalProperties": true,
-            "title": "Config",
-            "type": "object"
-          },
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
-            "type": "string"
-          },
-          "kind": {
-            "enum": [
-              "input",
-              "output",
-              "tool_input",
-              "tool_output"
-            ],
-            "title": "Kind",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "catalog_id"
-        ],
-        "title": "GuardrailSpec",
+        "title": "DocumentSummaryResponse",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1839,76 +691,6 @@
           "target_agent"
         ],
         "title": "HandoffOutputRunItem",
-        "type": "object"
-      },
-      "HandoffSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
-            "type": "string"
-          },
-          "nest_handoff_history": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Nest Handoff History"
-          },
-          "source_agent_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Source Agent Id",
-            "type": "string"
-          },
-          "target_agent_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Target Agent Id",
-            "type": "string"
-          },
-          "tool_description": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tool Description"
-          },
-          "tool_name": {
-            "anyOf": [
-              {
-                "maxLength": 128,
-                "minLength": 1,
-                "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tool Name"
-          }
-        },
-        "required": [
-          "id",
-          "source_agent_id",
-          "target_agent_id"
-        ],
-        "title": "HandoffSpec",
         "type": "object"
       },
       "HealthResponse": {
@@ -1991,66 +773,6 @@
           "ocr_engine"
         ],
         "title": "IngestionOptionsResponse",
-        "type": "object"
-      },
-      "InterruptionResolutionRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "approved": {
-            "title": "Approved",
-            "type": "boolean"
-          },
-          "rejection_message": {
-            "anyOf": [
-              {
-                "maxLength": 2000,
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Rejection Message"
-          }
-        },
-        "required": [
-          "approved"
-        ],
-        "title": "InterruptionResolutionRequest",
-        "type": "object"
-      },
-      "JsonOutputSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "kind": {
-            "const": "json_schema",
-            "default": "json_schema",
-            "title": "Kind",
-            "type": "string"
-          },
-          "name": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Name",
-            "type": "string"
-          },
-          "schema": {
-            "additionalProperties": true,
-            "title": "Schema",
-            "type": "object"
-          },
-          "strict": {
-            "default": true,
-            "title": "Strict",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "name",
-          "schema"
-        ],
-        "title": "JsonOutputSpec",
         "type": "object"
       },
       "McpApprovalRequestRunItem": {
@@ -2182,172 +904,6 @@
           }
         },
         "title": "ModelReferenceSpec",
-        "type": "object"
-      },
-      "ModelSettingsSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "frequency_penalty": {
-            "anyOf": [
-              {
-                "maximum": 2.0,
-                "minimum": -2.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Frequency Penalty"
-          },
-          "max_tokens": {
-            "anyOf": [
-              {
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Tokens"
-          },
-          "parallel_tool_calls": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Parallel Tool Calls"
-          },
-          "presence_penalty": {
-            "anyOf": [
-              {
-                "maximum": 2.0,
-                "minimum": -2.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Presence Penalty"
-          },
-          "reasoning": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ReasoningSpec"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "temperature": {
-            "anyOf": [
-              {
-                "maximum": 2.0,
-                "minimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Temperature"
-          },
-          "tool_choice": {
-            "anyOf": [
-              {
-                "enum": [
-                  "auto",
-                  "required",
-                  "none"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tool Choice"
-          },
-          "top_p": {
-            "anyOf": [
-              {
-                "maximum": 1.0,
-                "minimum": 0.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Top P"
-          },
-          "truncation": {
-            "anyOf": [
-              {
-                "enum": [
-                  "auto",
-                  "disabled"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Truncation"
-          },
-          "verbosity": {
-            "anyOf": [
-              {
-                "enum": [
-                  "low",
-                  "medium",
-                  "high"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Verbosity"
-          }
-        },
-        "title": "ModelSettingsSpec",
-        "type": "object"
-      },
-      "PrimitiveCatalogEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "kind": {
-            "title": "Kind",
-            "type": "string"
-          },
-          "sdk_constructor": {
-            "title": "Sdk Constructor",
-            "type": "string"
-          }
-        },
-        "required": [
-          "kind",
-          "sdk_constructor",
-          "description"
-        ],
-        "title": "PrimitiveCatalogEntry",
         "type": "object"
       },
       "ProviderCreate": {
@@ -2728,25 +1284,6 @@
         "title": "ProviderVerifyResponse",
         "type": "object"
       },
-      "PythonExportResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "filename": {
-            "title": "Filename",
-            "type": "string"
-          },
-          "source": {
-            "title": "Source",
-            "type": "string"
-          }
-        },
-        "required": [
-          "filename",
-          "source"
-        ],
-        "title": "PythonExportResponse",
-        "type": "object"
-      },
       "ReasoningRunItem": {
         "additionalProperties": false,
         "properties": {
@@ -2769,33 +1306,6 @@
           "raw_item"
         ],
         "title": "ReasoningRunItem",
-        "type": "object"
-      },
-      "ReasoningSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "effort": {
-            "anyOf": [
-              {
-                "enum": [
-                  "none",
-                  "minimal",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Effort"
-          }
-        },
-        "title": "ReasoningSpec",
         "type": "object"
       },
       "RemotePdfDownloadRequest": {
@@ -2826,81 +1336,21 @@
         "title": "RemotePdfDownloadRequest",
         "type": "object"
       },
-      "RunCreateRequest": {
+      "ResearchConversationCreateRequest": {
         "additionalProperties": false,
         "properties": {
-          "agent_revision_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Revision Id"
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
           },
-          "blueprint": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/AgentBlueprint"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "conversation_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Conversation Id"
-          },
-          "input": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "items": {
-                  "additionalProperties": true,
-                  "type": "object"
-                },
-                "type": "array"
-              }
-            ],
-            "title": "Input"
-          },
-          "reasoning_effort": {
-            "anyOf": [
-              {
-                "enum": [
-                  "none",
-                  "minimal",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ],
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Reasoning Effort"
+          "title": {
+            "default": "New research",
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
           }
         },
-        "required": [
-          "input"
-        ],
-        "title": "RunCreateRequest",
+        "title": "ResearchConversationCreateRequest",
         "type": "object"
       },
       "RunEpochResponse": {
@@ -3332,38 +1782,6 @@
         "title": "RunResponse",
         "type": "object"
       },
-      "RunSettingsSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "max_tool_concurrency": {
-            "anyOf": [
-              {
-                "maximum": 64.0,
-                "minimum": 1.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Max Tool Concurrency"
-          },
-          "max_turns": {
-            "default": 10,
-            "maximum": 100.0,
-            "minimum": 1.0,
-            "title": "Max Turns",
-            "type": "integer"
-          },
-          "tracing_enabled": {
-            "default": false,
-            "title": "Tracing Enabled",
-            "type": "boolean"
-          }
-        },
-        "title": "RunSettingsSpec",
-        "type": "object"
-      },
       "SavedWebSourceNoteResponse": {
         "additionalProperties": false,
         "properties": {
@@ -3400,44 +1818,6 @@
           "name"
         ],
         "title": "SavedWebSourceNoteResponse",
-        "type": "object"
-      },
-      "SdkCatalogResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "function_tools": {
-            "items": {
-              "$ref": "#/components/schemas/FunctionToolCatalogEntry"
-            },
-            "title": "Function Tools",
-            "type": "array"
-          },
-          "guardrails": {
-            "items": {
-              "$ref": "#/components/schemas/GuardrailCatalogEntry"
-            },
-            "title": "Guardrails",
-            "type": "array"
-          },
-          "primitives": {
-            "items": {
-              "$ref": "#/components/schemas/PrimitiveCatalogEntry"
-            },
-            "title": "Primitives",
-            "type": "array"
-          },
-          "sdk_version": {
-            "title": "Sdk Version",
-            "type": "string"
-          }
-        },
-        "required": [
-          "sdk_version",
-          "primitives",
-          "function_tools",
-          "guardrails"
-        ],
-        "title": "SdkCatalogResponse",
         "type": "object"
       },
       "SessionItemResponse": {
@@ -4387,50 +2767,6 @@
         "title": "ValidationError",
         "type": "object"
       },
-      "WebSearchToolSpec": {
-        "additionalProperties": false,
-        "properties": {
-          "external_web_access": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "External Web Access"
-          },
-          "id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "pattern": "^[A-Za-z][A-Za-z0-9_-]*$",
-            "title": "Id",
-            "type": "string"
-          },
-          "kind": {
-            "const": "web_search",
-            "default": "web_search",
-            "title": "Kind",
-            "type": "string"
-          },
-          "search_context_size": {
-            "default": "medium",
-            "enum": [
-              "low",
-              "medium",
-              "high"
-            ],
-            "title": "Search Context Size",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id"
-        ],
-        "title": "WebSearchToolSpec",
-        "type": "object"
-      },
       "WebSourceCreateRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4793,7 +3129,7 @@
   "paths": {
     "/api/agent/conversations": {
       "get": {
-        "operationId": "list_autonomous_conversations_api_agent_conversations_get",
+        "operationId": "list_research_conversations_api_agent_conversations_get",
         "responses": {
           "200": {
             "content": {
@@ -4802,7 +3138,7 @@
                   "items": {
                     "$ref": "#/components/schemas/ConversationResponse"
                   },
-                  "title": "Response List Autonomous Conversations Api Agent Conversations Get",
+                  "title": "Response List Research Conversations Api Agent Conversations Get",
                   "type": "array"
                 }
               }
@@ -4810,18 +3146,18 @@
             "description": "Successful Response"
           }
         },
-        "summary": "List Autonomous Conversations",
+        "summary": "List Research Conversations",
         "tags": [
-          "conversations"
+          "research conversations"
         ]
       },
       "post": {
-        "operationId": "create_autonomous_conversation_api_agent_conversations_post",
+        "operationId": "create_research_conversation_api_agent_conversations_post",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BuilderConversationCreateRequest"
+                "$ref": "#/components/schemas/ResearchConversationCreateRequest"
               }
             }
           },
@@ -4849,15 +3185,15 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Create Autonomous Conversation",
+        "summary": "Create Research Conversation",
         "tags": [
-          "conversations"
+          "research conversations"
         ]
       }
     },
     "/api/agent/conversations/{conversation_id}": {
       "get": {
-        "operationId": "get_autonomous_conversation_api_agent_conversations__conversation_id__get",
+        "operationId": "get_research_conversation_api_agent_conversations__conversation_id__get",
         "parameters": [
           {
             "in": "path",
@@ -4891,15 +3227,15 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Autonomous Conversation",
+        "summary": "Get Research Conversation",
         "tags": [
-          "conversations"
+          "research conversations"
         ]
       }
     },
     "/api/agent/conversations/{conversation_id}/messages": {
       "post": {
-        "operationId": "send_autonomous_message_api_agent_conversations__conversation_id__messages_post",
+        "operationId": "send_research_message_api_agent_conversations__conversation_id__messages_post",
         "parameters": [
           {
             "in": "path",
@@ -4943,351 +3279,9 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Send Autonomous Message",
+        "summary": "Send Research Message",
         "tags": [
-          "conversations"
-        ]
-      }
-    },
-    "/api/agents": {
-      "get": {
-        "operationId": "list_agents_api_agents_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AgentResponse"
-                  },
-                  "title": "Response List Agents Api Agents Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Agents",
-        "tags": [
-          "agents"
-        ]
-      },
-      "post": {
-        "operationId": "create_agent_api_agents_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentWriteRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Agent",
-        "tags": [
-          "agents"
-        ]
-      }
-    },
-    "/api/agents/export/python": {
-      "post": {
-        "operationId": "export_python_api_agents_export_python_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentBlueprint"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PythonExportResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Export Python",
-        "tags": [
-          "agents"
-        ]
-      }
-    },
-    "/api/agents/templates": {
-      "get": {
-        "operationId": "templates_api_agents_templates_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AgentBlueprint"
-                  },
-                  "title": "Response Templates Api Agents Templates Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Templates",
-        "tags": [
-          "agents"
-        ]
-      }
-    },
-    "/api/agents/validate": {
-      "post": {
-        "operationId": "validate_agent_api_agents_validate_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentBlueprint"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentValidationResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Validate Agent",
-        "tags": [
-          "agents"
-        ]
-      }
-    },
-    "/api/agents/{agent_id}": {
-      "delete": {
-        "operationId": "delete_agent_api_agents__agent_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "agent_id",
-            "required": true,
-            "schema": {
-              "title": "Agent Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Agent",
-        "tags": [
-          "agents"
-        ]
-      },
-      "get": {
-        "operationId": "get_agent_api_agents__agent_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "agent_id",
-            "required": true,
-            "schema": {
-              "title": "Agent Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Agent",
-        "tags": [
-          "agents"
-        ]
-      },
-      "put": {
-        "operationId": "update_agent_api_agents__agent_id__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "agent_id",
-            "required": true,
-            "schema": {
-              "title": "Agent Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AgentWriteRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AgentResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Agent",
-        "tags": [
-          "agents"
-        ]
-      }
-    },
-    "/api/agents/{agent_id}/revisions": {
-      "get": {
-        "operationId": "list_revisions_api_agents__agent_id__revisions_get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "agent_id",
-            "required": true,
-            "schema": {
-              "title": "Agent Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/AgentRevisionResponse"
-                  },
-                  "title": "Response List Revisions Api Agents  Agent Id  Revisions Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "List Revisions",
-        "tags": [
-          "agents"
+          "research conversations"
         ]
       }
     },
@@ -5415,228 +3409,6 @@
         ]
       }
     },
-    "/api/builder/conversations": {
-      "get": {
-        "operationId": "list_builder_conversations_api_builder_conversations_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ConversationResponse"
-                  },
-                  "title": "Response List Builder Conversations Api Builder Conversations Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Builder Conversations",
-        "tags": [
-          "conversations"
-        ]
-      },
-      "post": {
-        "operationId": "create_builder_conversation_api_builder_conversations_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BuilderConversationCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Builder Conversation",
-        "tags": [
-          "conversations"
-        ]
-      }
-    },
-    "/api/builder/conversations/{conversation_id}": {
-      "get": {
-        "operationId": "get_builder_conversation_api_builder_conversations__conversation_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "conversation_id",
-            "required": true,
-            "schema": {
-              "title": "Conversation Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationDetailResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Builder Conversation",
-        "tags": [
-          "conversations"
-        ]
-      }
-    },
-    "/api/builder/conversations/{conversation_id}/messages": {
-      "post": {
-        "operationId": "send_builder_message_api_builder_conversations__conversation_id__messages_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "conversation_id",
-            "required": true,
-            "schema": {
-              "title": "Conversation Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConversationMessageRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationMessageResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Send Builder Message",
-        "tags": [
-          "conversations"
-        ]
-      }
-    },
-    "/api/conversations": {
-      "get": {
-        "operationId": "list_conversations_api_conversations_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/ConversationResponse"
-                  },
-                  "title": "Response List Conversations Api Conversations Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Conversations",
-        "tags": [
-          "conversations"
-        ]
-      },
-      "post": {
-        "operationId": "create_conversation_api_conversations_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ConversationCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConversationResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Conversation",
-        "tags": [
-          "conversations"
-        ]
-      }
-    },
     "/api/conversations/{conversation_id}": {
       "delete": {
         "operationId": "delete_conversation_api_conversations__conversation_id__delete",
@@ -5668,11 +3440,77 @@
         },
         "summary": "Delete Conversation",
         "tags": [
-          "conversations"
+          "research conversations"
+        ]
+      }
+    },
+    "/api/deep-work/conversations": {
+      "get": {
+        "operationId": "list_deep_work_conversations_api_deep_work_conversations_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ConversationResponse"
+                  },
+                  "title": "Response List Deep Work Conversations Api Deep Work Conversations Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Deep Work Conversations",
+        "tags": [
+          "research conversations"
         ]
       },
+      "post": {
+        "operationId": "create_deep_work_conversation_api_deep_work_conversations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchConversationCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Deep Work Conversation",
+        "tags": [
+          "research conversations"
+        ]
+      }
+    },
+    "/api/deep-work/conversations/{conversation_id}": {
       "get": {
-        "operationId": "get_conversation_api_conversations__conversation_id__get",
+        "operationId": "get_deep_work_conversation_api_deep_work_conversations__conversation_id__get",
         "parameters": [
           {
             "in": "path",
@@ -5706,15 +3544,15 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Get Conversation",
+        "summary": "Get Deep Work Conversation",
         "tags": [
-          "conversations"
+          "research conversations"
         ]
       }
     },
-    "/api/conversations/{conversation_id}/messages": {
+    "/api/deep-work/conversations/{conversation_id}/messages": {
       "post": {
-        "operationId": "send_conversation_message_api_conversations__conversation_id__messages_post",
+        "operationId": "send_deep_work_message_api_deep_work_conversations__conversation_id__messages_post",
         "parameters": [
           {
             "in": "path",
@@ -5758,9 +3596,9 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Send Conversation Message",
+        "summary": "Send Deep Work Message",
         "tags": [
-          "conversations"
+          "research conversations"
         ]
       }
     },
@@ -5773,7 +3611,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/DocumentResponse"
+                    "$ref": "#/components/schemas/DocumentSummaryResponse"
                   },
                   "title": "Response List Documents Api Documents Get",
                   "type": "array"
@@ -6582,222 +4420,6 @@
         ]
       }
     },
-    "/api/research-agent-conversations": {
-      "get": {
-        "operationId": "list_direct_conversations_api_research_agent_conversations_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/DirectConversationResponse"
-                  },
-                  "title": "Response List Direct Conversations Api Research Agent Conversations Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Direct Conversations",
-        "tags": [
-          "direct research agents"
-        ]
-      },
-      "post": {
-        "operationId": "create_direct_conversation_api_research_agent_conversations_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DirectConversationCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DirectConversationResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Direct Conversation",
-        "tags": [
-          "direct research agents"
-        ]
-      }
-    },
-    "/api/research-agent-conversations/{conversation_id}": {
-      "delete": {
-        "operationId": "delete_direct_conversation_api_research_agent_conversations__conversation_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "conversation_id",
-            "required": true,
-            "schema": {
-              "title": "Conversation Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Direct Conversation",
-        "tags": [
-          "direct research agents"
-        ]
-      },
-      "get": {
-        "operationId": "get_direct_conversation_api_research_agent_conversations__conversation_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "conversation_id",
-            "required": true,
-            "schema": {
-              "title": "Conversation Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DirectConversationDetailResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Direct Conversation",
-        "tags": [
-          "direct research agents"
-        ]
-      }
-    },
-    "/api/research-agent-conversations/{conversation_id}/messages": {
-      "post": {
-        "operationId": "send_direct_message_api_research_agent_conversations__conversation_id__messages_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "conversation_id",
-            "required": true,
-            "schema": {
-              "title": "Conversation Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DirectConversationMessageRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DirectConversationMessageResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Send Direct Message",
-        "tags": [
-          "direct research agents"
-        ]
-      }
-    },
-    "/api/research-agents": {
-      "get": {
-        "operationId": "list_research_agents_api_research_agents_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/DirectAgentResponse"
-                  },
-                  "title": "Response List Research Agents Api Research Agents Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Research Agents",
-        "tags": [
-          "direct research agents"
-        ]
-      }
-    },
     "/api/runs": {
       "get": {
         "operationId": "list_runs_api_runs_get",
@@ -6849,81 +4471,9 @@
         "tags": [
           "runs"
         ]
-      },
-      "post": {
-        "operationId": "create_run_api_runs_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/RunCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Run",
-        "tags": [
-          "runs"
-        ]
       }
     },
     "/api/runs/{run_id}": {
-      "delete": {
-        "operationId": "delete_run_api_runs__run_id__delete",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "run_id",
-            "required": true,
-            "schema": {
-              "title": "Run Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Delete Run",
-        "tags": [
-          "runs"
-        ]
-      },
       "get": {
         "operationId": "get_run_api_runs__run_id__get",
         "parameters": [
@@ -7058,67 +4608,6 @@
         ]
       }
     },
-    "/api/runs/{run_id}/interruptions/{interruption_id}": {
-      "post": {
-        "operationId": "resolve_interruption_api_runs__run_id__interruptions__interruption_id__post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "run_id",
-            "required": true,
-            "schema": {
-              "title": "Run Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "interruption_id",
-            "required": true,
-            "schema": {
-              "title": "Interruption Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/InterruptionResolutionRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/RunResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Resolve Interruption",
-        "tags": [
-          "runs"
-        ]
-      }
-    },
     "/api/runs/{run_id}/steering": {
       "post": {
         "operationId": "steer_run_api_runs__run_id__steering_post",
@@ -7213,27 +4702,6 @@
         ]
       }
     },
-    "/api/sdk/catalog": {
-      "get": {
-        "operationId": "sdk_catalog_api_sdk_catalog_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SdkCatalogResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Sdk Catalog",
-        "tags": [
-          "agents"
-        ]
-      }
-    },
     "/api/settings": {
       "get": {
         "operationId": "get_settings_api_settings_get",
@@ -7291,245 +4759,6 @@
         "summary": "Update Settings",
         "tags": [
           "application"
-        ]
-      }
-    },
-    "/api/tools": {
-      "get": {
-        "operationId": "list_tools_api_tools_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/FunctionToolResponse"
-                  },
-                  "title": "Response List Tools Api Tools Get",
-                  "type": "array"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "List Tools",
-        "tags": [
-          "tools"
-        ]
-      },
-      "post": {
-        "operationId": "create_tool_api_tools_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FunctionToolWriteRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FunctionToolResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Create Tool",
-        "tags": [
-          "tools"
-        ]
-      }
-    },
-    "/api/tools/test": {
-      "post": {
-        "operationId": "test_tool_api_tools_test_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FunctionToolTestRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FunctionToolTestResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Test Tool",
-        "tags": [
-          "tools"
-        ]
-      }
-    },
-    "/api/tools/{definition_id}": {
-      "get": {
-        "operationId": "get_tool_api_tools__definition_id__get",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "definition_id",
-            "required": true,
-            "schema": {
-              "title": "Definition Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FunctionToolResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Get Tool",
-        "tags": [
-          "tools"
-        ]
-      },
-      "put": {
-        "operationId": "update_tool_api_tools__definition_id__put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "definition_id",
-            "required": true,
-            "schema": {
-              "title": "Definition Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/FunctionToolWriteRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FunctionToolResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Update Tool",
-        "tags": [
-          "tools"
-        ]
-      }
-    },
-    "/api/tools/{definition_id}/archive": {
-      "post": {
-        "operationId": "archive_tool_api_tools__definition_id__archive_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "definition_id",
-            "required": true,
-            "schema": {
-              "title": "Definition Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FunctionToolResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Archive Tool",
-        "tags": [
-          "tools"
         ]
       }
     },

@@ -10,8 +10,7 @@ import pytest
 from ddgs.exceptions import DDGSException, RatelimitException
 from ddgs.engines.duckduckgo import Duckduckgo
 
-from backend.agents.templates import starter_blueprints
-from backend.autonomous.service import autonomous_blueprint
+from backend.autonomous.service import RESEARCH_TOOL_IDS, autonomous_blueprint
 from backend.bootstrap import create_services
 from backend.core.config import Settings
 from backend.research import AsyncRateLimiter, ResearchSearchService
@@ -352,24 +351,24 @@ async def test_web_search_session_budget_reuses_cached_queries(
     runtime = services.runs._tool_runtime
     try:
         first = await runtime.invoke(
-            "web.search",
-            {"query": '  "broad"   research topic  ', "limit": 10},
+            "research.sources.search",
+            {"provider": "web", "query": '  "broad"   research topic  '},
             context,
         )
         cached = await runtime.invoke(
-            "web.search",
-            {"query": "BROAD RESEARCH TOPIC", "limit": 10},
+            "research.sources.search",
+            {"provider": "web", "query": "BROAD RESEARCH TOPIC"},
             context,
         )
         second = await runtime.invoke(
-            "web.search",
-            {"query": "specific evidence gap", "limit": 10},
+            "research.sources.search",
+            {"provider": "web", "query": "specific evidence gap"},
             context,
         )
         with pytest.raises(ValueError, match="session limit was reached"):
             await runtime.invoke(
-                "web.search",
-                {"query": "unnecessary third query", "limit": 10},
+                "research.sources.search",
+                {"provider": "web", "query": "unnecessary third query"},
                 context,
             )
     finally:
@@ -386,65 +385,16 @@ async def test_web_search_session_budget_reuses_cached_queries(
     assert cached["search_budget"] == {"used": 1, "limit": 2, "remaining": 1}
     assert second["search_budget"] == {"used": 2, "limit": 2, "remaining": 0}
 
-
-@pytest.mark.anyio
-async def test_agent_web_search_requires_ten_results(test_settings) -> None:
-    services = create_services(test_settings)
-    context = ScholarWeaveContext(
-        run_id="search-result-limit-run",
-        tool_runtime=services.runs._tool_runtime,
-    )
-    try:
-        with pytest.raises(ValueError, match="exactly 10 results"):
-            await services.runs._tool_runtime.invoke(
-                "web.search",
-                {"query": "broad research topic", "limit": 5},
-                context,
-            )
-    finally:
-        await services.close()
-
-    assert context.metadata.get("web_search_requests_used", 0) == 0
-
-
 def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     assert Settings.model_fields["web_search_max_requests_per_session"].default == 100
     definitions = create_tool_catalog().definitions()
     catalog_ids = {definition.catalog_id for definition in definitions}
-    web_search = next(
-        definition for definition in definitions if definition.catalog_id == "web.search"
-    )
-    assert web_search.parameters_schema is not None
-    assert web_search.parameters_schema["properties"]["limit"] == {
-        "type": "integer",
-        "minimum": 10,
-        "maximum": 10,
-        "description": "Always request 10 results to maximize coverage per search.",
-    }
-    source_tools = {
-        "documents.download",
-        "webpage.download",
-        "webpage.list",
-        "webpage.read",
-        "webpage.search",
-        "webpage.notes.save",
-    }
-    assert {"web.search", "arxiv.search", "wikipedia.search", *source_tools} <= catalog_ids
-
-    for blueprint in starter_blueprints():
-        researcher = next(agent for agent in blueprint.agents if agent.id == "researcher")
-        bound_catalog_ids = {
-            tool.catalog_id
-            for tool in blueprint.tools
-            if tool.id in researcher.tool_ids and tool.kind == "function"
-        }
-        assert {"web.search", "arxiv.search", "wikipedia.search", *source_tools} <= bound_catalog_ids
-        assert blueprint.run.max_turns == 30
+    expected = {catalog_id for _, catalog_id in RESEARCH_TOOL_IDS}
+    assert catalog_ids == {*expected, "tool.results.read"}
 
     autonomous = autonomous_blueprint({})
     autonomous_catalog_ids = {tool.catalog_id for tool in autonomous.tools}
-    assert {"web.search", "arxiv.search", "wikipedia.search", *source_tools} <= autonomous_catalog_ids
-    assert "one broad keyword query" in autonomous.agents[0].instructions
-    assert "avoid quoted exact phrases" in autonomous.agents[0].instructions
-    assert "Request 10 results from every web search" in autonomous.agents[0].instructions
-    assert autonomous.run.max_turns == 50
+    assert autonomous_catalog_ids == expected
+    assert "smallest answer" not in autonomous.agents[0].instructions
+    assert "shortest answer" in autonomous.agents[0].instructions
+    assert autonomous.run.max_turns == 16

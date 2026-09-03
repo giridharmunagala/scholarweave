@@ -4,14 +4,11 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import StreamingResponse
 
-from backend.agents.blueprint import AgentBlueprint
 from backend.api.dependencies import services
 from backend.runs.schemas import (
-    InterruptionResolutionRequest,
-    RunCreateRequest,
     RunEventResponse,
     RunResponse,
     SteeringMessageRequest,
@@ -40,38 +37,9 @@ def list_runs(
     ]
 
 
-@router.post("", response_model=RunResponse, status_code=status.HTTP_202_ACCEPTED)
-async def create_run(
-    payload: RunCreateRequest,
-    container=Depends(services),
-) -> RunResponse:
-    compiled = (
-        container.agents.compile_revision(payload.agent_revision_id)
-        if payload.agent_revision_id
-        else container.compiler.compile(payload.blueprint)
-    )
-    record = container.runs.create(
-        compiled,
-        payload.input,
-        agent_revision_id=payload.agent_revision_id,
-        conversation_id=payload.conversation_id,
-        reasoning_effort=payload.reasoning_effort,
-    )
-    return run_response(container.runs.get(record.id))
-
-
 @router.get("/{run_id}", response_model=RunResponse)
 def get_run(run_id: str, service: RunService = Depends(run_service)) -> RunResponse:
     return run_response(service.get(run_id))
-
-
-@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_run(
-    run_id: str,
-    service: RunService = Depends(run_service),
-) -> Response:
-    service.delete(run_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/{run_id}/cancel", response_model=RunResponse)
@@ -113,31 +81,6 @@ async def steer_run(
         content=message.content,
         status="queued",
     )
-
-
-@router.post(
-    "/{run_id}/interruptions/{interruption_id}",
-    response_model=RunResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def resolve_interruption(
-    run_id: str,
-    interruption_id: str,
-    payload: InterruptionResolutionRequest,
-    container=Depends(services),
-) -> RunResponse:
-    record = container.runs.get(run_id)
-    compiled = container.compiler.compile(
-        AgentBlueprint.model_validate(record.blueprint_json)
-    )
-    updated = await container.runs.resolve_interruption(
-        compiled,
-        run_id=run_id,
-        interruption_id=interruption_id,
-        approved=payload.approved,
-        rejection_message=payload.rejection_message,
-    )
-    return run_response(updated)
 
 
 @router.get("/{run_id}/events")

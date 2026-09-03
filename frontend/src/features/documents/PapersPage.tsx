@@ -3,10 +3,11 @@ import { apiUrl, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { EmptyState, ErrorNotice, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
-import './papers.css';
+import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
+import '../library.css';
 
 type Document = components['schemas']['DocumentResponse'];
+type DocumentSummary = components['schemas']['DocumentSummaryResponse'];
 type Artifact = Document['artifacts'][number];
 type DocumentChunk = Document['chunks'][number];
 type ArtifactContent = components['schemas']['ArtifactContentResponse'];
@@ -17,21 +18,6 @@ type IngestionProgress = {
   total: number;
   percent: number;
 };
-type WebSource = {
-  id: string;
-  url: string;
-  title: string;
-  text: string | null;
-  chunk_count: number;
-  created_at: string;
-  expires_at: string;
-};
-type SavedWebNote = {
-  path: string;
-  note_id: string | null;
-  name: string | null;
-};
-
 function displayKind(kind: string): string {
   return kind.split('_').join(' ');
 }
@@ -112,7 +98,7 @@ function ingestionDetail(document: Document): string {
 }
 
 export default function PapersPage() {
-  const [documents, setDocuments] = useState<Document[]>([]);
+  const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [selected, setSelected] = useState<Document | null>(null);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
   const [ingestionOptions, setIngestionOptions] = useState<IngestionOptions | null>(null);
@@ -122,13 +108,7 @@ export default function PapersPage() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [remotePdfUrl, setRemotePdfUrl] = useState('');
   const [remotePdfTitle, setRemotePdfTitle] = useState('');
-  const [webUrl, setWebUrl] = useState('');
   const [showImport, setShowImport] = useState(false);
-  const [webSources, setWebSources] = useState<WebSource[]>([]);
-  const [selectedWebSource, setSelectedWebSource] = useState<WebSource | null>(null);
-  const [webNoteName, setWebNoteName] = useState('');
-  const [webNoteContent, setWebNoteContent] = useState('');
-  const [savedWebNote, setSavedWebNote] = useState<SavedWebNote | null>(null);
   const ingestionRequest = useRef<AbortController | null>(null);
   const previewRequestId = useRef(0);
 
@@ -138,22 +118,13 @@ export default function PapersPage() {
   }, []);
 
   const load = async (selectedId?: string) => {
-    const [items, temporarySources] = await Promise.all([
-      request<Document[]>('/documents'),
-      request<WebSource[]>('/web-sources'),
-    ]);
+    const items = await request<DocumentSummary[]>('/documents');
+    const targetId = selectedId ?? selected?.id ?? items[0]?.id;
+    const detail = targetId
+      ? await request<Document>(`/documents/${encodeURIComponent(targetId)}`)
+      : null;
     setDocuments(items);
-    setWebSources(temporarySources);
-    setSelectedWebSource((current) =>
-      current ? temporarySources.find((source) => source.id === current.id) ?? null : null,
-    );
-    setSelected((current) => {
-      const targetId = selectedId ?? current?.id;
-      if (targetId) {
-        return items.find((item) => item.id === targetId) ?? items[0] ?? null;
-      }
-      return items[0] ?? null;
-    });
+    setSelected(detail);
   };
 
   useEffect(() => {
@@ -290,77 +261,6 @@ export default function PapersPage() {
     }
   };
 
-  const downloadWebPage = async () => {
-    const url = webUrl.trim();
-    if (!url) return;
-    setBusyAction('download-web');
-    setError(null);
-    setSavedWebNote(null);
-    try {
-      const source = await request<WebSource>('/web-sources', json('POST', { url }));
-      setWebUrl('');
-      setWebSources((current) => [source, ...current.filter((item) => item.id !== source.id)]);
-      setSelectedWebSource(source);
-      setWebNoteName(`${source.title} notes`);
-      setWebNoteContent('');
-    } catch (nextError) {
-      setError(nextError);
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const openWebSource = async (source: WebSource) => {
-    setError(null);
-    setSavedWebNote(null);
-    try {
-      const fullSource = source.text
-        ? source
-        : await request<WebSource>(`/web-sources/${encodeURIComponent(source.id)}`);
-      setSelectedWebSource(fullSource);
-      setWebNoteName(`${fullSource.title} notes`);
-      setWebNoteContent('');
-    } catch (nextError) {
-      setError(nextError);
-    }
-  };
-
-  const saveWebNote = async () => {
-    if (!selectedWebSource || !webNoteName.trim() || !webNoteContent.trim()) return;
-    setBusyAction(`note:${selectedWebSource.id}`);
-    setError(null);
-    try {
-      const note = await request<SavedWebNote>(
-        `/web-sources/${encodeURIComponent(selectedWebSource.id)}/notes`,
-        json('POST', {
-          name: webNoteName.trim(),
-          content: webNoteContent.trim(),
-          tags: [],
-        }),
-      );
-      setSavedWebNote(note);
-      setWebNoteContent('');
-    } catch (nextError) {
-      setError(nextError);
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
-  const removeWebSource = async (source: WebSource) => {
-    setBusyAction(`delete-web:${source.id}`);
-    setError(null);
-    try {
-      await request<void>(`/web-sources/${encodeURIComponent(source.id)}`, { method: 'DELETE' });
-      setWebSources((current) => current.filter((item) => item.id !== source.id));
-      if (selectedWebSource?.id === source.id) setSelectedWebSource(null);
-    } catch (nextError) {
-      setError(nextError);
-    } finally {
-      setBusyAction(null);
-    }
-  };
-
   const ingest = async (document: Document, mode: IngestionMode) => {
     const action = `ingest:${document.id}`;
     const processing = {
@@ -450,7 +350,7 @@ export default function PapersPage() {
   const operationBusy = busyAction !== null;
   const recommendedMode = ingestionOptions?.recommended_mode ?? 'embedded';
   const pageProgress = selected ? ingestionProgress(selected) : null;
-  const importOpen = showImport || webSources.length > 0;
+  const importOpen = showImport;
 
   return (
     <div className="page">
@@ -481,12 +381,13 @@ export default function PapersPage() {
           </>
         }
       />
+      <LibraryTabs active="papers" />
       {error ? <ErrorNotice error={error} /> : null}
       {importOpen ? (
-      <div className="source-import-grid">
+      <div className="paper-import">
         <Panel
-          title="Download a PDF"
-          description="Public PDFs are retained, extracted, indexed, and available to every research chat."
+          title="Add a PDF by URL"
+          description="Public PDFs are downloaded, indexed, and retained in your library."
         >
           <form
             className="source-form"
@@ -516,92 +417,6 @@ export default function PapersPage() {
             </button>
           </form>
         </Panel>
-        <Panel
-          title="Temporary web pages"
-          description="Page text remains in memory for chat Q&A. Notes are saved permanently in the workspace."
-        >
-          <form
-            className="source-form"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void downloadWebPage();
-            }}
-          >
-            <input
-              aria-label="Web page URL"
-              placeholder="https://example.com/article"
-              type="url"
-              value={webUrl}
-              disabled={operationBusy}
-              onChange={(event) => setWebUrl(event.target.value)}
-            />
-            <button className="button" type="submit" disabled={operationBusy || !webUrl.trim()}>
-              <Icon name="download" size={15} />
-              {busyAction === 'download-web' ? 'Downloading page…' : 'Download page'}
-            </button>
-          </form>
-          {webSources.length ? (
-            <div className="temporary-source-list">
-              {webSources.map((source) => (
-                <button
-                  type="button"
-                  className={selectedWebSource?.id === source.id ? 'paper-row active' : 'paper-row'}
-                  key={source.id}
-                  onClick={() => void openWebSource(source)}
-                >
-                  <div>
-                    <strong>{source.title}</strong>
-                    <small>{source.chunk_count} chunks · expires {new Date(source.expires_at).toLocaleTimeString()}</small>
-                  </div>
-                </button>
-              ))}
-            </div>
-          ) : null}
-          {selectedWebSource ? (
-            <section className="temporary-source-detail">
-              <header>
-                <a href={selectedWebSource.url} target="_blank" rel="noreferrer">
-                  {selectedWebSource.title}
-                </a>
-                <button
-                  className="button danger small"
-                  type="button"
-                  disabled={operationBusy}
-                  onClick={() => void removeWebSource(selectedWebSource)}
-                >
-                  {busyAction === `delete-web:${selectedWebSource.id}` ? 'Removing…' : 'Remove page'}
-                </button>
-              </header>
-              {selectedWebSource.text ? <pre>{selectedWebSource.text}</pre> : null}
-              <div className="web-note-form">
-                <input
-                  aria-label="Note name"
-                  value={webNoteName}
-                  disabled={operationBusy}
-                  onChange={(event) => setWebNoteName(event.target.value)}
-                />
-                <textarea
-                  aria-label="Web page note"
-                  placeholder="Write a durable note from this page…"
-                  rows={4}
-                  value={webNoteContent}
-                  disabled={operationBusy}
-                  onChange={(event) => setWebNoteContent(event.target.value)}
-                />
-                <button
-                  className="button secondary"
-                  type="button"
-                  disabled={operationBusy || !webNoteName.trim() || !webNoteContent.trim()}
-                  onClick={() => void saveWebNote()}
-                >
-                  <Icon name="save" size={15} />
-                  {busyAction === `note:${selectedWebSource.id}` ? 'Saving…' : 'Save note'}
-                </button>
-                {savedWebNote ? <small>Saved to {savedWebNote.path}</small> : null}
-              </div>
-            </section>
-          ) : null}
-        </Panel>
       </div>
       ) : null}
       <div className="papers-layout">
@@ -616,8 +431,10 @@ export default function PapersPage() {
                 className={selected?.id === document.id ? 'paper-row active' : 'paper-row'}
                 key={document.id}
                 onClick={() => {
-                  setSelected(document);
                   clearArtifactPreview();
+                  void request<Document>(`/documents/${encodeURIComponent(document.id)}`)
+                    .then(setSelected)
+                    .catch(setError);
                 }}
               >
                 <div>

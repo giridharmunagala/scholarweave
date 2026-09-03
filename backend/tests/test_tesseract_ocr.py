@@ -22,6 +22,18 @@ class FakeReader:
         pass
 
 
+def test_tesseract_command_can_be_configured_with_an_environment_path(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "tesseract.exe"
+    executable.touch()
+    monkeypatch.setattr("backend.documents.ocr.shutil.which", lambda _name: None)
+    monkeypatch.setenv("TESSERACT_CMD", str(executable))
+
+    assert DocumentOCR._tesseract_path() == str(executable)
+
+
 @pytest.mark.anyio
 async def test_sufficient_native_text_skips_ocr(
     test_settings,

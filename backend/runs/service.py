@@ -1404,18 +1404,19 @@ def _continuation_instruction(
     state = json.dumps(goal_state, ensure_ascii=False, separators=(",", ":"))
     return (
         f"[ScholarWeave supervisor epoch {epoch_index} for run {run_id}] "
-        "Continue toward the original user goal from durable conversation history. "
-        "Do not repeat completed actions. Reconcile any unknown write outcome before "
-        f"retrying. Current durable goal state: {state or '{}'}"
+        "Continue the original request from durable conversation history. Do not repeat "
+        "completed research or writes. Finish with the evidence already gathered unless "
+        "a specific missing fact still requires another tool call. "
+        f"Current durable goal state: {state}"
     )
 
 
 def _recovery_instruction(run_id: str) -> str:
     return (
         f"[ScholarWeave recovery for run {run_id}] The process stopped during the "
-        "previous epoch. Continue from durable conversation history and saved artifacts. "
-        "Do not replay writes unless their outcome has been verified. Update the goal "
-        "plan, then resume only unfinished work."
+        "previous epoch. Continue from durable conversation history and saved notes. "
+        "Do not replay writes unless their outcome has been verified. Resume only "
+        "unfinished research."
     )
 
 

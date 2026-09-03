@@ -9,17 +9,14 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.agents.router import router as agents_router
 from backend.api.errors import install_error_handlers
 from backend.bootstrap import ApplicationServices, create_services
 from backend.core.config import Settings
 from backend.conversations.router import router as conversations_router
 from backend.core.router import router as core_router
-from backend.direct_agents.router import router as direct_agents_router
 from backend.providers.router import router as providers_router
 from backend.research.router import router as research_router
 from backend.runs.router import router as runs_router
-from backend.tools.router import router as tools_router
 from backend.workspace.router import router as workspace_router
 
 
@@ -47,12 +44,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     for router in (
         core_router,
         providers_router,
-        agents_router,
-        tools_router,
         conversations_router,
         runs_router,
         research_router,
-        direct_agents_router,
         workspace_router,
     ):
         app.include_router(router, prefix=prefix)

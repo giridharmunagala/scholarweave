@@ -13,10 +13,21 @@ from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
 from backend.runs.broker import EventBroker
 from backend.runs.repository import RunRepository
-from backend.runs.service import RunService
+from backend.runs.service import RunService, _continuation_instruction
 from backend.runtime.context import ScholarWeaveContext
 from backend.runtime.sessions import SdkSessionFactory
 from backend.tools.catalog import create_tool_catalog
+
+
+def test_continuation_instruction_includes_durable_goal_state() -> None:
+    instruction = _continuation_instruction(
+        "run-1",
+        2,
+        {"status": "working", "completed_steps": ["search"]},
+    )
+
+    assert '"status":"working"' in instruction
+    assert '"completed_steps":["search"]' in instruction
 
 
 class _Resolver:
@@ -70,7 +81,7 @@ def _compiled(model, settings: Settings, *, max_turns: int = 20):
                     {
                         "id": "documents",
                         "kind": "function",
-                        "catalog_id": "documents.list",
+                        "catalog_id": "research.library.search",
                     }
                 ],
                 "run": {"max_turns": max_turns},
@@ -87,8 +98,16 @@ def anyio_backend() -> str:
 @pytest.mark.anyio
 async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provider) -> None:
     stub_provider.tool_plans = [
-        ("multi epoch", "list_documents", {}),
-        ("multi epoch", "list_documents", {}),
+        (
+            "multi epoch",
+            "search_research_library",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
+        (
+            "multi epoch",
+            "search_research_library",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
     ]
     client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
     model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
@@ -122,7 +141,7 @@ async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provide
         "turn_boundary",
         "goal_completed",
     ]
-    assert runtime.calls == ["documents.list", "documents.list"]
+    assert runtime.calls == ["research.library.search", "research.library.search"]
     assert any(event.event_type == "run.epoch.completed" for event in run.events)
     await client.close()
 
@@ -186,9 +205,21 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
     stub_provider,
 ) -> None:
     stub_provider.tool_plans = [
-        ("bounded goal", "list_documents", {}),
-        ("bounded goal", "list_documents", {}),
-        ("bounded goal", "list_documents", {}),
+        (
+            "bounded goal",
+            "search_research_library",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
+        (
+            "bounded goal",
+            "search_research_library",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
+        (
+            "bounded goal",
+            "search_research_library",
+            {"query": None, "document_id": None, "limit": 10},
+        ),
     ]
     client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
     model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
@@ -261,6 +292,7 @@ async def test_queued_run_can_be_cancelled_before_model_start(
 @pytest.mark.anyio
 async def test_tool_results_are_bounded_and_attempts_are_journaled(
     test_settings,
+    monkeypatch,
 ) -> None:
     test_settings.tool_result_max_tokens = 256
     from backend.bootstrap import create_services
@@ -279,9 +311,17 @@ async def test_tool_results_are_bounded_and_attempts_are_journaled(
             tool_runtime=services.runs._tool_runtime,
         )
 
+        def large_result(_arguments, _context):
+            return {"items": ["large result " * 1000]}
+
+        monkeypatch.setattr(
+            services.runs._tool_runtime,
+            "_search_research_library",
+            large_result,
+        )
         result = await services.runs._tool_runtime.invoke(
-            "sdk.catalog",
-            {},
+            "research.library.search",
+            {"query": None, "document_id": None, "limit": 10},
             context,
             tool_call_id="call-1",
         )
@@ -324,8 +364,8 @@ async def test_safe_reads_retry_but_failed_writes_remain_unknown(test_settings) 
 
         services.research_search.search_web = flaky_search
         result = await services.runs._tool_runtime.invoke(
-            "web.search",
-            {"query": "fault tolerance"},
+            "research.sources.search",
+            {"provider": "web", "query": "fault tolerance"},
             context,
             tool_call_id="read-call",
         )
@@ -334,8 +374,16 @@ async def test_safe_reads_retry_but_failed_writes_remain_unknown(test_settings) 
 
         with pytest.raises(ValueError):
             await services.runs._tool_runtime.invoke(
-                "workspace.write",
-                {"path": "../escape.md", "content": "unsafe"},
+                "research.notes.save",
+                {
+                    "target": "path",
+                    "mode": "overwrite",
+                    "document_id": None,
+                    "path": "../escape.md",
+                    "name": None,
+                    "content": "unsafe",
+                    "tags": [],
+                },
                 context,
                 tool_call_id="write-call",
             )

@@ -1,21 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Icon, type IconName } from '../../shared/components/Icons';
 import { ErrorNotice, Loading, PageHeader } from '../../shared/components/Ui';
-import { AppearancePanel } from './AppearancePanel';
 import { ModelDefaultsPanel } from './ModelDefaultsPanel';
 import { ProviderProfilesPanel } from './ProviderProfilesPanel';
 import { DocumentsPanel, RuntimePanel } from './SettingsSections';
 import { providersApi, type Provider, type Settings } from './api';
 import './providers.css';
 
-type SectionKey = 'models' | 'providers' | 'documents' | 'runtime' | 'appearance';
+type SectionKey = 'models' | 'providers' | 'documents' | 'runtime';
 
 const SECTIONS: { key: SectionKey; label: string; icon: IconName; hint: string }[] = [
   { key: 'models', label: 'Models', icon: 'sparkle', hint: 'Defaults per capability' },
   { key: 'providers', label: 'Providers', icon: 'tools', hint: 'Profiles and catalogues' },
   { key: 'documents', label: 'Documents', icon: 'papers', hint: 'OCR and ingestion' },
   { key: 'runtime', label: 'Runtime', icon: 'sliders', hint: 'Limits and storage' },
-  { key: 'appearance', label: 'Appearance', icon: 'palette', hint: 'Theme wallpaper' },
 ];
 
 export default function SettingsPage() {
@@ -141,7 +139,6 @@ export default function SettingsPage() {
           {section === 'runtime' ? (
             <RuntimePanel settings={settings} onChange={setSettings} />
           ) : null}
-          {section === 'appearance' ? <AppearancePanel /> : null}
         </div>
       </div>
 

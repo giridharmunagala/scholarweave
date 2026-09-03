@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { Link } from '../../app/router';
 import { Icon, type IconName } from './Icons';
 
 export function PageHeader({
@@ -22,6 +23,41 @@ export function PageHeader({
       {actions ? <div className="button-row">{actions}</div> : null}
     </header>
   );
+}
+
+export function PageTabs({
+  label,
+  active,
+  items,
+}: {
+  label: string;
+  active: string;
+  items: { id: string; label: string; to: string; icon: IconName }[];
+}) {
+  return (
+    <nav className="page-tabs" aria-label={label}>
+      {items.map((item) => (
+        <Link
+          className={active === item.id ? 'active' : ''}
+          to={item.to}
+          aria-current={active === item.id ? 'page' : undefined}
+          key={item.id}
+        >
+          <Icon name={item.icon} size={15} />
+          {item.label}
+        </Link>
+      ))}
+    </nav>
+  );
+}
+
+const LIBRARY_TABS = [
+  { id: 'papers', label: 'Papers', to: '/library', icon: 'papers' },
+  { id: 'notes', label: 'Notes', to: '/library/notes', icon: 'workspace' },
+] satisfies { id: string; label: string; to: string; icon: IconName }[];
+
+export function LibraryTabs({ active }: { active: 'papers' | 'notes' }) {
+  return <PageTabs label="Library view" active={active} items={LIBRARY_TABS} />;
 }
 
 export function Panel({

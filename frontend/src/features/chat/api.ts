@@ -10,32 +10,33 @@ export type StopAndAnswerResponse = components['schemas']['StopAndAnswerResponse
 export type SteeringMessage = components['schemas']['SteeringMessageResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
 type ConversationMessageRequest = components['schemas']['ConversationMessageRequest'];
-export type WorkMode = ConversationMessageRequest['work_mode'];
-export type WorkBudget = ConversationMessageRequest['work_budget'];
 
-export const chatApi = {
-  list: () => request<Conversation[]>('/agent/conversations'),
+function conversationApi(basePath: string) {
+  return {
+  list: () => request<Conversation[]>(basePath),
   create: (title: string, modelReference: ModelReference) =>
     request<Conversation>(
-      '/agent/conversations',
+      basePath,
       json('POST', { title, model_reference: modelReference }),
     ),
   get: (id: string) =>
-    request<ConversationDetail>(`/agent/conversations/${encodeURIComponent(id)}`),
+    request<ConversationDetail>(`${basePath}/${encodeURIComponent(id)}`),
   send: (
     id: string,
     content: string,
     reasoningEffort: ReasoningEffort | null = null,
-    workMode: WorkMode = 'direct',
-    workBudget: WorkBudget = 'medium',
+    webEnabled = true,
+    fastAnswer = false,
+    webSearchLimit = 1,
   ) =>
     request<components['schemas']['ConversationMessageResponse']>(
-      `/agent/conversations/${encodeURIComponent(id)}/messages`,
+      `${basePath}/${encodeURIComponent(id)}/messages`,
       json('POST', {
         content,
         reasoning_effort: reasoningEffort ?? undefined,
-        work_mode: workMode,
-        work_budget: workBudget,
+        web_enabled: webEnabled,
+        fast_answer: fastAnswer,
+        web_search_limit: webSearchLimit,
       }),
     ),
   remove: (id: string) =>
@@ -55,4 +56,8 @@ export const chatApi = {
       `/runs/${encodeURIComponent(id)}/steering`,
       json('POST', { content }),
     ),
-};
+  };
+}
+
+export const chatApi = conversationApi('/agent/conversations');
+export const deepWorkApi = conversationApi('/deep-work/conversations');

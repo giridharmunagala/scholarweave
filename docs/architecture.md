@@ -14,7 +14,7 @@ Use [`recipes.md`](recipes.md) when you already know what you want to change.
 - [9. Documents and ingestion](#9-documents-and-ingestion)
 - [10. Research and web sources](#10-research-and-web-sources)
 - [11. Workspace](#11-workspace)
-- [12. The three agent experiences](#12-the-three-agent-experiences)
+- [12. Research experiences](#12-research-experiences)
 - [13. Frontend](#13-frontend)
 
 ---
@@ -22,7 +22,7 @@ Use [`recipes.md`](recipes.md) when you already know what you want to change.
 ## 1. Composition root
 
 `backend/bootstrap.py` is the only place services are constructed. `create_services(settings)`
-returns an `ApplicationServices` dataclass holding ~28 singletons, and construction order encodes
+returns an `ApplicationServices` dataclass holding the active research services, and construction order encodes
 the dependency graph:
 
 ```
@@ -34,14 +34,14 @@ Settings
        ├─ SafeStorage ─ WorkspaceService
        ├─ RetrievalService, ResearchSearchService
        ├─ DocumentRepository ─ DocumentOCR/Vision/Formatter/Figures ─ DocumentIngestion ─ DocumentService
-       ├─ ToolCatalog + FunctionToolService (registers dynamic factory)
+       ├─ ToolCatalog (eight research facade tools + result reader)
        ├─ GuardrailCatalog
        ├─ AgentCompiler(model_resolver, tool_catalog, guardrail_catalog, settings)
-       ├─ AgentService, SdkSessionFactory, ConversationService, ConversationMemoryService
+       ├─ SdkSessionFactory, ConversationService
        ├─ EventBroker
-       ├─ ApplicationToolRuntime(...)    # receives nearly every other service
+       ├─ ApplicationToolRuntime(...)    # research, documents, notes, and run receipts
        ├─ RunService(repo, sessions, tool_runtime, events, ...)
-       └─ BuilderService / AutonomousAgentService / DirectAgentService / ProviderService
+       └─ AutonomousAgentService / ProviderService / BuiltInSpeechRuntime
 ```
 
 `backend/app.py` calls `create_services()`, stores the container on `app.state.services`, installs
@@ -490,20 +490,16 @@ toward `replace_workspace_markdown` / `append_workspace_markdown` over wholesale
 
 ---
 
-## 12. The three agent experiences
+## 12. Research experiences
 
-| Experience | Service | Conversation namespace | What it is |
-| --- | --- | --- | --- |
-| **Chat / autonomous** | `autonomous/service.py` | `/api/agent/conversations` | One research coordinator with a scoped research/workspace tool set, durable goal controls, bounded epochs, and context compaction. |
-| **Builder** | `builder/service.py`, `builder/todos.py` | `/api/builder/conversations` | An agent that authors *other* agents. Drives an explicit TODO plan (`builder.todos.*`) and must finish with `finish_builder_run` plus a save receipt. |
-| **Direct research agents** | `direct_agents/service.py` | `/api/research-agent-conversations` | Fixed, single-purpose agents listed at `GET /api/research-agents`: summary agent, open-areas agent, per-paper Q&A, and a paper cleaner that records keep/no-keep page decisions. |
+| Experience | Conversation namespace | What it is |
+| --- | --- | --- |
+| **Research** | `/api/agent/conversations` | One fast research agent with eight domain tools, a 16-turn limit, two concurrent tool calls, and its own durable history. |
+| **Deep Work** | `/api/deep-work/conversations` | A coordinator plus one reusable focused worker, a bounded 20-message history, a 48-turn limit, and three concurrent tool calls. |
 
-Generic `/api/conversations` serves conversations created directly from a saved blueprint.
-
-Goal state is persisted in `agent_goal_states` through three coordinator controls:
-`update_goal_plan`, `request_clarification_or_block`, and `finish_goal`. The UI renders
-`goal.plan.updated`, `goal.blocked`, and `goal.completed` events. Research mode does not expose
-agent authoring, custom Python, shell, browser, LSP, or computer-use tools.
+Both experiences can search and acquire sources, search and read papers, read web pages, and
+search, read, and save notes. They do not expose authoring, custom Python, shell, browser
+automation, LSP, or computer-use tools.
 
 ---
 
@@ -519,10 +515,10 @@ library. State is `useState`/`useRef`; data fetching is direct `fetch` wrappers.
 
 ```
 src/
-├── app/        App.tsx (path→page), AppShell.tsx (nav/palette/theme), router.tsx (custom router)
+├── app/        App.tsx (path→page), AppShell.tsx (four-item nav/theme), router.tsx (custom router)
 ├── api/        client.ts, events.ts (SSE), schema.generated.ts (GENERATED)
-├── features/   agents/ chat/ dashboard/ direct-agents/ documents/ providers/ runs/ tools/ workspace/
-└── shared/     components/, theme/ (12 themes), styles/ (tokens.css, base.css, components.css, layout.css)
+├── features/   chat/ documents/ providers/ workspace/
+└── shared/     components/, theme/ (Paper and Slate), styles/
 ```
 
 Each feature folder holds `<Name>Page.tsx` (default export, lazy-loaded), `api.ts`, feature CSS, and
