@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { RunStreamEvent } from '../../api/events';
-import { anchorRunsToItems, turnMetrics } from './ChatPage';
+import {
+  anchorRunsToItems,
+  missingRunResponsesByUserIndex,
+  turnMetrics,
+} from './ChatPage';
 import { restoreChatStream } from './chatStream';
 import type { ConversationDetail, Run } from './api';
 
@@ -112,6 +116,62 @@ describe('anchorRunsToItems', () => {
     expect(anchors.byIndex.get(0)?.id).toBe('run-1');
     expect(anchors.byIndex.get(2)?.id).toBe('run-2');
     expect(anchors.responseByIndex.get(3)?.id).toBe('run-2');
+  });
+});
+
+describe('missingRunResponsesByUserIndex', () => {
+  it('recovers model turns retained by a failed run but rolled out of session context', () => {
+    const items = [
+      item('user', 'First question'),
+      item('user', 'Second question'),
+      item('assistant', 'Latest answer'),
+    ];
+    const failed = run('run-1', 'First question', 'First pass.');
+    failed.status = 'failed';
+    failed.items = [
+      {
+        type: 'message_output_item',
+        agent_name: 'Researcher',
+        raw_item: {},
+        content: 'Intermediate answer',
+      },
+      {
+        type: 'message_output_item',
+        agent_name: 'Researcher',
+        raw_item: {},
+        content: 'Rejected final answer',
+      },
+    ];
+    const latest = run('run-2', 'Second question', 'Second pass.');
+
+    expect(missingRunResponsesByUserIndex(items, [failed, latest])).toEqual(
+      new Map([[0, ['Intermediate answer', 'Rejected final answer']]]),
+    );
+  });
+
+  it('does not duplicate model turns already present in the transcript', () => {
+    const items = [
+      item('user', 'Question'),
+      item('assistant', 'Intermediate answer'),
+      item('assistant', 'Final answer'),
+    ];
+    const completed = run('run-1', 'Question', 'Reasoning');
+    completed.items = [
+      {
+        type: 'message_output_item',
+        agent_name: 'Researcher',
+        raw_item: {},
+        content: 'Intermediate answer',
+      },
+      {
+        type: 'message_output_item',
+        agent_name: 'Researcher',
+        raw_item: {},
+        content: 'Final answer',
+      },
+    ];
+
+    expect(missingRunResponsesByUserIndex(items, [completed])).toEqual(new Map());
   });
 });
 

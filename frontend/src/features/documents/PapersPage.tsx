@@ -84,12 +84,12 @@ export default function PapersPage() {
   const ingestionRequest = useRef<AbortController | null>(null);
   const textRequestId = useRef(0);
 
-  const load = async (selectedId?: string) => {
+  const load = async (selectedId?: string | null) => {
     const [items, nextFolders] = await Promise.all([
       request<DocumentSummary[]>('/documents'),
       request<PaperFolder[]>('/paper-folders'),
     ]);
-    const targetId = selectedId ?? selected?.id ?? items[0]?.id;
+    const targetId = selectedId === null ? items[0]?.id : selectedId ?? selected?.id ?? items[0]?.id;
     const detail = targetId
       ? await request<Document>(`/documents/${encodeURIComponent(targetId)}`)
       : null;
@@ -257,13 +257,38 @@ export default function PapersPage() {
     }
   };
 
-  const deleteDocument = async (document: Document) => {
+  const deleteDocument = async (document: DocumentSummary) => {
+    if (!window.confirm(`Delete "${document.title}" and all of its saved files? This cannot be undone.`)) {
+      return;
+    }
     setBusyAction(`delete:${document.id}`);
     setError(null);
     try {
-      await request<void>(`/documents/${document.id}`, { method: 'DELETE' });
-      setSelected(null);
-      await load();
+      await request<void>(`/documents/${encodeURIComponent(document.id)}`, { method: 'DELETE' });
+      const deletedSelection = selected?.id === document.id;
+      if (deletedSelection) setSelected(null);
+      await load(deletedSelection ? null : selected?.id);
+    } catch (nextError) {
+      setError(nextError);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const deleteFolder = async (folder: PaperFolder) => {
+    const paperCount = documents.filter((document) => folderId(document) === folder.id).length;
+    const paperLabel = `${paperCount} paper${paperCount === 1 ? '' : 's'}`;
+    if (!window.confirm(`Delete the "${folder.name}" folder? Its ${paperLabel} will remain in Papers.`)) {
+      return;
+    }
+    setBusyAction(`delete-folder:${folder.id}`);
+    setError(null);
+    try {
+      await request<void>(`/paper-folders/${encodeURIComponent(folder.id)}`, {
+        method: 'DELETE',
+      });
+      setActiveFolder('unfiled');
+      await load(selected?.id);
     } catch (nextError) {
       setError(nextError);
     } finally {
@@ -460,7 +485,7 @@ export default function PapersPage() {
             <nav className="paper-folder-list" aria-label="Paper folders">
               <button
                 type="button"
-                className={activeFolder === 'all' ? 'active' : ''}
+                className={`paper-folder-target${activeFolder === 'all' ? ' active' : ''}`}
                 onClick={() => setActiveFolder('all')}
               >
                 <span>All papers</span>
@@ -468,43 +493,67 @@ export default function PapersPage() {
               </button>
               <button
                 type="button"
-                className={activeFolder === 'unfiled' ? 'active' : ''}
+                className={`paper-folder-target${activeFolder === 'unfiled' ? ' active' : ''}`}
                 onClick={() => setActiveFolder('unfiled')}
               >
                 <span>Papers</span>
                 <small>{documents.filter((document) => folderId(document) === null).length}</small>
               </button>
               {folders.map((folder) => (
-                <button
-                  type="button"
-                  className={activeFolder === folder.id ? 'active' : ''}
-                  key={folder.id}
-                  onClick={() => setActiveFolder(folder.id)}
-                >
-                  <span>{folder.name}</span>
-                  <small>
-                    {documents.filter((document) => folderId(document) === folder.id).length}
-                  </small>
-                </button>
+                <div className="paper-folder-row" key={folder.id}>
+                  <button
+                    type="button"
+                    className={`paper-folder-target${activeFolder === folder.id ? ' active' : ''}`}
+                    onClick={() => setActiveFolder(folder.id)}
+                  >
+                    <span>{folder.name}</span>
+                    <small>
+                      {documents.filter((document) => folderId(document) === folder.id).length}
+                    </small>
+                  </button>
+                  <button
+                    type="button"
+                    className="button danger icon paper-folder-delete"
+                    aria-label={`Delete folder ${folder.name}`}
+                    title={`Delete ${folder.name}`}
+                    disabled={operationBusy}
+                    onClick={() => void deleteFolder(folder)}
+                  >
+                    <Icon name="trash" size={14} />
+                  </button>
+                </div>
               ))}
             </nav>
             {visibleDocuments.map((document) => (
-              <button
-                type="button"
+              <div
                 className={selected?.id === document.id ? 'paper-row active' : 'paper-row'}
                 key={document.id}
-                onClick={() => {
-                  void request<Document>(`/documents/${encodeURIComponent(document.id)}`)
-                    .then(setSelected)
-                    .catch(setError);
-                }}
               >
-                <div>
-                  <strong>{document.title}</strong>
-                  <small>{document.source_filename}</small>
-                </div>
-                <StatusPill value={document.status} />
-              </button>
+                <button
+                  type="button"
+                  className="paper-row-main"
+                  onClick={() => {
+                    void request<Document>(`/documents/${encodeURIComponent(document.id)}`)
+                      .then(setSelected)
+                      .catch(setError);
+                  }}
+                >
+                  <div>
+                    <strong>{document.title}</strong>
+                    <small>{document.source_filename}</small>
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  className="button danger icon paper-row-delete"
+                  aria-label={`Delete paper ${document.title}`}
+                  title={`Delete ${document.title}`}
+                  disabled={operationBusy || document.status === 'processing'}
+                  onClick={() => void deleteDocument(document)}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
             ))}
             {!documents.length ? <p>Upload or download a PDF to start the research library.</p> : null}
             {documents.length && !visibleDocuments.length ? <p>No papers in this folder.</p> : null}
@@ -585,6 +634,7 @@ export default function PapersPage() {
                   disabled={operationBusy || selected.status === 'processing'}
                   onClick={() => void deleteDocument(selected)}
                 >
+                  <Icon name="trash" size={13} />
                   {busyAction === `delete:${selected.id}` ? 'Deleting…' : 'Delete'}
                 </button>
               </div>

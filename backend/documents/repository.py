@@ -125,6 +125,21 @@ class DocumentRepository:
             session.refresh(folder)
             return folder
 
+    def delete_folder(self, folder_id: str) -> bool:
+        with self.session_factory() as session:
+            folder = session.get(PaperFolder, folder_id)
+            if folder is None:
+                return False
+            documents = session.scalars(select(Document)).all()
+            for document in documents:
+                metadata = dict(document.metadata_json or {})
+                if metadata.get("folder_id") == folder_id:
+                    metadata.pop("folder_id", None)
+                    document.metadata_json = metadata
+            session.delete(folder)
+            session.commit()
+            return True
+
     def assign_folder(self, document_id: str, folder_id: str | None) -> Document:
         with self.session_factory() as session:
             document = session.get(Document, document_id)

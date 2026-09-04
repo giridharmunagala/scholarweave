@@ -142,6 +142,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         document_repository,
         document_ingestion,
         document_ocr,
+        workspace,
     )
     source_downloads = SourceDownloadService(
         resolved,

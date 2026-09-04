@@ -11,7 +11,7 @@ from backend.agents.blueprint import AgentBlueprint, SessionPolicySpec
 from backend.agents.compiler import AgentCompiler
 from backend.agents.harness import ModelBinding
 from backend.core.config import Settings
-from backend.core.errors import ConflictError, NotFoundError
+from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.runs.events import EventBroker
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
@@ -341,6 +341,76 @@ async def test_failed_completion_preserves_user_message_for_next_turn(
         and message.get("content") == "Second turn must survive."
         for message in third_request_messages
     )
+    await binding.client.close()
+
+
+@pytest.mark.anyio
+async def test_validation_completion_rejection_starts_corrective_epoch(
+    tmp_path,
+    stub_provider,
+) -> None:
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Answer the user.",
+                        "tool_ids": [],
+                    }
+                ],
+                "tools": [],
+            }
+        )
+    )
+    validation_attempts = 0
+
+    def require_notes(_context) -> None:
+        nonlocal validation_attempts
+        validation_attempts += 1
+        if validation_attempts == 1:
+            raise ValidationError(
+                "Paper work is incomplete.",
+                issues=["Paper: populate notes.md through save_research_note"],
+            )
+
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        ConversationSessionFactory(settings.database_path),
+        ToolRuntime(),
+        EventBroker(),
+        settings=settings,
+    )
+
+    run = await service.run_now(
+        replace(
+            compiled,
+            completion_validator=require_notes,
+            completion_policy_id="paper-work-v1",
+        ),
+        "Summarize the paper.",
+    )
+
+    assert run.status == "completed", run.error
+    assert validation_attempts == 2
+    assert len(stub_provider.requests) == 2
+    assert "populate notes.md through save_research_note" in str(
+        stub_provider.requests[1]["messages"]
+    )
+    assert [epoch.terminal_reason for epoch in run.epochs] == [
+        "completion_rejected",
+        "goal_completed",
+    ]
     await binding.client.close()
 
 

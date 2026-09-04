@@ -125,6 +125,13 @@ def create_paper_folder(
     return _paper_folder_response(container.documents.create_folder(payload.name))
 
 
+@router.delete("/paper-folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_paper_folder(folder_id: str, container=Depends(services)) -> Response:
+    if not container.documents.delete_folder(folder_id):
+        raise HTTPException(status_code=404, detail="Paper folder was not found.")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.get("/documents", response_model=list[DocumentSummaryResponse])
 def list_documents(container=Depends(services)) -> list[DocumentSummaryResponse]:
     return [

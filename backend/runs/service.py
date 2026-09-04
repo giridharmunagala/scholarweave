@@ -29,7 +29,7 @@ from backend.conversations.steering import (
     emit_steering_applied,
 )
 from backend.core.config import Settings
-from backend.core.errors import ConflictError, NotFoundError
+from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.prompting.registry import PromptRegistry
 from backend.providers.inference import InferenceScheduler
 from backend.providers.reasoning import ReasoningEffort
@@ -1284,6 +1284,33 @@ class RunService:
                             first_epoch = False
                             active_epoch_id = None
                             continue
+                        completion_repair = _completion_repair_instruction(
+                            compiled,
+                            context,
+                        )
+                        if completion_repair is not None:
+                            self._persist_items(run_id, result.new_items)
+                            await session.add_items(result.generated_items)
+                            aggregate_usage = self._finish_epoch(
+                                run_id,
+                                epoch,
+                                epoch_usage,
+                                "completion_rejected",
+                            )
+                            await sink.emit(
+                                "run.epoch.completed",
+                                {
+                                    "epoch_id": epoch.id,
+                                    "epoch_index": epoch.epoch_index,
+                                    "terminal_reason": "completion_rejected",
+                                    "usage": aggregate_usage,
+                                },
+                            )
+                            epoch_input = completion_repair
+                            consumed_turns += int(epoch_usage["model_turns"])
+                            first_epoch = False
+                            active_epoch_id = None
+                            continue
                         await self._finish_result(
                             run_id,
                             result,
@@ -1293,6 +1320,7 @@ class RunService:
                             session=session,
                             session_checkpoint=session_checkpoint,
                             epoch_usage=epoch_usage,
+                            completion_validated=True,
                         )
                         finished = self._repository.get(run_id)
                         aggregate_usage = self._finish_epoch(
@@ -1473,6 +1501,7 @@ class RunService:
         session: Any,
         session_checkpoint: int,
         epoch_usage: dict[str, Any],
+        completion_validated: bool = False,
     ) -> None:
         self._persist_items(run_id, result.new_items)
         await session.add_items(result.generated_items)
@@ -1487,7 +1516,7 @@ class RunService:
             self._repository.aggregate_epoch_usage(run_id),
             epoch_usage,
         )
-        if compiled.completion_validator is not None:
+        if compiled.completion_validator is not None and not completion_validated:
             try:
                 compiled.completion_validator(context)
             except Exception:
@@ -1810,3 +1839,24 @@ def _epoch_model_turns(usage: dict[str, Any], limit: int) -> int:
     if isinstance(requests, int) and not isinstance(requests, bool):
         return max(0, min(limit, requests))
     return limit
+
+
+def _completion_repair_instruction(
+    compiled: CompiledAgent,
+    context: ScholarWeaveContext,
+) -> str | None:
+    validator = compiled.completion_validator
+    if validator is None:
+        return None
+    try:
+        validator(context)
+    except ValidationError as exc:
+        issues = "\n".join(f"- {issue}" for issue in exc.issues)
+        detail = f"\nMissing requirements:\n{issues}" if issues else ""
+        return (
+            "Your attempted final answer did not satisfy the run's completion requirements. "
+            "Do not repeat the final answer yet. Use the available tools to complete every missing "
+            "requirement below, then provide the final answer."
+            f"\n\n{exc.message}{detail}"
+        )
+    return None

@@ -15,6 +15,7 @@ from backend.documents.repository import DocumentRepository
 from backend.persistence.files import StoredFile
 from backend.providers.types import AgentModelDefaults, ModelReference
 from backend.utils import ProgressCallback
+from backend.workspace.service import WorkspaceService
 
 
 class DocumentService:
@@ -25,10 +26,12 @@ class DocumentService:
         repository: DocumentRepository,
         ingestion: DocumentIngestion,
         ocr: DocumentOCR,
+        workspace: WorkspaceService,
     ) -> None:
         self.repository = repository
         self.ingestion = ingestion
         self.ocr = ocr
+        self.workspace = workspace
         self._active_ingestions: dict[str, anyio.CancelScope] = {}
         self._ingestion_finished: dict[str, anyio.Event] = {}
         self._ingestion_subscribers: dict[str, set[asyncio.Queue[None]]] = {}
@@ -93,6 +96,9 @@ class DocumentService:
     def create_folder(self, name: str) -> PaperFolder:
         return self.repository.create_folder(name)
 
+    def delete_folder(self, folder_id: str) -> bool:
+        return self.repository.delete_folder(folder_id)
+
     def assign_folder(self, document_id: str, folder_id: str | None) -> Document:
         return self.repository.assign_folder(document_id, folder_id)
 
@@ -109,7 +115,13 @@ class DocumentService:
         return self.repository.get_artifact(artifact_id)
 
     def delete_document(self, document_id: str) -> bool:
-        return self.repository.delete(document_id)
+        if not self.repository.delete(document_id):
+            return False
+        try:
+            self.workspace.delete_folder(f"papers/{document_id}")
+        except FileNotFoundError:
+            pass
+        return True
 
     def delete_run_artifacts(self, run_id: str) -> None:
         self.repository.delete_run_artifacts(run_id)

@@ -83,12 +83,36 @@ def test_paper_folders_organize_documents(test_settings) -> None:
         duplicate = client.post("/api/paper-folders", json={"name": " methods "})
         assert duplicate.status_code == 409
 
-        unfiled = client.put(
-            f"/api/documents/{document.id}/folder",
-            json={"folder_id": None},
-        )
-        assert unfiled.status_code == 200, unfiled.text
+        deleted = client.delete(f"/api/paper-folders/{folder['id']}")
+        assert deleted.status_code == 204, deleted.text
+        assert client.get("/api/paper-folders").json() == []
+        unfiled = client.get(f"/api/documents/{document.id}")
         assert "folder_id" not in unfiled.json()["metadata"]
+        assert client.delete(f"/api/paper-folders/{folder['id']}").status_code == 404
+
+
+def test_deleting_paper_removes_managed_files_and_workspace_notes(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        document = app.state.services.documents.create_document_from_bytes(
+            b"%PDF-1.4\n%%EOF",
+            filename="delete-me.pdf",
+            title="Delete Me",
+        )
+        paper = app.state.services.workspace.ensure_paper_folder(document.id, document.title)
+        assert (test_settings.workspace_dir / paper["summary_path"]).exists()
+        assert (test_settings.documents_dir / document.id).exists()
+
+        deleted = client.delete(f"/api/documents/{document.id}")
+
+        assert deleted.status_code == 204, deleted.text
+        assert client.get(f"/api/documents/{document.id}").status_code == 404
+        assert not (test_settings.workspace_dir / paper["folder"]).exists()
+        assert not (test_settings.documents_dir / document.id).exists()
+        assert all(
+            not entry.path.startswith(f"papers/{document.id}/")
+            for entry in app.state.services.workspace.list_files()
+        )
 
 
 def test_extracted_markdown_contains_only_paper_text(test_settings) -> None:

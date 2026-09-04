@@ -55,6 +55,8 @@ Papers can be uploaded or downloaded from a URL. Ingestion:
 Every acquired paper has canonical `summary.md` and `notes.md` files in the workspace. Saving a
 reviewed summary also creates an immutable summary version. Papers can be grouped into named folders;
 folder assignment changes document metadata only and never moves the source PDF or workspace files.
+Deleting a folder returns its papers to the default Papers group. Deleting a paper removes its
+managed PDF, extracted artifacts, summaries, and notes.
 
 ## Setup
 
