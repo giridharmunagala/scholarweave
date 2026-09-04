@@ -4,7 +4,7 @@ import inspect
 
 import agents
 
-from backend.runtime.sdk_compat import SUPPORTED_SDK_VERSION, assert_supported_sdk
+from backend.agents.sdk import SUPPORTED_SDK_VERSION, assert_supported_sdk
 
 
 def test_sdk_version_is_exactly_supported() -> None:

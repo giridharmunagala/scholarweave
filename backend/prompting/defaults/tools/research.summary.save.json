@@ -1,0 +1,9 @@
+{
+  "label": "Save paper summary version",
+  "description": "Save one completed, self-reviewed, citation-grounded single-paper summary as a new immutable version and update the paper's canonical summary.md. Use this exactly once after reading the paper and checking evidence, whether the summary came from chat or the dedicated paper-summary workflow.",
+  "parameter_descriptions": {
+    "document_id": "The exact local document ID being summarized.",
+    "content": "The complete final summary Markdown with valid paper page or chunk citations.",
+    "review_summary": "A concise record of the reviewer checks completed and any remaining evidence limitations."
+  }
+}

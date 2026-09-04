@@ -130,56 +130,6 @@
 }
 .swatch i { flex: 1; }
 
-/* ------------------------------------------------------------ Wallpaper --- */
-
-/*
- * The backdrop everything else is glass over. It is one fixed layer rather than a
- * body background so an uploaded image can be softened and dimmed: `filter` needs
- * a real element, and the dim has to sit above the blur but below the grain.
- */
-.app-wallpaper {
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  overflow: hidden;
-  pointer-events: none;
-}
-.app-wallpaper::before,
-.app-wallpaper::after { content: ''; position: absolute; }
-.app-wallpaper::before {
-  /* Bleed past the edges so blurring never exposes a soft border. */
-  inset: calc(-2 * var(--wallpaper-blur, 0px) - 8px);
-  background-image: var(--wallpaper);
-  background-position: center;
-  background-repeat: var(--wallpaper-repeat, no-repeat);
-  background-size: var(--wallpaper-size, cover);
-  filter: blur(var(--wallpaper-blur, 0px));
-}
-.app-wallpaper::after {
-  inset: 0;
-  background-color: color-mix(in srgb, var(--bg) var(--wallpaper-dim, 0%), transparent);
-  background-image: var(--grain);
-  background-repeat: repeat;
-  background-size: 160px 160px;
-}
-
-/* Legibility aids for thin glass. Both are inert at --glass-open: 0 — the halo has
- * zero radius and zero alpha, and the edge highlight keeps its stock value — so the
- * built-in themes render exactly as they did before. */
-.app-shell { text-shadow: var(--glass-halo); }
-/* Anything sitting on its own solid fill already has the contrast it needs, and a
- * halo on monospace or inside a control just looks smeared. */
-pre,
-code,
-.code-card,
-input,
-textarea,
-select,
-button,
-.status-pill,
-.badge,
-.chip { text-shadow: none; }
-
 /* ----------------------------------------------------------------- Page --- */
 
 .app-main { min-width: 0; padding: clamp(var(--space-4), 2.2vw, var(--space-6)); background: transparent; }

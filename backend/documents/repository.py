@@ -5,15 +5,15 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.config import Settings
-from backend.core.text import clean_filename
-from backend.core.time import utcnow
-from backend.documents.errors import DocumentProcessingError
-from backend.documents.models import Artifact, Document, DocumentChunk
+from backend.core.errors import ConflictError, NotFoundError
+from backend.core.errors import DocumentProcessingError
+from backend.utils import clean_filename, utcnow
+from backend.documents.models import Artifact, Document, DocumentChunk, PaperFolder
 from backend.persistence.files import SafeStorage, StoredFile
 
 
@@ -92,6 +92,52 @@ class DocumentRepository:
                     metadata_json={"storage_area": "documents"},
                 )
             )
+            session.commit()
+            session.refresh(document)
+            return document
+
+    def list_folders(self) -> list[PaperFolder]:
+        with self.session_factory() as session:
+            return list(
+                session.scalars(
+                    select(PaperFolder).order_by(
+                        func.lower(PaperFolder.name),
+                        PaperFolder.created_at,
+                    )
+                )
+            )
+
+    def create_folder(self, name: str) -> PaperFolder:
+        normalized = " ".join(name.split())
+        if not normalized:
+            raise ValueError("Folder name cannot be empty.")
+        with self.session_factory() as session:
+            existing = session.scalar(
+                select(PaperFolder).where(
+                    func.lower(PaperFolder.name) == normalized.casefold()
+                )
+            )
+            if existing is not None:
+                raise ConflictError(f"A paper folder named '{normalized}' already exists.")
+            folder = PaperFolder(name=normalized)
+            session.add(folder)
+            session.commit()
+            session.refresh(folder)
+            return folder
+
+    def assign_folder(self, document_id: str, folder_id: str | None) -> Document:
+        with self.session_factory() as session:
+            document = session.get(Document, document_id)
+            if document is None:
+                raise NotFoundError("Paper was not found.")
+            if folder_id is not None and session.get(PaperFolder, folder_id) is None:
+                raise NotFoundError("Paper folder was not found.")
+            metadata = dict(document.metadata_json or {})
+            if folder_id is None:
+                metadata.pop("folder_id", None)
+            else:
+                metadata["folder_id"] = folder_id
+            document.metadata_json = metadata
             session.commit()
             session.refresh(document)
             return document

@@ -8,17 +8,14 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.persistence import Base, JSONText
-from backend.runtime.sdk_compat import SUPPORTED_SDK_VERSION
-from backend.core.time import utcnow
+from backend.agents.sdk import SUPPORTED_SDK_VERSION
+from backend.utils import utcnow
 
 
 class AgentRunRecord(Base):
     __tablename__ = "agent_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    agent_revision_id: Mapped[str | None] = mapped_column(
-        ForeignKey("agent_revisions.id", ondelete="SET NULL"), nullable=True
-    )
     conversation_id: Mapped[str | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
     )
@@ -33,6 +30,9 @@ class AgentRunRecord(Base):
     trace_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sdk_version: Mapped[str] = mapped_column(String(32), default=SUPPORTED_SDK_VERSION)
     state_json: Mapped[Any | None] = mapped_column(JSONText, nullable=True)
+    context_window_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    runtime_metadata_json: Mapped[Any] = mapped_column(JSONText, default=dict)
+    completion_policy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -118,7 +118,10 @@ class AgentRunClaimRecord(Base):
         ForeignKey("agent_runs.id", ondelete="CASCADE"), primary_key=True
     )
     owner_id: Mapped[str] = mapped_column(String(36), index=True)
+    generation: Mapped[int] = mapped_column(Integer, default=1)
+    token: Mapped[str] = mapped_column(String(36), unique=True)
     claimed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class AgentRunEpochRecord(Base):

@@ -1,0 +1,9 @@
+{
+  "label": "Read paper summary batch",
+  "description": "Inspect or prepare the paper, or read one fixed batch of up to 10 pages or 10 chunks for the single-agent summary workflow. At most five content batches may be read, limiting summary coverage to 50 pages or 50 chunks.",
+  "parameter_descriptions": {
+    "document_id": "The exact local document ID being summarized.",
+    "action": "Inspect metadata/readability, prepare unreadable extraction, or read a pages/chunks batch.",
+    "start": "For pages, the one-based starting page; for chunks, the zero-based starting chunk. Use null for inspect or prepare."
+  }
+}

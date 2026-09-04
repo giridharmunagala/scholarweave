@@ -1,1 +1,0 @@
-"""Safe local workspace access."""

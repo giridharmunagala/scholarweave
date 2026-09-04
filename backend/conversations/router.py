@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Response, status
 
 from backend.agents.blueprint import ModelReferenceSpec, SessionPolicySpec
-from backend.api.dependencies import services
+from backend.core.http import services
 from backend.conversations.schemas import (
     ConversationDetailResponse,
     ConversationMessageRequest,
@@ -78,6 +78,7 @@ async def send_research_message(
         web_enabled=payload.web_enabled,
         fast_answer=payload.fast_answer,
         web_search_limit=payload.web_search_limit,
+        context_window_tokens=payload.context_window_tokens,
     )
     return ConversationMessageResponse(
         conversation=_response(container.autonomous.get_conversation(conversation_id)),
@@ -138,6 +139,7 @@ async def send_deep_work_message(
         payload.content,
         reasoning_effort=payload.reasoning_effort,
         web_enabled=payload.web_enabled,
+        context_window_tokens=payload.context_window_tokens,
     )
     return ConversationMessageResponse(
         conversation=_response(
@@ -152,7 +154,6 @@ def _response(record) -> ConversationResponse:
         id=record.id,
         title=record.title,
         kind=record.kind,
-        agent_revision_id=record.agent_revision_id,
         model_reference=ModelReferenceSpec.model_validate(record.model_reference_json or {}),
         session_policy=SessionPolicySpec.model_validate(record.session_policy_json or {}),
         status=record.status,

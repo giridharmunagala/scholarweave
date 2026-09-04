@@ -9,25 +9,68 @@
 .chat-page > .notice { flex: none; margin: var(--space-3) var(--space-4) 0; }
 
 .chat-layout {
+  --chat-list-width: 272px;
+  --chat-activity-width: 320px;
   display: grid;
-  grid-template-columns: 272px minmax(0, 1fr);
+  grid-template-columns: var(--chat-list-width) minmax(0, 1fr);
   flex: 1 1 auto;
   min-height: 0;
   transition: grid-template-columns var(--dur-med) var(--ease);
 }
-.chat-layout.activity-open { grid-template-columns: 272px minmax(0, 1fr) 320px; }
+.chat-layout.activity-open {
+  grid-template-columns: var(--chat-list-width) minmax(0, 1fr) var(--chat-activity-width);
+}
 /* Hiding the list hides it completely: a 44px stub was neither list nor space. */
 .chat-layout.collapsed { grid-template-columns: 0 minmax(0, 1fr); }
-.chat-layout.collapsed.activity-open { grid-template-columns: 0 minmax(0, 1fr) 320px; }
+.chat-layout.collapsed.activity-open {
+  grid-template-columns: 0 minmax(0, 1fr) var(--chat-activity-width);
+}
 .chat-layout.collapsed .conversation-list {
   border-right-color: transparent;
   opacity: 0;
   pointer-events: none;
 }
+/* A drag while resizing must not select transcript text or animate the columns. */
+.chat-layout.resizing { transition: none; user-select: none; }
+
+/* ------------------------------------------------------- Pane resizers --- */
+
+.pane-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 5;
+  width: 8px;
+  padding: 0;
+  border: 1px solid var(--divider);
+  background: var(--glass-inset);
+  cursor: col-resize;
+  touch-action: none;
+}
+.pane-resizer.right { right: 0; }
+.pane-resizer.left { left: 0; }
+.pane-resizer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  transform: translateX(-50%);
+  transition: background var(--dur-fast) var(--ease);
+  content: '';
+}
+.pane-resizer:hover::after,
+.pane-resizer:focus-visible::after,
+.pane-resizer.active::after { background: var(--accent); }
+.pane-resizer:focus-visible { outline: none; }
+.chat-layout.collapsed .conversation-list .pane-resizer { display: none; }
 
 /* ----------------------------------------------------------- Chat list --- */
 
 .conversation-list {
+  position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: var(--space-2);
@@ -68,10 +111,10 @@
 
 .conversation-open {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-2);
   width: 100%;
-  padding: .42rem .55rem;
+  padding: .42rem 2.2rem .42rem .55rem;
   border: 0;
   background: transparent;
   color: var(--text);
@@ -82,14 +125,15 @@
 .conversation-open strong {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
   font-weight: 500;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .conversation.active .conversation-open strong { color: var(--accent-strong); font-weight: 600; }
 .conversation-time {
   flex: none;
+  margin-top: .08rem;
   color: var(--muted);
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
@@ -99,7 +143,7 @@
 
 .conversation-delete {
   position: absolute;
-  top: 50%;
+  top: .35rem;
   right: .3rem;
   display: grid;
   place-items: center;
@@ -108,12 +152,12 @@
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
-  opacity: 0;
+  opacity: 1;
   cursor: pointer;
-  transform: translateY(-50%);
   transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
 }
 .conversation:hover .conversation-delete, .conversation-delete:focus-visible { opacity: 1; }
+.conversation-delete:disabled { opacity: .3; cursor: not-allowed; }
 .conversation-delete:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
 .conversation-empty { padding: var(--space-4) var(--space-3); color: var(--muted); font-size: var(--text-sm); text-align: center; }
 
@@ -162,12 +206,16 @@
 }
 .chat-list-toggle:hover { background: var(--surface-2); color: var(--text); }
 .activity-toggle {
+  position: relative;
   display: inline-flex;
+  flex: none;
   align-items: center;
+  justify-content: center;
   gap: .35rem;
+  width: 1.9rem;
   min-height: 1.9rem;
   margin-left: auto;
-  padding: 0 .5rem;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
@@ -176,8 +224,11 @@
 }
 .activity-toggle:hover, .activity-toggle.active { background: var(--surface-2); color: var(--text); }
 .activity-toggle span {
-  min-width: 1.15rem;
-  padding: .06rem .3rem;
+  position: absolute;
+  top: -.25rem;
+  right: -.35rem;
+  min-width: 1rem;
+  padding: .04rem .22rem;
   border-radius: var(--radius-pill);
   background: var(--accent-soft);
   color: var(--accent-strong);
@@ -185,17 +236,26 @@
   font-weight: 700;
   text-align: center;
 }
-.chat-working { display: inline-flex; align-items: center; gap: var(--space-2); margin-left: auto; color: var(--muted); font-size: var(--text-xs); }
-.activity-toggle + .chat-working { margin-left: 0; }
-.chat-header .status-pill { margin-left: auto; }
-.activity-toggle + .status-pill { margin-left: 0; }
-.chat-working + .status-pill { margin-left: 0; }
+.compaction-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  padding: .22rem .5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--divider));
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.compaction-indicator.failed {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--divider));
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  color: var(--danger);
+}
 .spinner.tiny { width: 13px; height: 13px; border-width: 2px; }
 
-/* Void at the margins, a firmer plate behind the reading column, painted as a single
-   gradient so the two never composite on top of each other — at `--glass-open: 0` both
-   stops are the same colour and the thread is flat, exactly as the themes ship. The
-   edges fade rather than cut so the plate reads as light on glass, not a taped-on box. */
 .chat-thread {
   position: relative;
   display: grid;
@@ -206,14 +266,14 @@
   background: linear-gradient(
     to right,
     var(--glass-void) 0,
-    var(--glass-void) calc(50% - var(--chat-band) / 2 - 1.5rem),
-    var(--glass-column) calc(50% - var(--chat-band) / 2 + 1.5rem),
-    var(--glass-column) calc(50% + var(--chat-band) / 2 - 1.5rem),
-    var(--glass-void) calc(50% + var(--chat-band) / 2 + 1.5rem),
+    var(--glass-void) calc(50% - var(--chat-band) / 2),
+    var(--glass-column) calc(50% - var(--chat-band) / 2),
+    var(--glass-column) calc(50% + var(--chat-band) / 2),
+    var(--glass-void) calc(50% + var(--chat-band) / 2),
     var(--glass-void) 100%
   );
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur-wide);
+  -webkit-backdrop-filter: var(--glass-blur-wide);
 }
 
 /* Everything in the thread shares one centred reading column, so answers, traces
@@ -325,6 +385,54 @@
 .thinking-bubble span:nth-child(3) { animation-delay: .36s; }
 @keyframes thinking { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-3px); } }
 
+/* ------------------------------------------------------- Live activity --- */
+
+/* While a run is open the thread says what the agent is doing right now, by name,
+   so waiting never looks like nothing happening. */
+.live-activity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: .5rem .7rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--divider));
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+}
+.live-activity-body { display: grid; gap: 1px; min-width: 0; margin-right: auto; }
+.live-activity-body strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-activity-body small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.live-activity-elapsed {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+.live-activity-open {
+  flex: none;
+  padding: .2rem .5rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--divider));
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  cursor: pointer;
+}
+.live-activity-open:hover { background: var(--surface); }
 .scroll-to-bottom {
   position: absolute;
   bottom: 7.5rem;
@@ -387,23 +495,6 @@
   padding: var(--space-3);
   border-top: 1px solid var(--border);
 }
-.builder-todos {
-  display: grid;
-  gap: .4rem;
-  margin: 0;
-  padding: .6rem;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  list-style: none;
-}
-.builder-todos li { display: flex; gap: .55rem; align-items: start; color: var(--muted); font-size: var(--text-sm); }
-.builder-todos li > span { width: 1rem; color: var(--muted); font-weight: 700; text-align: center; }
-.builder-todos li > div { display: grid; gap: .1rem; }
-.builder-todos li strong { color: inherit; }
-.builder-todos li small { color: var(--muted); }
-.builder-todos .todo-completed { color: var(--success); }
-.builder-todos .todo-in_progress { color: var(--accent-strong); }
-.builder-todos .todo-blocked { color: var(--danger); }
 .reasoning-stream {
   border: 1px solid var(--reason-border);
   border-left: 3px solid var(--reason);
@@ -561,6 +652,7 @@
 /* ------------------------------------------------------ Activity sidebar --- */
 
 .activity-sidebar {
+  position: relative;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -612,6 +704,13 @@
   text-transform: uppercase;
 }
 .activity-sidebar-empty { margin: 0; color: var(--muted); font-size: var(--text-sm); }
+.prompt-snapshot { display: grid; gap: var(--space-3); }
+.prompt-snapshot section { display: grid; gap: var(--space-1); min-width: 0; }
+.prompt-snapshot h4, .prompt-snapshot p { margin: 0; }
+.prompt-snapshot code { overflow-wrap: anywhere; color: var(--muted); font-size: var(--text-xs); }
+.prompt-snapshot details { border-top: 1px solid var(--divider); padding-top: var(--space-1); }
+.prompt-snapshot summary { cursor: pointer; color: var(--text-strong); font-size: var(--text-sm); }
+.prompt-snapshot pre { max-height: 18rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------- Sources --- */
 
@@ -732,14 +831,14 @@
   background: linear-gradient(
     to right,
     var(--glass-list-void) 0,
-    var(--glass-list-void) calc(50% - var(--chat-band) / 2 - 1.5rem),
-    var(--glass-list) calc(50% - var(--chat-band) / 2 + 1.5rem),
-    var(--glass-list) calc(50% + var(--chat-band) / 2 - 1.5rem),
-    var(--glass-list-void) calc(50% + var(--chat-band) / 2 + 1.5rem),
+    var(--glass-list-void) calc(50% - var(--chat-band) / 2),
+    var(--glass-list) calc(50% - var(--chat-band) / 2),
+    var(--glass-list) calc(50% + var(--chat-band) / 2),
+    var(--glass-list-void) calc(50% + var(--chat-band) / 2),
     var(--glass-list-void) 100%
   );
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur-wide);
+  -webkit-backdrop-filter: var(--glass-blur-wide);
 }
 .composer-inner {
   display: grid;
@@ -787,7 +886,19 @@
 }
 .composer-bar { display: flex; align-items: center; gap: var(--space-1); }
 
-.chat-model-picker { min-width: 0; width: min(230px, 45%); }
+.chat-model-picker {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  width: min(230px, 32%);
+}
+.chat-model-picker-label {
+  flex: none;
+  padding-left: .25rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.chat-model-picker .model-select { min-width: 0; }
 .chat-model-picker .model-select-trigger {
   padding: .25rem .35rem .25rem .5rem;
   border-color: transparent;
@@ -815,6 +926,23 @@
   font-size: var(--text-xs);
 }
 .composer-reasoning select:hover { background-color: var(--surface-2); color: var(--text); }
+.composer-context {
+  display: flex;
+  align-items: center;
+  gap: .25rem;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.composer-context select {
+  width: auto;
+  min-width: 0;
+  padding: .3rem 1.4rem .3rem .35rem;
+  border-color: transparent;
+  background-color: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.composer-context select:hover { background-color: var(--surface-2); color: var(--text); }
 .composer-work-controls { display: flex; align-items: center; gap: 2px; }
 .composer-work-controls select {
   width: auto;
@@ -920,79 +1048,6 @@
   color: var(--accent-contrast);
 }
 .composer-run-answer:hover:not(:disabled) { background: var(--accent-strong); }
-.composer-icon.recording {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
-  animation: speech-pulse 1.4s ease-in-out infinite;
-}
-@keyframes speech-pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--danger) 16%, transparent); } }
-
-/* ------------------------------------------------------------- Dictation --- */
-
-.speech-control { position: relative; display: flex; align-items: center; }
-.speech-source-toggle {
-  display: grid;
-  place-items: center;
-  width: 1rem;
-  height: 2rem;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.speech-source-toggle svg { transform: rotate(-90deg); }
-.speech-source-toggle:hover { color: var(--text); }
-.speech-popover {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + var(--space-2));
-  z-index: 40;
-  display: grid;
-  gap: var(--space-2);
-  width: 232px;
-  padding: var(--space-3);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  box-shadow: var(--shadow-lg);
-}
-.speech-choice { display: flex; align-items: center; gap: var(--space-2); color: var(--text); font-size: var(--text-sm); cursor: pointer; }
-.speech-choice input { width: auto; margin: 0; }
-.speech-choice:has(input:disabled) { color: var(--muted); cursor: not-allowed; }
-.speech-install { display: grid; gap: var(--space-1); }
-.speech-install progress { width: 100%; }
-.speech-install small { color: var(--muted); }
-.speech-install .field-error { color: var(--danger); }
-
-.speech-review {
-  display: grid;
-  gap: var(--space-2);
-  padding: var(--space-3);
-  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface));
-}
-.speech-review-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-2);
-  font-size: var(--text-sm);
-}
-.speech-review textarea { min-height: 4.8rem; resize: vertical; background: var(--surface); }
-.speech-review-error { color: var(--danger); }
-.speech-review-actions { justify-content: flex-end; }
-.recording-dot { display: inline-flex; align-items: center; gap: .35rem; color: var(--danger); font-size: var(--text-xs); font-weight: 700; }
-.recording-dot::before {
-  width: .45rem;
-  height: .45rem;
-  border-radius: 50%;
-  background: currentColor;
-  content: '';
-  animation: speech-pulse 1.4s ease-in-out infinite;
-}
-
 /* ----------------------------------------------------------- Responsive --- */
 
 @media (max-width: 900px) {
@@ -1006,7 +1061,7 @@
     bottom: 0;
     left: 0;
     z-index: 20;
-    width: 272px;
+    width: var(--chat-list-width, 272px);
     background: var(--surface);
     box-shadow: var(--shadow-lg);
   }
@@ -1017,7 +1072,7 @@
     right: 0;
     bottom: 0;
     z-index: 21;
-    width: min(320px, 92vw);
+    width: min(var(--chat-activity-width, 320px), 92vw);
     box-shadow: var(--shadow-lg);
   }
   .message.role-user .message-body { max-width: 100%; }
@@ -1025,8 +1080,7 @@
 
 @media (max-width: 600px) {
   .chat-header, .message-list, .composer { padding-inline: var(--space-3); }
-  .chat-working { display: none; }
-  .chat-model-picker { width: min(160px, 45%); }
+  .chat-model-picker { width: min(190px, 48%); }
   .composer-bar { flex-wrap: wrap; }
   .composer-hint { display: none; }
   .source-images { grid-auto-columns: 88%; }

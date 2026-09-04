@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 from agents import (
@@ -17,7 +19,6 @@ from agents import (
 from backend.agents.blueprint import AgentBlueprint, ReasoningSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.agents.compiler import AgentCompiler, MAX_AGENT_TOOL_DEPTH
-from backend.agents.export import export_agent
 from backend.agents.guardrails import create_guardrail_catalog
 from backend.agents.instructions import (
     GLOBAL_AGENT_INSTRUCTIONS,
@@ -168,6 +169,106 @@ def test_compiler_builds_real_sdk_topology() -> None:
     assert "\nCurrent time:" in compiled.entry_agent.instructions
     assert compiled.entry_agent.model_settings.include_usage is True
     assert compiled.max_turns == 10
+
+
+def test_compiler_applies_explicit_context_window_to_every_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[int, int] = {}
+
+    def capture_context_windows(_settings, windows_by_agent, *_args, **_kwargs):
+        captured.update(windows_by_agent)
+        return None
+
+    monkeypatch.setattr(
+        "backend.agents.compiler.create_context_budget_filter",
+        capture_context_windows,
+    )
+    compiler = AgentCompiler(
+        Resolver(),
+        tool_catalog(),
+        settings=SimpleNamespace(user_timezone=None, user_profile=None),
+    )
+    payload = blueprint().model_dump(by_alias=True)
+    payload["tools"] = []
+    payload["handoffs"] = []
+    payload["agent_tools"] = []
+    for agent in payload["agents"]:
+        agent["tool_ids"] = []
+
+    compiled = compiler.compile(
+        AgentBlueprint.model_validate(payload),
+        context_window_tokens=65_536,
+    )
+
+    assert captured == {
+        id(compiled.agents_by_id["triage"]): 65_536,
+        id(compiled.agents_by_id["researcher"]): 65_536,
+    }
+
+
+@pytest.mark.anyio
+async def test_serialized_agent_tool_rejects_concurrent_calls() -> None:
+    active = 0
+    maximum_active = 0
+    started = 0
+
+    async def invoke(_context, _arguments: str) -> str:
+        nonlocal active, maximum_active, started
+        started += 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return "{}"
+
+    tool = FunctionTool(
+        name="summary",
+        description="Summarize one paper.",
+        params_json_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        on_invoke_tool=invoke,
+    )
+    serialized = AgentCompiler._serialize_agent_tool(tool)
+
+    results = await asyncio.gather(
+        *(serialized.on_invoke_tool(None, "{}") for _ in range(3))
+    )
+
+    assert maximum_active == 1
+    assert started == 1
+    assert results.count("{}") == 1
+    rejections = [result for result in results if result != "{}"]
+    assert len(rejections) == 2
+    assert all(
+        "one call at a time" in rejection and "not started" in rejection
+        for rejection in rejections
+    )
+
+
+@pytest.mark.anyio
+async def test_serialized_agent_tool_runs_sequential_calls() -> None:
+    async def invoke(_context, _arguments: str) -> str:
+        await asyncio.sleep(0)
+        return "{}"
+
+    tool = FunctionTool(
+        name="summary",
+        description="Summarize one paper.",
+        params_json_schema={
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        on_invoke_tool=invoke,
+    )
+    serialized = AgentCompiler._serialize_agent_tool(tool)
+
+    for _ in range(3):
+        assert await serialized.on_invoke_tool(None, "{}") == "{}"
 
 
 def test_json_schema_output_accepts_fenced_json() -> None:
@@ -524,21 +625,3 @@ def test_compiler_binds_agent_and_tool_guardrails() -> None:
     assert [guardrail.get_name() for guardrail in function_tool.tool_output_guardrails] == [
         "tool-output-limit"
     ]
-
-
-def test_python_export_preserves_sdk_topology_and_exact_tool_schema() -> None:
-    definition = blueprint()
-    source = export_agent(definition, tool_catalog=tool_catalog())
-
-    compile(source, "exported_agent.py", "exec")
-    assert "double-dollar delimiters" in source
-    assert "$$<math>$$" in source
-
-    assert "from agents import (" in source
-    assert "params_json_schema={'type': 'object', 'properties': {'text': {'type': 'string'}}" in source
-    assert "PersistedJsonSchema('Finding'" in source
-    assert "agent_researcher.as_tool(" in source
-    assert "handoff(agent_researcher" in source
-    assert "Runner.run(" in source
-    assert "run_config=RUN_CONFIG" in source
-    assert "session=SESSION" in source

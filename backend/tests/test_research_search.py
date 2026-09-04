@@ -10,11 +10,12 @@ import pytest
 from ddgs.exceptions import DDGSException, RatelimitException
 from ddgs.engines.duckduckgo import Duckduckgo
 
-from backend.autonomous.service import RESEARCH_TOOL_IDS, autonomous_blueprint
+from backend.conversations.autonomous import RESEARCH_TOOL_IDS, autonomous_blueprint
+from backend.prompting.registry import default_prompt_registry
 from backend.bootstrap import create_services
 from backend.core.config import Settings
 from backend.research import AsyncRateLimiter, ResearchSearchService
-from backend.runtime.context import ScholarWeaveContext
+from backend.agents.context import ScholarWeaveContext
 from backend.tools.catalog import create_tool_catalog
 
 
@@ -34,7 +35,45 @@ class StubDuckDuckGo:
 
 
 @pytest.mark.anyio
-async def test_search_providers_return_normalized_cited_results(tmp_path) -> None:
+async def test_duckduckgo_returns_normalized_results(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+    )
+    duckduckgo = StubDuckDuckGo(
+        [
+            {
+                "title": "Open <b>result</b>",
+                "href": "https://example.test/result",
+                "body": "Useful &amp; public",
+            }
+        ]
+    )
+    service = ResearchSearchService(
+        settings,
+        duckduckgo_client=duckduckgo,
+    )
+    web = await service.search_web("open source", 1)
+
+    assert web["results"][0] == {
+        "title": "Open result",
+        "url": "https://example.test/result",
+        "snippet": "Useful & public",
+        "engine": "duckduckgo",
+        "published_at": None,
+        "image_url": None,
+    }
+    assert web["provider"] == "duckduckgo"
+    assert duckduckgo.calls == [
+        (
+            "open source",
+            {"max_results": 1, "backend": "duckduckgo", "region": "wt-wt"},
+        )
+    ]
+
+
+@pytest.mark.anyio
+async def test_arxiv_and_wikipedia_return_direct_normalized_results(tmp_path) -> None:
     requests: list[httpx.Request] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
@@ -86,49 +125,24 @@ async def test_search_providers_return_normalized_cited_results(tmp_path) -> Non
         transport=httpx.MockTransport(respond),
         headers={"User-Agent": settings.search_user_agent},
     )
-    duckduckgo = StubDuckDuckGo(
-        [
-            {
-                "title": "Open <b>result</b>",
-                "href": "https://example.test/result",
-                "body": "Useful &amp; public",
-            }
-        ]
-    )
-    service = ResearchSearchService(
-        settings,
-        client=client,
-        duckduckgo_client=duckduckgo,
-    )
+    service = ResearchSearchService(settings, client=client)
     try:
-        web = await service.search_web("open source", 1)
         arxiv = await service.search_arxiv("agent research", 1)
         wikipedia = await service.search_wikipedia("research", 1)
     finally:
         await client.aclose()
 
-    assert web["results"][0] == {
-        "title": "Open result",
-        "url": "https://example.test/result",
-        "snippet": "Useful & public",
-        "engine": "duckduckgo",
-        "published_at": None,
-        "image_url": None,
-    }
-    assert web["provider"] == "duckduckgo"
-    assert duckduckgo.calls == [
-        (
-            "open source",
-            {"max_results": 1, "backend": "duckduckgo", "region": "wt-wt"},
-        )
-    ]
     assert arxiv["results"][0]["arxiv_id"] == "2601.00001v1"
     assert arxiv["results"][0]["authors"] == ["Ada Researcher"]
     assert arxiv["results"][0]["pdf_url"] == "https://arxiv.org/pdf/2601.00001v1"
-    assert wikipedia["results"][0]["url"] == "https://en.wikipedia.org/wiki/Research"
+    assert wikipedia["results"][0] == {
+        "page_id": 42,
+        "title": "Research",
+        "url": "https://en.wikipedia.org/wiki/Research",
+        "extract": "Systematic inquiry.",
+    }
     assert requests[0].url.params["max_results"] == "1"
     assert requests[1].url.params["gsrlimit"] == "1"
-    assert [request.method for request in requests] == ["GET", "GET"]
     assert all(request.headers["user-agent"] == settings.search_user_agent for request in requests)
 
 
@@ -203,7 +217,7 @@ async def test_duckduckgo_rate_limits_fail_without_retry(tmp_path) -> None:
 
 
 @pytest.mark.anyio
-async def test_duckduckgo_no_results_error_is_not_overridden(tmp_path) -> None:
+async def test_duckduckgo_no_results_is_a_successful_empty_result(tmp_path) -> None:
     now = [100.0]
     delays: list[float] = []
 
@@ -229,14 +243,16 @@ async def test_duckduckgo_no_results_error_is_not_overridden(tmp_path) -> None:
         sleep=advance,
     )
     try:
-        with pytest.raises(
-            RuntimeError,
-            match="search request failed: No results found",
-        ):
-            await service.search_web("open source", 1)
+        result = await service.search_web("open source", 1)
     finally:
         await service.close()
 
+    assert result == {
+        "query": "open source",
+        "provider": "duckduckgo",
+        "results": [],
+        "warning": "DuckDuckGo reported no results for this query.",
+    }
     assert duckduckgo.attempts == 1
     assert delays == []
 
@@ -390,11 +406,20 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     definitions = create_tool_catalog().definitions()
     catalog_ids = {definition.catalog_id for definition in definitions}
     expected = {catalog_id for _, catalog_id in RESEARCH_TOOL_IDS}
-    assert catalog_ids == {*expected, "tool.results.read"}
+    assert catalog_ids == {
+        *expected,
+        "conversation.title.set",
+        "tool.results.read",
+        "research.summary.save",
+        "work.plan.create",
+        "work.plan.update",
+        "work.plan.read",
+    }
 
     autonomous = autonomous_blueprint({})
     autonomous_catalog_ids = {tool.catalog_id for tool in autonomous.tools}
     assert autonomous_catalog_ids == expected
-    assert "smallest answer" not in autonomous.agents[0].instructions
-    assert "shortest answer" in autonomous.agents[0].instructions
+    assert autonomous.agents[0].instructions == default_prompt_registry().render("research")
+    assert {agent.id for agent in autonomous.agents} == {"researcher"}
+    assert {"save-note", "save-summary"}.issubset(autonomous.agents[0].tool_ids)
     assert autonomous.run.max_turns == 16

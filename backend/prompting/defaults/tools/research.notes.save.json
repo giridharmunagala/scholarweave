@@ -1,0 +1,13 @@
+{
+  "label": "Save research note",
+  "description": "Create a durable note or append to or overwrite a known note or paper notes file. Paper research is retained by default, so use paper_notes for useful paper-specific findings even when the user did not explicitly ask to save them. Other notes remain opt-in. Prefer append for additive observations; overwrite only when replacing the intended complete document. Never overwrite a paper summary through this tool.",
+  "parameter_descriptions": {
+    "target": "new_note, paper_notes, or an existing path.",
+    "mode": "append to preserve existing content or overwrite to replace it.",
+    "document_id": "Required for paper_notes, otherwise null.",
+    "path": "Required for path target, otherwise null.",
+    "name": "Required human-readable name for a new note, otherwise null.",
+    "content": "The complete Markdown content to write or append.",
+    "tags": "Short searchable tags; use an empty list when none are useful."
+  }
+}

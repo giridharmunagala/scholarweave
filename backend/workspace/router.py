@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Response, status
 
-from backend.api.dependencies import services
+from backend.core.http import services
 from backend.workspace.schemas import (
     WorkspaceFileContentResponse,
     WorkspaceFileResponse,

@@ -9,9 +9,7 @@ from typing import Any
 from fastapi import UploadFile
 
 from backend.core.config import Settings
-from backend.core.json import dumps_json, loads_json
-from backend.core.text import clean_filename
-from backend.persistence.hashing import sha256_bytes
+from backend.utils import clean_filename, dumps_json, loads_json, sha256_bytes
 
 
 class StorageError(ValueError):
@@ -73,7 +71,7 @@ class SafeStorage:
         absolute.parent.mkdir(parents=True, exist_ok=True)
         absolute.write_bytes(content)
         return StoredFile(
-            relative_path=str(Path(relative_path)),
+            relative_path=absolute.resolve().relative_to(base_dir.resolve()).as_posix(),
             absolute_path=absolute,
             size_bytes=len(content),
             sha256=sha256_bytes(content),
@@ -85,6 +83,23 @@ class SafeStorage:
 
     def write_json(self, base_dir: Path, relative_path: str, content: Any) -> StoredFile:
         return self.write_text(base_dir, relative_path, dumps_json(content))
+
+    def read_text(
+        self,
+        base_dir: Path,
+        relative_path: str,
+        *,
+        allowed_suffixes: set[str] | None = None,
+    ) -> str:
+        absolute = self._safe_path(
+            base_dir,
+            relative_path,
+            allowed_suffixes=allowed_suffixes,
+        )
+        content = absolute.read_bytes()
+        if len(content) > self.settings.max_artifact_bytes:
+            raise StorageError("Artifact exceeds maximum allowed size")
+        return content.decode("utf-8")
 
     async def save_upload(self, upload: UploadFile, relative_dir: str) -> StoredFile:
         filename = clean_filename(upload.filename or "upload.bin")
@@ -256,7 +271,9 @@ class SafeStorage:
             raise StorageError("Workspace write exceeds maximum allowed size")
         absolute.write_bytes(data)
         return StoredFile(
-            relative_path=relative_path,
+            relative_path=absolute.resolve()
+            .relative_to(self.settings.workspace_dir.resolve())
+            .as_posix(),
             absolute_path=absolute,
             size_bytes=len(data),
             sha256=sha256_bytes(data),

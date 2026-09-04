@@ -24,11 +24,6 @@ class SessionItemResponse(ConversationSchema):
     raw: Any
 
 
-class ConversationCreateRequest(ConversationSchema):
-    title: str = Field(default="New conversation", min_length=1, max_length=120)
-    agent_revision_id: str
-
-
 class ResearchConversationCreateRequest(ConversationSchema):
     title: str = Field(default="New research", min_length=1, max_length=120)
     model_reference: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
@@ -37,8 +32,7 @@ class ResearchConversationCreateRequest(ConversationSchema):
 class ConversationResponse(ConversationSchema):
     id: str
     title: str
-    kind: Literal["agent", "autonomous", "deep_work", "builder", "direct_agent"]
-    agent_revision_id: str | None
+    kind: Literal["autonomous", "deep_work"]
     model_reference: ModelReferenceSpec
     session_policy: SessionPolicySpec
     status: str
@@ -57,6 +51,7 @@ class ConversationMessageRequest(ConversationSchema):
     web_enabled: bool = True
     fast_answer: bool = False
     web_search_limit: int = Field(default=1, ge=1, le=100)
+    context_window_tokens: int | None = Field(default=None, ge=4_096, le=2_000_000)
 
 
 class ConversationMessageResponse(ConversationSchema):

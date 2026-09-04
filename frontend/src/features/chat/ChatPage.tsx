@@ -5,15 +5,15 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { ErrorNotice, Loading, StatusPill } from '../../shared/components/Ui';
-import { capabilityOptions } from '../providers/ModelDefaultsPanel';
+import { ErrorNotice, Loading } from '../../shared/components/Ui';
 import {
   providersApi,
-  type BuiltInSpeechStatus,
   type Provider,
   type Settings,
 } from '../providers/api';
@@ -23,10 +23,15 @@ import {
   type Conversation,
   type ConversationDetail,
   type ModelReference,
+  type PromptSnapshot,
   type Run,
   type SteeringMessage,
 } from './api';
-import { ChatModelPicker, preferredChatModel } from './ChatModelPicker';
+import {
+  ChatModelPicker,
+  preferredChatModel,
+  resolveModelReference,
+} from './ChatModelPicker';
 import {
   readStoredReasoningEffort,
   reasoningEffortsForModel,
@@ -42,17 +47,18 @@ import {
 } from './chatStream';
 import {
   buildTurnTimeline,
+  describeLiveActivity,
   emptyTurnTimeline,
   type TimelineSource,
   type TurnTimeline,
 } from './chatTimeline';
 import {
   ActivitySidebar,
+  LiveActivityBar,
   SourceChips,
   SourceImages,
   TurnTimelineView,
 } from './TurnTimeline';
-import { SpeechControl } from './SpeechControl';
 import './chat.css';
 
 const SUGGESTIONS = [
@@ -61,12 +67,115 @@ const SUGGESTIONS = [
   'What open research questions remain in this area?',
   'Draft research notes with citations for my current topic.',
 ];
-export const PROVIDER_TRANSCRIPTION_INTERVAL_MS = 750;
+const COMMON_CONTEXT_WINDOWS = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
 
-interface BuiltInSpeechMessage {
-  type: 'ready' | 'partial' | 'final' | 'error';
-  text?: string;
-  message?: string;
+function configuredContextWindow(
+  providers: Provider[],
+  reference: ModelReference,
+  fallback: number,
+) {
+  const provider = providers.find((item) => item.id === reference.provider_profile_id);
+  return provider?.models.find((model) => model.name === reference.model)?.context_window_tokens
+    ?? fallback;
+}
+
+function contextWindowLabel(tokens: number) {
+  return tokens % 1_024 === 0 ? `${tokens / 1_024}K` : tokens.toLocaleString();
+}
+
+/* The two rails are resizable so a wide tool result can be read without leaving the chat. */
+const LIST_WIDTH_KEY = 'scholarweave.chat.list-width';
+const ACTIVITY_WIDTH_KEY = 'scholarweave.chat.activity-width';
+const LIST_WIDTH = { value: 272, min: 200, max: 520 };
+const ACTIVITY_WIDTH = { value: 320, min: 260, max: 760 };
+
+type WidthBounds = { value: number; min: number; max: number };
+
+function clampWidth(width: number, bounds: WidthBounds): number {
+  return Math.round(Math.min(bounds.max, Math.max(bounds.min, width)));
+}
+
+function readStoredWidth(key: string, bounds: WidthBounds): number {
+  if (typeof window === 'undefined') return bounds.value;
+  const stored = Number(window.localStorage.getItem(key));
+  return Number.isFinite(stored) && stored > 0 ? clampWidth(stored, bounds) : bounds.value;
+}
+
+function storeWidth(key: string, width: number) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(key, String(width));
+  } catch {
+    /* A full or blocked store only costs the remembered width, never the session. */
+  }
+}
+
+/** A drag handle on the pane edge; keyboard arrows move it too, so it is not mouse-only. */
+function PaneResizer({
+  side,
+  label,
+  width,
+  bounds,
+  onResize,
+  onResizingChange,
+}: {
+  side: 'left' | 'right';
+  label: string;
+  width: number;
+  bounds: WidthBounds;
+  onResize: (width: number) => void;
+  onResizingChange: (resizing: boolean) => void;
+}) {
+  const [active, setActive] = useState(false);
+  const originRef = useRef({ pointer: 0, width });
+
+  const finish = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!active) return;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setActive(false);
+    onResizingChange(false);
+  };
+
+  return (
+    <div
+      className={`pane-resizer ${side}${active ? ' active' : ''}`}
+      role="separator"
+      tabIndex={0}
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuenow={width}
+      aria-valuemin={bounds.min}
+      aria-valuemax={bounds.max}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        originRef.current = { pointer: event.clientX, width };
+        setActive(true);
+        onResizingChange(true);
+      }}
+      onPointerMove={(event) => {
+        if (!active) return;
+        const delta = event.clientX - originRef.current.pointer;
+        onResize(clampWidth(originRef.current.width + (side === 'right' ? delta : -delta), bounds));
+      }}
+      onPointerUp={finish}
+      onPointerCancel={finish}
+      onDoubleClick={() => onResize(bounds.value)}
+      onKeyDown={(event) => {
+        const step = event.shiftKey ? 48 : 16;
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          onResize(clampWidth(width + (side === 'right' ? -step : step), bounds));
+        } else if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          onResize(clampWidth(width + (side === 'right' ? step : -step), bounds));
+        } else if (event.key === 'Home') {
+          event.preventDefault();
+          onResize(bounds.value);
+        }
+      }}
+    />
+  );
 }
 
 export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'deep-work' }) {
@@ -77,15 +186,13 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
   const [modelReference, setModelReference] = useState<ModelReference>({});
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
-  const [speechModelReference, setSpeechModelReference] = useState<ModelReference>({});
-  const [speechMode, setSpeechMode] = useState<'builtin' | 'provider'>('builtin');
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
     readStoredReasoningEffort,
   );
+  const [contextWindowTokens, setContextWindowTokens] = useState(32_768);
   const [webEnabled, setWebEnabled] = useState(true);
   const [fastAnswer, setFastAnswer] = useState(false);
   const [webSearchLimit, setWebSearchLimit] = useState(1);
-  const [builtInSpeech, setBuiltInSpeech] = useState<BuiltInSpeechStatus | null>(null);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
@@ -99,39 +206,36 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   const [sending, setSending] = useState(false);
   const [queueingSteering, setQueueingSteering] = useState(false);
   const [stopping, setStopping] = useState<'stop' | 'answer' | null>(null);
-  const [recording, setRecording] = useState(false);
-  const [startingRecording, setStartingRecording] = useState(false);
-  const [transcribing, setTranscribing] = useState(false);
-  const [speechPreview, setSpeechPreview] = useState<string | null>(null);
-  const [speechFinalFailed, setSpeechFinalFailed] = useState(false);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(
     () => typeof window === 'undefined' || window.innerWidth > 900,
   );
   const [activityOpen, setActivityOpen] = useState(false);
+  const [listWidth, setListWidth] = useState(() => readStoredWidth(LIST_WIDTH_KEY, LIST_WIDTH));
+  const [activityWidth, setActivityWidth] = useState(
+    () => readStoredWidth(ACTIVITY_WIDTH_KEY, ACTIVITY_WIDTH),
+  );
+  const [resizing, setResizing] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
-  const microphoneStreamRef = useRef<MediaStream | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const audioSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const audioProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const audioChunksRef = useRef<Float32Array[]>([]);
-  const speechPreviewTimerRef = useRef<number | null>(null);
-  const speechSocketRef = useRef<WebSocket | null>(null);
-  const partialTranscriptionBusyRef = useRef(false);
-  const transcriptionRequestRef = useRef(0);
-  const recordingStartPendingRef = useRef(false);
-  const speechMountedRef = useRef(false);
   const openRequestRef = useRef(0);
   const runLifecycleRef = useRef(0);
+  const effectiveModelReference = useMemo(
+    () => resolveModelReference(modelReference, settings),
+    [modelReference.provider_profile_id, modelReference.model, settings],
+  );
   const supportedReasoningEfforts = useMemo(
-    () => reasoningEffortsForModel(providers, modelReference),
-    [providers, modelReference.provider_profile_id, modelReference.model],
+    () => reasoningEffortsForModel(providers, effectiveModelReference),
+    [providers, effectiveModelReference.provider_profile_id, effectiveModelReference.model],
   );
 
   const refreshList = () => activeChatApi.list().then(setConversations);
-  const open = async (id: string) => {
+  const open = async (
+    id: string,
+    contextProviders = providers,
+    contextSettings: Settings | null = settings,
+  ) => {
     const request = ++openRequestRef.current;
     setRun(null);
     setRuns([]);
@@ -154,6 +258,13 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
     setCurrent(conversation);
     setModelReference(conversation.model_reference);
+    setContextWindowTokens(
+      configuredContextWindow(
+        contextProviders,
+        resolveModelReference(conversation.model_reference, contextSettings),
+        contextSettings?.agent_context_window_tokens ?? 32_768,
+      ),
+    );
     setRun(latestRun);
     setRuns(conversationRuns);
     setStream(latestRun ? displayStream(latestRun) : emptyChatStream);
@@ -170,65 +281,40 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       activeChatApi.list(),
       providersApi.list(),
       providersApi.settings(),
-      providersApi.builtInSpeechStatus(),
     ])
-      .then(async ([items, nextProviders, nextSettings, speechStatus]) => {
+      .then(async ([items, nextProviders, nextSettings]) => {
         setConversations(items);
         setProviders(nextProviders);
         setSettings(nextSettings);
         const preferredModel = preferredChatModel(nextSettings);
         setPreferredModelReference(preferredModel);
         setModelReference(preferredModel);
-        setSpeechModelReference(nextSettings.default_model_references.speech ?? {});
-        if (
-          nextSettings.default_model_references.speech?.provider_profile_id
-          && nextSettings.default_model_references.speech?.model
-        ) {
-          setSpeechMode('provider');
+        setContextWindowTokens(
+          configuredContextWindow(
+            nextProviders,
+            preferredModel,
+            nextSettings.agent_context_window_tokens,
+          ),
+        );
+        if (items[0]) {
+          await open(items[0].id, nextProviders, nextSettings);
         }
-        setBuiltInSpeech(speechStatus);
-        if (items[0]) await open(items[0].id);
       })
       .catch(setError)
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => {
-    if (builtInSpeech?.state !== 'installing') return;
-    const timer = window.setInterval(() => {
-      void providersApi.builtInSpeechStatus()
-        .then(setBuiltInSpeech)
-        .catch(setError);
-    }, 750);
-    return () => window.clearInterval(timer);
-  }, [builtInSpeech?.state]);
-
-  useEffect(() => {
     if (
       reasoningEffort
-      && modelReference.provider_profile_id
-      && modelReference.model
+      && effectiveModelReference.provider_profile_id
+      && effectiveModelReference.model
       && !supportedReasoningEfforts?.includes(reasoningEffort)
     ) {
       setReasoningEffort(null);
       storeReasoningEffort(null);
     }
   }, [reasoningEffort, supportedReasoningEfforts]);
-
-  useEffect(() => {
-    speechMountedRef.current = true;
-    return () => {
-      speechMountedRef.current = false;
-      if (speechPreviewTimerRef.current !== null) {
-        window.clearInterval(speechPreviewTimerRef.current);
-      }
-      audioProcessorRef.current?.disconnect();
-      audioSourceRef.current?.disconnect();
-      speechSocketRef.current?.close();
-      void audioContextRef.current?.close();
-      microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
-    };
-  }, []);
 
   useLayoutEffect(() => {
     const list = messageListRef.current;
@@ -395,6 +481,13 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   const create = () => {
     setCurrent(null);
     setModelReference(preferredModelReference);
+    setContextWindowTokens(
+      configuredContextWindow(
+        providers,
+        preferredModelReference,
+        settings?.agent_context_window_tokens ?? 32_768,
+      ),
+    );
     resetThread();
     composerRef.current?.focus();
   };
@@ -402,6 +495,13 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   const selectModel = (reference: ModelReference) => {
     setModelReference(reference);
     setPreferredModelReference(reference);
+    setContextWindowTokens(
+      configuredContextWindow(
+        providers,
+        reference,
+        settings?.agent_context_window_tokens ?? 32_768,
+      ),
+    );
     void providersApi
       .updateSettings({ last_chat_model_reference: reference })
       .then(setSettings)
@@ -415,15 +515,6 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   const selectReasoningEffort = (effort: ReasoningEffort | null) => {
     setReasoningEffort(effort);
     storeReasoningEffort(effort);
-  };
-
-  const installBuiltInSpeech = async () => {
-    setError(null);
-    try {
-      setBuiltInSpeech(await providersApi.installBuiltInSpeech());
-    } catch (nextError) {
-      setError(nextError);
-    }
   };
 
   const stopRun = async (answerWithAvailableInformation: boolean) => {
@@ -461,6 +552,12 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   };
 
   const remove = async (id: string) => {
+    const conversation = conversations.find((item) => item.id === id);
+    if (
+      !window.confirm(
+        `Delete "${conversation?.title ?? 'this chat'}"? This cannot be undone.`,
+      )
+    ) return;
     try {
       await activeChatApi.remove(id);
       const remaining = await activeChatApi.list();
@@ -477,7 +574,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
 
   const send = async (override?: string) => {
     const submitted = (override ?? content).trim();
-    if (!submitted || recording || startingRecording || transcribing || speechPreview !== null) return;
+    if (!submitted) return;
     if (sending) {
       if (
         !run
@@ -515,7 +612,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     try {
       let conversation = current;
       if (!conversation) {
-        const created = await activeChatApi.create(submitted.slice(0, 50), modelReference);
+        const created = await activeChatApi.create(modelReference);
         if (request !== openRequestRef.current) return;
         conversation = await activeChatApi.get(created.id);
         if (request !== openRequestRef.current) return;
@@ -530,6 +627,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
         webEnabled,
         mode === 'research' && fastAnswer,
         webSearchLimit,
+        contextWindowTokens,
       );
       if (request !== openRequestRef.current) return;
       setRun(response.run);
@@ -544,185 +642,6 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       setSending(false);
       setError(nextError);
     }
-  };
-
-  const transcribeRecording = async (audio: Blob, final: boolean) => {
-    if (!final && partialTranscriptionBusyRef.current) return;
-    const request = ++transcriptionRequestRef.current;
-    if (final) {
-      setTranscribing(true);
-      setSpeechFinalFailed(false);
-      setError(null);
-    } else {
-      partialTranscriptionBusyRef.current = true;
-    }
-    try {
-      const result = await providersApi.transcribe(audio, speechModelReference);
-      if (request === transcriptionRequestRef.current) {
-        setSpeechPreview(result.text.trim());
-      }
-    } catch (nextError) {
-      if (final) setSpeechFinalFailed(true);
-      setError(nextError);
-    } finally {
-      if (final) setTranscribing(false);
-      else partialTranscriptionBusyRef.current = false;
-    }
-  };
-
-  const stopRecording = () => {
-    if (speechPreviewTimerRef.current !== null) {
-      window.clearInterval(speechPreviewTimerRef.current);
-      speechPreviewTimerRef.current = null;
-    }
-    audioProcessorRef.current?.disconnect();
-    audioSourceRef.current?.disconnect();
-    microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
-    void audioContextRef.current?.close();
-    const chunks = audioChunksRef.current;
-    const sampleRate = audioContextRef.current?.sampleRate ?? 16_000;
-    const speechSocket = speechSocketRef.current;
-    audioProcessorRef.current = null;
-    audioSourceRef.current = null;
-    microphoneStreamRef.current = null;
-    audioContextRef.current = null;
-    audioChunksRef.current = [];
-    setRecording(false);
-    if (speechMode === 'builtin' && speechSocket?.readyState === WebSocket.OPEN) {
-      try {
-        speechSocket.send('finish');
-        setTranscribing(true);
-      } catch (nextError) {
-        setTranscribing(false);
-        setSpeechFinalFailed(true);
-        setError(nextError);
-      }
-    } else if (chunks.length) {
-      void transcribeRecording(encodeWav(chunks, sampleRate), true);
-    }
-  };
-
-  const toggleRecording = async () => {
-    if (recording) {
-      stopRecording();
-      return;
-    }
-    if (recordingStartPendingRef.current) return;
-    recordingStartPendingRef.current = true;
-    setStartingRecording(true);
-    let acquiredStream: MediaStream | null = null;
-    let acquiredContext: AudioContext | null = null;
-    try {
-      setError(null);
-      setSpeechPreview('');
-      setSpeechFinalFailed(false);
-      const microphone = acquireMicrophone(navigator.mediaDevices);
-      const speechWarmup = speechMode === 'builtin'
-        ? providersApi.startBuiltInSpeech()
-        : Promise.resolve(null);
-      const [microphoneResult, warmupResult] = await Promise.allSettled([
-        microphone,
-        speechWarmup,
-      ]);
-      if (microphoneResult.status !== 'fulfilled') throw microphoneResult.reason;
-      if (warmupResult.status === 'rejected') throw warmupResult.reason;
-      const activeStream = microphoneResult.value;
-      acquiredStream = activeStream;
-      const speechStatus = warmupResult.value;
-      if (speechStatus) setBuiltInSpeech(speechStatus);
-      if (speechMode === 'builtin') {
-        const socket = providersApi.builtInSpeechSocket();
-        speechSocketRef.current = socket;
-        await new Promise<void>((resolve, reject) => {
-          socket.onopen = () => resolve();
-          socket.onerror = () => reject(
-            new Error('Could not connect to the local Nemotron speech stream.'),
-          );
-        });
-        socket.onmessage = (event) => {
-          const message = JSON.parse(String(event.data)) as BuiltInSpeechMessage;
-          if (message.type === 'partial' || message.type === 'final') {
-            setSpeechPreview(message.text?.trim() ?? '');
-          }
-          if (message.type === 'final') {
-            setTranscribing(false);
-            setSpeechFinalFailed(!message.text?.trim());
-            socket.close();
-          } else if (message.type === 'error') {
-            setTranscribing(false);
-            setSpeechFinalFailed(true);
-            setError(new Error(message.message || 'Nemotron transcription failed.'));
-          }
-        };
-        socket.onclose = () => {
-          if (speechSocketRef.current === socket) speechSocketRef.current = null;
-        };
-      }
-      if (!speechMountedRef.current) {
-        activeStream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      const context = new AudioContext({ sampleRate: 16_000 });
-      acquiredContext = context;
-      const source = context.createMediaStreamSource(activeStream);
-      const processor = context.createScriptProcessor(4096, 1, 1);
-      microphoneStreamRef.current = activeStream;
-      audioContextRef.current = acquiredContext;
-      audioSourceRef.current = source;
-      audioProcessorRef.current = processor;
-      audioChunksRef.current = [];
-      processor.onaudioprocess = (event) => {
-        const samples = new Float32Array(event.inputBuffer.getChannelData(0));
-        const socket = speechSocketRef.current;
-        if (speechMode === 'builtin' && socket?.readyState === WebSocket.OPEN) {
-          socket.send(encodePcm16(samples, context.sampleRate));
-        } else {
-          audioChunksRef.current.push(samples);
-        }
-      };
-      source.connect(processor);
-      processor.connect(context.destination);
-      setRecording(true);
-      if (speechMode === 'provider') {
-        speechPreviewTimerRef.current = window.setInterval(() => {
-          if (!audioChunksRef.current.length) return;
-          void transcribeRecording(
-            encodeWav(audioChunksRef.current, context.sampleRate),
-            false,
-          );
-        }, PROVIDER_TRANSCRIPTION_INTERVAL_MS);
-      }
-    } catch (nextError) {
-      acquiredStream?.getTracks().forEach((track) => track.stop());
-      void acquiredContext?.close();
-      microphoneStreamRef.current?.getTracks().forEach((track) => track.stop());
-      microphoneStreamRef.current = null;
-      audioProcessorRef.current?.disconnect();
-      audioSourceRef.current?.disconnect();
-      void audioContextRef.current?.close();
-      audioProcessorRef.current = null;
-      audioSourceRef.current = null;
-      audioContextRef.current = null;
-      speechSocketRef.current?.close();
-      speechSocketRef.current = null;
-      audioChunksRef.current = [];
-      setRecording(false);
-      setSpeechPreview(null);
-      setError(nextError);
-    } finally {
-      recordingStartPendingRef.current = false;
-      if (speechMountedRef.current) setStartingRecording(false);
-    }
-  };
-
-  const acceptSpeechPreview = () => {
-    const transcript = speechPreview?.trim();
-    if (!transcript) return;
-    setContent((currentContent) =>
-      [currentContent.trim(), transcript].filter(Boolean).join(' '),
-    );
-    setSpeechPreview(null);
-    window.setTimeout(() => composerRef.current?.focus(), 0);
   };
 
   const filtered = useMemo(() => {
@@ -763,13 +682,19 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       id: candidate.id,
       label: `Run ${index + 1}`,
       timeline: activityTimeline(timelineFor(candidate)),
+      snapshot: promptSnapshotFromRun(candidate),
     }))
-    .filter(({ timeline }) => timeline.steps.length > 0);
+    .filter(({ timeline, snapshot }) => timeline.steps.length > 0 || snapshot != null);
   const activityCount = activityTimelines.reduce(
     (total, { timeline }) => total + timeline.steps.length,
     0,
   );
   const streamingTimeline = liveReasoningTimeline(liveTimeline);
+  const runActive = sending || Boolean(run && !isTerminalRun(run));
+  const liveActivity = runActive
+    ? describeLiveActivity(liveTimeline, { writing: Boolean(stream.assistant) })
+    : null;
+  const compaction = compactionIndicator(runs, run, stream.events);
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
@@ -779,7 +704,6 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
 
   if (loading || !settings) return <Loading label="Loading agent conversations…" />;
 
-  const speechOptions = capabilityOptions(providers, 'speech');
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
   /** Re-asking is the only way to redo a turn, since the transcript itself is append-only. */
@@ -791,7 +715,13 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   return (
     <div className="chat-page">
       {error ? <ErrorNotice error={error} /> : null}
-      <div className={`chat-layout${sidebarOpen ? '' : ' collapsed'}${activityOpen ? ' activity-open' : ''}`}>
+      <div
+        className={`chat-layout${sidebarOpen ? '' : ' collapsed'}${activityOpen ? ' activity-open' : ''}${resizing ? ' resizing' : ''}`}
+        style={{
+          '--chat-list-width': `${listWidth}px`,
+          '--chat-activity-width': `${activityWidth}px`,
+        } as CSSProperties}
+      >
         <aside className="conversation-list" aria-label="Conversations">
           <div className="conversation-list-head">
             <button className="button block new-chat" type="button" onClick={create}>
@@ -830,7 +760,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                   className="conversation-delete"
                   title="Delete chat"
                   aria-label={`Delete ${conversation.title}`}
-                  disabled={sending || transcribing}
+                  disabled={current?.id === conversation.id && sending}
                   onClick={() => void remove(conversation.id)}
                 >
                   <Icon name="trash" size={14} />
@@ -843,6 +773,17 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
               </p>
             ) : null}
           </div>
+          <PaneResizer
+            side="right"
+            label="Resize chat list"
+            width={listWidth}
+            bounds={LIST_WIDTH}
+            onResize={(next) => {
+              setListWidth(next);
+              storeWidth(LIST_WIDTH_KEY, next);
+            }}
+            onResizingChange={setResizing}
+          />
         </aside>
 
         <section className="chat-surface">
@@ -857,6 +798,20 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
               <Icon name="sidebar" size={16} />
             </button>
             <h1>{current?.title ?? (mode === 'deep-work' ? 'New deep work' : 'New research')}</h1>
+            {compaction ? (
+              <span
+                className={`compaction-indicator ${compaction.state}`}
+                role="status"
+                title={compaction.title}
+              >
+                {compaction.state === 'active' ? (
+                  <span className="spinner tiny" aria-hidden="true" />
+                ) : (
+                  <Icon name={compaction.state === 'failed' ? 'close' : 'check'} size={13} />
+                )}
+                {compaction.label}
+              </span>
+            ) : null}
             <button
               type="button"
               className={`activity-toggle${activityOpen ? ' active' : ''}`}
@@ -867,13 +822,6 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
               <Icon name="tools" size={15} />
               {activityCount ? <span>{activityCount}</span> : null}
             </button>
-            {sending ? (
-              <span className="chat-working">
-                <span className="spinner tiny" aria-hidden="true" />
-                Working
-              </span>
-            ) : null}
-            {run && run.status !== 'completed' && !sending ? <StatusPill value={run.status} /> : null}
           </header>
 
           <div className="chat-thread">
@@ -900,7 +848,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                         type="button"
                         className="suggestion"
                         key={suggestion}
-                        disabled={sending || speechPreview !== null}
+                        disabled={sending}
                         onClick={() => void send(suggestion)}
                       >
                         {suggestion}
@@ -948,10 +896,12 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                   sources={liveTimeline.sources}
                 />
               ) : null}
-              {sending && !stream.assistant && !stream.reasoning && !liveTimeline.steps.length ? (
-                <div className="thinking-bubble" role="status" aria-label="The agent is thinking">
-                  <span /> <span /> <span />
-                </div>
+              {liveActivity ? (
+                <LiveActivityBar
+                  key={run?.id ?? 'pending-run'}
+                  activity={liveActivity}
+                  onOpenActivity={activityOpen ? undefined : () => setActivityOpen(true)}
+                />
               ) : null}
               {run?.error ? <div className="notice error chat-run-error">{run.error}</div> : null}
             </div>
@@ -975,80 +925,11 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
 
             <div className="composer">
               <div className="composer-inner">
-                {speechPreview !== null ? (
-                  <section className="speech-review" aria-live="polite">
-                    <div className="speech-review-head">
-                      <strong>
-                        {recording
-                          ? 'Live transcript'
-                          : transcribing
-                            ? 'Finishing transcript'
-                            : speechFinalFailed ? 'Transcription incomplete' : 'Review transcript'}
-                      </strong>
-                      {recording ? <span className="recording-dot">Listening</span> : null}
-                    </div>
-                    <textarea
-                      value={speechPreview}
-                      rows={3}
-                      disabled={recording || transcribing}
-                      aria-label="Speech transcript preview"
-                      placeholder={recording ? 'Start speaking…' : 'Waiting for transcription…'}
-                      onChange={(event) => setSpeechPreview(event.target.value)}
-                    />
-                    {speechFinalFailed ? (
-                      <small className="speech-review-error">
-                        The final pass failed, so this partial transcript cannot be accepted. Retry the recording or discard it.
-                      </small>
-                    ) : null}
-                    <div className="button-row speech-review-actions">
-                      {recording ? (
-                        <button className="button small" type="button" onClick={stopRecording}>
-                          <Icon name="stop" size={14} />
-                          Stop
-                        </button>
-                      ) : (
-                        <>
-                          <button
-                            className="button small"
-                            type="button"
-                            disabled={transcribing || speechFinalFailed || !speechPreview.trim()}
-                            onClick={acceptSpeechPreview}
-                          >
-                            <Icon name="check" size={14} />
-                            Use transcript
-                          </button>
-                          <button
-                            className="button secondary small"
-                            type="button"
-                            disabled={transcribing}
-                            onClick={() => {
-                              setSpeechPreview(null);
-                              void toggleRecording();
-                            }}
-                          >
-                            <Icon name="refresh" size={14} />
-                            Retry
-                          </button>
-                          <button
-                            className="button ghost small"
-                            type="button"
-                            disabled={transcribing}
-                            onClick={() => setSpeechPreview(null)}
-                          >
-                            Discard
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </section>
-                ) : null}
-
                 {/* One control surface: what you type, what answers, and how you send it. */}
                 <div className="composer-box">
                   <textarea
                     ref={composerRef}
                     rows={1}
-                    disabled={recording || transcribing}
                     value={content}
                     onChange={(event) => setContent(event.target.value)}
                     onKeyDown={(event) => {
@@ -1077,6 +958,26 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                       disabled={sending}
                       onChange={selectReasoningEffort}
                     />
+                    <label
+                      className="composer-context"
+                      title="Context window used for chat history and automatic compaction"
+                    >
+                      <span>Context</span>
+                      <select
+                        aria-label="Context size"
+                        value={contextWindowTokens}
+                        onChange={(event) => setContextWindowTokens(Number(event.target.value))}
+                        disabled={sending}
+                      >
+                        {[...new Set([...COMMON_CONTEXT_WINDOWS, contextWindowTokens])]
+                          .sort((left, right) => left - right)
+                          .map((tokens) => (
+                            <option key={tokens} value={tokens}>
+                              {contextWindowLabel(tokens)}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
                     <button
                       className={`composer-capability${webEnabled ? ' active' : ''}`}
                       type="button"
@@ -1136,20 +1037,6 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                     <span className="composer-hint">
                       <kbd>Enter</kbd> to send
                     </span>
-                    <SpeechControl
-                      mode={speechMode}
-                      onModeChange={setSpeechMode}
-                      builtIn={builtInSpeech}
-                      options={speechOptions}
-                      modelReference={speechModelReference}
-                      onModelReferenceChange={setSpeechModelReference}
-                      recording={recording}
-                      starting={startingRecording}
-                      transcribing={transcribing}
-                      busy={sending}
-                      onInstallBuiltIn={() => void installBuiltInSpeech()}
-                      onToggle={() => void toggleRecording()}
-                    />
                     {sending && run && ['pending', 'running'].includes(run.status) ? (
                       <>
                         <div className="composer-run-actions">
@@ -1182,7 +1069,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                           className="composer-icon composer-send"
                           type="button"
                           aria-label="Queue steering message"
-                          disabled={queueingSteering || transcribing || !content.trim()}
+                          disabled={queueingSteering || !content.trim()}
                           onClick={() => void send()}
                         >
                           {queueingSteering
@@ -1195,7 +1082,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                         className="composer-icon composer-send"
                         type="button"
                         aria-label="Send message"
-                        disabled={sending || transcribing || speechPreview !== null || !content.trim()}
+                        disabled={sending || !content.trim()}
                         onClick={() => void send()}
                       >
                         <Icon name="arrowRight" size={16} />
@@ -1211,6 +1098,19 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
           open={activityOpen}
           timelines={activityTimelines}
           onClose={() => setActivityOpen(false)}
+          resizer={
+            <PaneResizer
+              side="left"
+              label="Resize activity panel"
+              width={activityWidth}
+              bounds={ACTIVITY_WIDTH}
+              onResize={(next) => {
+                setActivityWidth(next);
+                storeWidth(ACTIVITY_WIDTH_KEY, next);
+              }}
+              onResizingChange={setResizing}
+            />
+          }
         />
       </div>
     </div>
@@ -1221,92 +1121,70 @@ export default function ChatPage() {
   return <ResearchChatPage />;
 }
 
-type MicrophoneDevices = Pick<MediaDevices, 'enumerateDevices' | 'getUserMedia'>;
+type CompactionIndicator = {
+  state: 'active' | 'complete' | 'failed';
+  label: string;
+  title: string;
+};
 
-export async function acquireMicrophone(
-  mediaDevices: MicrophoneDevices,
-): Promise<MediaStream> {
-  try {
-    return await mediaDevices.getUserMedia({ audio: true });
-  } catch (error) {
-    if (!isUnavailableMicrophone(error)) throw error;
-  }
-
-  const inputs = (await mediaDevices.enumerateDevices()).filter(
-    (device) =>
-      device.kind === 'audioinput'
-      && device.deviceId
-      && device.deviceId !== 'default',
-  );
-  for (const input of inputs) {
-    try {
-      return await mediaDevices.getUserMedia({
-        audio: { deviceId: { exact: input.deviceId } },
-      });
-    } catch (error) {
-      if (!isUnavailableMicrophone(error)) throw error;
+function compactionIndicator(
+  runs: Run[],
+  activeRun: Run | null,
+  liveEvents: RunStreamEvent[],
+): CompactionIndicator | null {
+  const compactions = runs.flatMap((candidate) => {
+    let events: RunStreamEvent[] = candidate.events;
+    if (candidate.id === activeRun?.id) {
+      const bySequence = new Map<number, RunStreamEvent>(
+        candidate.events.map((event) => [event.sequence, event]),
+      );
+      for (const event of liveEvents) bySequence.set(event.sequence, event);
+      events = [...bySequence.values()];
     }
+    return events
+      .filter((event) => event.event_type.startsWith('context.compact'))
+      .map((event) => ({ runId: candidate.id, event }));
+  });
+  if (!compactions.length) return null;
+
+  const completed = compactions.filter(({ event }) => event.event_type === 'context.compacted');
+  const latest = compactions[compactions.length - 1];
+  const active = latest.event.event_type === 'context.compaction_started'
+    && latest.runId === activeRun?.id
+    && activeRun != null
+    && !isTerminalRun(activeRun);
+  if (active) {
+    return {
+      state: 'active',
+      label: 'Compacting context',
+      title: compactionTitle(latest.event),
+    };
   }
-  throw new Error(
-    'No microphone input is available. Select a system input device and allow microphone access, then try again.',
-  );
-}
-
-function isUnavailableMicrophone(error: unknown): boolean {
-  return error instanceof DOMException
-    && ['NotFoundError', 'OverconstrainedError', 'NotReadableError'].includes(error.name);
-}
-
-export function encodePcm16(
-  samples: Float32Array,
-  inputSampleRate: number,
-  outputSampleRate = 16_000,
-): ArrayBuffer {
-  const outputLength = Math.max(
-    1,
-    Math.round(samples.length * outputSampleRate / inputSampleRate),
-  );
-  const pcm = new Int16Array(outputLength);
-  const ratio = inputSampleRate / outputSampleRate;
-  for (let index = 0; index < outputLength; index += 1) {
-    const sourceIndex = Math.min(samples.length - 1, Math.floor(index * ratio));
-    const sample = Math.max(-1, Math.min(1, samples[sourceIndex]));
-    pcm[index] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  if (latest.event.event_type === 'context.compaction_failed') {
+    return {
+      state: 'failed',
+      label: 'Compaction issue',
+      title: String(latest.event.payload.error ?? 'Context compaction failed.'),
+    };
   }
-  return pcm.buffer;
-}
-
-export function encodeWav(chunks: Float32Array[], sampleRate: number): Blob {
-  const sampleCount = chunks.reduce((total, chunk) => total + chunk.length, 0);
-  const buffer = new ArrayBuffer(44 + sampleCount * 2);
-  const view = new DataView(buffer);
-  const writeText = (offset: number, value: string) => {
-    for (let index = 0; index < value.length; index += 1) {
-      view.setUint8(offset + index, value.charCodeAt(index));
-    }
+  const lastCompleted = completed[completed.length - 1]?.event ?? latest.event;
+  return {
+    state: 'complete',
+    label: completed.length > 1 ? `Context compacted x${completed.length}` : 'Context compacted',
+    title: compactionTitle(lastCompleted),
   };
-  writeText(0, 'RIFF');
-  view.setUint32(4, 36 + sampleCount * 2, true);
-  writeText(8, 'WAVE');
-  writeText(12, 'fmt ');
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
-  view.setUint16(34, 16, true);
-  writeText(36, 'data');
-  view.setUint32(40, sampleCount * 2, true);
-  let offset = 44;
-  for (const chunk of chunks) {
-    for (const sample of chunk) {
-      const clamped = Math.max(-1, Math.min(1, sample));
-      view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
-      offset += 2;
-    }
+}
+
+function compactionTitle(event: RunStreamEvent): string {
+  const before = Number(event.payload.estimated_tokens_before);
+  const after = Number(event.payload.estimated_tokens_after);
+  if (Number.isFinite(before) && Number.isFinite(after)) {
+    return `Context reduced from about ${before.toLocaleString()} to ${after.toLocaleString()} tokens.`;
   }
-  return new Blob([buffer], { type: 'audio/wav' });
+  if (Number.isFinite(before)) {
+    return `Compaction triggered at about ${before.toLocaleString()} tokens.`;
+  }
+  return 'Context compaction was triggered for this conversation.';
 }
 
 function Message({
@@ -1343,7 +1221,6 @@ function Message({
         metrics={isAssistant ? metrics : null}
         onRetry={isAssistant ? onRetry : null}
         canRetry={canRetry}
-        speakable={isAssistant}
       />
     </article>
   );
@@ -1355,19 +1232,13 @@ function MessageActions({
   metrics,
   onRetry,
   canRetry,
-  speakable,
 }: {
   content: string;
   metrics: TurnMetrics | null;
   onRetry: (() => void) | null;
   canRetry: boolean;
-  speakable: boolean;
 }) {
   const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle');
-  const [speaking, setSpeaking] = useState(false);
-  const speech = typeof window !== 'undefined' ? window.speechSynthesis : undefined;
-
-  useEffect(() => () => speech?.cancel(), [speech]);
 
   const copy = async () => {
     try {
@@ -1377,21 +1248,6 @@ function MessageActions({
     } catch {
       setCopyStatus('failed');
     }
-  };
-
-  const speak = () => {
-    if (!speech) return;
-    if (speaking) {
-      speech.cancel();
-      setSpeaking(false);
-      return;
-    }
-    const utterance = new SpeechSynthesisUtterance(content.slice(0, 4000));
-    utterance.onend = () => setSpeaking(false);
-    utterance.onerror = () => setSpeaking(false);
-    speech.cancel();
-    speech.speak(utterance);
-    setSpeaking(true);
   };
 
   return (
@@ -1414,17 +1270,6 @@ function MessageActions({
           onClick={onRetry}
         >
           <Icon name="refresh" size={14} />
-        </button>
-      ) : null}
-      {speakable && speech ? (
-        <button
-          type="button"
-          className={speaking ? 'active' : ''}
-          title={speaking ? 'Stop reading' : 'Read aloud'}
-          aria-label={speaking ? 'Stop reading' : 'Read aloud'}
-          onClick={speak}
-        >
-          <Icon name={speaking ? 'stop' : 'speaker'} size={14} />
         </button>
       ) : null}
       {metrics ? <TurnMetadata metrics={metrics} /> : null}
@@ -1467,6 +1312,12 @@ function activityTimeline(timeline: TurnTimeline): TurnTimeline {
       (step) => step.kind !== 'reasoning' || !step.streaming,
     ),
   };
+}
+
+function promptSnapshotFromRun(run: Run): PromptSnapshot | null {
+  const snapshotEvent = run.events.find((event) => event.event_type === 'prompt.snapshot');
+  if (!snapshotEvent) return null;
+  return snapshotEvent.payload as PromptSnapshot;
 }
 
 function runsForConversation(runs: Run[], conversationId: string): Run[] {

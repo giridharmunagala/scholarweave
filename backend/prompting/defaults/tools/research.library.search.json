@@ -1,0 +1,10 @@
+{
+  "label": "Search research library",
+  "description": "List local papers, inspect one paper's metadata, or search filenames, paper titles, and author names. Search removes English stop words, matches only whole words, ranks papers solely by the number of distinct query words matched, and returns at most the top three papers. It does not search paper body text, URLs, or partial words. If the required paper is not in those results, search again with the returned document IDs in ignore_document_ids. Always use this before acquiring a paper when it may already be local. Read relevant cited pages or chunks before treating content as support.",
+  "parameter_descriptions": {
+    "query": "Words from a paper title, filename, or author name; use JSON null (not the string \"null\") when listing or inspecting by document_id.",
+    "document_id": "A known local document ID to inspect or constrain the search; otherwise use JSON null, never the string \"null\".",
+    "ignore_document_ids": "Document IDs to omit from this search, or JSON null on the first search. When the desired paper is absent, repeat the query and ignore IDs already reviewed.",
+    "limit": "Maximum number of ranked paper results to return, from 1 to 3. Use 3 when searching."
+  }
+}

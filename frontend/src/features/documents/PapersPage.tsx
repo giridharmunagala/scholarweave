@@ -1,60 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { apiUrl, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
+import { PaperSummaryPanel } from './PaperSummaryPanel';
 import '../library.css';
 
 type Document = components['schemas']['DocumentResponse'];
 type DocumentSummary = components['schemas']['DocumentSummaryResponse'];
-type Artifact = Document['artifacts'][number];
-type DocumentChunk = Document['chunks'][number];
 type ArtifactContent = components['schemas']['ArtifactContentResponse'];
 type IngestionOptions = components['schemas']['IngestionOptionsResponse'];
+type PaperFolder = components['schemas']['PaperFolderResponse'];
 type IngestionMode = IngestionOptions['recommended_mode'];
 type IngestionProgress = {
   completed: number;
   total: number;
   percent: number;
 };
-function displayKind(kind: string): string {
-  return kind.split('_').join(' ');
-}
-
-function chunkLabel(chunk: DocumentChunk): string {
-  if (chunk.section_title?.trim()) {
-    return chunk.citation.trim()
-      ? `${chunk.citation} · ${chunk.section_title}`
-      : chunk.section_title;
-  }
-  if (chunk.citation.trim()) return chunk.citation;
-  return chunk.page_start === chunk.page_end
-    ? `Page ${chunk.page_start}`
-    : `Pages ${chunk.page_start}–${chunk.page_end}`;
-}
-
-export function ExtractionChunks({ chunks }: { chunks: DocumentChunk[] }) {
-  if (!chunks.length) return null;
-  return (
-    <section className="extraction-chunks">
-      <span className="eyebrow">Extracted text</span>
-      <div className="chunk-list">
-        {chunks.map((chunk) => (
-          <details className="disclosure" key={chunk.id} open>
-            <summary>{chunkLabel(chunk)}</summary>
-            <p>{chunk.text}</p>
-          </details>
-        ))}
-      </div>
-    </section>
-  );
-}
 
 function ingestionStatus(document: Document): string {
   const value = document.metadata.ingestion;
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return 'Extracting text, figures, and searchable chunks. Large papers can take several minutes.';
+    return 'Extracting text and searchable chunks. Large papers can take several minutes.';
   }
   const progress = value as Record<string, unknown>;
   const label = typeof progress.phase_label === 'string' ? progress.phase_label : 'Ingesting and indexing';
@@ -99,31 +67,34 @@ function ingestionDetail(document: Document): string {
 
 export default function PapersPage() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
+  const [folders, setFolders] = useState<PaperFolder[]>([]);
+  const [activeFolder, setActiveFolder] = useState<string>('all');
+  const [newFolderName, setNewFolderName] = useState('');
   const [selected, setSelected] = useState<Document | null>(null);
-  const [artifactPreview, setArtifactPreview] = useState<ArtifactContent | null>(null);
   const [ingestionOptions, setIngestionOptions] = useState<IngestionOptions | null>(null);
-  const [previewingArtifactId, setPreviewingArtifactId] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [remotePdfUrl, setRemotePdfUrl] = useState('');
   const [remotePdfTitle, setRemotePdfTitle] = useState('');
+  const [selectedPage, setSelectedPage] = useState(1);
+  const [viewerMode, setViewerMode] = useState<'pdf' | 'text'>('pdf');
+  const [retrievedText, setRetrievedText] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
   const ingestionRequest = useRef<AbortController | null>(null);
-  const previewRequestId = useRef(0);
-
-  const clearArtifactPreview = useCallback(() => {
-    previewRequestId.current += 1;
-    setArtifactPreview(null);
-  }, []);
+  const textRequestId = useRef(0);
 
   const load = async (selectedId?: string) => {
-    const items = await request<DocumentSummary[]>('/documents');
+    const [items, nextFolders] = await Promise.all([
+      request<DocumentSummary[]>('/documents'),
+      request<PaperFolder[]>('/paper-folders'),
+    ]);
     const targetId = selectedId ?? selected?.id ?? items[0]?.id;
     const detail = targetId
       ? await request<Document>(`/documents/${encodeURIComponent(targetId)}`)
       : null;
     setDocuments(items);
+    setFolders(nextFolders);
     setSelected(detail);
   };
 
@@ -175,52 +146,12 @@ export default function PapersPage() {
       .join(','),
   ]);
 
-  const previewArtifact = useCallback(async (artifact: Artifact) => {
-    const requestId = previewRequestId.current + 1;
-    previewRequestId.current = requestId;
-    setPreviewingArtifactId(artifact.id);
-    setError(null);
-    try {
-      const nextPreview = await request<ArtifactContent>(`/artifacts/${artifact.id}/content`, {
-        cache: 'no-store',
-      });
-      if (previewRequestId.current === requestId) {
-        setArtifactPreview(nextPreview);
-      }
-    } catch (nextError) {
-      if (previewRequestId.current === requestId) {
-        setError(nextError);
-      }
-    } finally {
-      if (previewRequestId.current === requestId) {
-        setPreviewingArtifactId(null);
-      }
-    }
-  }, []);
-
   useEffect(() => {
-    if (!selected || selected.status === 'processing') return;
-    const currentPreviewIsFresh =
-      artifactPreview?.artifact.document_id === selected.id &&
-      selected.artifacts.some((artifact) => artifact.id === artifactPreview.artifact.id);
-    if (currentPreviewIsFresh) return;
-    const markdownArtifact = selected.artifacts.find(
-      (artifact) => artifact.kind === 'extracted_markdown' && artifact.media_type === 'text/markdown',
-    );
-    if (!markdownArtifact) {
-      if (artifactPreview) clearArtifactPreview();
-      return;
-    }
-    void previewArtifact(markdownArtifact);
-  }, [
-    artifactPreview?.artifact.document_id,
-    artifactPreview?.artifact.id,
-    clearArtifactPreview,
-    previewArtifact,
-    selected?.artifacts,
-    selected?.id,
-    selected?.status,
-  ]);
+    textRequestId.current += 1;
+    setSelectedPage(1);
+    setViewerMode('pdf');
+    setRetrievedText(null);
+  }, [selected?.id]);
 
   if (loading) return <Loading label="Loading papers…" />;
 
@@ -231,7 +162,6 @@ export default function PapersPage() {
     form.append('file', file);
     try {
       const created = await request<Document>('/documents', { method: 'POST', body: form });
-      clearArtifactPreview();
       await load(created.id);
     } catch (nextError) {
       setError(nextError);
@@ -252,7 +182,6 @@ export default function PapersPage() {
       );
       setRemotePdfUrl('');
       setRemotePdfTitle('');
-      clearArtifactPreview();
       await load(created.id);
     } catch (nextError) {
       setError(nextError);
@@ -278,7 +207,6 @@ export default function PapersPage() {
     };
     setBusyAction(action);
     setError(null);
-    clearArtifactPreview();
     setSelected(processing);
     setDocuments((current) => current.map((item) => (item.id === document.id ? processing : item)));
     const controller = new AbortController();
@@ -335,12 +263,82 @@ export default function PapersPage() {
     try {
       await request<void>(`/documents/${document.id}`, { method: 'DELETE' });
       setSelected(null);
-      clearArtifactPreview();
       await load();
     } catch (nextError) {
       setError(nextError);
     } finally {
       setBusyAction(null);
+    }
+  };
+
+  const createFolder = async () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    setBusyAction('create-folder');
+    setError(null);
+    try {
+      const folder = await request<PaperFolder>(
+        '/paper-folders',
+        json('POST', { name }),
+      );
+      setFolders((current) => [...current, folder].sort((a, b) => a.name.localeCompare(b.name)));
+      setNewFolderName('');
+      setActiveFolder(folder.id);
+    } catch (nextError) {
+      setError(nextError);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const movePaper = async (document: Document, folderId: string | null) => {
+    const action = `folder:${document.id}`;
+    setBusyAction(action);
+    setError(null);
+    try {
+      const updated = await request<Document>(
+        `/documents/${encodeURIComponent(document.id)}/folder`,
+        json('PUT', { folder_id: folderId }),
+      );
+      setSelected(updated);
+      setDocuments((items) => items.map((item) => (item.id === updated.id ? updated : item)));
+    } catch (nextError) {
+      setError(nextError);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const showRetrievedText = async () => {
+    if (!selected) return;
+    const artifact = selected.artifacts.find(
+      (item) => item.kind === 'extracted_markdown' && item.media_type === 'text/markdown',
+    );
+    if (!artifact) return;
+    setViewerMode('text');
+    if (retrievedText !== null) return;
+    const action = `text:${selected.id}`;
+    const requestId = textRequestId.current + 1;
+    textRequestId.current = requestId;
+    setBusyAction(action);
+    setError(null);
+    try {
+      const preview = await request<ArtifactContent>(`/artifacts/${artifact.id}/content`, {
+        cache: 'no-store',
+      });
+      if (typeof preview.content !== 'string') {
+        throw new Error('The retrieved paper text is not available as text.');
+      }
+      if (textRequestId.current === requestId) {
+        setRetrievedText(preview.content);
+      }
+    } catch (nextError) {
+      if (textRequestId.current === requestId) {
+        setViewerMode('pdf');
+        setError(nextError);
+      }
+    } finally {
+      setBusyAction((current) => (current === action ? null : current));
     }
   };
 
@@ -351,7 +349,19 @@ export default function PapersPage() {
   const recommendedMode = ingestionOptions?.recommended_mode ?? 'embedded';
   const pageProgress = selected ? ingestionProgress(selected) : null;
   const importOpen = showImport;
-
+  const sourcePdf = selected?.artifacts.find((artifact) => artifact.kind === 'source_pdf');
+  const extractedText = selected?.artifacts.find(
+    (artifact) => artifact.kind === 'extracted_markdown' && artifact.media_type === 'text/markdown',
+  );
+  const folderId = (document: DocumentSummary): string | null => {
+    const value = document.metadata.folder_id;
+    return typeof value === 'string' ? value : null;
+  };
+  const visibleDocuments = documents.filter((document) => {
+    if (activeFolder === 'all') return true;
+    if (activeFolder === 'unfiled') return folderId(document) === null;
+    return folderId(document) === activeFolder;
+  });
   return (
     <div className="page">
       <PageHeader
@@ -425,13 +435,65 @@ export default function PapersPage() {
           description={documents.length ? `${documents.length} paper${documents.length === 1 ? '' : 's'}` : undefined}
         >
           <div className="stack-tight">
-            {documents.map((document) => (
+            <form
+              className="paper-folder-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void createFolder();
+              }}
+            >
+              <input
+                aria-label="New paper folder"
+                placeholder="New folder"
+                value={newFolderName}
+                disabled={operationBusy}
+                onChange={(event) => setNewFolderName(event.target.value)}
+              />
+              <button
+                className="button small secondary"
+                type="submit"
+                disabled={operationBusy || !newFolderName.trim()}
+              >
+                Add
+              </button>
+            </form>
+            <nav className="paper-folder-list" aria-label="Paper folders">
+              <button
+                type="button"
+                className={activeFolder === 'all' ? 'active' : ''}
+                onClick={() => setActiveFolder('all')}
+              >
+                <span>All papers</span>
+                <small>{documents.length}</small>
+              </button>
+              <button
+                type="button"
+                className={activeFolder === 'unfiled' ? 'active' : ''}
+                onClick={() => setActiveFolder('unfiled')}
+              >
+                <span>Papers</span>
+                <small>{documents.filter((document) => folderId(document) === null).length}</small>
+              </button>
+              {folders.map((folder) => (
+                <button
+                  type="button"
+                  className={activeFolder === folder.id ? 'active' : ''}
+                  key={folder.id}
+                  onClick={() => setActiveFolder(folder.id)}
+                >
+                  <span>{folder.name}</span>
+                  <small>
+                    {documents.filter((document) => folderId(document) === folder.id).length}
+                  </small>
+                </button>
+              ))}
+            </nav>
+            {visibleDocuments.map((document) => (
               <button
                 type="button"
                 className={selected?.id === document.id ? 'paper-row active' : 'paper-row'}
                 key={document.id}
                 onClick={() => {
-                  clearArtifactPreview();
                   void request<Document>(`/documents/${encodeURIComponent(document.id)}`)
                     .then(setSelected)
                     .catch(setError);
@@ -445,6 +507,7 @@ export default function PapersPage() {
               </button>
             ))}
             {!documents.length ? <p>Upload or download a PDF to start the research library.</p> : null}
+            {documents.length && !visibleDocuments.length ? <p>No papers in this folder.</p> : null}
           </div>
         </Panel>
         <Panel title={selected?.title ?? 'Document details'} className="paper-detail-panel">
@@ -452,6 +515,22 @@ export default function PapersPage() {
             <div className="stack" aria-busy={ingesting}>
               <div className="button-row">
                 <StatusPill value={ingesting ? 'processing' : selected.status} />
+                <label className="paper-folder-select">
+                  <span>Folder</span>
+                  <select
+                    aria-label="Paper folder"
+                    value={folderId(selected) ?? ''}
+                    disabled={operationBusy}
+                    onChange={(event) => {
+                      void movePaper(selected, event.target.value || null);
+                    }}
+                  >
+                    <option value="">Papers</option>
+                    {folders.map((folder) => (
+                      <option value={folder.id} key={folder.id}>{folder.name}</option>
+                    ))}
+                  </select>
+                </label>
                 {!ingesting ? (
                   <>
                     <button
@@ -559,78 +638,68 @@ export default function PapersPage() {
                   <span>{selected.artifacts.length} artifacts</span>
                 </div>
               ) : null}
-              {!ingesting && selected.artifacts.length ? (
-                <div>
-                  <span className="eyebrow">Artifacts</span>
-                  <div className="button-row">
-                    {selected.artifacts.map((artifact) => {
-                      const previewable =
-                        artifact.media_type.startsWith('text/') || artifact.media_type === 'application/json';
-                      return previewable ? (
-                        <button
-                          className="button secondary small"
-                          type="button"
-                          key={artifact.id}
-                          disabled={previewingArtifactId !== null}
-                          aria-pressed={artifactPreview?.artifact.id === artifact.id}
-                          onClick={() => void previewArtifact(artifact)}
-                        >
-                          {previewingArtifactId === artifact.id ? 'Loading preview…' : displayKind(artifact.kind)}
-                        </button>
-                      ) : (
-                        <a
-                          className="button secondary small"
-                          target="_blank"
-                          rel="noreferrer"
-                          key={artifact.id}
-                          href={apiUrl(`/artifacts/${artifact.id}/raw?sha256=${artifact.sha256}`)}
-                        >
-                          {displayKind(artifact.kind)}
-                        </a>
-                      );
-                    })}
-                  </div>
+              {!ingesting ? (
+                <PaperSummaryPanel
+                  documentId={selected.id}
+                  ready={selected.status === 'ready' && selected.chunks.length > 0}
+                />
+              ) : null}
+              {!ingesting && sourcePdf ? (
+                <div className="paper-view-switcher" role="group" aria-label="Paper view">
+                  <button
+                    className={`button small${viewerMode === 'pdf' ? '' : ' secondary'}`}
+                    type="button"
+                    aria-pressed={viewerMode === 'pdf'}
+                    onClick={() => setViewerMode('pdf')}
+                  >
+                    PDF
+                  </button>
+                  <button
+                    className={`button small${viewerMode === 'text' ? '' : ' secondary'}`}
+                    type="button"
+                    aria-pressed={viewerMode === 'text'}
+                    disabled={!extractedText || busyAction === `text:${selected.id}`}
+                    title={extractedText ? 'Show the text retrieved during ingestion' : 'Ingest this paper to retrieve its text'}
+                    onClick={() => void showRetrievedText()}
+                  >
+                    {busyAction === `text:${selected.id}` ? 'Loading text…' : 'Retrieved text'}
+                  </button>
                 </div>
               ) : null}
-              {!ingesting && artifactPreview ? (
-                <section className="artifact-preview">
-                  <header className="artifact-preview-header">
-                    <div>
-                      <span className="eyebrow">Preview</span>
-                      <strong>{displayKind(artifactPreview.artifact.kind)}</strong>
-                    </div>
-                    <a
-                      className="button secondary small"
-                      target="_blank"
-                      rel="noreferrer"
-                      href={apiUrl(
-                        `/artifacts/${artifactPreview.artifact.id}/raw?sha256=${artifactPreview.artifact.sha256}`,
-                      )}
-                    >
-                      Open raw
-                    </a>
-                  </header>
-                  <div className="artifact-preview-content">
-                    {artifactPreview.artifact.media_type === 'text/markdown' &&
-                    typeof artifactPreview.content === 'string' ? (
-                      <MarkdownViewer content={artifactPreview.content} />
-                    ) : (
-                      <pre className="artifact-source">
-                        {typeof artifactPreview.content === 'string'
-                          ? artifactPreview.content
-                          : JSON.stringify(artifactPreview.content, null, 2)}
-                      </pre>
-                    )}
-                  </div>
+              {!ingesting && sourcePdf && viewerMode === 'pdf' ? (
+                <section className="paper-pdf-viewer">
+                  <nav className="paper-page-rail" aria-label="PDF pages">
+                    {Array.from({ length: selected.page_count ?? 1 }, (_, index) => index + 1).map((page) => (
+                      <button
+                        type="button"
+                        className={selectedPage === page ? 'active' : ''}
+                        aria-label={`Go to page ${page}`}
+                        aria-current={selectedPage === page ? 'page' : undefined}
+                        key={page}
+                        onClick={() => setSelectedPage(page)}
+                      >
+                        {page}
+                      </button>
+                    ))}
+                  </nav>
+                  <iframe
+                    key={`${sourcePdf.id}:${selectedPage}`}
+                    title={`${selected.title}, page ${selectedPage}`}
+                    src={`${apiUrl(`/artifacts/${sourcePdf.id}/raw?sha256=${sourcePdf.sha256}`)}#page=${selectedPage}&view=FitH`}
+                  />
                 </section>
               ) : null}
-              {!ingesting ? <ExtractionChunks chunks={selected.chunks} /> : null}
+              {!ingesting && viewerMode === 'text' && retrievedText !== null ? (
+                <section className="retrieved-text-view" aria-label="Retrieved paper text">
+                  <MarkdownViewer content={retrievedText} />
+                </section>
+              ) : null}
             </div>
           ) : (
             <EmptyState
               icon="papers"
               title="No paper selected"
-              description="Pick a paper on the left to inspect its ingestion status, artifacts and retrieval chunks."
+              description="Pick a paper on the left to read the full PDF."
             />
           )}
         </Panel>

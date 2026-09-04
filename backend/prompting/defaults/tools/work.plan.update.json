@@ -1,0 +1,9 @@
+{
+  "label": "Update work item",
+  "description": "Keep the autonomous work tracker accurate as each item starts, completes, or becomes blocked.",
+  "parameter_descriptions": {
+    "id": "The stable ID of an existing work item.",
+    "status": "The item's current status.",
+    "summary": "A concise result or blocker; required when completing or blocking an item."
+  }
+}

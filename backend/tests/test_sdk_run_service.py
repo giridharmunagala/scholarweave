@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,9 +15,10 @@ from agents import (
 )
 from openai import AsyncOpenAI
 
-from backend.agents.blueprint import AgentBlueprint
+from backend.agents.blueprint import AgentBlueprint, SessionPolicySpec
 from backend.agents.compiler import AgentCompiler
 from backend.core.config import Settings
+from backend.core.errors import ConflictError, NotFoundError
 from backend.runs.broker import EventBroker
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
@@ -27,10 +29,15 @@ from backend.runs.service import (
     RunService,
     _restore_pending_steering,
 )
-from backend.runtime.sessions import SdkSessionFactory
-from backend.runtime.steering import SteeringMessage
-from backend.runtime.steering import steering_message_id
+from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.steering import SteeringMessage
+from backend.conversations.steering import steering_message_id
 from backend.tools.catalog import create_tool_catalog
+from backend.tools.failures import (
+    record_tool_success,
+    restore_tool_failure_state_from_attempts,
+    serialize_tool_failure_state,
+)
 
 
 class Resolver:
@@ -182,6 +189,47 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
+def test_tool_failure_state_restores_by_logical_call_and_success_resets_it() -> None:
+    metadata: dict = {}
+    attempts = [
+        SimpleNamespace(
+            catalog_id="research.sources.acquire",
+            tool_call_id="call-1",
+            status="failed",
+        ),
+        SimpleNamespace(
+            catalog_id="research.sources.acquire",
+            tool_call_id="call-1",
+            status="failed",
+        ),
+        SimpleNamespace(
+            catalog_id="research.sources.acquire",
+            tool_call_id="call-2",
+            status="failed",
+        ),
+        SimpleNamespace(
+            catalog_id="research.sources.acquire",
+            tool_call_id="call-3",
+            status="unknown_outcome",
+        ),
+    ]
+
+    restore_tool_failure_state_from_attempts(metadata, attempts)
+
+    assert serialize_tool_failure_state(metadata) == {
+        "counts": {"research.sources.acquire": 3},
+        "disabled": ["research.sources.acquire"],
+    }
+    record_tool_success(
+        SimpleNamespace(metadata=metadata),
+        "research.sources.acquire",
+    )
+    assert serialize_tool_failure_state(metadata) == {
+        "counts": {},
+        "disabled": [],
+    }
+
+
 @pytest.mark.anyio
 async def test_run_service_persists_sdk_items_events_and_usage(
     tmp_path,
@@ -235,6 +283,7 @@ async def test_run_service_persists_sdk_items_events_and_usage(
         SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         tool_runtime,
         EventBroker(),
+        run_log_dir=settings.data_dir / "run_logs",
     )
 
     run = await service.run_now(compiled, "List the papers.")
@@ -246,6 +295,14 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     assert any(item.item_type == "tool_call_item" for item in run.items)
     assert any(item.item_type == "tool_call_output_item" for item in run.items)
     assert any(event.event_type == "run.completed" for event in run.events)
+    run_log = json.loads(
+        (settings.data_dir / "run_logs" / f"{run.id}.json").read_text(encoding="utf-8")
+    )
+    assert run_log["run"]["status"] == "completed"
+    assert run_log["event_counts"]["run.completed"] == 1
+    assert run_log["event_counts"]["tool.completed"] == 1
+    assert "input" not in run_log["run"]
+    assert "final_output" not in run_log["run"]
     assert tool_runtime.calls == [
         (
             "research.library.search",
@@ -312,7 +369,6 @@ async def test_terminal_model_call_continues_with_queued_steering(
     pending = service.create(
         compiled,
         "Explain the evidence.",
-        agent_revision_id=None,
         conversation_id="conversation-1",
     )
     started = await asyncio.to_thread(stub_provider.request_started.wait, 2)
@@ -394,7 +450,6 @@ async def test_steering_is_not_applied_when_run_budget_is_exhausted(
     pending = service.create(
         compiled,
         "Explain the evidence.",
-        agent_revision_id=None,
         conversation_id="conversation-1",
     )
     assert await asyncio.to_thread(stub_provider.request_started.wait, 2) is True
@@ -629,7 +684,6 @@ async def test_run_cancellation_supersedes_active_agent_invocation(tmp_path) -> 
     created = service.create(
         compiled,
         "Wait.",
-        agent_revision_id=None,
         conversation_id=None,
     )
     await asyncio.wait_for(model.started.wait(), timeout=2)
@@ -672,14 +726,12 @@ async def test_run_service_clear_history_preserves_active_runs(tmp_path) -> None
         EventBroker(),
     )
     old_run = repository.create(
-        agent_revision_id=None,
         conversation_id=None,
         agent_name="Old run",
         input_value="old",
         blueprint={},
     )
     active_run = repository.create(
-        agent_revision_id=None,
         conversation_id=None,
         agent_name="Active run",
         input_value="active",
@@ -698,6 +750,98 @@ async def test_run_service_clear_history_preserves_active_runs(tmp_path) -> None
     finally:
         active_task.cancel()
         await asyncio.gather(active_task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_run_service_deletes_only_finished_runs(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    repository = RunRepository(create_session_factory(settings))
+    sdk_sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    service = RunService(
+        repository,
+        sdk_sessions,
+        ToolRuntime(),
+        EventBroker(),
+    )
+    finished = repository.create(
+        conversation_id=None,
+        agent_name="Finished run",
+        input_value="done",
+        blueprint={},
+    )
+    repository.complete(
+        finished.id,
+        final_output="Done",
+        last_agent_name="Researcher",
+        usage={},
+    )
+    pending = repository.create(
+        conversation_id=None,
+        agent_name="Pending run",
+        input_value="waiting",
+        blueprint={},
+    )
+    standalone = sdk_sessions.get(
+        f"run:{finished.id}",
+        SessionPolicySpec(),
+    )
+    await standalone.add_items([{"role": "user", "content": "delete me"}])
+
+    service.delete(finished.id)
+
+    with pytest.raises(NotFoundError):
+        repository.get(finished.id)
+    with pytest.raises(ConflictError, match="finished run"):
+        service.delete(pending.id)
+    assert await sdk_sessions.get(
+        f"run:{finished.id}",
+        SessionPolicySpec(),
+    ).get_items() == []
+
+
+@pytest.mark.anyio
+async def test_remote_cancellation_records_intent_without_terminalizing_owner_run(
+    tmp_path,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    repository = RunRepository(create_session_factory(settings))
+    service = RunService(
+        repository,
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ToolRuntime(),
+        EventBroker(),
+    )
+    run = repository.create(
+        conversation_id=None,
+        agent_name="Remote owner",
+        input_value="work",
+        blueprint={},
+    )
+    remote_lease = repository.claim(run.id, "another-process")
+    assert remote_lease is not None
+    repository.mark_running_owned(remote_lease)
+
+    result = await service.cancel(run.id)
+
+    assert result.status == "running"
+    assert result.cancel_requested is True
+    assert not any(event.event_type == "run.cancelled" for event in result.events)
+    assert repository.release_claim(
+        run.id,
+        "another-process",
+        generation=remote_lease.generation,
+        token=remote_lease.token,
+    )
 
 
 @pytest.mark.anyio
@@ -881,6 +1025,93 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
 
 
 @pytest.mark.anyio
+async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
+    tmp_path,
+    stub_provider,
+) -> None:
+    stub_provider.tool_plans = [
+        (
+            "Find one unavailable paper",
+            "acquire_research_source",
+            {
+                "kind": "paper",
+                "url": f"https://example.com/unavailable-{index}.pdf",
+                "title": None,
+            },
+        )
+        for index in range(3)
+    ]
+    client = AsyncOpenAI(
+        api_key="test",
+        base_url=f"{stub_provider.base_url}/v1",
+    )
+    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Acquisition-aware researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Try available sources, then answer.",
+                        "tool_ids": ["acquire", "paper-list"],
+                    }
+                ],
+                "tools": [
+                    {
+                        "id": "acquire",
+                        "kind": "function",
+                        "catalog_id": "research.sources.acquire",
+                    },
+                    {
+                        "id": "paper-list",
+                        "kind": "function",
+                        "catalog_id": "research.library.search",
+                    },
+                ],
+                "run": {"max_turns": 8},
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    runtime = FailingToolRuntime()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        runtime,
+        EventBroker(),
+    )
+
+    try:
+        run = await service.run_now(compiled, "Find one unavailable paper.")
+
+        assert run.status == "completed"
+        assert runtime.calls == 3
+        outputs = [
+            item.item_json["output"]
+            for item in run.items
+            if item.item_type == "tool_call_output_item"
+        ]
+        assert "acquire_research_source tool is now disabled" in outputs[-1]
+        offered_tools = {
+            tool["function"]["name"]
+            for tool in stub_provider.requests[-1].get("tools", [])
+        }
+        assert "acquire_research_source" not in offered_tools
+        assert "search_research_library" in offered_tools
+    finally:
+        await service.close()
+        await client.close()
+
+
+@pytest.mark.anyio
 async def test_cancel_immediately_stops_model_stream(
     tmp_path,
     stub_provider,
@@ -922,7 +1153,6 @@ async def test_cancel_immediately_stops_model_stream(
     pending = service.create(
         compiled,
         "Explain the evidence.",
-        agent_revision_id=None,
         conversation_id="conversation-1",
     )
     for _attempt in range(200):
@@ -994,7 +1224,6 @@ async def test_cancel_immediately_propagates_to_active_tool(
     pending = service.create(
         compiled,
         "List documents.",
-        agent_revision_id=None,
         conversation_id="conversation-1",
     )
     await asyncio.wait_for(runtime.started.wait(), timeout=2)
@@ -1071,7 +1300,6 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
         pending = service.create(
             compiled,
             "Find every relevant source.",
-            agent_revision_id=None,
             conversation_id="conversation-1",
         )
         await asyncio.sleep(0)
@@ -1172,9 +1400,17 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
     run = service.create(
         compiled,
         "List the papers.",
-        agent_revision_id=None,
         conversation_id=None,
-        runtime_metadata={"extended_work_notes": [{"summary": "Keep this finding."}]},
+        runtime_metadata={
+            "work_plan": [
+                {
+                    "id": "papers",
+                    "title": "List the papers",
+                    "status": "in_progress",
+                    "summary": "",
+                }
+            ]
+        },
     )
     for _attempt in range(200):
         paused = service.get(run.id)
@@ -1184,8 +1420,16 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
 
     assert paused.status == "paused"
     assert paused.state_json
+    expected_plan = [
+        {
+            "id": "papers",
+            "title": "List the papers",
+            "status": "in_progress",
+            "summary": "",
+        }
+    ]
     assert paused.state_json["context"]["context"]["metadata"] == {
-        "extended_work_notes": [{"summary": "Keep this finding."}]
+        "work_plan": expected_plan
     }
     assert len(paused.interruptions) == 1
     assert paused.interruptions[0].status == "pending"
@@ -1211,9 +1455,7 @@ async def test_run_service_serializes_approval_and_resumes_sdk_state(
             {"query": None, "document_id": None, "limit": 10},
         )
     ]
-    assert tool_runtime.context_metadata[0]["extended_work_notes"] == [
-        {"summary": "Keep this finding."}
-    ]
+    assert tool_runtime.context_metadata[0]["work_plan"] == expected_plan
     assert sum(item.item_type == "tool_call_item" for item in resumed.items) == 1
     assert sum(item.item_type == "tool_call_output_item" for item in resumed.items) == 1
     assert any(event.event_type == "run.paused" for event in resumed.events)

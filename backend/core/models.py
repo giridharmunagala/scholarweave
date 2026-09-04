@@ -7,7 +7,7 @@ from sqlalchemy import DateTime, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.persistence.database import Base, JSONText
-from backend.core.time import utcnow
+from backend.utils import utcnow
 
 
 class AppSetting(Base):

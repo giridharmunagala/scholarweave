@@ -6,6 +6,7 @@ export type Conversation = components['schemas']['ConversationResponse'];
 export type ConversationDetail = components['schemas']['ConversationDetailResponse'];
 export type SessionItem = components['schemas']['SessionItemResponse'];
 export type Run = components['schemas']['RunResponse'];
+export type PromptSnapshot = components['schemas']['PromptSnapshotResponse'];
 export type StopAndAnswerResponse = components['schemas']['StopAndAnswerResponse'];
 export type SteeringMessage = components['schemas']['SteeringMessageResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
@@ -14,10 +15,10 @@ type ConversationMessageRequest = components['schemas']['ConversationMessageRequ
 function conversationApi(basePath: string) {
   return {
   list: () => request<Conversation[]>(basePath),
-  create: (title: string, modelReference: ModelReference) =>
+  create: (modelReference: ModelReference) =>
     request<Conversation>(
       basePath,
-      json('POST', { title, model_reference: modelReference }),
+      json('POST', { model_reference: modelReference }),
     ),
   get: (id: string) =>
     request<ConversationDetail>(`${basePath}/${encodeURIComponent(id)}`),
@@ -28,6 +29,7 @@ function conversationApi(basePath: string) {
     webEnabled = true,
     fastAnswer = false,
     webSearchLimit = 1,
+    contextWindowTokens?: number,
   ) =>
     request<components['schemas']['ConversationMessageResponse']>(
       `${basePath}/${encodeURIComponent(id)}/messages`,
@@ -37,6 +39,7 @@ function conversationApi(basePath: string) {
         web_enabled: webEnabled,
         fast_answer: fastAnswer,
         web_search_limit: webSearchLimit,
+        context_window_tokens: contextWindowTokens,
       }),
     ),
   remove: (id: string) =>

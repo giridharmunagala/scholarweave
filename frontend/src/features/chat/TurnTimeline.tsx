@@ -1,9 +1,11 @@
-import { Fragment, useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
+import type { PromptSnapshot } from './api';
 import {
   formatStepDuration,
   humanizeToolName,
+  type LiveActivity,
   type ReasoningStep,
   type TimelineSource,
   type ToolStep,
@@ -48,17 +50,63 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
   );
 }
 
+/**
+ * A live status line inside the thread: what the agent is doing right now, how long the turn
+ * has been running, and a way into the full trace. Without it a long tool call looks like a
+ * stalled screen.
+ */
+export function LiveActivityBar({
+  activity,
+  onOpenActivity,
+}: {
+  activity: LiveActivity;
+  onOpenActivity?: () => void;
+}) {
+  const [seconds, setSeconds] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsed = formatStepDuration(seconds);
+
+  return (
+    <div className={`live-activity phase-${activity.phase}`} role="status" aria-live="polite">
+      <span className="spinner tiny" aria-hidden="true" />
+      <span className="live-activity-body">
+        <strong>{activity.label}</strong>
+        {activity.detail ? <small>{activity.detail}</small> : null}
+      </span>
+      {elapsed ? <span className="live-activity-elapsed">{elapsed}</span> : null}
+      {onOpenActivity && activity.completedSteps ? (
+        <button type="button" className="live-activity-open" onClick={onOpenActivity}>
+          {activity.completedSteps} step{activity.completedSteps === 1 ? '' : 's'}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function ActivitySidebar({
   open,
   timelines,
   onClose,
+  resizer,
 }: {
   open: boolean;
-  timelines: { id: string; label: string; timeline: TurnTimeline }[];
+  timelines: {
+    id: string;
+    label: string;
+    timeline: TurnTimeline;
+    snapshot?: PromptSnapshot | null;
+  }[];
   onClose: () => void;
+  resizer?: ReactNode;
 }) {
   return (
     <aside className="activity-sidebar" aria-label="Run activity" hidden={!open}>
+      {resizer}
       <header className="activity-sidebar-head">
         <div>
           <strong>Activity</strong>
@@ -69,9 +117,10 @@ export function ActivitySidebar({
         </button>
       </header>
       <div className="activity-sidebar-scroll">
-        {timelines.length ? timelines.map(({ id, label, timeline }) => (
+        {timelines.length ? timelines.map(({ id, label, timeline, snapshot }) => (
           <section className="activity-turn" key={id}>
             <h2>{label}</h2>
+            {snapshot ? <PromptSnapshotRow snapshot={snapshot} /> : null}
             <TurnTimelineView timeline={timeline} />
           </section>
         )) : (
@@ -79,6 +128,55 @@ export function ActivitySidebar({
         )}
       </div>
     </aside>
+  );
+}
+
+function PromptSnapshotRow({ snapshot }: { snapshot: PromptSnapshot }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`timeline-row kind-prompt${open ? ' open' : ''}`}>
+      <button
+        type="button"
+        className="timeline-head"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Icon className="timeline-glyph" name="settings" size={15} />
+        <span className="timeline-label">
+          <strong>Prompt & tools</strong>
+          <small>
+            {snapshot.agents.length} agent{snapshot.agents.length === 1 ? '' : 's'} · {snapshot.tools.length} tools
+          </small>
+        </span>
+        <Icon className="timeline-chevron" name="arrowRight" size={13} />
+      </button>
+      {open ? (
+        <div className="timeline-detail prompt-snapshot" aria-label="Effective prompt snapshot">
+          {snapshot.prompt_revision ? (
+            <section>
+              <h4>Revision</h4>
+              <code>{snapshot.prompt_revision}</code>
+            </section>
+          ) : null}
+          {snapshot.agents.map((agent) => (
+            <section key={String(agent.id)}>
+              <h4>{String(agent.name || agent.id)}</h4>
+              <pre>{String(agent.effective_instructions || '')}</pre>
+            </section>
+          ))}
+          <section>
+            <h4>Model-visible tools</h4>
+            {snapshot.tools.length ? snapshot.tools.map((tool, index) => (
+              <details key={`${String(tool.name)}-${index}`}>
+                <summary>{String(tool.name)}</summary>
+                {tool.description ? <p>{String(tool.description)}</p> : null}
+                {tool.parameters_schema ? <pre>{formatPayload(tool.parameters_schema)}</pre> : null}
+              </details>
+            )) : <p>No tools were exposed to this run.</p>}
+          </section>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

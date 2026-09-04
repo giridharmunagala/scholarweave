@@ -4,15 +4,9 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 
-GLOBAL_AGENT_INSTRUCTIONS = (
-    "When rendering mathematical notation, always use display math with double-dollar delimiters "
-    "in the form $$<math>$$. Put the opening and closing $$ on their own lines. Do not use single "
-    "dollar signs, \\(...\\), \\[...\\], or bare square brackets as math delimiters. "
-    "Do not loop on an unavailable source or failing tool. If one information tool repeatedly "
-    "fails, stop using that tool and continue with the remaining tools or another source. Answer "
-    "from the evidence already available only when alternatives are exhausted, clearly stating "
-    "limitations."
-)
+from backend.prompting.registry import default_prompt_registry
+
+GLOBAL_AGENT_INSTRUCTIONS = default_prompt_registry().render("global")
 
 
 def current_system_information(
@@ -43,13 +37,15 @@ def current_system_information(
 def with_global_agent_instructions(
     instructions: str,
     *,
+    global_instructions: str = GLOBAL_AGENT_INSTRUCTIONS,
     at: datetime | None = None,
     timezone_name: str | None = None,
     user_profile: str | None = None,
 ) -> str:
     combined = instructions.rstrip()
-    if GLOBAL_AGENT_INSTRUCTIONS not in combined:
-        combined = f"{combined}\n\n{GLOBAL_AGENT_INSTRUCTIONS}"
+    global_instructions = global_instructions.strip()
+    if global_instructions and global_instructions not in combined:
+        combined = f"{combined}\n\n{global_instructions}"
     return (
         f"{combined}\n\n"
         f"{current_system_information(at, timezone_name=timezone_name, user_profile=user_profile)}"

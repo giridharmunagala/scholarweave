@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import DateTime, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
-from backend.core.time import utcnow
+from backend.utils import utcnow
 from backend.persistence.database import Base, JSONText
 
 

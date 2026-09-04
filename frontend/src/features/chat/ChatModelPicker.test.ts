@@ -6,11 +6,12 @@ import {
   decodeModelReference,
   encodeModelReference,
   preferredChatModel,
+  resolveModelReference,
 } from './ChatModelPicker';
 import { reasoningEffortsForModel } from './ReasoningEffortSelect';
 
 describe('builder chat model picker', () => {
-  it('offers tool-capable and undeclared models but not embedding-only models', () => {
+  it('offers every enabled model from active providers', () => {
     const providers = [
       {
         id: 'provider-1',
@@ -27,6 +28,7 @@ describe('builder chat model picker', () => {
     expect(chatModelOptions(providers).map((option) => option.label)).toEqual([
       'Local models / builder',
       'Local models / unknown',
+      'Local models / embed',
     ]);
   });
 
@@ -95,5 +97,33 @@ describe('builder chat model picker', () => {
         model: 'unknown',
       }),
     ).toBeNull();
+  });
+
+  it('reads reasoning levels from the workspace default when no model is picked', () => {
+    const providers = [
+      {
+        id: 'provider-1',
+        models: [
+          { name: 'qwen', enabled: true, reasoning_efforts: ['low', 'medium', 'high'] },
+        ],
+      },
+    ] as Provider[];
+    const settings = {
+      default_model_references: {
+        chat: { provider_profile_id: 'provider-1', model: 'qwen' },
+      },
+    };
+
+    expect(resolveModelReference({}, settings)).toEqual({
+      provider_profile_id: 'provider-1',
+      model: 'qwen',
+    });
+    expect(
+      reasoningEffortsForModel(providers, resolveModelReference({}, settings)),
+    ).toEqual(['low', 'medium', 'high']);
+    expect(
+      resolveModelReference({ provider_profile_id: 'provider-2', model: 'other' }, settings),
+    ).toEqual({ provider_profile_id: 'provider-2', model: 'other' });
+    expect(resolveModelReference({}, null)).toEqual({});
   });
 });

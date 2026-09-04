@@ -116,6 +116,7 @@ class ResearchSearchService:
 
     async def search_web(self, query: str, limit: int = _MAX_RESULTS) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
+        warning: str | None = None
         async with self._duckduckgo_lock:
             await self._duckduckgo_limiter.acquire()
             try:
@@ -125,13 +126,17 @@ class ResearchSearchService:
                     limit,
                 )
             except DDGSException as exc:
-                if not _is_duckduckgo_rate_limit(exc):
+                if _is_duckduckgo_rate_limit(exc):
+                    raise RuntimeError(
+                        f"DuckDuckGo search was rate-limited ({exc}). Automatic retries are disabled "
+                        "to conserve the session request budget; use evidence already gathered "
+                        "or try again in a later session."
+                    ) from exc
+                if _is_duckduckgo_no_results(exc):
+                    raw_results = []
+                    warning = "DuckDuckGo reported no results for this query."
+                else:
                     raise RuntimeError(f"DuckDuckGo search request failed: {exc}") from exc
-                raise RuntimeError(
-                    f"DuckDuckGo search was rate-limited ({exc}). Automatic retries are disabled "
-                    "to conserve the session request budget; use evidence already gathered "
-                    "or try again in a later session."
-                ) from exc
 
         if not isinstance(raw_results, list):
             raise ValueError("DuckDuckGo returned an invalid results payload.")
@@ -151,7 +156,12 @@ class ResearchSearchService:
             )
             if len(results) == limit:
                 break
-        return {"query": query, "provider": "duckduckgo", "results": results}
+        return {
+            "query": query,
+            "provider": "duckduckgo",
+            "results": results,
+            **({"warning": warning} if warning else {}),
+        }
 
     def _search_duckduckgo(self, query: str, limit: int) -> list[dict[str, Any]]:
         with self._duckduckgo_thread_lock:
@@ -162,7 +172,7 @@ class ResearchSearchService:
                 region="wt-wt",
             )
 
-    async def search_arxiv(self, query: str, limit: int) -> dict[str, Any]:
+    async def search_arxiv(self, query: str, limit: int = _MAX_RESULTS) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
         response = await self._get(
             "arxiv",
@@ -184,7 +194,9 @@ class ResearchSearchService:
         for entry in root.findall("atom:entry", _ATOM):
             entry_url = _element_text(entry, "atom:id")
             links = {
-                link.attrib.get("title") or link.attrib.get("rel", ""): link.attrib.get("href", "")
+                link.attrib.get("title") or link.attrib.get("rel", ""): link.attrib.get(
+                    "href", ""
+                )
                 for link in entry.findall("atom:link", _ATOM)
             }
             results.append(
@@ -209,7 +221,11 @@ class ResearchSearchService:
             )
         return {"query": query, "provider": "arxiv", "results": results[:limit]}
 
-    async def search_wikipedia(self, query: str, limit: int) -> dict[str, Any]:
+    async def search_wikipedia(
+        self,
+        query: str,
+        limit: int = _MAX_RESULTS,
+    ) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
         payload = await self._get_json(
             "wikipedia",
@@ -275,12 +291,8 @@ class ResearchSearchService:
             response = await self._client.get(url, params=params)
             response.raise_for_status()
         except httpx.HTTPError as exc:
-            raise self._request_error(provider, exc) from exc
+            raise RuntimeError(f"{provider} search request failed: {exc}") from exc
         return response
-
-    @staticmethod
-    def _request_error(provider: str, exc: httpx.HTTPError) -> RuntimeError:
-        return RuntimeError(f"{provider} search request failed: {exc}")
 
     @staticmethod
     def _validated_request(query: str, limit: int) -> tuple[str, int]:
@@ -300,6 +312,11 @@ def _clean_text(value: Any) -> str:
 def _element_text(element: ET.Element, path: str) -> str:
     child = element.find(path, _ATOM)
     return _clean_text(child.text if child is not None else "")
+
+
+def _is_duckduckgo_no_results(exc: BaseException) -> bool:
+    message = _WHITESPACE.sub(" ", str(exc)).strip().rstrip(".").casefold()
+    return message == "no results found"
 
 
 def _is_duckduckgo_rate_limit(exc: BaseException) -> bool:

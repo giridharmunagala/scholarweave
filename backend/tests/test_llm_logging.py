@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from backend.observability.llm_logging import (
+from backend.providers.logging import (
     LLMCallLogger,
     LoggingTransport,
     _decode_response_body,

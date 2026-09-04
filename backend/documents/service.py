@@ -7,13 +7,14 @@ from typing import Any
 
 import anyio
 
-from backend.documents.errors import DocumentProcessingError, ProgressCallback
+from backend.core.errors import DocumentProcessingError
 from backend.documents.ingestion import DocumentIngestion
-from backend.documents.models import Artifact, Document, DocumentChunk
+from backend.documents.models import Artifact, Document, DocumentChunk, PaperFolder
 from backend.documents.ocr import DocumentOCR
 from backend.documents.repository import DocumentRepository
 from backend.persistence.files import StoredFile
 from backend.providers.types import AgentModelDefaults, ModelReference
+from backend.utils import ProgressCallback
 
 
 class DocumentService:
@@ -85,6 +86,15 @@ class DocumentService:
 
     def list_documents(self) -> list[Document]:
         return self.repository.list()
+
+    def list_folders(self) -> list[PaperFolder]:
+        return self.repository.list_folders()
+
+    def create_folder(self, name: str) -> PaperFolder:
+        return self.repository.create_folder(name)
+
+    def assign_folder(self, document_id: str, folder_id: str | None) -> Document:
+        return self.repository.assign_folder(document_id, folder_id)
 
     def get_document(self, document_id: str) -> Document | None:
         return self.repository.get(document_id)

@@ -5,8 +5,8 @@ from typing import Any
 import anyio
 
 from backend.core.config import Settings
-from backend.documents.errors import DocumentProcessingError, ProgressCallback, report_progress
-from backend.documents.figures import FigureExtractor
+from backend.core.errors import DocumentProcessingError
+from backend.utils import ProgressCallback, report_progress
 from backend.documents.formatting import DocumentFormatter
 from backend.documents.models import Document
 from backend.documents.ocr import DocumentOCR
@@ -28,7 +28,6 @@ class DocumentIngestion:
         retrieval: RetrievalService,
         ocr: DocumentOCR,
         vision: VisionEnhancer,
-        figures: FigureExtractor,
         formatter: DocumentFormatter,
     ) -> None:
         self.settings = settings
@@ -37,7 +36,6 @@ class DocumentIngestion:
         self.retrieval = retrieval
         self.ocr = ocr
         self.vision = vision
-        self.figures = figures
         self.formatter = formatter
 
     async def ingest(
@@ -80,25 +78,6 @@ class DocumentIngestion:
             retain_page_images=enhancement_enabled,
             progress=progress,
         )
-        await report_progress(
-            progress,
-            {
-                "phase": "figures",
-                "phase_label": "Extracting figures",
-                "completed_pages": len(pages),
-                "total_pages": len(pages),
-            },
-        )
-        figure_artifacts = await anyio.to_thread.run_sync(
-            self.figures.extract,
-            pdf_path,
-            document.id,
-        )
-        figures_by_page: dict[int, list[dict[str, Any]]] = {}
-        for figure in figure_artifacts:
-            figures_by_page.setdefault(figure["page"], []).append(figure)
-        for page in pages:
-            page["figures"] = figures_by_page.get(page["page"], [])
         if enhancement_enabled:
             assert enhancement_model is not None
             assert quality_model is not None
@@ -108,12 +87,6 @@ class DocumentIngestion:
                 triage_model=quality_model,
                 progress=progress,
             )
-        else:
-            for page in pages:
-                page["text"] = self.formatter.append_missing_figure_references(
-                    page["text"],
-                    page["figures"],
-                )
         await report_progress(
             progress,
             {
@@ -126,7 +99,6 @@ class DocumentIngestion:
         return self._persist_document_content(
             document,
             pages,
-            figure_artifacts,
             enhancement_model=enhancement_model.model if enhancement_model else None,
             triage_model=quality_model.model if quality_model else None,
             extraction_mode="ocr" if force_ocr else "embedded",
@@ -213,13 +185,9 @@ class DocumentIngestion:
             progress=progress,
             force_repair=True,
         )
-        figures = manifest.get("figures", [])
-        if not isinstance(figures, list):
-            figures = []
         result = self._persist_document_content(
             document,
             pages,
-            figures,
             enhancement_model=model.model,
             triage_model=quality_model.model,
             extraction_mode="page_enhancement",
@@ -233,7 +201,6 @@ class DocumentIngestion:
         self,
         document: Document,
         pages: list[dict[str, Any]],
-        figure_artifacts: list[dict[str, Any]],
         *,
         enhancement_model: str | None,
         triage_model: str | None = None,
@@ -251,7 +218,7 @@ class DocumentIngestion:
             raise DocumentProcessingError(
                 "Paper extraction produced no readable chunks. Retry ingestion with OCR."
             )
-        markdown = self.formatter.build_markdown(document.title, pages)
+        markdown = self.formatter.build_markdown(pages)
         manifest = build_paper_manifest(
             document_id=document.id,
             title=document.title,
@@ -259,7 +226,6 @@ class DocumentIngestion:
             content_type=document.content_type,
             pages=pages,
             chunks=chunks,
-            figures=figure_artifacts,
         )
         markdown_path = f"documents/{document.id}/extracted.md"
         json_path = f"documents/{document.id}/manifest.json"
@@ -344,7 +310,6 @@ class DocumentIngestion:
                 "ocr_quality_counts": quality_counts,
                 "ocr_llm_model": enhancement_model,
                 "ocr_llm_triage_model": triage_model,
-                "figure_count": len(figure_artifacts),
                 "extraction_mode": extraction_mode,
                 "paper_manifest_schema_version": manifest["schema_version"],
                 "extracted_char_count": manifest["content"]["char_count"],
@@ -358,11 +323,6 @@ class DocumentIngestion:
             "artifact_ids": [
                 md_artifact.id,
                 json_artifact.id,
-                *(
-                    figure["artifact_id"]
-                    for figure in figure_artifacts
-                    if isinstance(figure, dict) and "artifact_id" in figure
-                ),
             ],
             "text": "\n\n".join(page["text"] for page in pages if page["text"]),
         }

@@ -11,7 +11,6 @@ function item(role: string, text: string): ConversationDetail['items'][number] {
 function run(id: string, input: string, reasoning: string): Run {
   return {
     id,
-    agent_revision_id: null,
     conversation_id: 'conversation-1',
     agent_name: 'Researcher',
     status: 'completed',

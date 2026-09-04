@@ -1,0 +1,1 @@
+[ScholarWeave recovery for run {{ run_id }}] The process stopped during the previous epoch. Continue only unfinished work from durable conversation history, saved notes, and persisted tool outcomes. Do not replay completed reads or writes, and never repeat a write whose outcome is unknown until it has been reconciled.

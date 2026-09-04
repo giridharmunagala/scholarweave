@@ -229,6 +229,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}/folder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Assign Document Folder */
+        put: operations["assign_document_folder_api_documents__document_id__folder_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}/ingest": {
         parameters: {
             query?: never;
@@ -297,6 +314,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/{document_id}/summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Summary Versions */
+        get: operations["list_summary_versions_api_documents__document_id__summaries_get"];
+        put?: never;
+        /** Start Summary */
+        post: operations["start_summary_api_documents__document_id__summaries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/summaries/{version_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Summary Version */
+        get: operations["get_summary_version_api_documents__document_id__summaries__version_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/{document_id}/summaries/{version_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Promote Summary Version */
+        post: operations["promote_summary_version_api_documents__document_id__summaries__version_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -308,6 +377,24 @@ export interface paths {
         get: operations["health_api_health_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/paper-folders": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Paper Folders */
+        get: operations["list_paper_folders_api_paper_folders_get"];
+        put?: never;
+        /** Create Paper Folder */
+        post: operations["create_paper_folder_api_paper_folders_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -326,91 +413,6 @@ export interface paths {
         put?: never;
         /** Create Provider */
         post: operations["create_provider_api_providers_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/speech/builtin": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        post?: never;
-        /** Uninstall Built In Speech */
-        delete: operations["uninstall_built_in_speech_api_providers_speech_builtin_delete"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/speech/builtin/install": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Install Built In Speech */
-        post: operations["install_built_in_speech_api_providers_speech_builtin_install_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/speech/builtin/start": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Start Built In Speech */
-        post: operations["start_built_in_speech_api_providers_speech_builtin_start_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/speech/builtin/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Built In Speech Status */
-        get: operations["built_in_speech_status_api_providers_speech_builtin_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/speech/transcriptions": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Transcribe Speech */
-        post: operations["transcribe_speech_api_providers_speech_transcriptions_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -498,7 +500,8 @@ export interface paths {
         get: operations["get_run_api_runs__run_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /** Delete Run */
+        delete: operations["delete_run_api_runs__run_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -530,6 +533,23 @@ export interface paths {
         };
         /** Stream Events */
         get: operations["stream_events_api_runs__run_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/runs/{run_id}/prompt-snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Prompt Snapshot */
+        get: operations["get_prompt_snapshot_api_runs__run_id__prompt_snapshot_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -751,15 +771,6 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
-        /** Body_transcribe_speech_api_providers_speech_transcriptions_post */
-        Body_transcribe_speech_api_providers_speech_transcriptions_post: {
-            /** File */
-            file: string;
-            /** Model */
-            model: string;
-            /** Provider Profile Id */
-            provider_profile_id: string;
-        };
         /** Body_upload_document_api_documents_post */
         Body_upload_document_api_documents_post: {
             /** File */
@@ -767,35 +778,8 @@ export interface components {
             /** Title */
             title?: string | null;
         };
-        /** BuiltInSpeechStatus */
-        BuiltInSpeechStatus: {
-            /** Available */
-            available: boolean;
-            /**
-             * Downloaded Bytes
-             * @default 0
-             */
-            downloaded_bytes: number;
-            /** Error */
-            error?: string | null;
-            /** Installed */
-            installed: boolean;
-            /** Model */
-            model: string;
-            /** Running */
-            running: boolean;
-            /**
-             * State
-             * @enum {string}
-             */
-            state: "not_installed" | "installing" | "ready" | "running" | "error";
-            /** Total Bytes */
-            total_bytes: number;
-        };
         /** ConversationDetailResponse */
         ConversationDetailResponse: {
-            /** Agent Revision Id */
-            agent_revision_id: string | null;
             /**
              * Created At
              * Format: date-time
@@ -809,7 +793,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "autonomous" | "deep_work" | "builder" | "direct_agent";
+            kind: "autonomous" | "deep_work";
             /** Last Message Preview */
             last_message_preview: string;
             model_reference: components["schemas"]["ModelReferenceSpec"];
@@ -828,6 +812,8 @@ export interface components {
         ConversationMessageRequest: {
             /** Content */
             content: string;
+            /** Context Window Tokens */
+            context_window_tokens?: number | null;
             /**
              * Fast Answer
              * @default false
@@ -853,8 +839,6 @@ export interface components {
         };
         /** ConversationResponse */
         ConversationResponse: {
-            /** Agent Revision Id */
-            agent_revision_id: string | null;
             /**
              * Created At
              * Format: date-time
@@ -866,7 +850,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "autonomous" | "deep_work" | "builder" | "direct_agent";
+            kind: "autonomous" | "deep_work";
             /** Last Message Preview */
             last_message_preview: string;
             model_reference: components["schemas"]["ModelReferenceSpec"];
@@ -1090,6 +1074,102 @@ export interface components {
             /** Provider Profile Id */
             provider_profile_id?: string | null;
         };
+        /** PaperFolderAssignmentRequest */
+        PaperFolderAssignmentRequest: {
+            /** Folder Id */
+            folder_id: string | null;
+        };
+        /** PaperFolderCreateRequest */
+        PaperFolderCreateRequest: {
+            /** Name */
+            name: string;
+        };
+        /** PaperFolderResponse */
+        PaperFolderResponse: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** PaperSummaryContentResponse */
+        PaperSummaryContentResponse: {
+            /** Content */
+            content: string;
+            version: components["schemas"]["PaperSummaryVersionResponse"];
+        };
+        /** PaperSummaryPromotionResponse */
+        PaperSummaryPromotionResponse: {
+            /** Content */
+            content: string;
+            /** Summary Path */
+            summary_path: string;
+            version: components["schemas"]["PaperSummaryVersionResponse"];
+        };
+        /** PaperSummaryRunRequest */
+        PaperSummaryRunRequest: {
+            model_reference?: components["schemas"]["ModelReferenceSpec"];
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
+        };
+        /** PaperSummaryRunResponse */
+        PaperSummaryRunResponse: {
+            /** Prompt Revision */
+            prompt_revision: string;
+            run: components["schemas"]["RunResponse"];
+        };
+        /** PaperSummaryVersionResponse */
+        PaperSummaryVersionResponse: {
+            /** Citation Count */
+            citation_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Document Id */
+            document_id: string;
+            /** Id */
+            id: string;
+            /** Path */
+            path: string;
+            /** Prompt Revision */
+            prompt_revision: string | null;
+            /** Review Summary */
+            review_summary: string;
+            /** Run Id */
+            run_id: string;
+            /** Status */
+            status: string;
+        };
+        /** PromptSnapshotResponse */
+        PromptSnapshotResponse: {
+            /** Activated Skills */
+            activated_skills: {
+                [key: string]: unknown;
+            }[];
+            /** Agents */
+            agents: {
+                [key: string]: unknown;
+            }[];
+            /** Prompt Revision */
+            prompt_revision: string | null;
+            /** Run Id */
+            run_id: string;
+            /** Tools */
+            tools: {
+                [key: string]: unknown;
+            }[];
+        };
         /** ProviderCreate */
         ProviderCreate: {
             /** Api Key */
@@ -1109,7 +1189,7 @@ export interface components {
         /** ProviderModel */
         ProviderModel: {
             /** Capabilities */
-            capabilities?: ("chat" | "embedding" | "vision" | "tools" | "speech")[];
+            capabilities?: ("chat" | "embedding" | "vision" | "tools")[];
             /** Context Window Tokens */
             context_window_tokens?: number | null;
             /**
@@ -1301,8 +1381,6 @@ export interface components {
         RunResponse: {
             /** Agent Name */
             agent_name: string;
-            /** Agent Revision Id */
-            agent_revision_id: string | null;
             /** Cancel Requested */
             cancel_requested: boolean;
             /** Conversation Id */
@@ -1422,14 +1500,6 @@ export interface components {
             ocr_llm_triage_model: string | null;
             /** Ollama Base Url */
             ollama_base_url: string;
-            /** Python Tool Allowed Imports */
-            python_tool_allowed_imports: string[];
-            /** Python Tool Enabled */
-            python_tool_enabled: boolean;
-            /** Python Tool Memory Mb */
-            python_tool_memory_mb: number;
-            /** Python Tool Timeout Seconds */
-            python_tool_timeout_seconds: number;
             /** Request Timeout Seconds */
             request_timeout_seconds: number;
             /** Retrieval Max Context Chars */
@@ -1476,14 +1546,6 @@ export interface components {
             ocr_llm_triage_model?: string | null;
             /** Ollama Base Url */
             ollama_base_url?: string | null;
-            /** Python Tool Allowed Imports */
-            python_tool_allowed_imports?: string[] | null;
-            /** Python Tool Enabled */
-            python_tool_enabled?: boolean | null;
-            /** Python Tool Memory Mb */
-            python_tool_memory_mb?: number | null;
-            /** Python Tool Timeout Seconds */
-            python_tool_timeout_seconds?: number | null;
             /** Request Timeout Seconds */
             request_timeout_seconds?: number | null;
             /** Retrieval Max Context Chars */
@@ -1628,11 +1690,6 @@ export interface components {
              * @enum {string}
              */
             type: "tool_search_output_item";
-        };
-        /** TranscriptionResponse */
-        TranscriptionResponse: {
-            /** Text */
-            text: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -2278,6 +2335,41 @@ export interface operations {
             };
         };
     };
+    assign_document_folder_api_documents__document_id__folder_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperFolderAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     ingest_document_api_documents__document_id__ingest_post: {
         parameters: {
             query?: {
@@ -2404,6 +2496,136 @@ export interface operations {
             };
         };
     };
+    list_summary_versions_api_documents__document_id__summaries_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperSummaryVersionResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_summary_api_documents__document_id__summaries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperSummaryRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperSummaryRunResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_summary_version_api_documents__document_id__summaries__version_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+                version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperSummaryContentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    promote_summary_version_api_documents__document_id__summaries__version_id__promote_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+                version_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperSummaryPromotionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_api_health_get: {
         parameters: {
             query?: never;
@@ -2420,6 +2642,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthResponse"];
+                };
+            };
+        };
+    };
+    list_paper_folders_api_paper_folders_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperFolderResponse"][];
+                };
+            };
+        };
+    };
+    create_paper_folder_api_paper_folders_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperFolderCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperFolderResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2475,119 +2750,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    uninstall_built_in_speech_api_providers_speech_builtin_delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
-                };
-            };
-        };
-    };
-    install_built_in_speech_api_providers_speech_builtin_install_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
-                };
-            };
-        };
-    };
-    start_built_in_speech_api_providers_speech_builtin_start_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
-                };
-            };
-        };
-    };
-    built_in_speech_status_api_providers_speech_builtin_status_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["BuiltInSpeechStatus"];
-                };
-            };
-        };
-    };
-    transcribe_speech_api_providers_speech_transcriptions_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "multipart/form-data": components["schemas"]["Body_transcribe_speech_api_providers_speech_transcriptions_post"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TranscriptionResponse"];
                 };
             };
             /** @description Validation Error */
@@ -2826,6 +2988,35 @@ export interface operations {
             };
         };
     };
+    delete_run_api_runs__run_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     cancel_run_api_runs__run_id__cancel_post: {
         parameters: {
             query?: never;
@@ -2877,6 +3068,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_prompt_snapshot_api_runs__run_id__prompt_snapshot_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptSnapshotResponse"];
                 };
             };
             /** @description Validation Error */

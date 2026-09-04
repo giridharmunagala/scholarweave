@@ -9,9 +9,21 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 
+class SubscriberLagged:
+    """Signals that durable replay must resume from the subscriber's last cursor."""
+
+
+SUBSCRIBER_LAGGED = SubscriberLagged()
+
+
 class EventBroker:
-    def __init__(self) -> None:
-        self._queues: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+    def __init__(self, *, subscriber_queue_size: int = 256) -> None:
+        if subscriber_queue_size < 1:
+            raise ValueError("Subscriber queue size must be positive.")
+        self._subscriber_queue_size = subscriber_queue_size
+        self._queues: dict[
+            str, set[asyncio.Queue[dict[str, Any] | SubscriberLagged]]
+        ] = defaultdict(set)
         self._history: dict[str, deque[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
 
@@ -26,8 +38,16 @@ class EventBroker:
                 "run.cancelled",
             }:
                 self._history.pop(run_id, None)
-        for queue in queues:
-            await queue.put(event)
+            for queue in queues:
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    self._queues[run_id].discard(queue)
+                    while not queue.empty():
+                        queue.get_nowait()
+                    queue.put_nowait(SUBSCRIBER_LAGGED)
+            if run_id in self._queues and not self._queues[run_id]:
+                self._queues.pop(run_id, None)
 
     async def events_after(
         self,
@@ -42,14 +62,20 @@ class EventBroker:
             ]
 
     @asynccontextmanager
-    async def subscribe(self, run_id: str) -> AsyncIterator[asyncio.Queue[dict[str, Any]]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+    async def subscribe(
+        self, run_id: str
+    ) -> AsyncIterator[asyncio.Queue[dict[str, Any] | SubscriberLagged]]:
+        queue: asyncio.Queue[dict[str, Any] | SubscriberLagged] = asyncio.Queue(
+            maxsize=self._subscriber_queue_size
+        )
         async with self._lock:
             self._queues[run_id].add(queue)
         try:
             yield queue
         finally:
             async with self._lock:
-                self._queues[run_id].discard(queue)
-                if not self._queues[run_id]:
-                    self._queues.pop(run_id, None)
+                queues = self._queues.get(run_id)
+                if queues is not None:
+                    queues.discard(queue)
+                    if not queues:
+                        self._queues.pop(run_id, None)

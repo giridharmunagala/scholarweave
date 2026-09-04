@@ -1,0 +1,10 @@
+{
+  "label": "Search research notes",
+  "description": "Find user-authored durable notes and paper summaries by text, kind, or tags. Use this when prior workspace knowledge may answer or inform the request. Notes are secondary, potentially stale evidence: distinguish them from source-backed paper or web content and read a selected note before relying on details.",
+  "parameter_descriptions": {
+    "query": "Text to search, or null when filtering only by kinds or tags.",
+    "kinds": "Workspace document kinds to include; use an empty list for all kinds.",
+    "tags": "Tags that should constrain results; use an empty list for no tag filter.",
+    "limit": "Maximum number of compact matches, from 1 to 50."
+  }
+}

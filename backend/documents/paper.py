@@ -14,7 +14,6 @@ def build_paper_manifest(
     content_type: str,
     pages: list[dict[str, Any]],
     chunks: list[dict[str, Any]],
-    figures: list[dict[str, Any]],
 ) -> dict[str, Any]:
     normalized_pages = [
         {
@@ -62,14 +61,12 @@ def build_paper_manifest(
         "pages": normalized_pages,
         "sections": sections,
         "chunks": normalized_chunks,
-        "figures": figures,
         "content": {
             "char_count": total_chars,
             "nonempty_page_count": sum(
                 bool(page["text"].strip()) for page in normalized_pages
             ),
             "chunk_count": len(normalized_chunks),
-            "figure_count": len(figures),
         },
     }
 

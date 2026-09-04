@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import inspect
 from typing import Any
@@ -17,12 +18,106 @@ def _replay_same_model_reasoning(context: Any) -> bool:
     return context.reasoning.origin_model == context.model
 
 
+class CompatibleChatCompletionsModel(OpenAIChatCompletionsModel):
+    """Avoid a non-portable combination of tool and structured-output grammars."""
+
+    @staticmethod
+    def _compatible_request(
+        model_settings: Any,
+        tools: list[Any],
+        output_schema: Any,
+        handoffs: list[Any],
+    ) -> tuple[Any, Any]:
+        if (
+            output_schema is None
+            or output_schema.is_plain_text()
+            or not (tools or handoffs)
+        ):
+            return model_settings, output_schema
+
+        # Several OpenAI-compatible llama.cpp servers cannot compose a strict
+        # json_schema response grammar with their tool-call grammar. Keep JSON
+        # syntax constrained provider-side; the runner still validates the final
+        # value against output_schema after the model returns it.
+        extra_args = dict(model_settings.extra_args or {})
+        extra_args["response_format"] = {"type": "json_object"}
+        return replace(model_settings, extra_args=extra_args), None
+
+    async def get_response(
+        self,
+        system_instructions,
+        input,
+        model_settings,
+        tools,
+        output_schema,
+        handoffs,
+        tracing,
+        *,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        model_settings, request_output_schema = self._compatible_request(
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+        )
+        return await super().get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            request_output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+    async def stream_response(
+        self,
+        system_instructions,
+        input,
+        model_settings,
+        tools,
+        output_schema,
+        handoffs,
+        tracing,
+        *,
+        previous_response_id=None,
+        conversation_id=None,
+        prompt=None,
+    ):
+        model_settings, request_output_schema = self._compatible_request(
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+        )
+        async for event in super().stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            request_output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        ):
+            yield event
+
+
 class SdkClientPool:
     """Owns provider clients for the application lifespan."""
 
     def __init__(self, runtime: ModelRuntime) -> None:
         self._runtime = runtime
         self._clients: dict[tuple[str, str, str, str], Any] = {}
+        self._retired_clients: list[Any] = []
 
     def get(self, resolved: ResolvedModel) -> AsyncOpenAI:
         credential_fingerprint = hashlib.sha256(
@@ -41,13 +136,19 @@ class SdkClientPool:
         return client
 
     def invalidate_profile(self, profile_id: str) -> None:
+        # Compiled/running agents may still hold this client. Retire it from
+        # future resolution now, then close it with all other clients at shutdown.
         stale = [key for key in self._clients if key[0] == profile_id]
         for key in stale:
-            self._clients.pop(key)
+            self._retired_clients.append(self._clients.pop(key))
 
     async def close(self) -> None:
-        clients = tuple(self._clients.values())
+        clients: list[Any] = []
+        for client in (*self._clients.values(), *self._retired_clients):
+            if not any(existing is client for existing in clients):
+                clients.append(client)
         self._clients.clear()
+        self._retired_clients.clear()
         for client in clients:
             outcome = client.close()
             if inspect.isawaitable(outcome):
@@ -84,8 +185,14 @@ class ProfileModelResolver:
                 model_name=resolved.model,
                 responses_client=client,
                 context_window_tokens=resolved.context_window_tokens,
+                local_inference=resolved.local_inference,
             )
-        model = OpenAIChatCompletionsModel(
+        chat_model_type = (
+            CompatibleChatCompletionsModel
+            if resolved.kind in {"ollama", "openai_compatible"}
+            else OpenAIChatCompletionsModel
+        )
+        model = chat_model_type(
             model=resolved.model,
             openai_client=client,
             should_replay_reasoning_content=(
@@ -104,4 +211,5 @@ class ProfileModelResolver:
             in {"azure_openai", "azure_foundry"},
             model_name=resolved.model,
             context_window_tokens=resolved.context_window_tokens,
+            local_inference=resolved.local_inference,
         )

@@ -7,13 +7,13 @@ import pytest
 from agents.run_config import CallModelData, ModelInputData
 
 from backend.core.config import Settings
-from backend.runtime.context import ScholarWeaveContext
-from backend.runtime.context_budget import (
+from backend.agents.context import ScholarWeaveContext, ToolReceipt
+from backend.agents.context_budget import (
     _adaptive_target_tokens,
     create_context_budget_filter,
 )
-from backend.runtime.lifecycle import start_agent_invocation
-from backend.runtime.steering import SteeringInbox, SteeringMessage, steering_message_id
+from backend.runs.hooks import start_agent_invocation
+from backend.conversations.steering import SteeringInbox, SteeringMessage, steering_message_id
 
 
 class Runtime:
@@ -158,6 +158,103 @@ async def test_steering_is_injected_at_the_next_model_call_boundary(tmp_path) ->
 
 
 @pytest.mark.anyio
+async def test_summary_checkpoint_replaces_raw_paper_batch_on_next_turn(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        agent_context_window_tokens=80_000,
+    )
+    context = ScholarWeaveContext(run_id="summary-run", tool_runtime=Runtime())
+    raw_pages = "raw paper page content " * 1_000
+    understanding = "Pages 1-10 understanding with key methods and results [p.4]."
+    filtered = await create_context_budget_filter(settings)(
+        CallModelData(
+            model_data=ModelInputData(
+                input=[
+                    {
+                        "type": "function_call",
+                        "name": "paper_summary_checkpoint",
+                        "call_id": "checkpoint-read-1",
+                        "arguments": json.dumps(
+                            {
+                                "document_id": "paper-1",
+                                "action": "read",
+                                "content": None,
+                                "offset": 0,
+                                "limit": 8000,
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "checkpoint-read-1",
+                        "output": json.dumps(
+                            {
+                                "status": "available",
+                                "checkpoint_path": "checkpoint.md",
+                                "content": "prior checkpoint evidence",
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "read_paper_summary_batch",
+                        "call_id": "read-1",
+                        "arguments": '{"document_id":"paper-1","action":"pages","start":1}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "read-1",
+                        "output": raw_pages,
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "paper_summary_checkpoint",
+                        "call_id": "checkpoint-1",
+                        "arguments": json.dumps(
+                            {
+                                "document_id": "paper-1",
+                                "action": "append",
+                                "content": understanding,
+                                "offset": None,
+                                "limit": None,
+                            }
+                        ),
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "checkpoint-1",
+                        "output": json.dumps(
+                            {
+                                "status": "appended",
+                                "checkpoint_path": "checkpoint.md",
+                                "checkpointed_batch": 1,
+                                "coverage": {"kind": "pages", "start": 1, "end": 10},
+                            }
+                        ),
+                    },
+                ],
+                instructions=None,
+            ),
+            agent=SimpleNamespace(name="Paper Summarizer"),
+            context=context,
+        )
+    )
+
+    checkpoint_read_output = json.loads(filtered.input[1]["output"])
+    read_output = json.loads(filtered.input[3]["output"])
+    assert checkpoint_read_output["status"] == "replaced_by_summary_checkpoint"
+    assert read_output["status"] == "replaced_by_summary_checkpoint"
+    assert read_output["checkpoint_path"] == "checkpoint.md"
+    assert read_output["checkpointed_batch"] == 1
+    assert read_output["coverage"] == {"kind": "pages", "start": 1, "end": 10}
+    assert raw_pages not in json.dumps(filtered.input)
+    assert "prior checkpoint evidence" not in json.dumps(filtered.input)
+    assert understanding not in json.dumps(filtered.input)
+    assert json.loads(filtered.input[4]["arguments"])["content"] is None
+
+
+@pytest.mark.anyio
 async def test_compaction_does_not_duplicate_replayed_steering(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -276,14 +373,28 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
         tool_runtime=Runtime(),
         event_sink=sink,
         metadata={
-            "extended_work_plan": [
+            "work_plan": [
                 {
                     "id": "evidence",
                     "title": "Collect evidence",
                     "status": "in_progress",
                 }
-            ]
+            ],
+            "paper_activity": [
+                {
+                    "action": "acquired",
+                    "document_id": "paper-1",
+                    "title": "Durable Research",
+                }
+            ],
         },
+    )
+    context.receipts.append(
+        ToolReceipt(
+            kind="file",
+            title="Created papers/paper-1/notes.md",
+            href="/workspace?path=papers/paper-1/notes.md",
+        )
     )
     invocation_id = await start_agent_invocation(context, "Worker")
     large_result = {
@@ -298,11 +409,15 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
     budget_filter = create_context_budget_filter(settings)
     agent = SimpleNamespace(name="Worker", model=SummaryModel())
 
+    original_user_message = {
+        "role": "user",
+        "content": "Research the topic exactly as requested — keep this punctuation!",
+    }
     compacted = await budget_filter(
         CallModelData(
             model_data=ModelInputData(
                 input=[
-                    {"role": "user", "content": "Research the topic."},
+                    original_user_message,
                     {
                         "role": "assistant",
                         "content": "Prior reasoning " * 1_000,
@@ -318,6 +433,7 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
 
     serialized = json.dumps(compacted.input)
     assert "Prior reasoning Prior reasoning" not in serialized
+    assert original_user_message in compacted.input
     assert "artifact-1" in serialized
     assert "The research objective remains active" in serialized
     assert len(agent.model.calls) == 1
@@ -327,6 +443,8 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
         "artifact-1",
         "https://example.com/source",
     ]
+    assert checkpoint["activity"][0]["title"] == "Created papers/paper-1/notes.md"
+    assert checkpoint["work_state"]["paper_activity"][0]["document_id"] == "paper-1"
     lifecycle = [
         (event_type, payload)
         for event_type, payload in sink.events
@@ -337,7 +455,12 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
         {"agent_name": "Worker", "invocation_id": invocation_id},
     )
     assert len(lifecycle) == 1
-    assert any(event_type == "context.compacted" for event_type, _ in sink.events)
+    compaction_events = [
+        event_type
+        for event_type, _ in sink.events
+        if event_type.startswith("context.compact")
+    ]
+    assert compaction_events == ["context.compaction_started", "context.compacted"]
 
 
 @pytest.mark.anyio

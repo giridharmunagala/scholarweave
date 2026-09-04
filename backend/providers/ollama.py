@@ -9,6 +9,7 @@ import anyio
 import httpx
 
 from backend.core.config import Settings
+from backend.providers.inference import InferenceScheduler
 
 
 class OllamaError(RuntimeError):
@@ -21,10 +22,14 @@ class OllamaClient:
         settings: Settings,
         base_url: str | None = None,
         request_lock: anyio.Lock | None = None,
+        inference_scheduler: InferenceScheduler | None = None,
     ) -> None:
+        if request_lock is not None and inference_scheduler is not None:
+            raise ValueError("Configure either a request lock or an inference scheduler, not both.")
         self.settings = settings
         self._base_url = base_url.rstrip("/") if base_url else None
         self._request_lock = request_lock
+        self._inference_scheduler = inference_scheduler
 
     @property
     def base_url(self) -> str:
@@ -185,6 +190,10 @@ class OllamaClient:
 
     @asynccontextmanager
     async def _request_guard(self) -> AsyncIterator[None]:
+        if self._inference_scheduler is not None:
+            async with self._inference_scheduler.request():
+                yield
+            return
         if self._request_lock is None:
             yield
             return

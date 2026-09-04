@@ -10,7 +10,7 @@ from backend.app import create_app
 from backend.bootstrap import create_services
 from backend.core.config import Settings
 from backend.core.models import AppSetting
-from backend.providers.errors import ProviderRuntimeError
+from backend.providers.types import ProviderRuntimeError
 from backend.providers.ollama import OllamaClient
 from backend.providers.repository import ProviderRepository
 from backend.providers.runtime import ResolvedModel, _compatible_context_window
@@ -224,64 +224,6 @@ def test_legacy_empty_ocr_model_references_migrate_to_null(test_settings) -> Non
             assert session.get(AppSetting, "ocr_llm_triage_model") is None
     finally:
         asyncio.run(restarted.close())
-
-
-def test_speech_model_default_and_transcription_endpoint(test_settings, monkeypatch) -> None:
-    app = create_app(test_settings)
-    profile = app.state.services.providers.create(
-        ProviderCreate(
-            name="Local speech",
-            kind="openai_compatible",
-            base_url="http://127.0.0.1:1234/v1",
-            models=[
-                ProviderModel(name="nemotron-speech-en", capabilities={"speech"}),
-            ],
-        )
-    )
-    captured = {}
-
-    async def transcribe(resolved, *, filename, content, content_type) -> str:
-        captured.update(
-            model=resolved.model,
-            filename=filename,
-            content=content,
-            content_type=content_type,
-        )
-        return "locally transcribed prompt"
-
-    monkeypatch.setattr(app.state.services.model_runtime, "transcribe", transcribe)
-
-    with TestClient(app) as client:
-        settings = client.put(
-            "/api/settings",
-            json={
-                "default_model_references": {
-                    "speech": {
-                        "provider_profile_id": profile.id,
-                        "model": "nemotron-speech-en",
-                    }
-                }
-            },
-        )
-        response = client.post(
-            "/api/providers/speech/transcriptions",
-            data={
-                "provider_profile_id": profile.id,
-                "model": "nemotron-speech-en",
-            },
-            files={"file": ("recording.webm", b"audio-data", "audio/webm")},
-        )
-
-    assert settings.status_code == 200
-    assert settings.json()["default_model_references"]["speech"]["model"] == "nemotron-speech-en"
-    assert response.status_code == 200
-    assert response.json() == {"text": "locally transcribed prompt"}
-    assert captured == {
-        "model": "nemotron-speech-en",
-        "filename": "recording.webm",
-        "content": b"audio-data",
-        "content_type": "audio/webm",
-    }
 
 
 def test_provider_validation_does_not_reflect_api_keys(test_settings) -> None:

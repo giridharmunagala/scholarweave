@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from backend.core.time import utcnow
+from backend.utils import utcnow
 from backend.persistence.database import Base, JSONText
 
 
@@ -21,6 +21,17 @@ class TimestampMixin:
         default=utcnow,
         onupdate=utcnow,
     )
+
+
+class PaperFolder(Base, TimestampMixin):
+    __tablename__ = "paper_folders"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid.uuid4()),
+    )
+    name: Mapped[str] = mapped_column(String(100), unique=True)
 
 
 class Document(Base, TimestampMixin):

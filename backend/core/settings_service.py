@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.core.config import Settings
 from backend.core.models import AppSetting
-from backend.core.time import utcnow
+from backend.utils import utcnow
 
 PERSISTED_SETTING_KEYS = {
     "ollama_base_url",
@@ -28,16 +28,16 @@ PERSISTED_SETTING_KEYS = {
     "agent_tracing_enabled",
     "user_timezone",
     "user_profile",
-    "python_tool_enabled",
-    "python_tool_timeout_seconds",
-    "python_tool_memory_mb",
-    "python_tool_allowed_imports",
     "retrieval_max_context_chars",
     "ocr_llm_enhancement_enabled",
     "ocr_llm_model",
     "ocr_llm_triage_model",
 }
-MODEL_DEFAULT_CAPABILITIES = {"chat", "embedding", "vision", "speech"}
+MODEL_DEFAULT_CAPABILITIES = {
+    "chat",
+    "embedding",
+    "vision",
+}
 OPTIONAL_MODEL_SETTING_KEYS = {"ocr_llm_model", "ocr_llm_triage_model"}
 
 
@@ -79,10 +79,6 @@ class SettingsResponse(SettingsSchema):
     agent_tracing_enabled: bool
     user_timezone: str
     user_profile: str
-    python_tool_enabled: bool
-    python_tool_timeout_seconds: float
-    python_tool_memory_mb: int
-    python_tool_allowed_imports: list[str]
     retrieval_max_context_chars: int
     ocr_engine: Literal["tesseract"]
     ocr_llm_enhancement_enabled: bool
@@ -107,10 +103,6 @@ class SettingsUpdate(SettingsSchema):
     agent_tracing_enabled: bool | None = None
     user_timezone: str | None = Field(default=None, min_length=1, max_length=100)
     user_profile: str | None = Field(default=None, max_length=2_000)
-    python_tool_enabled: bool | None = None
-    python_tool_timeout_seconds: float | None = Field(default=None, gt=0, le=300)
-    python_tool_memory_mb: int | None = Field(default=None, ge=32, le=8192)
-    python_tool_allowed_imports: list[str] | None = None
     retrieval_max_context_chars: int | None = Field(default=None, ge=1_000, le=1_000_000)
     ocr_llm_enhancement_enabled: bool | None = None
     ocr_llm_model: str | None = None
@@ -187,10 +179,6 @@ class SettingsService:
             agent_tracing_enabled=self.settings.agent_tracing_enabled,
             user_timezone=self.settings.user_timezone,
             user_profile=self.settings.user_profile,
-            python_tool_enabled=self.settings.python_tool_enabled,
-            python_tool_timeout_seconds=self.settings.python_tool_timeout_seconds,
-            python_tool_memory_mb=self.settings.python_tool_memory_mb,
-            python_tool_allowed_imports=self.settings.python_tool_allowed_imports,
             retrieval_max_context_chars=self.settings.retrieval_max_context_chars,
             ocr_engine="tesseract",
             ocr_llm_enhancement_enabled=self.settings.ocr_llm_enhancement_enabled,

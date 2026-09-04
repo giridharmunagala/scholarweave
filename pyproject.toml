@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scholarweave-backend"
 version = "0.1.0"
-description = "Local-first research workspace and visual agent builder"
+description = "Local-first LLM research workspace with autonomous planning and paper OCR"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -22,9 +22,9 @@ dependencies = [
   "pypdfium2>=4.30,<5",
   "pytesseract>=0.3.13,<1",
   "python-multipart>=0.0.9,<1",
-  "sherpa-onnx==1.13.5",
   "sqlalchemy>=2.0,<3",
-  "uvicorn[standard]>=0.30,<1"
+  "uvicorn[standard]>=0.30,<1",
+  "stop-words>=2018.7.23,<2019",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +34,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["backend*"]
+
+[tool.setuptools.package-data]
+"backend.prompting" = ["defaults/**/*.md", "defaults/**/*.json"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

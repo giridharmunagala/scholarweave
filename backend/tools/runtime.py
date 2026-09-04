@@ -3,26 +3,166 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 import uuid
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from typing import Any
 
+from stop_words import get_stop_words
+
+from backend.tools.work import create_work_plan, update_work_item, work_plan
+from backend.core.errors import NotFoundError
 from backend.core.config import Settings
-from backend.core.text import clean_filename
+from backend.conversations.service import ConversationService
 from backend.documents import DocumentService
 from backend.documents.paper import manifest_pages
 from backend.documents.retrieval import RetrievalService
-from backend.runtime.context import ScholarWeaveContext, ToolReceipt
-from backend.runs.repository import RunRepository
+from backend.agents.context import ScholarWeaveContext, ToolReceipt
+from backend.runs.repository import LeaseOwnershipError, RunRepository
+from backend.utils import to_jsonable
 from backend.persistence.files import SafeStorage
+from backend.prompting.registry import PromptRegistry
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService, WebSourceUnavailable
-from backend.core.json import dumps_json
+from backend.tools.catalog import APPLICATION_TOOL_HANDLERS
 from backend.workspace.service import WorkspaceService
 
 
 _WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
 _WEB_SEARCH_CACHE_KEY = "web_search_results"
 _WEB_SEARCH_ATTEMPTS_KEY = "web_search_attempted_queries"
+_NULL_TOOL_LITERALS = {"null", "none"}
+_SEARCH_STOP_WORDS = frozenset(get_stop_words("en"))
+_PAPER_CITATION_PATTERN = re.compile(
+    r"\[(?:p{1,2}\.?\s*\d+(?:\s*[-–]\s*\d+)?|chunk[^\]]*)\]",
+    flags=re.IGNORECASE,
+)
+
+
+def _paper_summary_citations(content: str) -> set[str]:
+    return {match.group(0) for match in _PAPER_CITATION_PATTERN.finditer(content)}
+
+
+def _nullable_tool_string(
+    value: Any,
+    parameter_name: str,
+    *,
+    coerce_null_literal: bool = False,
+) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{parameter_name} must be a string or null.")
+    normalized = value.strip()
+    if not normalized or (
+        coerce_null_literal and normalized.casefold() in _NULL_TOOL_LITERALS
+    ):
+        return None
+    return normalized
+
+
+def _tool_string_list(value: Any, parameter_name: str) -> set[str]:
+    if value is None:
+        return set()
+    if not isinstance(value, list):
+        raise ValueError(f"{parameter_name} must be an array of strings or null.")
+    normalized: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"{parameter_name} must contain only non-empty strings.")
+        normalized.add(item.strip())
+    return normalized
+
+
+def _normalize_result_ref(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("result_ref must be a relative path string.")
+    raw = value.strip()
+    if (
+        not raw
+        or "\x00" in raw
+        or raw.startswith(("/", "\\"))
+        or re.match(r"^[a-zA-Z]:", raw)
+    ):
+        raise ValueError("result_ref must be a safe relative run path.")
+    normalized = re.sub(r"[\\/]+", "/", raw)
+    parts = normalized.split("/")
+    if (
+        len(parts) < 3
+        or parts[0] != "runs"
+        or any(part in {"", ".", ".."} or ":" in part for part in parts)
+    ):
+        raise ValueError("result_ref must be a safe relative run path.")
+    return PurePosixPath(*parts).as_posix()
+
+
+def _persistable_tool_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    return to_jsonable(
+        {
+            key: value
+            for key, value in metadata.items()
+            if key not in {"_steering_inbox", "active_epoch_id", "epoch_index", "goal_state"}
+        }
+    )
+
+
+def _document_metadata_matches(
+    document: Any,
+    query_tokens: list[str],
+) -> tuple[list[str], list[str]]:
+    metadata = document.metadata_json if isinstance(document.metadata_json, dict) else {}
+    fields = {
+        "title": document.title,
+        "source_filename": document.source_filename,
+        "authors": " ".join(_document_authors(metadata)),
+    }
+    matched_fields: list[str] = []
+    matched_words: set[str] = set()
+    for name, value in fields.items():
+        if not isinstance(value, str):
+            continue
+        field_matches = set(query_tokens) & set(_search_words(value))
+        if field_matches:
+            matched_fields.append(name)
+            matched_words.update(field_matches)
+    return matched_fields, [token for token in query_tokens if token in matched_words]
+
+
+def _document_authors(metadata: dict[str, Any]) -> list[str]:
+    raw_authors = metadata.get("authors", metadata.get("author"))
+    if isinstance(raw_authors, str):
+        return [raw_authors]
+    if not isinstance(raw_authors, list):
+        return []
+    authors: list[str] = []
+    for raw_author in raw_authors:
+        if isinstance(raw_author, str):
+            name = raw_author
+        elif isinstance(raw_author, dict):
+            name = str(raw_author.get("name") or "").strip()
+            if not name:
+                name = " ".join(
+                    str(raw_author.get(part) or "").strip()
+                    for part in ("given", "family")
+                ).strip()
+        else:
+            continue
+        if name.strip():
+            authors.append(name.strip())
+    return authors
+
+
+def _search_key(value: str) -> str:
+    return " ".join(re.findall(r"\w+", value.casefold()))
+
+
+def _search_words(value: str) -> list[str]:
+    return [
+        token
+        for token in _search_key(value).split()
+        if token not in _SEARCH_STOP_WORDS
+    ]
 
 
 class ApplicationToolRuntime:
@@ -36,6 +176,8 @@ class ApplicationToolRuntime:
         workspace: WorkspaceService,
         research_search: ResearchSearchService,
         source_downloads: SourceDownloadService,
+        conversations: ConversationService,
+        prompts: PromptRegistry | None = None,
         run_repository: RunRepository | None = None,
     ) -> None:
         self._settings = settings
@@ -45,7 +187,10 @@ class ApplicationToolRuntime:
         self._workspace = workspace
         self._research_search = research_search
         self._source_downloads = source_downloads
+        self._conversations = conversations
+        self._prompts = prompts
         self._runs = run_repository
+        self._paper_summary_lock = asyncio.Lock()
 
     async def invoke(
         self,
@@ -55,20 +200,10 @@ class ApplicationToolRuntime:
         *,
         tool_call_id: str | None = None,
     ) -> Any:
-        handlers = {
-            "research.sources.search": self._search_research_sources,
-            "research.sources.acquire": self._acquire_research_source,
-            "research.library.search": self._search_research_library,
-            "research.paper.read": self._read_research_paper,
-            "research.web.read": self._read_research_web_page,
-            "research.notes.search": self._search_research_notes,
-            "research.notes.read": self._read_research_note,
-            "research.notes.save": self._save_research_note,
-            "tool.results.read": self._read_tool_result,
-        }
-        handler = handlers.get(catalog_id)
-        if handler is None:
+        handler_name = APPLICATION_TOOL_HANDLERS.get(catalog_id)
+        if handler_name is None:
             raise ValueError(f"Unknown application tool '{catalog_id}'.")
+        handler = getattr(self, handler_name)
         journal = (
             self._runs
             if self._runs is not None and self._runs.exists(context.run_id)
@@ -81,14 +216,31 @@ class ApplicationToolRuntime:
         for attempt_number in range(1, attempts + 1):
             if journal is not None and journal.cancel_requested(context.run_id):
                 raise asyncio.CancelledError
+            lease_getter = getattr(context.event_sink, "current_lease", None)
+            lease = lease_getter() if lease_getter is not None else None
+            if journal is not None and lease_getter is not None and lease is None:
+                raise LeaseOwnershipError(
+                    f"Run {context.run_id} has no active lease for tool journaling."
+                )
             attempt = (
-                journal.begin_tool_attempt(
-                    run_id=context.run_id,
-                    epoch_id=_active_epoch_id(context),
-                    tool_call_id=call_id,
-                    catalog_id=catalog_id,
-                    attempt=attempt_number,
-                    arguments=arguments,
+                (
+                    journal.begin_tool_attempt_owned(
+                        lease,
+                        epoch_id=_active_epoch_id(context),
+                        tool_call_id=call_id,
+                        catalog_id=catalog_id,
+                        attempt=attempt_number,
+                        arguments=arguments,
+                    )
+                    if lease is not None
+                    else journal.begin_tool_attempt(
+                        run_id=context.run_id,
+                        epoch_id=_active_epoch_id(context),
+                        tool_call_id=call_id,
+                        catalog_id=catalog_id,
+                        attempt=attempt_number,
+                        arguments=arguments,
+                    )
                 )
                 if journal is not None
                 else None
@@ -121,23 +273,18 @@ class ApplicationToolRuntime:
                 if journal is not None:
                     result = await self.bound_tool_result(catalog_id, result, context)
                 if attempt is not None:
-                    journal.finish_tool_attempt(
+                    self._finish_tool_attempt(
+                        journal,
+                        context,
                         attempt.id,
                         status="completed",
                         result=result,
-                        result_ref=result.get("result_ref")
-                        if isinstance(result, dict)
-                        else None,
+                        result_ref=(
+                            result.get("result_ref")
+                            if isinstance(result, dict)
+                            else None
+                        ),
                     )
-                if catalog_id in {"builder.todos.create", "builder.todos.update"}:
-                    await context.emit("builder.todos.updated", result)
-                goal_event = {
-                    "goal.plan.update": "goal.plan.updated",
-                    "extended.block": "goal.blocked",
-                    "extended.finish": "goal.completed",
-                }.get(catalog_id)
-                if goal_event is not None:
-                    await context.emit(goal_event, result)
                 await context.emit(
                     "tool.attempt.completed",
                     {
@@ -152,7 +299,9 @@ class ApplicationToolRuntime:
             except asyncio.CancelledError:
                 if attempt is not None:
                     status = "cancelled" if safe_retry else "unknown_outcome"
-                    journal.finish_tool_attempt(
+                    self._finish_tool_attempt(
+                        journal,
+                        context,
                         attempt.id,
                         status=status,
                         failure_category=(
@@ -170,7 +319,9 @@ class ApplicationToolRuntime:
                 retryable = safe_retry and transient and attempt_number < attempts
                 status = "failed" if safe_retry else "unknown_outcome"
                 if attempt is not None:
-                    journal.finish_tool_attempt(
+                    self._finish_tool_attempt(
+                        journal,
+                        context,
                         attempt.id,
                         status=status,
                         failure_category=category,
@@ -195,6 +346,209 @@ class ApplicationToolRuntime:
                 raise
         raise RuntimeError("Tool invocation ended without a result.")
 
+    @staticmethod
+    def _finish_tool_attempt(
+        journal: RunRepository,
+        context: ScholarWeaveContext,
+        attempt_id: str,
+        **values: Any,
+    ) -> None:
+        lease_getter = getattr(context.event_sink, "current_lease", None)
+        lease = lease_getter() if lease_getter is not None else None
+        if lease_getter is not None and lease is None:
+            raise LeaseOwnershipError(
+                f"Run {context.run_id} has no active lease for tool journaling."
+            )
+        if lease is not None:
+            journal.finish_tool_attempt_owned(lease, attempt_id, **values)
+        else:
+            journal.finish_tool_attempt(attempt_id, **values)
+
+    def _set_conversation_title(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, str]:
+        if not context.metadata.get("allow_conversation_title_update"):
+            raise ValueError("Conversation titles can only be set during the first turn.")
+        if context.metadata.get("conversation_title_set"):
+            raise ValueError("The conversation title has already been set.")
+        if context.conversation_id is None:
+            raise ValueError("A conversation is required to set its title.")
+
+        record = self._conversations.set_title(
+            context.conversation_id,
+            str(arguments["title"]),
+        )
+        context.metadata["conversation_title_set"] = True
+        return {"conversation_id": record.id, "title": record.title}
+
+    @staticmethod
+    def _create_work_plan(
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return create_work_plan(arguments, context)
+
+    @staticmethod
+    def _update_work_item(
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return update_work_item(arguments, context)
+
+    @staticmethod
+    def _read_work_plan(
+        _arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        return work_plan(context)
+
+    def _save_paper_summary_version(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = str(arguments["document_id"]).strip()
+        content = str(arguments["content"]).strip()
+        review_summary = str(arguments["review_summary"]).strip()
+        document = self._documents.get_document(document_id)
+        if document is None:
+            raise ValueError("Paper was not found.")
+        self._require_paper_read(context, document_id)
+        citations = _paper_summary_citations(content)
+        paper = self._workspace.ensure_paper_folder(document.id, document.title)
+        revision = self._prompts.revision if self._prompts is not None else None
+        created_at = datetime.now(timezone.utc).isoformat()
+        version_id = context.run_id
+        path = f"{paper['folder']}/summaries/{version_id}.md"
+        metadata_path = f"{paper['folder']}/summaries/{version_id}.json"
+        metadata = {
+            "id": version_id,
+            "document_id": document_id,
+            "run_id": context.run_id,
+            "path": path,
+            "created_at": created_at,
+            "prompt_revision": revision,
+            "review_summary": review_summary,
+            "citation_count": len(citations),
+            "status": "reviewed",
+        }
+        saved = self._workspace.write_file(
+            path,
+            content + "\n",
+            tags=["paper", f"paper:{document_id}", "summary-version"],
+        )
+        canonical = self._workspace.write_file(
+            str(paper["summary_path"]),
+            content + "\n",
+            tags=["paper", f"paper:{document_id}", "summary"],
+        )
+        metadata["canonical_path"] = canonical.path
+        self._workspace.write_file(
+            metadata_path,
+            metadata,
+            tags=["paper", f"paper:{document_id}", "summary-version-metadata"],
+        )
+        self._append_workspace_receipt(context, saved, "Created")
+        self._append_workspace_receipt(context, canonical, "Updated")
+        self._record_paper_activity(
+            context,
+            document,
+            "summary_saved",
+            path=canonical.path,
+            version_path=saved.path,
+        )
+        return metadata
+
+    async def _paper_summary_checkpoint(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        document_id = str(arguments["document_id"]).strip()
+        document = self._documents.get_document(document_id)
+        if document is None:
+            raise ValueError("Paper was not found.")
+        relative_path = (
+            f"runs/{context.run_id}/paper-summary/{document.id}/checkpoint.md"
+        )
+        action = str(arguments["action"])
+        async with self._paper_summary_lock:
+            try:
+                checkpoint = self._storage.read_text(
+                    self._settings.artifacts_dir,
+                    relative_path,
+                    allowed_suffixes={".md"},
+                )
+            except FileNotFoundError:
+                checkpoint = ""
+
+            if action == "append":
+                self._require_paper_read(context, document_id)
+                content = _nullable_tool_string(arguments.get("content"), "content")
+                if content is None:
+                    raise ValueError("content is required when appending a summary checkpoint.")
+                separator = "\n\n" if checkpoint else ""
+                updated = checkpoint.rstrip() + separator + content.strip() + "\n"
+                saved = self._storage.write_text(
+                    self._settings.artifacts_dir,
+                    relative_path,
+                    updated,
+                )
+                persisted = self._storage.read_text(
+                    self._settings.artifacts_dir,
+                    saved.relative_path,
+                    allowed_suffixes={".md"},
+                )
+                if persisted != updated:
+                    raise RuntimeError("Paper summary checkpoint verification failed.")
+                state = self._paper_summary_state(context, document_id)
+                pending = state.pop("pending_checkpoint", None)
+                state["checkpoint_path"] = saved.relative_path
+                state["checkpoint_size_characters"] = len(persisted)
+                return {
+                    "status": "appended",
+                    "checkpoint_path": saved.relative_path,
+                    "size_characters": len(persisted),
+                    "checkpointed_batch": (
+                        pending.get("batch") if isinstance(pending, dict) else None
+                    ),
+                    "coverage": (
+                        pending.get("coverage") if isinstance(pending, dict) else None
+                    ),
+                    "has_more_paper": (
+                        pending.get("has_more") if isinstance(pending, dict) else None
+                    ),
+                    "next_start": (
+                        pending.get("next_start") if isinstance(pending, dict) else None
+                    ),
+                    "instruction": (
+                        "The checkpoint write was verified. The previous raw batch is now "
+                        "discardable; read the next batch if more paper content remains."
+                    ),
+                }
+
+            if action == "read":
+                offset = int(arguments.get("offset") or 0)
+                limit = int(arguments.get("limit") or 8000)
+                content = checkpoint[offset : offset + limit]
+                return {
+                    "status": "available" if checkpoint else "empty",
+                    "checkpoint_path": relative_path,
+                    "offset": offset,
+                    "content": content,
+                    "has_more": offset + len(content) < len(checkpoint),
+                    "next_offset": (
+                        offset + len(content)
+                        if offset + len(content) < len(checkpoint)
+                        else None
+                    ),
+                    "size_characters": len(checkpoint),
+                }
+
+        raise ValueError(f"Unknown paper summary checkpoint action '{action}'.")
+
     async def bound_tool_result(
         self,
         catalog_id: str,
@@ -204,6 +558,8 @@ class ApplicationToolRuntime:
         max_tokens: int | None = None,
     ) -> Any:
         if isinstance(result, dict) and result.get("result_ref") and result.get("truncated"):
+            return result
+        if catalog_id == "tool.results.read":
             return result
         serialized = json.dumps(result, ensure_ascii=False, default=str)
         limit = (max_tokens or self._settings.tool_result_max_tokens) * 4
@@ -255,9 +611,7 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        result_ref = str(arguments["result_ref"])
-        if not result_ref.startswith(f"runs/{context.run_id}/"):
-            raise ValueError("result_ref does not belong to the active run.")
+        result_ref = self._authorized_result_ref(arguments["result_ref"], context)
         offset = int(arguments["offset"])
         limit = int(arguments.get("limit", 10))
         content = self._storage.read_artifact(result_ref).decode("utf-8")
@@ -270,231 +624,42 @@ class ApplicationToolRuntime:
             "size_characters": len(content),
         }
 
-    def _update_goal_plan(
+    def _result_ref_is_accessible(
         self,
-        arguments: dict[str, Any],
+        result_ref: str,
         context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        if self._runs is None:
-            raise RuntimeError("Goal persistence is unavailable.")
-        state = self._runs.get_goal_state(context.run_id)
-        state.update({"steps": arguments["steps"], "summary": arguments.get("summary")})
-        result = self._runs.save_goal_state(context.run_id, status="active", state=state)
-        context.metadata["goal_state"] = result
-        return result
+    ) -> bool:
+        try:
+            self._authorized_result_ref(result_ref, context)
+        except ValueError:
+            return False
+        return True
 
-    def _block_goal(
+    def _authorized_result_ref(
         self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        if self._runs is None:
-            raise RuntimeError("Goal persistence is unavailable.")
-        state = self._runs.get_goal_state(context.run_id)
-        state["blocker"] = arguments
-        result = self._runs.save_goal_state(context.run_id, status="blocked", state=state)
-        context.metadata["goal_state"] = result
-        return result
-
-    def _finish_goal(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        if self._runs is None:
-            raise RuntimeError("Goal persistence is unavailable.")
-        state = self._runs.get_goal_state(context.run_id)
-        state["outcome"] = arguments
-        result = self._runs.save_goal_state(context.run_id, status="completed", state=state)
-        context.metadata["goal_state"] = result
-        return result
-    def _search_tools(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        from backend.autonomous.service import AUTONOMOUS_TOOL_IDS
-
-        available_catalog_ids = {catalog_id for _, catalog_id in AUTONOMOUS_TOOL_IDS}
-        query = str(arguments.get("query") or "").strip().casefold()
-        definitions = self._catalog.definitions() if self._catalog is not None else ()
-        tools = [
-            {
-                "catalog_id": definition.catalog_id,
-                "name": definition.name,
-                "description": definition.description,
-                "parameters_schema": definition.parameters_schema,
-                "requires_approval": False,
-            }
-            for definition in definitions
-            if definition.catalog_id in available_catalog_ids
-        ]
-        if query:
-            tools = [
-                tool
-                for tool in tools
-                if query
-                in " ".join(
-                    str(tool.get(field) or "")
-                    for field in ("catalog_id", "name", "description")
-                ).casefold()
-            ]
-        return {"query": query or None, "count": len(tools), "tools": tools}
-
-    def _read_all_paper_pages(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document_id = self._scoped_document(arguments, context)
-        result = self._read_pages(document_id, arguments, retained_only=False)
-        self._record_read_pages(context, result)
-        return result
-
-    def _read_retained_paper_pages(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document_id = self._scoped_document(arguments, context)
-        result = self._read_pages(document_id, arguments, retained_only=True)
-        self._record_read_pages(context, result)
-        return result
-
-    def _read_pages(
-        self,
-        document_id: str,
-        arguments: dict[str, Any],
-        *,
-        retained_only: bool,
-    ) -> dict[str, Any]:
-        details = self._documents.get_document_details(document_id)
-        if details is None:
-            raise ValueError("Paper was not found.")
-        document, artifacts, _ = details
-        manifest_artifact = next(
-            (artifact for artifact in artifacts if artifact.kind == "extracted_manifest"),
-            None,
-        )
-        if document.status != "ready" or manifest_artifact is None:
-            raise ValueError("Paper must be ingested before its pages can be read.")
-        manifest = self._documents.artifact_content(manifest_artifact)
-        if not isinstance(manifest, dict) or not isinstance(manifest.get("pages"), list):
-            raise ValueError("Paper page manifest is invalid.")
-        raw_pages = [page for page in manifest["pages"] if isinstance(page, dict)]
-        decisions = self._require_direct_agents().page_decisions(document_id)
-        pages = [
-            {
-                "page_number": int(page["page"]),
-                "text": str(page.get("text") or ""),
-                "decision": decisions.get(int(page["page"]), "unreviewed"),
-            }
-            for page in raw_pages
-            if not retained_only or decisions.get(int(page["page"])) != "no_keep"
-        ]
-        start_page = int(arguments["start_page"])
-        limit = int(arguments["limit"])
-        available = [page for page in pages if page["page_number"] >= start_page]
-        selected = available[:limit]
-        next_page = selected[-1]["page_number"] + 1 if selected else start_page
-        return {
-            "document_id": document_id,
-            "title": document.title,
-            "total_pages": len(raw_pages),
-            "available_pages": len(pages),
-            "pages": selected,
-            "has_more": len(available) > len(selected),
-            "next_page": next_page,
-        }
-
-    def _save_page_decisions(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document_id = self._scoped_document(arguments, context)
-        if context.metadata.get("direct_agent_key") != "paper_cleaner":
-            raise ValueError("Only the paper cleaner can save page decisions.")
-        decisions = list(arguments["decisions"])
-        document = self._documents.get_document(document_id)
-        if document is None or document.page_count is None:
-            raise ValueError("Paper must be ingested before page decisions can be saved.")
-        page_numbers = [int(decision["page_number"]) for decision in decisions]
-        if len(page_numbers) != len(set(page_numbers)):
-            raise ValueError("A decision batch cannot contain duplicate page numbers.")
-        if any(page < 1 or page > document.page_count for page in page_numbers):
-            raise ValueError("A page decision is outside the paper's page range.")
-        staged = context.metadata.get("paper_page_decisions")
-        staged_by_page = dict(staged) if isinstance(staged, dict) else {}
-        for decision in decisions:
-            staged_by_page[str(int(decision["page_number"]))] = decision
-        context.metadata["paper_page_decisions"] = staged_by_page
-        decided_pages = set(context.metadata.get("paper_pages_decided", []))
-        decided_pages.update(page_numbers)
-        context.metadata["paper_pages_decided"] = sorted(decided_pages)
-        return {
-            "document_id": document_id,
-            "saved_count": len(decisions),
-            "total_saved": len(staged_by_page),
-            "total_pages": document.page_count,
-            "status": "staged_until_run_completes",
-        }
-
-    def _save_paper_summary(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document_id = self._scoped_document(arguments, context)
-        if context.metadata.get("direct_agent_key") != "summary":
-            raise ValueError("Only the summary agent can save paper summaries.")
-        context.metadata["paper_summary"] = {
-            "contribution": str(arguments["contribution"]),
-            "contributions_detail": str(arguments["contributions_detail"]),
-            "experimentation_results": str(arguments["experimentation_results"]),
-            "open_areas": list(arguments["open_areas"]),
-        }
-        context.metadata["paper_summary_saved"] = True
-        return {
-            "document_id": document_id,
-            "saved": True,
-            "status": "staged_until_run_completes",
-        }
-
-    def _list_paper_summaries(
-        self,
-        _arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> list[dict[str, Any]]:
-        if context.metadata.get("direct_agent_key") != "open_areas":
-            raise ValueError("Only the open-areas agent can list stored paper summaries.")
-        context.metadata["paper_summaries_listed"] = True
-        return self._require_direct_agents().list_summaries()
-
-    @staticmethod
-    def _scoped_document(
-        arguments: dict[str, Any],
+        result_ref: Any,
         context: ScholarWeaveContext,
     ) -> str:
-        document_id = str(arguments["document_id"])
-        allowed = context.metadata.get("direct_agent_document_ids")
-        if not isinstance(allowed, list) or document_id not in allowed:
-            raise ValueError("The requested paper is outside this direct-agent conversation.")
-        return document_id
-
-    @staticmethod
-    def _record_read_pages(
-        context: ScholarWeaveContext,
-        result: dict[str, Any],
-    ) -> None:
-        context.metadata["paper_pages_tool_called"] = True
-        read_pages = set(context.metadata.get("paper_pages_read", []))
-        read_pages.update(
-            int(page["page_number"])
-            for page in result["pages"]
-            if isinstance(page, dict) and "page_number" in page
-        )
-        context.metadata["paper_pages_read"] = sorted(read_pages)
+        normalized = _normalize_result_ref(result_ref)
+        parts = PurePosixPath(normalized).parts
+        referenced_run_id = parts[1]
+        if referenced_run_id == context.run_id:
+            return normalized
+        if self._runs is None or context.conversation_id is None:
+            raise ValueError(
+                "result_ref does not belong to the active run or its conversation."
+            )
+        try:
+            referenced_run = self._runs.get(referenced_run_id)
+        except NotFoundError:
+            raise ValueError(
+                "result_ref does not belong to the active run or its conversation."
+            ) from None
+        if referenced_run.conversation_id != context.conversation_id:
+            raise ValueError(
+                "result_ref does not belong to the active run or its conversation."
+            )
+        return normalized
 
     async def _search_research_sources(
         self,
@@ -521,11 +686,13 @@ class ApplicationToolRuntime:
                     for item in result.get("results", [])
                     if isinstance(item, dict) and item.get("url")
                 )
-            return result
+            return self._annotate_local_source_results(result)
         if provider == "arxiv":
-            return await self._search_arxiv({"query": query, "limit": 10}, context)
+            result = await self._research_search.search_arxiv(query, 10)
+            return self._annotate_local_source_results(result, match_title=True)
         if provider == "wikipedia":
-            return await self._search_wikipedia({"query": query, "limit": 10}, context)
+            result = await self._research_search.search_wikipedia(query, 10)
+            return self._annotate_local_source_results(result)
         raise ValueError(f"Unknown research source provider '{provider}'.")
 
     async def _acquire_research_source(
@@ -535,6 +702,7 @@ class ApplicationToolRuntime:
     ) -> dict[str, Any]:
         kind = str(arguments["kind"])
         url = str(arguments["url"])
+        title = _nullable_tool_string(arguments.get("title"), "title")
         if context.metadata.get("fast_answer"):
             allowed_urls = context.metadata.get("fast_answer_result_urls", [])
             if kind != "web_page" or not isinstance(allowed_urls, list) or url not in allowed_urls:
@@ -544,7 +712,7 @@ class ApplicationToolRuntime:
             context.metadata["fast_answer_page_acquired"] = True
         if kind == "paper":
             return await self._download_paper(
-                {"pdf_url": url, "title": arguments.get("title")},
+                {"pdf_url": url, "title": title},
                 context,
             )
         if kind == "web_page":
@@ -556,29 +724,135 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> Any:
-        query_value = arguments.get("query")
-        query = str(query_value).strip() if query_value is not None else ""
-        document_value = arguments.get("document_id")
-        document_id = str(document_value) if document_value is not None else None
+        query = _nullable_tool_string(arguments.get("query"), "query") or ""
+        document_id = _nullable_tool_string(
+            arguments.get("document_id"),
+            "document_id",
+            coerce_null_literal=True,
+        )
+        ignored_document_ids = _tool_string_list(
+            arguments.get("ignore_document_ids"),
+            "ignore_document_ids",
+        )
+        selected_document = (
+            self._documents.get_document(document_id) if document_id else None
+        )
+        if document_id and selected_document is None:
+            return {
+                "found": False,
+                "requested_document_id": document_id,
+                "query": query or None,
+                "results": [],
+                "warning": (
+                    "No local paper has that document ID. Search by title or filename with "
+                    "document_id set to JSON null."
+                ),
+            }
         if query:
-            return self._keyword_search(
-                {
-                    "query": query,
-                    "document_id": document_id,
-                    "top_k": int(arguments["limit"]),
-                },
-                context,
+            query_tokens = list(dict.fromkeys(_search_words(query)))
+            documents = (
+                [selected_document]
+                if document_id
+                else self._documents.list_documents()
             )
+            documents = [
+                document
+                for document in documents
+                if document is not None and document.id not in ignored_document_ids
+            ]
+            matches: list[dict[str, Any]] = []
+            for document in documents:
+                matched_fields, matched_words = _document_metadata_matches(
+                    document,
+                    query_tokens,
+                )
+                if not matched_words:
+                    continue
+                matches.append(
+                    {
+                        **self._document_search_result(document),
+                        "match_type": "metadata",
+                        "matched_fields": matched_fields,
+                        "matched_words": matched_words,
+                        "match_score": len(matched_words),
+                    }
+                )
+            matches.sort(
+                key=lambda match: (
+                    -int(match["match_score"]),
+                    str(match["title"]).casefold(),
+                    str(match["document_id"]),
+                )
+            )
+            return matches[: min(3, int(arguments["limit"]))]
         if document_id:
             return self._inspect_paper({"document_id": document_id}, context)
         return self._list_documents({}, context)
+
+    def _organize_research_library(
+        self,
+        arguments: dict[str, Any],
+        _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        action = str(arguments["action"])
+        if action == "list":
+            return {
+                "folders": [
+                    {"id": folder.id, "name": folder.name}
+                    for folder in self._documents.list_folders()
+                ],
+                "papers": [
+                    {
+                        "document_id": document.id,
+                        "title": document.title,
+                        "folder_id": (document.metadata_json or {}).get("folder_id"),
+                    }
+                    for document in self._documents.list_documents()
+                ],
+            }
+        if action == "create_folder":
+            folder_name = _nullable_tool_string(
+                arguments.get("folder_name"),
+                "folder_name",
+            )
+            if folder_name is None:
+                raise ValueError("create_folder requires folder_name.")
+            folder = self._documents.create_folder(folder_name)
+            return {"folder": {"id": folder.id, "name": folder.name}}
+        if action == "move_paper":
+            document_id = _nullable_tool_string(
+                arguments.get("document_id"),
+                "document_id",
+            )
+            if document_id is None:
+                raise ValueError("move_paper requires document_id.")
+            folder_id = _nullable_tool_string(
+                arguments.get("folder_id"),
+                "folder_id",
+                coerce_null_literal=True,
+            )
+            document = self._documents.assign_folder(document_id, folder_id)
+            return {
+                "paper": {
+                    "document_id": document.id,
+                    "title": document.title,
+                    "folder_id": (document.metadata_json or {}).get("folder_id"),
+                }
+            }
+        raise ValueError(f"Unknown library organization action '{action}'.")
 
     async def _read_research_paper(
         self,
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> Any:
-        document_id = str(arguments["document_id"])
+        document_id = _nullable_tool_string(
+            arguments.get("document_id"),
+            "document_id",
+            coerce_null_literal=True,
+        )
+        if document_id is None:
+            raise ValueError("document_id is required when reading a paper.")
         action = str(arguments["action"])
         if action == "inspect":
             return self._inspect_paper({"document_id": document_id}, context)
@@ -609,13 +883,119 @@ class ApplicationToolRuntime:
             )
         raise ValueError(f"Unknown paper read action '{action}'.")
 
+    async def _read_paper_summary_batch(
+        self,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> Any:
+        action = str(arguments["action"])
+        delegated = {
+            "document_id": arguments["document_id"],
+            "action": action,
+            "start": arguments.get("start"),
+            "limit": 10,
+        }
+        if action in {"inspect", "prepare"}:
+            return await self._read_research_paper(delegated, context)
+
+        document_id = str(arguments["document_id"]).strip()
+        batch_counts = context.metadata.setdefault("_paper_summary_read_batches", {})
+        if not isinstance(batch_counts, dict):
+            batch_counts = {}
+            context.metadata["_paper_summary_read_batches"] = batch_counts
+        async with self._paper_summary_lock:
+            state = self._paper_summary_state(context, document_id)
+            pending = state.get("pending_checkpoint")
+            if isinstance(pending, dict):
+                raise ValueError(
+                    "The previous paper-summary batch must be appended to "
+                    f"{pending['checkpoint_path']} before another batch can be read."
+                )
+            completed = int(batch_counts.get(document_id, 0))
+            if completed >= 5:
+                raise ValueError(
+                    "Paper summary reading is capped at five 10-page or 10-chunk batches."
+                )
+            result = await self._read_research_paper(delegated, context)
+            completed += 1
+            batch_counts[document_id] = completed
+            if isinstance(result, dict):
+                coverage = self._paper_summary_coverage(action, delegated, result)
+                checkpoint_path = (
+                    f"runs/{context.run_id}/paper-summary/{document_id}/checkpoint.md"
+                )
+                state["pending_checkpoint"] = {
+                    "batch": completed,
+                    "coverage": coverage,
+                    "has_more": bool(result.get("has_more")),
+                    "next_start": result.get("next_page", result.get("next_start")),
+                    "checkpoint_path": checkpoint_path,
+                }
+                return {
+                    **result,
+                    "summary_batch": completed,
+                    "summary_batches_remaining": 5 - completed,
+                    "checkpoint_required": True,
+                    "checkpoint_path": checkpoint_path,
+                    "coverage": coverage,
+                    "instruction": (
+                        "You must append your understanding of this batch to the checkpoint "
+                        "before any next paper-summary batch. Parallel batch reads are rejected."
+                    ),
+                }
+            return result
+
+    @staticmethod
+    def _paper_summary_state(
+        context: ScholarWeaveContext,
+        document_id: str,
+    ) -> dict[str, Any]:
+        states = context.metadata.setdefault("_paper_summary_checkpoint_states", {})
+        if not isinstance(states, dict):
+            states = {}
+            context.metadata["_paper_summary_checkpoint_states"] = states
+        state = states.setdefault(document_id, {})
+        if not isinstance(state, dict):
+            state = {}
+            states[document_id] = state
+        return state
+
+    @staticmethod
+    def _paper_summary_coverage(
+        action: str,
+        arguments: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        if action == "pages":
+            pages = result.get("pages")
+            numbers = [
+                int(page["page_number"])
+                for page in pages
+                if isinstance(page, dict) and page.get("page_number") is not None
+            ] if isinstance(pages, list) else []
+            return {
+                "kind": "pages",
+                "start": min(numbers) if numbers else int(arguments.get("start") or 1),
+                "end": max(numbers) if numbers else None,
+            }
+        chunks = result.get("chunks")
+        indexes = [
+            int(chunk["chunk_index"])
+            for chunk in chunks
+            if isinstance(chunk, dict) and chunk.get("chunk_index") is not None
+        ] if isinstance(chunks, list) else []
+        return {
+            "kind": "chunks",
+            "start": min(indexes) if indexes else int(arguments.get("start") or 0),
+            "end": max(indexes) if indexes else None,
+        }
+
     async def _read_research_web_page(
         self,
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> Any:
-        query_value = arguments.get("query")
-        query = str(query_value).strip() if query_value is not None else ""
+        query = _nullable_tool_string(arguments.get("query"), "query") or ""
         if query:
             return await self._search_web_page(
                 {
@@ -641,7 +1021,7 @@ class ApplicationToolRuntime:
     ) -> list[dict[str, Any]]:
         return self._search_workspace(
             {
-                "query": arguments.get("query"),
+                "query": _nullable_tool_string(arguments.get("query"), "query"),
                 "kinds": arguments["kinds"],
                 "tags": arguments["tags"],
                 "limit": arguments["limit"],
@@ -655,7 +1035,46 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        return self._read_workspace(arguments, context)
+        result = self._read_workspace(arguments, context)
+        path = str(result["path"])
+        tags = result["tags"]
+        content = result["content"]
+        if not (
+            path.startswith("papers/")
+            and path.endswith("/summary.md")
+            and isinstance(content, str)
+        ):
+            return result
+
+        paper_tag = next(
+            (
+                tag
+                for tag in tags
+                if isinstance(tag, str) and tag.startswith("paper:")
+            ),
+            None,
+        )
+        document_id = paper_tag.removeprefix("paper:") if paper_tag else None
+        document = self._documents.get_document(document_id) if document_id else None
+        reusable = len(content.strip()) >= 200
+        result["summary_check"] = {
+            "status": "reusable" if reusable else "incomplete",
+            "document_id": document_id,
+            "needs_regeneration": not reusable,
+            "reason": (
+                "Canonical summary contains substantive content."
+                if reusable
+                else "Canonical summary is empty, still a template, or lacks substantive content."
+            ),
+        }
+        if reusable and document is not None:
+            self._record_paper_activity(
+                context,
+                document,
+                "summary_reused",
+                path=path,
+            )
+        return result
 
     def _save_research_note(
         self,
@@ -667,7 +1086,7 @@ class ApplicationToolRuntime:
         content = str(arguments["content"])
         tags = list(arguments["tags"])
         if target == "new_note":
-            name = str(arguments.get("name") or "").strip()
+            name = _nullable_tool_string(arguments.get("name"), "name")
             if not name:
                 raise ValueError("A new research note requires a name.")
             return self._create_workspace_note(
@@ -676,13 +1095,19 @@ class ApplicationToolRuntime:
             )
 
         if target == "paper_notes":
-            document_id = str(arguments.get("document_id") or "").strip()
+            document_id = _nullable_tool_string(
+                arguments.get("document_id"),
+                "document_id",
+                coerce_null_literal=True,
+            )
             if not document_id:
                 raise ValueError("Paper notes require a document_id.")
+            self._require_paper_read(context, document_id)
             paper = self._ensure_paper_workspace({"document_id": document_id}, context)
             path = str(paper["notes_path"])
+            paper_document = self._documents.get_document(document_id)
         elif target == "path":
-            path = str(arguments.get("path") or "").strip()
+            path = _nullable_tool_string(arguments.get("path"), "path")
             if not path:
                 raise ValueError("Updating a research note by path requires a path.")
         else:
@@ -701,6 +1126,13 @@ class ApplicationToolRuntime:
         if tags and mode == "append":
             document = self._workspace.set_tags(path, tags)
         self._append_workspace_receipt(context, document, "Updated")
+        if target == "paper_notes" and paper_document is not None:
+            self._record_paper_activity(
+                context,
+                paper_document,
+                "notes_saved",
+                path=document.path,
+            )
         return self._workspace_result(document)
 
     def _list_documents(
@@ -719,16 +1151,49 @@ class ApplicationToolRuntime:
             readable = document.status == "ready" and has_manifest and bool(chunks)
             documents.append(
                 {
-                    "id": document.id,
-                    "title": document.title,
-                    "status": document.status,
-                    "page_count": document.page_count,
+                    **self._document_search_result(document),
                     "readable": readable,
                     "chunk_count": len(chunks),
                     "next_action": None if readable else "inspect_paper",
                 }
             )
         return documents
+
+    @staticmethod
+    def _document_search_result(document: Any) -> dict[str, Any]:
+        metadata = document.metadata_json if isinstance(document.metadata_json, dict) else {}
+        return {
+            "id": document.id,
+            "document_id": document.id,
+            "title": document.title,
+            "source_filename": document.source_filename,
+            "authors": _document_authors(metadata),
+            "source_url": metadata.get("source_url"),
+            "status": document.status,
+            "page_count": document.page_count,
+        }
+
+    def _annotate_local_source_results(
+        self,
+        result: dict[str, Any],
+        *,
+        match_title: bool = False,
+    ) -> dict[str, Any]:
+        for item in result.get("results", []):
+            if not isinstance(item, dict):
+                continue
+            url = item.get("pdf_url") or item.get("url")
+            if not isinstance(url, str):
+                continue
+            title = (
+                item.get("title")
+                if match_title and isinstance(item.get("title"), str)
+                else None
+            )
+            document = self._source_downloads.find_document(url, title=title)
+            item["already_in_library"] = document is not None
+            item["local_document_id"] = document.id if document is not None else None
+        return result
 
     def _inspect_paper(
         self,
@@ -790,12 +1255,16 @@ class ApplicationToolRuntime:
     ) -> dict[str, Any]:
         document_id = str(arguments["document_id"])
         await self._documents.ingest_document(document_id)
-        return self._inspect_paper({"document_id": document_id}, context)
+        result = self._inspect_paper({"document_id": document_id}, context)
+        document = self._documents.get_document(document_id)
+        if document is not None:
+            self._record_paper_activity(context, document, "ingested")
+        return result
 
     def _read_paper_pages(
         self,
         arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
+        context: ScholarWeaveContext,
     ) -> dict[str, Any]:
         document_id = str(arguments["document_id"])
         details = self._documents.get_document_details(document_id)
@@ -817,10 +1286,24 @@ class ApplicationToolRuntime:
             page for page in pages if int(page.get("page") or 0) >= start_page
         ]
         selected = available[:limit]
+        if not selected:
+            return {
+                "document_id": document_id,
+                "title": document.title,
+                "page_count": len(pages),
+                "has_more": False,
+                "next_page": None,
+                "pages": [],
+                "warning": "The requested page is beyond the end of this paper.",
+            }
+        self._record_paper_activity(context, document, "read")
+        next_page = int(selected[-1]["page"]) + 1
         return {
             "document_id": document_id,
             "title": document.title,
             "page_count": len(pages),
+            "has_more": len(available) > len(selected),
+            "next_page": next_page,
             "pages": [
                 {
                     "page_number": int(page["page"]),
@@ -829,17 +1312,13 @@ class ApplicationToolRuntime:
                 }
                 for page in selected
             ],
-            "has_more": len(available) > len(selected),
-            "next_page": (
-                int(selected[-1]["page"]) + 1 if selected else start_page
-            ),
         }
 
     def _read_document_chunks(
         self,
         arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> list[dict[str, Any]]:
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
         start = int(arguments.get("start") or 0)
         limit = int(arguments.get("limit") or 20)
         document_id = str(arguments["document_id"])
@@ -851,18 +1330,40 @@ class ApplicationToolRuntime:
             raise ValueError(
                 "Paper has no readable extracted content. Inspect and ingest it before reading."
             )
-        return [
-            {
-                "chunk_id": chunk.id,
-                "chunk_index": chunk.chunk_index,
-                "section_title": chunk.section_title,
-                "citation": chunk.citation,
-                "page_start": chunk.page_start,
-                "page_end": chunk.page_end,
-                "text": chunk.text,
+        selected = chunks[start : start + limit]
+        if not selected:
+            return {
+                "document_id": document_id,
+                "title": document.title,
+                "chunk_count": len(chunks),
+                "start": start,
+                "has_more": False,
+                "next_start": None,
+                "chunks": [],
+                "warning": "The requested chunk is beyond the end of this paper.",
             }
-            for chunk in chunks[start : start + limit]
-        ]
+        self._record_paper_activity(context, document, "read")
+        next_start = start + len(selected)
+        return {
+            "document_id": document_id,
+            "title": document.title,
+            "chunk_count": len(chunks),
+            "start": start,
+            "has_more": next_start < len(chunks),
+            "next_start": next_start,
+            "chunks": [
+                {
+                    "chunk_id": chunk.id,
+                    "chunk_index": chunk.chunk_index,
+                    "section_title": chunk.section_title,
+                    "citation": chunk.citation,
+                    "page_start": chunk.page_start,
+                    "page_end": chunk.page_end,
+                    "text": chunk.text,
+                }
+                for chunk in selected
+            ],
+        }
 
     def _keyword_search(
         self,
@@ -880,11 +1381,44 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
-        document = await self._source_downloads.download_pdf(
-            str(arguments["pdf_url"]),
-            title=str(arguments["title"]) if arguments.get("title") else None,
+        pdf_url = str(arguments["pdf_url"])
+        title = str(arguments["title"]) if arguments.get("title") else None
+        existing = self._source_downloads.find_document(pdf_url, title=title)
+        document = await self._source_downloads.download_pdf(pdf_url, title=title)
+        paper = self._workspace.ensure_paper_folder(document.id, document.title)
+        marker = f"<!-- scholarweave-paper-acquired:{document.id} -->"
+        notes = self._workspace.read_file(str(paper["notes_path"]))
+        notes_content = notes.content if isinstance(notes.content, str) else ""
+        if marker not in notes_content:
+            notes = self._workspace.append_markdown(
+                str(paper["notes_path"]),
+                (
+                    f"\n{marker}\n## Source acquired\n\n"
+                    f"- URL: {str(arguments['pdf_url'])}\n"
+                    f"- Document ID: `{document.id}`\n"
+                ),
+            )
+            self._append_workspace_receipt(context, notes, "Updated")
+        for created_path in paper["created"]:
+            self._append_workspace_receipt(
+                context,
+                self._workspace.read_file(str(created_path)),
+                "Created",
+            )
+        self._record_paper_activity(
+            context,
+            document,
+            "acquired",
+            url=str(arguments["pdf_url"]),
+            summary_path=str(paper["summary_path"]),
+            notes_path=str(paper["notes_path"]),
         )
-        return self._inspect_paper({"document_id": document.id}, context)
+        return {
+            **self._inspect_paper({"document_id": document.id}, context),
+            "already_in_library": existing is not None,
+            "summary_path": paper["summary_path"],
+            "notes_path": paper["notes_path"],
+        }
 
     async def _download_web_page(
         self,
@@ -908,16 +1442,6 @@ class ApplicationToolRuntime:
                 ),
             }
         return self._web_source_result(source)
-
-    async def _list_web_pages(
-        self,
-        _arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> list[dict[str, Any]]:
-        return [
-            self._web_source_result(source)
-            for source in await self._source_downloads.list_web_sources()
-        ]
 
     async def _read_web_page(
         self,
@@ -952,25 +1476,6 @@ class ApplicationToolRuntime:
             str(arguments["query"]),
             top_k=int(arguments["top_k"]),
         )
-
-    async def _save_web_page_note(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document = await self._source_downloads.save_web_note(
-            str(arguments["source_id"]),
-            name=str(arguments["name"]),
-            content=str(arguments["content"]),
-            tags=list(arguments["tags"]),
-        )
-        self._append_workspace_receipt(context, document, "Created")
-        return {
-            **self._workspace_result(document),
-            "note_id": document.note_id,
-            "name": document.note_name,
-            "kind": document.kind,
-        }
 
     async def _search_web(
         self,
@@ -1078,26 +1583,6 @@ class ApplicationToolRuntime:
             raise ValueError("The web-search run limit is invalid.")
         return min(configured, value)
 
-    async def _search_arxiv(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        return await self._research_search.search_arxiv(
-            str(arguments["query"]),
-            int(arguments["limit"]),
-        )
-
-    async def _search_wikipedia(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        return await self._research_search.search_wikipedia(
-            str(arguments["query"]),
-            int(arguments["limit"]),
-        )
-
     @staticmethod
     def _web_source_result(source) -> dict[str, Any]:
         return {
@@ -1109,16 +1594,6 @@ class ApplicationToolRuntime:
             "created_at": source.created_at.isoformat(),
             "expires_at": source.expires_at.isoformat(),
         }
-
-    def _list_workspace(
-        self,
-        _arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> list[dict[str, Any]]:
-        return [
-            {"path": document.path, "tags": list(document.tags)}
-            for document in self._workspace.list_files()
-        ]
 
     def _read_workspace(
         self,
@@ -1155,76 +1630,6 @@ class ApplicationToolRuntime:
             )
         ]
 
-    def _write_workspace(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document = self._workspace.write_file(
-            str(arguments["path"]),
-            arguments["content"],
-        )
-        receipt = ToolReceipt(
-            kind="file",
-            title=f"Wrote {document.path}",
-            href=f"/workspace?path={document.path}",
-            metadata={"sha256": document.sha256},
-        )
-        context.receipts.append(receipt)
-        return {
-            "path": document.path,
-            "size_bytes": document.size_bytes,
-            "sha256": document.sha256,
-            "tags": list(document.tags),
-        }
-
-    def _replace_workspace_markdown(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document = self._workspace.replace_markdown(
-            str(arguments["path"]),
-            str(arguments["old_text"]),
-            str(arguments["new_text"]),
-            replace_all=bool(arguments["replace_all"]),
-        )
-        self._append_workspace_receipt(context, document, "Updated")
-        return self._workspace_result(document)
-
-    def _append_workspace_markdown(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document = self._workspace.append_markdown(
-            str(arguments["path"]),
-            str(arguments["content"]),
-        )
-        self._append_workspace_receipt(context, document, "Updated")
-        return self._workspace_result(document)
-
-    def _set_workspace_tags(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document = self._workspace.set_tags(
-            str(arguments["path"]),
-            list(arguments["tags"]),
-        )
-        return {"path": document.path, "tags": list(document.tags)}
-
-    def _search_workspace_tags(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> list[dict[str, Any]]:
-        return [
-            {"path": document.path, "tags": list(document.tags)}
-            for document in self._workspace.list_files(tags=list(arguments["tags"]))
-        ]
-
     def _ensure_paper_workspace(
         self,
         arguments: dict[str, Any],
@@ -1254,51 +1659,47 @@ class ApplicationToolRuntime:
             "kind": document.kind,
         }
 
-    def _save_extended_work_note(
+    def _record_paper_activity(
         self,
-        arguments: dict[str, Any],
         context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        result = save_work_note(arguments, context)
-        sources = list(result["sources"])
-        source_section = (
-            "\n\n## Sources\n\n" + "\n".join(f"- {source}" for source in sources)
-            if sources
-            else ""
-        )
-        folder = clean_filename(context.run_id)
-        filename = clean_filename(f"{result['note_id']}-{result['title']}")
-        path = f"extended-work-notes/{folder}/{filename}.md"
-        try:
-            document = self._workspace.write_file(
-                path,
-                f"# {result['title']}\n\n{result['content']}{source_section}\n",
-                tags=["extended-work", f"run:{context.run_id}"],
-            )
-        except Exception:
-            notes = context.metadata.get("extended_work_notes")
-            if isinstance(notes, dict):
-                notes.pop(result["note_id"], None)
-            raise
-        self._append_workspace_receipt(context, document, "Created")
-        return {
-            **result,
-            "workspace_path": document.path,
+        document: Any,
+        action: str,
+        **details: Any,
+    ) -> None:
+        activity = context.metadata.setdefault("paper_activity", [])
+        if not isinstance(activity, list):
+            activity = []
+            context.metadata["paper_activity"] = activity
+        entry = {
+            "action": action,
+            "document_id": document.id,
+            "title": document.title,
+            **details,
         }
+        if entry not in activity:
+            activity.append(entry)
+            if self._runs is not None and self._runs.exists(context.run_id):
+                self._runs.update_runtime_metadata(
+                    context.run_id,
+                    _persistable_tool_metadata(context.metadata),
+                )
 
-    def _set_paper_workspace_name(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, str]:
-        document_id = str(arguments["document_id"])
-        document = self._documents.get_document(document_id)
-        if document is None:
-            raise ValueError("Paper was not found.")
-        self._workspace.ensure_paper_folder(document.id, document.title)
-        return self._workspace.set_paper_name(
-            document.id,
-            str(arguments["paper_name"]),
+    @staticmethod
+    def _require_paper_read(
+        context: ScholarWeaveContext,
+        document_id: str,
+    ) -> None:
+        activity = context.metadata.get("paper_activity")
+        if isinstance(activity, list) and any(
+            isinstance(item, dict)
+            and item.get("document_id") == document_id
+            and item.get("action") == "read"
+            for item in activity
+        ):
+            return
+        raise ValueError(
+            "Paper summaries and notes can only be saved after extracted pages or chunks "
+            "have been read in the active run."
         )
 
     @staticmethod
@@ -1324,263 +1725,6 @@ class ApplicationToolRuntime:
                 metadata={"sha256": document.sha256},
             )
         )
-    def _write_artifact(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        media_type = str(arguments["media_type"])
-        content = arguments["content"]
-        if media_type == "application/json":
-            serialized = dumps_json(content)
-        elif isinstance(content, str):
-            serialized = content
-        else:
-            serialized = dumps_json(content)
-        relative_path = f"runs/{context.run_id}/{arguments['path']}"
-        stored = self._storage.write_text(
-            self._settings.artifacts_dir,
-            relative_path,
-            serialized,
-        )
-        artifact = self._documents.create_artifact_record(
-            owner_type="agent_run",
-            kind="generated",
-            relative_path=relative_path,
-            media_type=media_type,
-            stored=stored,
-            metadata={"agent_run_id": context.run_id},
-        )
-        receipt = ToolReceipt(
-            kind="artifact",
-            title=f"Created {arguments['path']}",
-            href=f"/api/artifacts/{artifact.id}",
-            metadata={"artifact_id": artifact.id},
-        )
-        context.receipts.append(receipt)
-        return {
-            "artifact_id": artifact.id,
-            "path": relative_path,
-            "media_type": media_type,
-            "size_bytes": stored.size_bytes,
-        }
-
-    def _sdk_catalog(
-        self,
-        _arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        definitions = self._catalog.definitions() if self._catalog is not None else ()
-        return {
-            "primitives": [
-                "Agent",
-                "FunctionTool",
-                "Agent.as_tool",
-                "Handoff",
-                "InputGuardrail",
-                "OutputGuardrail",
-                "Agent.output_type",
-                "ModelSettings",
-                "RunConfig",
-                "Session",
-            ],
-            "function_tools": [
-                {
-                    "catalog_id": definition.catalog_id,
-                    "name": definition.name,
-                    "description": definition.description,
-                    "parameters_schema": definition.parameters_schema,
-                }
-                for definition in definitions
-            ],
-            "agent_blueprint_schema": AgentBlueprint.model_json_schema(by_alias=True),
-            "agent_blueprint_examples": [
-                blueprint.model_dump(mode="json", by_alias=True)
-                for blueprint in starter_blueprints()
-            ],
-        }
-
-    def _list_agents(
-        self,
-        _arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> list[dict[str, Any]]:
-        agents = self._require_agents()
-        return [
-            {
-                "id": document.record.id,
-                "name": document.record.name,
-                "description": document.record.description,
-                "revision": document.latest_revision.revision,
-            }
-            for document in agents.list()
-        ]
-
-    def _get_agent(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        document = self._require_agents().get(str(arguments["agent_id"]))
-        return {
-            "id": document.record.id,
-            "revision_id": document.latest_revision.id,
-            "revision": document.latest_revision.revision,
-            "blueprint": document.latest_revision.blueprint_json,
-            "presentation": document.latest_revision.presentation_json,
-        }
-
-    def _validate_agent(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        try:
-            blueprint = AgentBlueprint.model_validate(arguments["blueprint"])
-        except PydanticValidationError as exc:
-            return {
-                "valid": False,
-                "issues": [
-                    f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
-                    for error in exc.errors(include_url=False, include_input=False)
-                ],
-            }
-        issues = self._require_agents().validate(blueprint)
-        return {"valid": not issues, "issues": list(issues)}
-
-    def _save_agent(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        agents = self._require_agents()
-        blueprint = AgentBlueprint.model_validate(arguments["blueprint"])
-        agent_id = arguments.get("agent_id")
-        if agent_id:
-            document = agents.update(
-                str(agent_id),
-                blueprint,
-                presentation=arguments.get("presentation") or {},
-            )
-        else:
-            document = agents.create(
-                blueprint,
-                presentation=arguments.get("presentation") or {},
-            )
-        context.receipts.append(
-            ToolReceipt(
-                kind="agent",
-                title=f"Saved {document.record.name}",
-                href=f"/agents/{document.record.id}",
-                metadata={"revision_id": document.latest_revision.id},
-            )
-        )
-        return {
-            "agent_id": document.record.id,
-            "revision_id": document.latest_revision.id,
-            "revision": document.latest_revision.revision,
-        }
-
-    def _save_function_tool(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        service = self._require_function_tools()
-        definition_id = arguments.get("definition_id")
-        payload = {
-            "name": str(arguments["name"]),
-            "description": str(arguments.get("description") or ""),
-            "parameters_schema": arguments["parameters_schema"],
-            "output_schema": arguments.get("output_schema"),
-            "code": str(arguments["code"]),
-            "requires_approval": bool(arguments.get("requires_approval", False)),
-        }
-        document = (
-            service.update(str(definition_id), **payload)
-            if definition_id
-            else service.create(**payload)
-        )
-        context.receipts.append(
-            ToolReceipt(
-                kind="function_tool",
-                title=f"Saved {document.record.name}",
-                href="/tools",
-                metadata={"revision_id": document.latest_revision.id},
-            )
-        )
-        return {
-            "definition_id": document.record.id,
-            "revision_id": document.latest_revision.id,
-            "revision": document.latest_revision.revision,
-            "catalog_id": f"custom:{document.latest_revision.id}",
-        }
-
-    def _search_conversation_memory(
-        self,
-        arguments: dict[str, Any],
-        context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        query = str(arguments["query"]).strip()
-        matches = self._require_conversation_memory().search(
-            query,
-            exclude_conversation_id=context.conversation_id,
-            limit=int(arguments["limit"]),
-        )
-        return {
-            "query": query,
-            "matches": matches,
-            "reuse_guidance": (
-                "Read and reuse only when the request, assumptions, and evidence clearly match. "
-                "Otherwise update the work."
-            ),
-        }
-
-    def _read_conversation_memory(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        return self._require_conversation_memory().read(str(arguments["run_id"]))
-
-    async def _execute_python(
-        self,
-        arguments: dict[str, Any],
-        _context: ScholarWeaveContext,
-    ) -> dict[str, Any]:
-        if not self._settings.python_tool_enabled:
-            raise ValueError("Sandboxed Python execution is disabled in Settings.")
-        result = await run_python(
-            str(arguments["code"]),
-            dict(arguments["inputs"]),
-            limits=SandboxLimits(
-                timeout_seconds=self._settings.python_tool_timeout_seconds,
-                memory_mb=self._settings.python_tool_memory_mb,
-            ),
-            allowed_imports=self._settings.python_tool_allowed_imports,
-            entrypoint="compute",
-        )
-        return {"output": result.value, "stdout": result.stdout}
-
-    def _require_agents(self) -> AgentService:
-        if self._agents is None:
-            raise RuntimeError("Agent tools are not configured.")
-        return self._agents
-
-    def _require_function_tools(self) -> FunctionToolService:
-        if self._function_tools is None:
-            raise RuntimeError("Function-tool authoring is not configured.")
-        return self._function_tools
-
-    def _require_conversation_memory(self) -> ConversationMemoryService:
-        if self._conversation_memory is None:
-            raise RuntimeError("Conversation memory is unavailable.")
-        return self._conversation_memory
-
-    def _require_direct_agents(self) -> DirectAgentRepository:
-        if self._direct_agents is None:
-            raise RuntimeError("Direct research-agent tools are not configured.")
-        return self._direct_agents
 
 
 def _active_epoch_id(context: ScholarWeaveContext) -> str | None:
@@ -1595,28 +1739,8 @@ _SAFE_READ_PREFIXES = (
     "research.web.read",
     "research.notes.search",
     "research.notes.read",
-    "tools.",
-    "documents.list",
-    "documents.inspect",
-    "documents.read_",
-    "retrieval.",
-    "research.pages.read",
-    "research.summaries.list",
-    "web.search",
-    "arxiv.search",
-    "wikipedia.search",
-    "webpage.list",
-    "webpage.read",
-    "webpage.search",
-    "workspace.list",
-    "workspace.search",
-    "workspace.read",
-    "workspace.tags.search",
-    "sdk.catalog",
-    "agents.list",
-    "agents.get",
-    "agents.validate",
     "tool.results.read",
+    "work.plan.read",
 )
 
 

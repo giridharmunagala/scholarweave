@@ -86,30 +86,6 @@
         "title": "ArtifactResponse",
         "type": "object"
       },
-      "Body_transcribe_speech_api_providers_speech_transcriptions_post": {
-        "properties": {
-          "file": {
-            "contentMediaType": "application/octet-stream",
-            "title": "File",
-            "type": "string"
-          },
-          "model": {
-            "title": "Model",
-            "type": "string"
-          },
-          "provider_profile_id": {
-            "title": "Provider Profile Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "file",
-          "provider_profile_id",
-          "model"
-        ],
-        "title": "Body_transcribe_speech_api_providers_speech_transcriptions_post",
-        "type": "object"
-      },
       "Body_upload_document_api_documents_post": {
         "properties": {
           "file": {
@@ -135,82 +111,9 @@
         "title": "Body_upload_document_api_documents_post",
         "type": "object"
       },
-      "BuiltInSpeechStatus": {
-        "additionalProperties": false,
-        "properties": {
-          "available": {
-            "title": "Available",
-            "type": "boolean"
-          },
-          "downloaded_bytes": {
-            "default": 0,
-            "title": "Downloaded Bytes",
-            "type": "integer"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
-          },
-          "installed": {
-            "title": "Installed",
-            "type": "boolean"
-          },
-          "model": {
-            "title": "Model",
-            "type": "string"
-          },
-          "running": {
-            "title": "Running",
-            "type": "boolean"
-          },
-          "state": {
-            "enum": [
-              "not_installed",
-              "installing",
-              "ready",
-              "running",
-              "error"
-            ],
-            "title": "State",
-            "type": "string"
-          },
-          "total_bytes": {
-            "title": "Total Bytes",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "state",
-          "available",
-          "installed",
-          "running",
-          "model",
-          "total_bytes"
-        ],
-        "title": "BuiltInSpeechStatus",
-        "type": "object"
-      },
       "ConversationDetailResponse": {
         "additionalProperties": false,
         "properties": {
-          "agent_revision_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Revision Id"
-          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -229,11 +132,8 @@
           },
           "kind": {
             "enum": [
-              "agent",
               "autonomous",
-              "deep_work",
-              "builder",
-              "direct_agent"
+              "deep_work"
             ],
             "title": "Kind",
             "type": "string"
@@ -266,7 +166,6 @@
           "id",
           "title",
           "kind",
-          "agent_revision_id",
           "model_reference",
           "session_policy",
           "status",
@@ -286,6 +185,19 @@
             "minLength": 1,
             "title": "Content",
             "type": "string"
+          },
+          "context_window_tokens": {
+            "anyOf": [
+              {
+                "maximum": 2000000.0,
+                "minimum": 4096.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window Tokens"
           },
           "fast_answer": {
             "default": false,
@@ -351,17 +263,6 @@
       "ConversationResponse": {
         "additionalProperties": false,
         "properties": {
-          "agent_revision_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Revision Id"
-          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -373,11 +274,8 @@
           },
           "kind": {
             "enum": [
-              "agent",
               "autonomous",
-              "deep_work",
-              "builder",
-              "direct_agent"
+              "deep_work"
             ],
             "title": "Kind",
             "type": "string"
@@ -410,7 +308,6 @@
           "id",
           "title",
           "kind",
-          "agent_revision_id",
           "model_reference",
           "session_policy",
           "status",
@@ -906,6 +803,278 @@
         "title": "ModelReferenceSpec",
         "type": "object"
       },
+      "PaperFolderAssignmentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          }
+        },
+        "required": [
+          "folder_id"
+        ],
+        "title": "PaperFolderAssignmentRequest",
+        "type": "object"
+      },
+      "PaperFolderCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "PaperFolderCreateRequest",
+        "type": "object"
+      },
+      "PaperFolderResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "PaperFolderResponse",
+        "type": "object"
+      },
+      "PaperSummaryContentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/PaperSummaryVersionResponse"
+          }
+        },
+        "required": [
+          "version",
+          "content"
+        ],
+        "title": "PaperSummaryContentResponse",
+        "type": "object"
+      },
+      "PaperSummaryPromotionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "summary_path": {
+            "title": "Summary Path",
+            "type": "string"
+          },
+          "version": {
+            "$ref": "#/components/schemas/PaperSummaryVersionResponse"
+          }
+        },
+        "required": [
+          "version",
+          "summary_path",
+          "content"
+        ],
+        "title": "PaperSummaryPromotionResponse",
+        "type": "object"
+      },
+      "PaperSummaryRunRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          }
+        },
+        "title": "PaperSummaryRunRequest",
+        "type": "object"
+      },
+      "PaperSummaryRunResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "prompt_revision": {
+            "title": "Prompt Revision",
+            "type": "string"
+          },
+          "run": {
+            "$ref": "#/components/schemas/RunResponse"
+          }
+        },
+        "required": [
+          "run",
+          "prompt_revision"
+        ],
+        "title": "PaperSummaryRunResponse",
+        "type": "object"
+      },
+      "PaperSummaryVersionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "citation_count": {
+            "title": "Citation Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "document_id": {
+            "title": "Document Id",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "prompt_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Revision"
+          },
+          "review_summary": {
+            "title": "Review Summary",
+            "type": "string"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "document_id",
+          "run_id",
+          "path",
+          "created_at",
+          "prompt_revision",
+          "review_summary",
+          "citation_count",
+          "status"
+        ],
+        "title": "PaperSummaryVersionResponse",
+        "type": "object"
+      },
+      "PromptSnapshotResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "activated_skills": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Activated Skills",
+            "type": "array"
+          },
+          "agents": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Agents",
+            "type": "array"
+          },
+          "prompt_revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Revision"
+          },
+          "run_id": {
+            "title": "Run Id",
+            "type": "string"
+          },
+          "tools": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Tools",
+            "type": "array"
+          }
+        },
+        "required": [
+          "run_id",
+          "prompt_revision",
+          "agents",
+          "tools",
+          "activated_skills"
+        ],
+        "title": "PromptSnapshotResponse",
+        "type": "object"
+      },
       "ProviderCreate": {
         "additionalProperties": false,
         "properties": {
@@ -969,8 +1138,7 @@
                 "chat",
                 "embedding",
                 "vision",
-                "tools",
-                "speech"
+                "tools"
               ],
               "type": "string"
             },
@@ -1545,17 +1713,6 @@
             "title": "Agent Name",
             "type": "string"
           },
-          "agent_revision_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Agent Revision Id"
-          },
           "cancel_requested": {
             "title": "Cancel Requested",
             "type": "boolean"
@@ -1759,7 +1916,6 @@
         },
         "required": [
           "id",
-          "agent_revision_id",
           "conversation_id",
           "agent_name",
           "status",
@@ -1978,25 +2134,6 @@
             "title": "Ollama Base Url",
             "type": "string"
           },
-          "python_tool_allowed_imports": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Python Tool Allowed Imports",
-            "type": "array"
-          },
-          "python_tool_enabled": {
-            "title": "Python Tool Enabled",
-            "type": "boolean"
-          },
-          "python_tool_memory_mb": {
-            "title": "Python Tool Memory Mb",
-            "type": "integer"
-          },
-          "python_tool_timeout_seconds": {
-            "title": "Python Tool Timeout Seconds",
-            "type": "number"
-          },
           "request_timeout_seconds": {
             "title": "Request Timeout Seconds",
             "type": "number"
@@ -2052,10 +2189,6 @@
           "agent_tracing_enabled",
           "user_timezone",
           "user_profile",
-          "python_tool_enabled",
-          "python_tool_timeout_seconds",
-          "python_tool_memory_mb",
-          "python_tool_allowed_imports",
           "retrieval_max_context_chars",
           "ocr_engine",
           "ocr_llm_enhancement_enabled",
@@ -2222,57 +2355,6 @@
               }
             ],
             "title": "Ollama Base Url"
-          },
-          "python_tool_allowed_imports": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Python Tool Allowed Imports"
-          },
-          "python_tool_enabled": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Python Tool Enabled"
-          },
-          "python_tool_memory_mb": {
-            "anyOf": [
-              {
-                "maximum": 8192.0,
-                "minimum": 32.0,
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Python Tool Memory Mb"
-          },
-          "python_tool_timeout_seconds": {
-            "anyOf": [
-              {
-                "exclusiveMinimum": 0.0,
-                "maximum": 300.0,
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Python Tool Timeout Seconds"
           },
           "request_timeout_seconds": {
             "anyOf": [
@@ -2711,20 +2793,6 @@
           "raw_item"
         ],
         "title": "ToolSearchOutputRunItem",
-        "type": "object"
-      },
-      "TranscriptionResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "text": {
-            "title": "Text",
-            "type": "string"
-          }
-        },
-        "required": [
-          "text"
-        ],
-        "title": "TranscriptionResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -3782,6 +3850,58 @@
         ]
       }
     },
+    "/api/documents/{document_id}/folder": {
+      "put": {
+        "operationId": "assign_document_folder_api_documents__document_id__folder_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperFolderAssignmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Assign Document Folder",
+        "tags": [
+          "research"
+        ]
+      }
+    },
     "/api/documents/{document_id}/ingest": {
       "post": {
         "operationId": "ingest_document_api_documents__document_id__ingest_post",
@@ -3962,6 +4082,204 @@
         ]
       }
     },
+    "/api/documents/{document_id}/summaries": {
+      "get": {
+        "operationId": "list_summary_versions_api_documents__document_id__summaries_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PaperSummaryVersionResponse"
+                  },
+                  "title": "Response List Summary Versions Api Documents  Document Id  Summaries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Summary Versions",
+        "tags": [
+          "paper summaries"
+        ]
+      },
+      "post": {
+        "operationId": "start_summary_api_documents__document_id__summaries_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperSummaryRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperSummaryRunResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Summary",
+        "tags": [
+          "paper summaries"
+        ]
+      }
+    },
+    "/api/documents/{document_id}/summaries/{version_id}": {
+      "get": {
+        "operationId": "get_summary_version_api_documents__document_id__summaries__version_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperSummaryContentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Summary Version",
+        "tags": [
+          "paper summaries"
+        ]
+      }
+    },
+    "/api/documents/{document_id}/summaries/{version_id}/promote": {
+      "post": {
+        "operationId": "promote_summary_version_api_documents__document_id__summaries__version_id__promote_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "title": "Version Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperSummaryPromotionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Promote Summary Version",
+        "tags": [
+          "paper summaries"
+        ]
+      }
+    },
     "/api/health": {
       "get": {
         "operationId": "health_api_health_get",
@@ -3980,6 +4298,70 @@
         "summary": "Health",
         "tags": [
           "application"
+        ]
+      }
+    },
+    "/api/paper-folders": {
+      "get": {
+        "operationId": "list_paper_folders_api_paper_folders_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PaperFolderResponse"
+                  },
+                  "title": "Response List Paper Folders Api Paper Folders Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Paper Folders",
+        "tags": [
+          "research"
+        ]
+      },
+      "post": {
+        "operationId": "create_paper_folder_api_paper_folders_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperFolderCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperFolderResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Paper Folder",
+        "tags": [
+          "research"
         ]
       }
     },
@@ -4064,131 +4446,6 @@
           }
         },
         "summary": "Create Provider",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/speech/builtin": {
-      "delete": {
-        "operationId": "uninstall_built_in_speech_api_providers_speech_builtin_delete",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BuiltInSpeechStatus"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Uninstall Built In Speech",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/speech/builtin/install": {
-      "post": {
-        "operationId": "install_built_in_speech_api_providers_speech_builtin_install_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BuiltInSpeechStatus"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Install Built In Speech",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/speech/builtin/start": {
-      "post": {
-        "operationId": "start_built_in_speech_api_providers_speech_builtin_start_post",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BuiltInSpeechStatus"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Start Built In Speech",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/speech/builtin/status": {
-      "get": {
-        "operationId": "built_in_speech_status_api_providers_speech_builtin_status_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/BuiltInSpeechStatus"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Built In Speech Status",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/speech/transcriptions": {
-      "post": {
-        "operationId": "transcribe_speech_api_providers_speech_transcriptions_post",
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_transcribe_speech_api_providers_speech_transcriptions_post"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TranscriptionResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Transcribe Speech",
         "tags": [
           "providers"
         ]
@@ -4474,6 +4731,39 @@
       }
     },
     "/api/runs/{run_id}": {
+      "delete": {
+        "operationId": "delete_run_api_runs__run_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Run",
+        "tags": [
+          "runs"
+        ]
+      },
       "get": {
         "operationId": "get_run_api_runs__run_id__get",
         "parameters": [
@@ -4603,6 +4893,48 @@
           }
         },
         "summary": "Stream Events",
+        "tags": [
+          "runs"
+        ]
+      }
+    },
+    "/api/runs/{run_id}/prompt-snapshot": {
+      "get": {
+        "operationId": "get_prompt_snapshot_api_runs__run_id__prompt_snapshot_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "title": "Run Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptSnapshotResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Prompt Snapshot",
         "tags": [
           "runs"
         ]

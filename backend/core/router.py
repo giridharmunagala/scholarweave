@@ -3,7 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends
 
-from backend.api.dependencies import services
+from backend.core.http import services
 from backend.core.settings_service import SettingsResponse, SettingsUpdate
 
 router = APIRouter(tags=["application"])

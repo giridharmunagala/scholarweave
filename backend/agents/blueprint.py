@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.providers.reasoning import ReasoningEffort
-from backend.runtime.sdk_compat import SUPPORTED_SDK_VERSION
+from backend.agents.sdk import SUPPORTED_SDK_VERSION
 
 Identifier = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")]
 
@@ -124,12 +124,24 @@ class AgentToolSpec(BlueprintModel):
     tool_description: str = Field(min_length=1, max_length=2_000)
     max_turns: int | None = Field(default=None, ge=1, le=100)
     needs_approval: bool = False
+    serialize_calls: bool = False
+    max_parallel_calls: int | None = Field(default=None, ge=2, le=64)
+
+    @model_validator(mode="after")
+    def validate_concurrency_policy(self) -> "AgentToolSpec":
+        if self.serialize_calls and self.max_parallel_calls is not None:
+            raise ValueError("An agent tool cannot be both serialized and parallel.")
+        return self
 
 
 class RunSettingsSpec(BlueprintModel):
     max_turns: int = Field(default=10, ge=1, le=100)
     max_tool_concurrency: int | None = Field(default=None, ge=1, le=64)
     tracing_enabled: bool = False
+    exclusive_inference: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+    )
 
 
 class SessionPolicySpec(BlueprintModel):

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import replace
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from agents import (
@@ -28,27 +30,35 @@ from backend.agents.compiler import CompiledAgent
 from backend.agents.blueprint import AgentBlueprint
 from backend.agents.compiler import AgentCompiler
 from backend.core.config import Settings
-from backend.core.errors import ConflictError
-from backend.core.time import utcnow
+from backend.core.errors import ConflictError, NotFoundError
+from backend.utils import to_jsonable, utcnow
 from backend.runs.broker import EventBroker
 from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
 from backend.runs.projector import project_run_item, project_stream_event, run_item_key
-from backend.runs.repository import RunRepository
-from backend.runtime.context import ScholarWeaveContext, ToolReceipt, ToolRuntime
-from backend.runtime.hooks import ScholarWeaveRunHooks
-from backend.runtime.serialization import to_jsonable
-from backend.runtime.sessions import SdkSessionFactory
-from backend.runtime.steering import (
+from backend.runs.repository import (
+    LeaseOwnershipError,
+    RunLease,
+    RunRepository,
+)
+from backend.agents.context import ScholarWeaveContext, ToolReceipt, ToolRuntime
+from backend.runs.hooks import ScholarWeaveRunHooks
+from backend.providers.inference import InferenceScheduler
+from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.steering import (
     SteeringInbox,
     SteeringMessage,
     emit_steering_applied,
 )
+from backend.prompting.registry import PromptRegistry
+from backend.runs.logging import RunDetailLogger
 from backend.tools.failures import (
     restore_tool_failure_state,
+    restore_tool_failure_state_from_attempts,
     serialize_tool_failure_state,
 )
 
 RunInput = str | list[TResponseInputItem]
+logger = logging.getLogger(__name__)
 STOP_AND_ANSWER_PROMPT = (
     "Stop all further research. Answer the user's request now using only the conversation "
     "history, tool results, and evidence already available. Give the most useful direct answer "
@@ -62,6 +72,16 @@ GuardrailTripwire = (
     | ToolInputGuardrailTripwireTriggered
     | ToolOutputGuardrailTripwireTriggered
 )
+
+
+class RunLeaseLost(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class LeaseDeadline:
+    lease: RunLease
+    monotonic_expires_at: float
 
 
 def _with_reasoning_effort(
@@ -121,6 +141,11 @@ def _restore_pending_steering(events: list[Any]) -> SteeringInbox:
 
 class RunService:
     _CLEANUP_INTERVAL_SECONDS = 60 * 60
+    _CLAIM_LEASE_SECONDS = 300.0
+    _CLAIM_HEARTBEAT_SECONDS = 60.0
+    _CLAIM_RETRY_SECONDS = 1.0
+    _CLAIM_SAFETY_MARGIN_SECONDS = 5.0
+    _RECOVERY_RETRY_SECONDS = 5.0
 
     def __init__(
         self,
@@ -132,6 +157,12 @@ class RunService:
         settings: Settings | None = None,
         retention_days: int | None = None,
         delete_run_artifacts: Callable[[str], None] | None = None,
+        prompts: PromptRegistry | None = None,
+        run_log_dir: Path | None = None,
+        inference_scheduler: InferenceScheduler | None = None,
+        completion_validators: Mapping[
+            str, Callable[[ScholarWeaveContext], None]
+        ] | None = None,
     ) -> None:
         self._repository = repository
         self._sessions = sessions
@@ -142,6 +173,10 @@ class RunService:
             days=retention_days or self._settings.run_retention_days
         )
         self._delete_run_artifacts = delete_run_artifacts
+        self._prompts = prompts
+        self._run_logger = RunDetailLogger(run_log_dir) if run_log_dir is not None else None
+        self._inference_scheduler = inference_scheduler
+        self._completion_validators = dict(completion_validators or {})
         self._owner_id = str(uuid.uuid4())
         self._closing = False
         self._active_streams: dict[str, RunResultStreaming] = {}
@@ -151,13 +186,41 @@ class RunService:
         self._steering_inboxes: dict[str, SteeringInbox] = {}
         self._stop_and_answer_in_progress: set[str] = set()
         self._cleanup_task: asyncio.Task[None] | None = None
+        self._recovery_task: asyncio.Task[None] | None = None
+        self._recovery_compiler: AgentCompiler | None = None
+        self._lease_lost_runs: set[str] = set()
+        self._active_leases: dict[str, RunLease] = {}
+        self._claim_cleanup_tasks: dict[str, set[asyncio.Task[None]]] = {}
 
     async def recover_incomplete(self, compiler: AgentCompiler) -> None:
-        self._repository.clear_stale_claims(self._owner_id)
+        self._recovery_compiler = compiler
+        await self._recover_incomplete_once(compiler)
+        if self._closing or self._recovery_task is not None:
+            return
+        self._recovery_task = asyncio.create_task(self._recovery_loop())
+
+    async def _recover_incomplete_once(self, compiler: AgentCompiler) -> None:
         for record in self._repository.incomplete():
             try:
+                lease_deadline = await self._acquire_claim(record.id)
+            except Exception:
+                logger.exception("Could not claim incomplete run %s for recovery.", record.id)
+                continue
+            if lease_deadline is None:
+                continue
+            self._active_leases[record.id] = lease_deadline.lease
+            claim_transferred = False
+            try:
+                record = self._repository.get(record.id)
+                if record.status not in {"pending", "running"}:
+                    continue
+                runtime_context: ScholarWeaveContext | None = None
                 if record.cancel_requested:
-                    self._repository.cancel(record.id)
+                    if self._repository.cancel_owned(lease_deadline.lease):
+                        await self._event_sink(record.id).emit(
+                            "run.cancelled",
+                            {"reason": "user_requested"},
+                        )
                     continue
                 if record.conversation_id is not None:
                     self._steering_inboxes[record.id] = (
@@ -166,17 +229,53 @@ class RunService:
                         )
                     )
                 compiled = compiler.compile(
-                    AgentBlueprint.model_validate(record.blueprint_json)
+                    AgentBlueprint.model_validate(record.blueprint_json),
+                    context_window_tokens=record.context_window_tokens,
                 )
+                if record.completion_policy_id is not None:
+                    validator = self._completion_validators.get(
+                        record.completion_policy_id
+                    )
+                    if validator is None:
+                        raise RuntimeError(
+                            "Unknown persisted completion policy "
+                            f"{record.completion_policy_id!r}."
+                        )
+                    compiled = replace(
+                        compiled,
+                        completion_validator=validator,
+                        completion_policy_id=record.completion_policy_id,
+                    )
                 if record.status == "pending":
-                    runtime_context = None
                     if record.state_json:
                         sink = self._event_sink(record.id)
+                        serialized_context = record.state_json.get(
+                            "context", {}
+                        ).get("context", {})
+                        serialized_metadata = (
+                            serialized_context.get("metadata")
+                            if isinstance(serialized_context, dict)
+                            else None
+                        )
                         runtime_context = ScholarWeaveContext(
                             run_id=record.id,
                             conversation_id=record.conversation_id,
                             tool_runtime=self._tool_runtime,
                             event_sink=sink,
+                            metadata={
+                                **(
+                                    dict(record.runtime_metadata_json)
+                                    if isinstance(
+                                        record.runtime_metadata_json, dict
+                                    )
+                                    else {}
+                                ),
+                                **(
+                                    dict(serialized_metadata)
+                                    if isinstance(serialized_metadata, dict)
+                                    else {}
+                                ),
+                            },
                         )
                         _restore_tool_failure_state_from_run_state(
                             runtime_context,
@@ -195,7 +294,9 @@ class RunService:
                     and compiled.blueprint.description
                     == STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION
                 ):
-                    self._repository.abandon_incomplete_epochs(record.id)
+                    self._repository.abandon_incomplete_epochs_owned(
+                        lease_deadline.lease
+                    )
                     entry_model = compiled.resolved_models[
                         compiled.blueprint.entry_agent_id
                     ]
@@ -204,37 +305,104 @@ class RunService:
                         compiled.blueprint.session,
                         entry_model,
                     )
+                    stop_prompt = _stop_and_answer_prompt_from_compiled(compiled)
                     input_value = _stop_and_answer_input(
-                        _stop_and_answer_source_items(record.input_json),
+                        _stop_and_answer_source_items(record.input_json, stop_prompt),
                         await session.get_items(),
+                        stop_prompt,
                     )
-                    recovered = True
-                elif record.conversation_id is not None:
-                    self._repository.abandon_incomplete_epochs(record.id)
-                    input_value = _recovery_instruction(record.id)
                     recovered = True
                 else:
-                    raise RuntimeError(
-                        "Process interrupted a run without a durable conversation session."
+                    self._repository.abandon_incomplete_epochs_owned(
+                        lease_deadline.lease
                     )
+                    input_value = (
+                        self._prompts.render("run-recovery", run_id=record.id)
+                        if self._prompts is not None
+                        else _recovery_instruction(record.id)
+                    )
+                    recovered = True
+                if recovered:
+                    runtime_context = ScholarWeaveContext(
+                        run_id=record.id,
+                        conversation_id=record.conversation_id,
+                        tool_runtime=self._tool_runtime,
+                        event_sink=self._event_sink(record.id),
+                        metadata={
+                            **(
+                                dict(record.runtime_metadata_json)
+                                if isinstance(record.runtime_metadata_json, dict)
+                                else {}
+                            ),
+                            "recovered": True,
+                        },
+                    )
+                    restore_tool_failure_state_from_attempts(
+                        runtime_context.metadata,
+                        self._repository.get(record.id).tool_attempts,
+                    )
+                lease_deadline = await self._renew_claim(lease_deadline)
                 self._schedule(
                     record.id,
                     compiled,
                     input_value,
                     conversation_id=record.conversation_id,
-                    runtime_context=runtime_context
-                    if record.status == "pending"
-                    else None,
-                    runtime_metadata={"recovered": recovered},
+                    runtime_context=runtime_context,
+                    runtime_metadata={
+                        **(
+                            dict(record.runtime_metadata_json)
+                            if isinstance(record.runtime_metadata_json, dict)
+                            else {}
+                        ),
+                        "recovered": recovered,
+                    },
+                    preclaimed=True,
+                    lease_deadline=lease_deadline,
                 )
+                claim_transferred = True
+            except asyncio.CancelledError:
+                if (
+                    record.id not in self._lease_lost_runs
+                    and lease_deadline is not None
+                    and self._repository.cancel_requested(record.id)
+                    and self._repository.cancel_owned(lease_deadline.lease)
+                ):
+                    await self._event_sink(record.id).emit(
+                        "run.cancelled",
+                        {"reason": "user_requested"},
+                    )
+                raise
             except Exception as exc:
                 error = f"Recovery failed: {type(exc).__name__}: {exc}"
-                self._repository.fail(record.id, error)
-                self._repository.add_event(
-                    record.id,
-                    "run.failed",
-                    {"error": error, "terminal_reason": "recovery_failed"},
-                )
+                try:
+                    lease_deadline = await self._renew_claim(lease_deadline)
+                    still_owned = True
+                except Exception:
+                    logger.exception(
+                        "Could not confirm ownership after recovery failed for run %s.",
+                        record.id,
+                    )
+                    still_owned = False
+                if still_owned and record.id not in self._lease_lost_runs:
+                    if self._repository.fail_owned(lease_deadline.lease, error):
+                        await self._event_sink(record.id).emit(
+                            "run.failed",
+                            {"error": error, "terminal_reason": "recovery_failed"},
+                        )
+                        self._log_terminal_run(record.id)
+            finally:
+                if not claim_transferred:
+                    try:
+                        await self._release_claim(lease_deadline.lease)
+                    except Exception:
+                        logger.exception(
+                            "Could not release recovery claim for run %s.", record.id
+                        )
+                    self._active_leases.pop(record.id, None)
+                    lease_lost = record.id in self._lease_lost_runs
+                    self._lease_lost_runs.discard(record.id)
+                    if not lease_lost:
+                        await self._cleanup_standalone_session_if_terminal(record.id)
 
     def list(self, *, conversation_id: str | None = None):
         return self._repository.list(conversation_id=conversation_id)
@@ -247,18 +415,22 @@ class RunService:
         compiled: CompiledAgent,
         input_value: RunInput,
         *,
-        agent_revision_id: str | None,
         conversation_id: str | None,
         reasoning_effort: ReasoningEffort | None = None,
         runtime_metadata: dict[str, Any] | None = None,
     ):
         compiled = _with_reasoning_effort(compiled, reasoning_effort)
+        _validate_completion_policy(compiled)
         record = self._repository.create(
-            agent_revision_id=agent_revision_id,
             conversation_id=conversation_id,
             agent_name=compiled.blueprint.name,
             input_value=to_jsonable(input_value),
             blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
+            context_window_tokens=compiled.context_window_tokens,
+            runtime_metadata=to_jsonable(
+                _persistable_runtime_metadata(runtime_metadata or {})
+            ),
+            completion_policy_id=compiled.completion_policy_id,
         )
         if conversation_id is not None:
             self._steering_inboxes[record.id] = SteeringInbox()
@@ -271,6 +443,26 @@ class RunService:
         )
         return record
 
+    def prompt_snapshot(self, run_id: str) -> dict[str, Any]:
+        self.get(run_id)
+        events = self._repository.events_after(run_id, -1)
+        snapshot = next(
+            (
+                dict(event.payload_json)
+                for event in events
+                if event.event_type == "prompt.snapshot"
+            ),
+            None,
+        )
+        if snapshot is None:
+            raise NotFoundError("A prompt snapshot is not available for this run.")
+        snapshot["activated_skills"] = [
+            dict(event.payload_json)
+            for event in events
+            if event.event_type == "skill.activated"
+        ]
+        return snapshot
+
     def _schedule(
         self,
         run_id: str,
@@ -280,6 +472,8 @@ class RunService:
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
         runtime_metadata: dict[str, Any] | None = None,
+        preclaimed: bool = False,
+        lease_deadline: LeaseDeadline | None = None,
     ) -> None:
         previous = self._tasks.get(run_id)
         self._compiled_runs[run_id] = compiled
@@ -287,8 +481,10 @@ class RunService:
             self._steering_inboxes.setdefault(run_id, SteeringInbox())
 
         async def execute_after_previous() -> None:
+            nonlocal execution_started
             if previous is not None and not previous.done():
                 await asyncio.gather(previous, return_exceptions=True)
+            execution_started = True
             await self._execute(
                 run_id,
                 compiled,
@@ -296,12 +492,24 @@ class RunService:
                 conversation_id=conversation_id,
                 runtime_context=runtime_context,
                 runtime_metadata=runtime_metadata,
+                preclaimed=preclaimed,
+                lease_deadline=lease_deadline,
             )
 
+        execution_started = False
         task = asyncio.create_task(execute_after_previous())
         self._tasks[run_id] = task
 
         def remove_if_current(completed: asyncio.Task[None]) -> None:
+            try:
+                completed.exception()
+            except asyncio.CancelledError:
+                pass
+            if preclaimed and not execution_started and lease_deadline is not None:
+                self._track_claim_cleanup(
+                    run_id,
+                    self._cleanup_unadopted_claim(lease_deadline.lease),
+                )
             if self._tasks.get(run_id) is completed:
                 self._tasks.pop(run_id, None)
                 self._compiled_runs.pop(run_id, None)
@@ -317,17 +525,18 @@ class RunService:
         compiled: CompiledAgent,
         input_value: RunInput | RunState[ScholarWeaveContext],
         *,
-        agent_revision_id: str | None = None,
         conversation_id: str | None = None,
     ):
+        _validate_completion_policy(compiled)
         record = self._repository.create(
-            agent_revision_id=agent_revision_id,
             conversation_id=conversation_id,
             agent_name=compiled.blueprint.name,
             input_value=to_jsonable(input_value)
             if not isinstance(input_value, RunState)
             else {"type": "run_state"},
             blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
+            context_window_tokens=compiled.context_window_tokens,
+            completion_policy_id=compiled.completion_policy_id,
         )
         if conversation_id is not None:
             self._steering_inboxes[record.id] = SteeringInbox()
@@ -360,7 +569,8 @@ class RunService:
         record = self._repository.get(run_id)
         if record.status not in {"pending", "running"}:
             return record
-        self._repository.request_cancel(run_id)
+        if not self._repository.request_cancel(run_id):
+            return self._repository.get(run_id)
         stream = self._active_streams.get(run_id)
         if stream is not None:
             stream.cancel("immediate")
@@ -368,11 +578,19 @@ class RunService:
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+        await self._wait_for_claim_cleanups(run_id)
         current = self._repository.get(run_id)
-        if current.status in {"pending", "running"}:
-            self._repository.cancel(run_id)
+        lease = self._active_leases.get(run_id)
+        if (
+            current.status in {"pending", "running"}
+            and lease is not None
+            and self._repository.cancel_owned(lease)
+        ):
             sink = self._event_sink(run_id)
             await sink.emit("run.cancelled", {"reason": "user_requested"})
+        current = self._repository.get(run_id)
+        if current.status in {"completed", "failed", "cancelled", "paused"}:
+            self._log_terminal_run(run_id)
         return self._repository.get(run_id)
 
     async def stop_and_answer(self, run_id: str):
@@ -391,7 +609,12 @@ class RunService:
             if compiled is None:
                 raise ConflictError("The active run is not owned by this process.")
             stopped = await self.cancel(run_id)
-            answer_compiled = _stop_and_answer_compiled(compiled)
+            stop_prompt = (
+                self._prompts.render("stop-and-answer")
+                if self._prompts is not None
+                else STOP_AND_ANSWER_PROMPT
+            )
+            answer_compiled = _stop_and_answer_compiled(compiled, stop_prompt)
             entry_model = compiled.resolved_models[compiled.blueprint.entry_agent_id]
             session = self._sessions.get(
                 record.conversation_id,
@@ -401,14 +624,14 @@ class RunService:
             answer_input = _stop_and_answer_input(
                 record.input_json,
                 await session.get_items(),
+                stop_prompt,
             )
             answer = self.create(
                 answer_compiled,
                 answer_input,
-                agent_revision_id=record.agent_revision_id,
                 conversation_id=record.conversation_id,
                 runtime_metadata={
-                    "internal_session_prompt": STOP_AND_ANSWER_PROMPT,
+                    "internal_session_prompt": stop_prompt,
                     "stop_and_answer_source_run_id": run_id,
                 },
             )
@@ -432,6 +655,18 @@ class RunService:
         ]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._wait_for_all_claim_cleanups()
+
+    async def _wait_for_all_claim_cleanups(self) -> None:
+        while self._claim_cleanup_tasks:
+            pending = tuple(
+                task
+                for cleanup_tasks in self._claim_cleanup_tasks.values()
+                for task in cleanup_tasks
+            )
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def resolve_interruption(
         self,
@@ -545,10 +780,11 @@ class RunService:
         return self._repository.get(run_id)
 
     def delete(self, run_id: str) -> None:
-        if run_id in self._active_streams:
-            raise ValueError("An active run cannot be deleted.")
-        self._event_sinks.pop(run_id, None)
-        self._repository.delete(run_id)
+        record = self._repository.get(run_id)
+        if record.status not in {"completed", "failed", "cancelled"}:
+            raise ConflictError("Only a finished run can be deleted.")
+        if self._delete_history([run_id]) != 1:
+            raise ConflictError("The run is still active and cannot be deleted.")
 
     def events_after(self, run_id: str, sequence: int = -1):
         self._repository.get(run_id)
@@ -569,6 +805,11 @@ class RunService:
 
     async def close(self) -> None:
         self._closing = True
+        recovery_task = self._recovery_task
+        self._recovery_task = None
+        if recovery_task is not None:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
         cleanup_task = self._cleanup_task
         self._cleanup_task = None
         if cleanup_task is not None:
@@ -581,22 +822,32 @@ class RunService:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        await self._wait_for_all_claim_cleanups()
 
     def _delete_history(self, run_ids: list[str]) -> int:
-        active_ids = set(self._active_streams) | set(self._tasks)
+        active_ids = set(self._active_streams) | {
+            run_id for run_id, task in self._tasks.items() if not task.done()
+        }
         deletable = [run_id for run_id in run_ids if run_id not in active_ids]
         if self._delete_run_artifacts is not None:
             for run_id in deletable:
                 self._delete_run_artifacts(run_id)
         for run_id in deletable:
             self._event_sinks.pop(run_id, None)
+            if self._repository.get(run_id).conversation_id is None:
+                self._sessions.delete_persisted(_standalone_session_id(run_id))
         self._repository.delete_many(deletable)
         return len(deletable)
 
     def _event_sink(self, run_id: str) -> PersistedRunEventSink:
         sink = self._event_sinks.get(run_id)
         if sink is None:
-            sink = PersistedRunEventSink(run_id, self._repository, self._broker)
+            sink = PersistedRunEventSink(
+                run_id,
+                self._repository,
+                self._broker,
+                lease=lambda: self._active_leases.get(run_id),
+            )
             self._event_sinks[run_id] = sink
         return sink
 
@@ -604,6 +855,210 @@ class RunService:
         while True:
             await asyncio.sleep(self._CLEANUP_INTERVAL_SECONDS)
             await asyncio.to_thread(self.prune_expired)
+
+    async def _recovery_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._RECOVERY_RETRY_SECONDS)
+            compiler = self._recovery_compiler
+            if compiler is not None:
+                try:
+                    await self._recover_incomplete_once(compiler)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Periodic incomplete-run recovery failed.")
+
+    async def _heartbeat_claim(
+        self,
+        run_id: str,
+        lease_deadline: LeaseDeadline,
+    ) -> None:
+        while True:
+            safety_margin = self._claim_safety_margin()
+            remaining = (
+                lease_deadline.monotonic_expires_at
+                - safety_margin
+                - asyncio.get_running_loop().time()
+            )
+            if remaining <= 0:
+                self._lease_lost_runs.add(run_id)
+                raise RunLeaseLost(f"Run {run_id} claim renewal deadline expired.")
+            await asyncio.sleep(min(self._CLAIM_HEARTBEAT_SECONDS, remaining))
+            while True:
+                if (
+                    asyncio.get_running_loop().time()
+                    >= lease_deadline.monotonic_expires_at - safety_margin
+                ):
+                    self._lease_lost_runs.add(run_id)
+                    raise RunLeaseLost(f"Run {run_id} claim renewal deadline expired.")
+                try:
+                    lease_deadline = await self._renew_claim(lease_deadline)
+                except asyncio.CancelledError:
+                    raise
+                except RunLeaseLost:
+                    raise
+                except Exception:
+                    logger.exception("Run %s claim renewal failed; retrying.", run_id)
+                    remaining = (
+                        lease_deadline.monotonic_expires_at
+                        - safety_margin
+                        - asyncio.get_running_loop().time()
+                    )
+                    if remaining <= 0:
+                        self._lease_lost_runs.add(run_id)
+                        raise RunLeaseLost(
+                            f"Run {run_id} claim could not be renewed safely."
+                        )
+                    await asyncio.sleep(min(self._CLAIM_RETRY_SECONDS, remaining))
+                    continue
+                confirmed_at = asyncio.get_running_loop().time()
+                if (
+                    confirmed_at
+                    >= lease_deadline.monotonic_expires_at - safety_margin
+                ):
+                    self._lease_lost_runs.add(run_id)
+                    raise RunLeaseLost(
+                        f"Run {run_id} claim was not renewed before its safety margin."
+                    )
+                break
+
+    async def _acquire_claim(self, run_id: str) -> LeaseDeadline | None:
+        started_at = asyncio.get_running_loop().time()
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._repository.claim,
+                run_id,
+                self._owner_id,
+                lease_seconds=self._CLAIM_LEASE_SECONDS,
+            )
+        )
+        try:
+            lease = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._track_claim_cleanup(
+                run_id,
+                self._cleanup_cancelled_acquisition(task),
+            )
+            raise
+        if lease is None:
+            return None
+        return LeaseDeadline(
+            lease=lease,
+            monotonic_expires_at=started_at + lease.duration_seconds,
+        )
+
+    async def _cleanup_cancelled_acquisition(
+        self,
+        claim_task: asyncio.Task[RunLease | None],
+    ) -> None:
+        try:
+            lease = await asyncio.shield(claim_task)
+        except Exception:
+            logger.exception("Cancelled run claim acquisition failed.")
+            return
+        if lease is not None:
+            await self._cleanup_unadopted_claim(lease)
+
+    async def _cleanup_unadopted_claim(self, lease: RunLease) -> None:
+        run_id = lease.run_id
+        if self._active_leases.get(run_id) is None:
+            self._active_leases[run_id] = lease
+        try:
+            if (
+                self._repository.cancel_requested(run_id)
+                and self._repository.cancel_owned(lease)
+            ):
+                await self._event_sink(run_id).emit(
+                    "run.cancelled",
+                    {"reason": "user_requested"},
+                )
+            await self._release_claim(lease)
+        finally:
+            if self._active_leases.get(run_id) == lease:
+                self._active_leases.pop(run_id, None)
+        await self._cleanup_standalone_session_if_terminal(run_id)
+
+    def _track_claim_cleanup(
+        self,
+        run_id: str,
+        cleanup: Awaitable[None],
+    ) -> None:
+        task = asyncio.create_task(cleanup)
+        self._claim_cleanup_tasks.setdefault(run_id, set()).add(task)
+
+        def finished(completed: asyncio.Task[None]) -> None:
+            tasks = self._claim_cleanup_tasks.get(run_id)
+            if tasks is not None:
+                tasks.discard(completed)
+                if not tasks:
+                    self._claim_cleanup_tasks.pop(run_id, None)
+            try:
+                completed.exception()
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Could not clean up unadopted run claim %s.", run_id)
+
+        task.add_done_callback(finished)
+
+    async def _wait_for_claim_cleanups(self, run_id: str) -> None:
+        while cleanup_tasks := tuple(self._claim_cleanup_tasks.get(run_id, ())):
+            await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+
+    async def _renew_claim(self, current: LeaseDeadline) -> LeaseDeadline:
+        started_at = asyncio.get_running_loop().time()
+        lease = await asyncio.to_thread(
+            self._repository.renew_claim,
+            current.lease.run_id,
+            current.lease.owner_id,
+            generation=current.lease.generation,
+            token=current.lease.token,
+            lease_seconds=self._CLAIM_LEASE_SECONDS,
+        )
+        if lease is None:
+            self._lease_lost_runs.add(current.lease.run_id)
+            raise RunLeaseLost(
+                f"Run {current.lease.run_id} claim is no longer owned."
+            )
+        self._active_leases[current.lease.run_id] = lease
+        return LeaseDeadline(
+            lease=lease,
+            monotonic_expires_at=started_at + lease.duration_seconds,
+        )
+
+    async def _release_claim(self, lease: RunLease) -> None:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                self._repository.release_claim,
+                lease.run_id,
+                lease.owner_id,
+                generation=lease.generation,
+                token=lease.token,
+            )
+        )
+        await asyncio.shield(task)
+
+    async def _validate_preclaimed_deadline(
+        self,
+        lease_deadline: LeaseDeadline,
+    ) -> None:
+        run_id = lease_deadline.lease.run_id
+        if (
+            asyncio.get_running_loop().time()
+            >= lease_deadline.monotonic_expires_at - self._claim_safety_margin()
+            or not await asyncio.to_thread(
+                self._repository.validate_claim,
+                lease_deadline.lease,
+            )
+        ):
+            self._lease_lost_runs.add(run_id)
+            raise RunLeaseLost(f"Run {run_id} preclaimed lease is no longer safe.")
+
+    def _claim_safety_margin(self) -> float:
+        return min(
+            self._CLAIM_SAFETY_MARGIN_SECONDS,
+            self._CLAIM_LEASE_SECONDS / 5,
+        )
 
     async def _execute(
         self,
@@ -614,27 +1069,233 @@ class RunService:
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
         runtime_metadata: dict[str, Any] | None = None,
+        preclaimed: bool = False,
+        lease_deadline: LeaseDeadline | None = None,
     ) -> None:
-        if not self._repository.claim(run_id, self._owner_id):
+        deadline = (
+            asyncio.get_running_loop().time()
+            + self._settings.agent_run_timeout_seconds
+        )
+        await self._execute_run(
+            run_id,
+            compiled,
+            input_value,
+            conversation_id=conversation_id,
+            runtime_context=runtime_context,
+            runtime_metadata=runtime_metadata,
+            deadline=deadline,
+            preclaimed=preclaimed,
+            lease_deadline=lease_deadline,
+        )
+
+    async def _execute_run(
+        self,
+        run_id: str,
+        compiled: CompiledAgent,
+        input_value: RunInput | RunState[ScholarWeaveContext],
+        *,
+        conversation_id: str | None,
+        runtime_context: ScholarWeaveContext | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+        deadline: float,
+        preclaimed: bool = False,
+        lease_deadline: LeaseDeadline | None = None,
+    ) -> None:
+        if not preclaimed:
+            lease_deadline = await self._acquire_claim(run_id)
+            if lease_deadline is None:
+                return
+            self._active_leases[run_id] = lease_deadline.lease
+        elif lease_deadline is None:
+            raise ValueError("A preclaimed run requires its lease expiration deadline.")
+        heartbeat: asyncio.Task[None] | None = None
+        execution: asyncio.Task[None] | None = None
+        try:
+            await self._validate_preclaimed_deadline(lease_deadline)
+            async with asyncio.timeout_at(deadline):
+                heartbeat = asyncio.create_task(
+                    self._heartbeat_claim(run_id, lease_deadline)
+                )
+                execution = asyncio.create_task(
+                    self._execute_owned_run(
+                        run_id,
+                        compiled,
+                        input_value,
+                        conversation_id=conversation_id,
+                        runtime_context=runtime_context,
+                        runtime_metadata=runtime_metadata,
+                        deadline=deadline,
+                    )
+                )
+                done, _ = await asyncio.wait(
+                    {execution, heartbeat},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if heartbeat in done:
+                    await heartbeat
+                    raise RuntimeError("Run claim heartbeat stopped unexpectedly.")
+                await execution
+        except asyncio.CancelledError:
+            if (
+                run_id not in self._lease_lost_runs
+                and lease_deadline is not None
+                and self._repository.cancel_requested(run_id)
+                and self._repository.cancel_owned(lease_deadline.lease)
+            ):
+                await self._event_sink(run_id).emit(
+                    "run.cancelled",
+                    {"reason": "user_requested"},
+                )
+            raise
+        except (RunLeaseLost, LeaseOwnershipError) as exc:
+            self._lease_lost_runs.add(run_id)
+            logger.warning("%s Execution was cancelled.", exc)
+            if execution is not None:
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+        except TimeoutError:
+            if execution is not None and not execution.done():
+                execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+            if run_id not in self._lease_lost_runs:
+                record = self._repository.get(run_id)
+                if record.status in {"pending", "running"}:
+                    error = (
+                        f"Run exceeded its {self._settings.agent_run_timeout_seconds:g}-second "
+                        "deadline."
+                    )
+                    await self._fail_or_cancel_owned(
+                        run_id,
+                        error,
+                        self._event_sink(run_id),
+                        {"error": error, "terminal_reason": "deadline_exceeded"},
+                    )
+                    self._log_terminal_run(run_id)
+        except Exception as exc:
+            record = self._repository.get(run_id)
+            if (
+                run_id not in self._lease_lost_runs
+                and record.status in {"pending", "running"}
+            ):
+                error = f"{type(exc).__name__}: {exc}"
+                await self._fail_or_cancel_owned(
+                    run_id,
+                    error,
+                    self._event_sink(run_id),
+                    {"error": error, "terminal_reason": "setup_error"},
+                )
+                self._log_terminal_run(run_id)
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            if execution is not None:
+                if not execution.done():
+                    execution.cancel()
+                await asyncio.gather(execution, return_exceptions=True)
+            lease_lost = run_id in self._lease_lost_runs
+            if not lease_lost:
+                await self._release_claim(lease_deadline.lease)
+            self._active_leases.pop(run_id, None)
+            self._lease_lost_runs.discard(run_id)
+            if not lease_lost:
+                await self._cleanup_standalone_session_if_terminal(run_id)
+
+    async def _execute_owned_run(
+        self,
+        run_id: str,
+        compiled: CompiledAgent,
+        input_value: RunInput | RunState[ScholarWeaveContext],
+        *,
+        conversation_id: str | None,
+        runtime_context: ScholarWeaveContext | None,
+        runtime_metadata: dict[str, Any] | None,
+        deadline: float,
+    ) -> None:
+        if (
+            self._inference_scheduler is not None
+            and compiled.blueprint.run.exclusive_inference
+            and _uses_local_inference(compiled)
+        ):
+            async with self._inference_scheduler.exclusive():
+                await self._execute_claimed_run(
+                    run_id,
+                    compiled,
+                    input_value,
+                    conversation_id=conversation_id,
+                    runtime_context=runtime_context,
+                    runtime_metadata=runtime_metadata,
+                    deadline=deadline,
+                )
             return
+        await self._execute_claimed_run(
+            run_id,
+            compiled,
+            input_value,
+            conversation_id=conversation_id,
+            runtime_context=runtime_context,
+            runtime_metadata=runtime_metadata,
+            deadline=deadline,
+        )
+
+    async def _execute_claimed_run(
+        self,
+        run_id: str,
+        compiled: CompiledAgent,
+        input_value: RunInput | RunState[ScholarWeaveContext],
+        *,
+        conversation_id: str | None,
+        runtime_context: ScholarWeaveContext | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+        deadline: float,
+    ) -> None:
         sink = self._event_sink(run_id)
         if isinstance(input_value, RunState) and runtime_context is None:
             raise ValueError("Resuming an SDK RunState requires restored live context.")
+        record_metadata = self._repository.get(run_id).runtime_metadata_json
         context = runtime_context or ScholarWeaveContext(
             run_id=run_id,
             conversation_id=conversation_id,
             tool_runtime=self._tool_runtime,
             event_sink=sink,
-            metadata=dict(runtime_metadata or {}),
+            metadata={
+                **(
+                    dict(record_metadata)
+                    if isinstance(record_metadata, dict)
+                    else {}
+                ),
+                **dict(runtime_metadata or {}),
+            },
         )
         if compiled.blueprint.description == STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION:
-            context.metadata.setdefault("internal_session_prompt", STOP_AND_ANSWER_PROMPT)
+            context.metadata.setdefault(
+                "internal_session_prompt",
+                (
+                    self._prompts.render("stop-and-answer")
+                    if self._prompts is not None
+                    else STOP_AND_ANSWER_PROMPT
+                ),
+            )
+        if not any(
+            event.event_type == "prompt.snapshot"
+            for event in self._repository.events_after(run_id, -1)
+        ):
+            await sink.emit(
+                "prompt.snapshot",
+                _compiled_prompt_snapshot(
+                    run_id,
+                    compiled,
+                    prompt_revision=(
+                        self._prompts.revision if self._prompts is not None else None
+                    ),
+                ),
+            )
         context.event_sink = sink
         hooks = ScholarWeaveRunHooks()
-        conversation_session = (
-            self._sessions.get(conversation_id, compiled.blueprint.session)
-            if conversation_id is not None
-            else None
+        sdk_session_id = conversation_id or _standalone_session_id(run_id)
+        conversation_session = self._sessions.get(
+            sdk_session_id,
+            compiled.blueprint.session,
         )
         session = (
             conversation_session if not isinstance(input_value, RunState) else None
@@ -648,9 +1309,7 @@ class RunService:
             steering_inbox.bind_session(conversation_session)
             context.metadata["_steering_inbox"] = steering_inbox
         lock = (
-            self._sessions.run_lock(conversation_id)
-            if conversation_id is not None
-            else _null_async_context()
+            self._sessions.run_lock(sdk_session_id)
         )
         existing_record = self._repository.get(run_id)
         persisted_item_count = (
@@ -659,7 +1318,7 @@ class RunService:
         initial_reasoning, initial_assistant = _persisted_stream_text(
             existing_record.events
         )
-        self._repository.mark_running(run_id)
+        self._repository.mark_running_owned(self._owned_lease(run_id))
         recovered = bool(context.metadata.get("recovered"))
         await sink.emit(
             "run.resumed" if isinstance(input_value, RunState) else "run.started",
@@ -676,7 +1335,7 @@ class RunService:
         active_epoch_id: str | None = None
         deferred_steering: list[SteeringMessage] = []
         try:
-            async with asyncio.timeout(self._settings.agent_run_timeout_seconds):
+            async with asyncio.timeout_at(deadline):
                 self._raise_if_cancelled(run_id)
                 async with lock:
                     self._raise_if_cancelled(run_id)
@@ -697,15 +1356,16 @@ class RunService:
                             remaining_turns,
                             self._settings.agent_epoch_max_turns,
                         )
-                        epoch = self._repository.begin_epoch(
-                            run_id,
+                        epoch = self._repository.begin_epoch_owned(
+                            self._owned_lease(run_id),
                             to_jsonable(epoch_input)
                             if not isinstance(epoch_input, RunState)
                             else {"type": "approval_resume"},
                         )
                         active_epoch_id = epoch.id
                         if epoch.epoch_index >= self._settings.agent_max_epochs:
-                            self._repository.finish_epoch(
+                            self._repository.finish_epoch_owned(
+                                self._owned_lease(run_id),
                                 epoch.id,
                                 status="failed",
                                 terminal_reason="budget_exhausted",
@@ -768,7 +1428,7 @@ class RunService:
                             run_data = exc.run_data
                             _persist_new_items(
                                 self._repository,
-                                run_id,
+                                self._owned_lease(run_id),
                                 getattr(run_data, "new_items", []),
                                 persisted_item_count if first_epoch else 0,
                             )
@@ -785,7 +1445,8 @@ class RunService:
                                 )
                             )
                             usage["model_turns"] = epoch_turn_limit
-                            self._repository.finish_epoch(
+                            self._repository.finish_epoch_owned(
+                                self._owned_lease(run_id),
                                 epoch.id,
                                 status="completed",
                                 terminal_reason="turn_boundary",
@@ -800,10 +1461,25 @@ class RunService:
                                     "usage": usage,
                                 },
                             )
-                            continuation = _continuation_instruction(
-                                run_id,
-                                epoch.epoch_index + 1,
-                                self._repository.get_goal_state(run_id),
+                            next_epoch = epoch.epoch_index + 1
+                            goal_state = self._repository.get_goal_state(run_id)
+                            continuation = (
+                                self._prompts.render(
+                                    "run-continuation",
+                                    run_id=run_id,
+                                    epoch_index=next_epoch,
+                                    goal_state=json.dumps(
+                                        goal_state,
+                                        ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    ),
+                                )
+                                if self._prompts is not None
+                                else _continuation_instruction(
+                                    run_id,
+                                    next_epoch,
+                                    goal_state,
+                                )
                             )
                             if session is None:
                                 epoch_input = [
@@ -818,7 +1494,8 @@ class RunService:
                             active_epoch_id = None
                             continue
                         except Exception as exc:
-                            self._repository.finish_epoch(
+                            self._repository.finish_epoch_owned(
+                                self._owned_lease(run_id),
                                 epoch.id,
                                 status="failed",
                                 terminal_reason="error",
@@ -856,7 +1533,8 @@ class RunService:
                                 runner_session=session,
                                 conversation_session=conversation_session,
                             )
-                            self._repository.finish_epoch(
+                            self._repository.finish_epoch_owned(
+                                self._owned_lease(run_id),
                                 epoch.id,
                                 status="completed",
                                 terminal_reason="steering_continuation",
@@ -865,7 +1543,10 @@ class RunService:
                             aggregate_usage = self._repository.aggregate_epoch_usage(
                                 run_id
                             )
-                            self._repository.update_usage(run_id, aggregate_usage)
+                            self._repository.update_usage_owned(
+                                self._owned_lease(run_id),
+                                aggregate_usage,
+                            )
                             await sink.emit(
                                 "run.epoch.completed",
                                 {
@@ -892,6 +1573,56 @@ class RunService:
                             first_epoch = False
                             active_epoch_id = None
                             continue
+                        work_continuation = _work_continuation(context)
+                        if work_continuation is not None:
+                            await self._persist_result_activity(
+                                run_id,
+                                stream,
+                                sink,
+                                persisted_item_count=persisted_item_count
+                                if first_epoch
+                                else 0,
+                            )
+                            await _persist_result_to_session_if_needed(
+                                stream,
+                                runner_session=session,
+                                conversation_session=conversation_session,
+                            )
+                            self._repository.finish_epoch_owned(
+                                self._owned_lease(run_id),
+                                epoch.id,
+                                status="completed",
+                                terminal_reason="work_pending",
+                                usage=epoch_usage,
+                            )
+                            aggregate_usage = self._repository.aggregate_epoch_usage(
+                                run_id
+                            )
+                            self._repository.update_usage_owned(
+                                self._owned_lease(run_id),
+                                aggregate_usage,
+                            )
+                            await sink.emit(
+                                "run.epoch.completed",
+                                {
+                                    "epoch_id": epoch.id,
+                                    "epoch_index": epoch.epoch_index,
+                                    "terminal_reason": "work_pending",
+                                    "usage": aggregate_usage,
+                                },
+                            )
+                            if session is None:
+                                epoch_input = [
+                                    *stream.to_input_list(mode="normalized"),
+                                    {"role": "user", "content": work_continuation},
+                                ]
+                            else:
+                                epoch_input = work_continuation
+                            persisted_item_count = 0
+                            consumed_turns += int(epoch_usage["model_turns"])
+                            first_epoch = False
+                            active_epoch_id = None
+                            continue
                         await self._finish_result(
                             run_id,
                             stream,
@@ -913,14 +1644,18 @@ class RunService:
                             if finished.status == "paused"
                             else "goal_completed"
                         )
-                        self._repository.finish_epoch(
+                        self._repository.finish_epoch_owned(
+                            self._owned_lease(run_id),
                             epoch.id,
                             status=finished.status,
                             terminal_reason=terminal_reason,
                             usage=epoch_usage,
                         )
                         aggregate_usage = self._repository.aggregate_epoch_usage(run_id)
-                        self._repository.update_usage(run_id, aggregate_usage)
+                        self._repository.update_usage_owned(
+                            self._owned_lease(run_id),
+                            aggregate_usage,
+                        )
                         await sink.emit(
                             "run.epoch.completed",
                             {
@@ -934,27 +1669,33 @@ class RunService:
                         return
         except asyncio.CancelledError:
             await _cleanup_internal_prompt_if_needed(context, session)
-            if self._closing:
-                self._repository.abandon_incomplete_epochs(run_id)
+            if run_id in self._lease_lost_runs:
+                pass
+            elif self._closing:
+                self._repository.abandon_incomplete_epochs_owned(
+                    self._owned_lease(run_id)
+                )
                 await sink.emit(
                     "run.interrupted",
                     {"reason": "process_shutdown", "recoverable": True},
                 )
             else:
                 await hooks.supersede_active(context, "run_cancelled")
-                if self._repository.get(run_id).status != "cancelled":
-                    self._repository.cancel(run_id)
+                if self._repository.cancel_owned(self._owned_lease(run_id)):
                     await sink.emit("run.cancelled", {"reason": "user_requested"})
             raise
         except TimeoutError:
             await _cleanup_internal_prompt_if_needed(context, session)
+            if run_id in self._lease_lost_runs:
+                raise asyncio.CancelledError
             error = (
                 f"Run exceeded its {self._settings.agent_run_timeout_seconds:g}-second "
                 "deadline."
             )
-            self._repository.fail(run_id, error)
-            await sink.emit(
-                "run.failed",
+            await self._fail_or_cancel_owned(
+                run_id,
+                error,
+                sink,
                 {"error": error, "terminal_reason": "deadline_exceeded"},
             )
         except (
@@ -964,24 +1705,37 @@ class RunService:
             ToolOutputGuardrailTripwireTriggered,
         ) as exc:
             await _cleanup_internal_prompt_if_needed(context, session)
+            if run_id in self._lease_lost_runs:
+                raise asyncio.CancelledError
             payload = _tripwire_payload(exc)
             await sink.emit("guardrail.tripwire", payload)
             error = f"{type(exc).__name__}: {exc}"
-            self._repository.fail(run_id, error)
-            await sink.emit("run.failed", {"error": error})
+            await self._fail_or_cancel_owned(
+                run_id,
+                error,
+                sink,
+                {"error": error},
+            )
+        except LeaseOwnershipError:
+            self._lease_lost_runs.add(run_id)
+            raise asyncio.CancelledError
         except Exception as exc:
             await _cleanup_internal_prompt_if_needed(context, session)
+            if run_id in self._lease_lost_runs:
+                raise asyncio.CancelledError
             if self._repository.get(run_id).cancel_requested:
                 await hooks.supersede_active(context, "run_cancelled")
-                self._repository.cancel(run_id)
-                await sink.emit("run.cancelled", {})
+                if self._repository.cancel_owned(self._owned_lease(run_id)):
+                    await sink.emit("run.cancelled", {})
             else:
                 await hooks.fail_active(context, exc)
-                self._repository.fail(run_id, f"{type(exc).__name__}: {exc}")
-                await sink.emit(
-                    "run.failed",
+                error = f"{type(exc).__name__}: {exc}"
+                await self._fail_or_cancel_owned(
+                    run_id,
+                    error,
+                    sink,
                     {
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": error,
                         "terminal_reason": (
                             "budget_exhausted"
                             if isinstance(exc, RunBudgetExceeded)
@@ -996,12 +1750,57 @@ class RunService:
             inbox = self._steering_inboxes.pop(run_id, None)
             if inbox is not None:
                 inbox.close()
-            if active_epoch_id is not None:
-                self._repository.abandon_incomplete_epochs(run_id)
-            self._repository.release_claim(run_id, self._owner_id)
+            if active_epoch_id is not None and run_id not in self._lease_lost_runs:
+                self._repository.abandon_incomplete_epochs_owned(
+                    self._owned_lease(run_id)
+                )
+            if run_id not in self._lease_lost_runs:
+                self._log_terminal_run(run_id)
+
+    def _log_terminal_run(self, run_id: str) -> None:
+        if self._run_logger is None:
+            return
+        record = self._repository.get(run_id)
+        if record.status not in {"completed", "failed", "cancelled", "paused"}:
+            return
+        try:
+            self._run_logger.write(record)
+        except OSError:
+            logger.exception("Could not write durable run details for run %s.", run_id)
+
+    def _owned_lease(self, run_id: str) -> RunLease:
+        lease = self._active_leases.get(run_id)
+        if lease is None:
+            raise LeaseOwnershipError(f"Run {run_id} has no active local lease.")
+        return lease
+
+    async def _fail_or_cancel_owned(
+        self,
+        run_id: str,
+        error: str,
+        sink: PersistedRunEventSink,
+        failure_payload: dict[str, Any],
+    ) -> None:
+        lease = self._owned_lease(run_id)
+        if self._repository.fail_owned(lease, error):
+            await sink.emit("run.failed", failure_payload)
+        elif self._repository.cancel_owned(lease):
+            await sink.emit("run.cancelled", {"reason": "user_requested"})
+
+    async def _cleanup_standalone_session_if_terminal(self, run_id: str) -> None:
+        record = self._repository.get(run_id)
+        if (
+            record.conversation_id is None
+            and record.status in {"completed", "failed", "cancelled"}
+        ):
+            await self._sessions.evict(_standalone_session_id(run_id), clear=True)
 
     def _raise_if_cancelled(self, run_id: str) -> None:
         if self._repository.cancel_requested(run_id):
+            raise asyncio.CancelledError
+
+    def _raise_if_lease_lost(self, run_id: str) -> None:
+        if run_id in self._lease_lost_runs:
             raise asyncio.CancelledError
 
     async def _finish_result(
@@ -1033,6 +1832,7 @@ class RunService:
 
         if result.interruptions:
             await ScholarWeaveRunHooks().supersede_active(context, "run_paused")
+            self._raise_if_lease_lost(run_id)
             state = result.to_state().to_json(
                 context_serializer=lambda context: {
                     "run_id": context.run_id,
@@ -1062,7 +1862,13 @@ class RunService:
                     tool_name=item.tool_name,
                     item=project_run_item(item),
                 )
-            self._repository.pause(run_id, state=state)
+            if not self._repository.pause_owned(
+                self._owned_lease(run_id),
+                state=state,
+            ):
+                if self._repository.cancel_owned(self._owned_lease(run_id)):
+                    await sink.emit("run.cancelled", {})
+                return
             await sink.emit(
                 "run.paused",
                 {"interruptions": [project_run_item(item) for item in result.interruptions]},
@@ -1070,8 +1876,9 @@ class RunService:
             return
         if self._repository.get(run_id).cancel_requested:
             await ScholarWeaveRunHooks().supersede_active(context, "run_cancelled")
-            self._repository.cancel(run_id)
-            await sink.emit("run.cancelled", {})
+            self._raise_if_lease_lost(run_id)
+            if self._repository.cancel_owned(self._owned_lease(run_id)):
+                await sink.emit("run.cancelled", {})
             return
         usage = _merge_usage(
             self._repository.aggregate_epoch_usage(run_id),
@@ -1090,12 +1897,21 @@ class RunService:
         if session is not None and isinstance(internal_prompt, str):
             await _remove_internal_session_prompt(session, internal_prompt)
             context.metadata["internal_session_prompt_removed"] = True
-        self._repository.complete(
-            run_id,
+        self._raise_if_lease_lost(run_id)
+        completed = self._repository.complete_owned(
+            self._owned_lease(run_id),
             final_output=to_jsonable(result.final_output),
             last_agent_name=result.last_agent.name,
             usage=usage,
         )
+        if not completed:
+            if self._repository.cancel_owned(self._owned_lease(run_id)):
+                await ScholarWeaveRunHooks().supersede_active(
+                    context,
+                    "run_cancelled",
+                )
+                await sink.emit("run.cancelled", {})
+            return
         await sink.emit(
             "run.completed",
             {
@@ -1117,7 +1933,10 @@ class RunService:
             project_run_item(item)
             for item in result.new_items[persisted_item_count:]
         ]
-        self._repository.add_items(run_id, projected_items)
+        self._repository.add_items_owned(
+            self._owned_lease(run_id),
+            projected_items,
+        )
         for kind, guardrail_results in (
             ("input", result.input_guardrail_results),
             ("output", result.output_guardrail_results),
@@ -1131,15 +1950,31 @@ class RunService:
                 )
 
 
-class _null_async_context:
-    async def __aenter__(self) -> None:
-        return None
-
-    async def __aexit__(self, exc_type, exc, traceback) -> None:
-        return None
+def _standalone_session_id(run_id: str) -> str:
+    return f"run:{run_id}"
 
 
-def _stop_and_answer_compiled(compiled: CompiledAgent) -> CompiledAgent:
+def _validate_completion_policy(compiled: CompiledAgent) -> None:
+    if (
+        compiled.completion_validator is not None
+        and compiled.completion_policy_id is None
+    ):
+        raise ValueError(
+            "A completion validator must have a stable completion_policy_id."
+        )
+
+
+def _uses_local_inference(compiled: CompiledAgent) -> bool:
+    return any(
+        model.local_inference
+        for model in compiled.resolved_models.values()
+    )
+
+
+def _stop_and_answer_compiled(
+    compiled: CompiledAgent,
+    prompt: str = STOP_AND_ANSWER_PROMPT,
+) -> CompiledAgent:
     entry_id = compiled.blueprint.entry_agent_id
     entry_spec = next(
         spec for spec in compiled.blueprint.agents if spec.id == entry_id
@@ -1150,7 +1985,7 @@ def _stop_and_answer_compiled(compiled: CompiledAgent) -> CompiledAgent:
             "agents": [
                 entry_spec.model_copy(
                     update={
-                        "instructions": STOP_AND_ANSWER_PROMPT,
+                        "instructions": prompt,
                         "output": None,
                         "tool_ids": [],
                         "input_guardrail_ids": [],
@@ -1167,7 +2002,7 @@ def _stop_and_answer_compiled(compiled: CompiledAgent) -> CompiledAgent:
     )
     answer_agent = compiled.entry_agent.clone(
         name=f"{compiled.entry_agent.name} Available Information Answer",
-        instructions=STOP_AND_ANSWER_PROMPT,
+        instructions=prompt,
         tools=[],
         handoffs=[],
         mcp_servers=[],
@@ -1183,12 +2018,61 @@ def _stop_and_answer_compiled(compiled: CompiledAgent) -> CompiledAgent:
         run_config=compiled.run_config,
         max_turns=1,
         completion_validator=None,
+        context_window_tokens=compiled.context_window_tokens,
     )
+
+
+def _compiled_prompt_snapshot(
+    run_id: str,
+    compiled: CompiledAgent,
+    *,
+    prompt_revision: str | None,
+) -> dict[str, Any]:
+    specifications = {spec.id: spec for spec in compiled.blueprint.agents}
+    agents: list[dict[str, Any]] = []
+    tools: list[dict[str, Any]] = []
+    seen_tools: set[tuple[str, str]] = set()
+    for agent_id, agent in compiled.agents_by_id.items():
+        spec = specifications[agent_id]
+        agents.append(
+            {
+                "id": agent_id,
+                "name": agent.name,
+                "source_instructions": spec.instructions,
+                "effective_instructions": str(agent.instructions or ""),
+                "model": spec.model.model,
+                "provider_profile_id": spec.model.provider_profile_id,
+            }
+        )
+        for tool in agent.tools:
+            name = str(getattr(tool, "name", type(tool).__name__))
+            key = (agent_id, name)
+            if key in seen_tools:
+                continue
+            seen_tools.add(key)
+            tools.append(
+                {
+                    "agent_id": agent_id,
+                    "name": name,
+                    "description": getattr(tool, "description", None),
+                    "parameters_schema": to_jsonable(
+                        getattr(tool, "params_json_schema", None)
+                    ),
+                }
+            )
+    return {
+        "run_id": run_id,
+        "prompt_revision": prompt_revision,
+        "agents": agents,
+        "tools": tools,
+        "activated_skills": [],
+    }
 
 
 def _stop_and_answer_input(
     source_input: RunInput,
     session_items: list[TResponseInputItem],
+    prompt: str = STOP_AND_ANSWER_PROMPT,
 ) -> list[TResponseInputItem]:
     answer_input: list[TResponseInputItem] = []
     current_turn_items = _current_turn_session_items(session_items)
@@ -1211,17 +2095,28 @@ def _stop_and_answer_input(
             if json.dumps(to_jsonable(item), sort_keys=True)
             not in serialized_session_items
         )
-    answer_input.append({"role": "user", "content": STOP_AND_ANSWER_PROMPT})
+    answer_input.append({"role": "user", "content": prompt})
     return answer_input
 
 
-def _stop_and_answer_source_items(input_value: Any) -> list[TResponseInputItem]:
+def _stop_and_answer_prompt_from_compiled(compiled: CompiledAgent) -> str:
+    entry_id = compiled.blueprint.entry_agent_id
+    entry_spec = next(
+        spec for spec in compiled.blueprint.agents if spec.id == entry_id
+    )
+    return entry_spec.instructions
+
+
+def _stop_and_answer_source_items(
+    input_value: Any,
+    prompt: str = STOP_AND_ANSWER_PROMPT,
+) -> list[TResponseInputItem]:
     if not isinstance(input_value, list):
         return []
     return [
         item
         for item in input_value
-        if _session_item_text(item) != STOP_AND_ANSWER_PROMPT
+        if _session_item_text(item) != prompt
     ]
 
 
@@ -1386,12 +2281,12 @@ async def _flush_preserving_cancellation(stream_sink: BufferedRunEventSink) -> N
 
 def _persist_new_items(
     repository: RunRepository,
-    run_id: str,
+    lease: RunLease,
     items: list[Any],
     skip: int,
 ) -> None:
-    repository.add_items(
-        run_id,
+    repository.add_items_owned(
+        lease,
         [project_run_item(item) for item in items[skip:]],
     )
 
@@ -1417,6 +2312,31 @@ def _recovery_instruction(run_id: str) -> str:
         "previous epoch. Continue from durable conversation history and saved notes. "
         "Do not replay writes unless their outcome has been verified. Resume only "
         "unfinished research."
+    )
+
+
+def _work_continuation(context: ScholarWeaveContext) -> str | None:
+    if context.metadata.get("autonomous_work") is not True:
+        return None
+    plan = context.metadata.get("work_plan")
+    if not isinstance(plan, list) or not plan:
+        return (
+            "Autonomous work is not finished because no work plan exists. Call "
+            "create_work_plan now, complete each tracked item, and update every item "
+            "to completed or blocked before giving the final answer."
+        )
+    pending = [
+        item
+        for item in plan
+        if isinstance(item, dict)
+        and item.get("status") not in {"completed", "blocked"}
+    ]
+    if not pending:
+        return None
+    return (
+        "Autonomous work is not finished. Continue with these open work items and "
+        "update their statuses before giving the final answer:\n"
+        f"{json.dumps(pending, ensure_ascii=False, separators=(',', ':'))}"
     )
 
 

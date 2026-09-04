@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from backend.core.text import clean_filename
+from backend.utils import clean_filename
 from backend.persistence.files import SafeStorage
 from backend.workspace.models import WorkspaceEntry
 from backend.workspace.repository import WorkspaceRepository
@@ -241,12 +241,23 @@ class WorkspaceService:
         }
         created: list[str] = []
         for path, content in templates.items():
+            existing = self._repository.get(path)
+            role = Path(path).stem
+            required_tags = ["paper", paper_tag, role]
+            existing_tags = list(existing.tags_json or []) if existing is not None else []
+            tags = self._normalize_tags([*existing_tags, *required_tags])
             try:
                 self._storage.workspace_file_info(path)
             except FileNotFoundError:
-                role = Path(path).stem
-                self.write_file(path, content, tags=["paper", paper_tag, role])
+                self.write_file(path, content, tags=tags)
                 created.append(path)
+                continue
+            self._index_file(
+                path,
+                tags=tags,
+                existing=existing,
+                paper_names={document_id: paper_name},
+            )
         self.set_paper_name(document_id, paper_name)
         return {
             "document_id": document_id,

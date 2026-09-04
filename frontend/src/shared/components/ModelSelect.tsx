@@ -29,6 +29,7 @@ export function ModelSelect({
   emptyOptionHint,
   inline = false,
   id,
+  ariaLabel,
 }: {
   options: ModelOption[];
   value: ModelSelectValue;
@@ -40,6 +41,7 @@ export function ModelSelect({
   emptyOptionHint?: string;
   inline?: boolean;
   id?: string;
+  ariaLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false);
@@ -153,6 +155,7 @@ export function ModelSelect({
       <button
         type="button"
         id={id}
+        aria-label={ariaLabel}
         className={`model-select-trigger${missing ? ' missing' : ''}`}
         disabled={disabled}
         aria-haspopup="listbox"

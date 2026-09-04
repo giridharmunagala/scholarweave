@@ -127,6 +127,39 @@ async def test_remote_pdf_is_persisted_ingested_and_searchable(
 
 
 @pytest.mark.anyio
+async def test_pdf_acquisition_reuses_local_paper_across_arxiv_versions(
+    test_settings,
+) -> None:
+    services = create_services(test_settings)
+    existing = services.documents.create_document_from_bytes(
+        b"%PDF-1.7\nlocal paper",
+        filename="1006.3498v1.pdf",
+        title="A Local Paper",
+        metadata={"source_url": "https://arxiv.org/pdf/1006.3498v1"},
+    )
+    client = _remote_client()
+    downloads = SourceDownloadService(
+        test_settings,
+        services.documents,
+        services.workspace,
+        client=client,
+    )
+
+    try:
+        reused = await downloads.download_pdf(
+            "https://arxiv.org/pdf/1006.3498v2.pdf",
+            title="A Local Paper",
+        )
+    finally:
+        await downloads.close()
+        await client.aclose()
+        await services.close()
+
+    assert reused.id == existing.id
+    assert reused.status == "uploaded"
+
+
+@pytest.mark.anyio
 async def test_html_page_is_temporary_searchable_and_notes_persist(
     test_settings,
     monkeypatch: pytest.MonkeyPatch,

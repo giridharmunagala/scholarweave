@@ -235,40 +235,7 @@ export function RuntimePanel({
               />
             </label>
           </div>
-          <div className="setting-row">
-            <div className="setting-label">
-              <strong>Custom Python FunctionTools</strong>
-              <small>Lets agents execute sandboxed Python tools you define.</small>
-            </div>
-            <Toggle
-              checked={settings.python_tool_enabled}
-              label="Custom Python FunctionTools"
-              onChange={(checked) => onChange({ ...settings, python_tool_enabled: checked })}
-            />
-          </div>
           <div className="field-row setting-nested">
-            <label className="field">
-              Python timeout (seconds)
-              <input
-                type="number"
-                min={1}
-                value={settings.python_tool_timeout_seconds}
-                onChange={(event) =>
-                  onChange({ ...settings, python_tool_timeout_seconds: Number(event.target.value) })
-                }
-              />
-            </label>
-            <label className="field">
-              Python memory (MB)
-              <input
-                type="number"
-                min={32}
-                value={settings.python_tool_memory_mb}
-                onChange={(event) =>
-                  onChange({ ...settings, python_tool_memory_mb: Number(event.target.value) })
-                }
-              />
-            </label>
             <label className="field">
               Retrieval context characters
               <input

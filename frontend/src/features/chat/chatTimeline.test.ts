@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RunStreamEvent } from '../../api/events';
-import { buildTurnTimeline } from './chatTimeline';
+import { buildTurnTimeline, describeLiveActivity, emptyTurnTimeline } from './chatTimeline';
 
 function event(
   sequence: number,
@@ -159,5 +159,63 @@ describe('sub-agent timeline activity', () => {
       },
     ]);
     expect(timeline.running).toBe(false);
+  });
+});
+
+describe('live activity status', () => {
+  it('names the tool the agent is waiting on, with the argument that identifies it', () => {
+    const timeline = buildTurnTimeline([
+      event(1, 'run.item', {
+        item: {
+          type: 'tool_call_item',
+          raw_item: {
+            name: 'search_papers',
+            call_id: 'call-1',
+            arguments: '{"query":"transformer scaling laws"}',
+          },
+        },
+      }),
+      event(2, 'tool.started', { tool_name: 'search_papers', tool_call_id: 'call-1' }),
+    ]);
+
+    expect(describeLiveActivity(timeline)).toMatchObject({
+      phase: 'tool',
+      label: 'Using Search papers',
+      detail: 'transformer scaling laws',
+    });
+  });
+
+  it('reports thinking while reasoning streams and counts the settled steps behind it', () => {
+    const timeline = buildTurnTimeline([
+      event(1, 'run.item', {
+        item: {
+          type: 'tool_call_item',
+          raw_item: { name: 'search_papers', call_id: 'call-1', arguments: '{"query":"a"}' },
+        },
+      }),
+      event(2, 'tool.completed', { tool_name: 'search_papers', tool_call_id: 'call-1', result: {} }),
+      event(3, 'model.stream', {
+        raw_type: 'response.reasoning_text.delta',
+        delta: 'Weighing the evidence',
+      }),
+    ]);
+
+    expect(describeLiveActivity(timeline)).toMatchObject({
+      phase: 'thinking',
+      label: 'Thinking',
+      completedSteps: 1,
+    });
+  });
+
+  it('falls back to the writing and starting phases when nothing is in flight', () => {
+    expect(describeLiveActivity(emptyTurnTimeline, { writing: true })).toMatchObject({
+      phase: 'writing',
+      label: 'Writing the answer',
+    });
+    expect(describeLiveActivity(emptyTurnTimeline)).toMatchObject({
+      phase: 'starting',
+      label: 'Starting the run',
+      completedSteps: 0,
+    });
   });
 });

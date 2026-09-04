@@ -9,7 +9,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
-from backend.api.dependencies import services
+from backend.core.http import services
+from backend.runs.schemas import run_response
 from backend.research.schemas import (
     ArtifactContentResponse,
     ArtifactResponse,
@@ -17,6 +18,14 @@ from backend.research.schemas import (
     DocumentResponse,
     DocumentSummaryResponse,
     IngestionOptionsResponse,
+    PaperFolderAssignmentRequest,
+    PaperFolderCreateRequest,
+    PaperFolderResponse,
+    PaperSummaryContentResponse,
+    PaperSummaryPromotionResponse,
+    PaperSummaryRunRequest,
+    PaperSummaryRunResponse,
+    PaperSummaryVersionResponse,
     RemotePdfDownloadRequest,
     SavedWebSourceNoteResponse,
     WebSourceCreateRequest,
@@ -25,6 +34,95 @@ from backend.research.schemas import (
 )
 
 router = APIRouter(tags=["research"])
+summary_router = APIRouter(
+    prefix="/documents/{document_id}/summaries",
+    tags=["paper summaries"],
+)
+
+
+@summary_router.post(
+    "",
+    response_model=PaperSummaryRunResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_summary(
+    document_id: str,
+    payload: PaperSummaryRunRequest,
+    container=Depends(services),
+) -> PaperSummaryRunResponse:
+    run, revision = container.summaries.start(
+        document_id,
+        model_reference=payload.model_reference,
+        reasoning_effort=payload.reasoning_effort,
+    )
+    return PaperSummaryRunResponse(
+        run=run_response(container.runs.get(run.id)),
+        prompt_revision=revision,
+    )
+
+
+@summary_router.get(
+    "",
+    response_model=list[PaperSummaryVersionResponse],
+)
+def list_summary_versions(
+    document_id: str,
+    container=Depends(services),
+) -> list[PaperSummaryVersionResponse]:
+    return [
+        PaperSummaryVersionResponse.model_validate(item)
+        for item in container.summaries.versions(document_id)
+    ]
+
+
+@summary_router.get(
+    "/{version_id}",
+    response_model=PaperSummaryContentResponse,
+)
+def get_summary_version(
+    document_id: str,
+    version_id: str,
+    container=Depends(services),
+) -> PaperSummaryContentResponse:
+    version, content = container.summaries.version(document_id, version_id)
+    return PaperSummaryContentResponse(
+        version=PaperSummaryVersionResponse.model_validate(version),
+        content=content,
+    )
+
+
+@summary_router.post(
+    "/{version_id}/promote",
+    response_model=PaperSummaryPromotionResponse,
+)
+def promote_summary_version(
+    document_id: str,
+    version_id: str,
+    container=Depends(services),
+) -> PaperSummaryPromotionResponse:
+    version, path, content = container.summaries.promote(document_id, version_id)
+    return PaperSummaryPromotionResponse(
+        version=PaperSummaryVersionResponse.model_validate(version),
+        summary_path=path,
+        content=content,
+    )
+
+
+@router.get("/paper-folders", response_model=list[PaperFolderResponse])
+def list_paper_folders(container=Depends(services)) -> list[PaperFolderResponse]:
+    return [_paper_folder_response(folder) for folder in container.documents.list_folders()]
+
+
+@router.post(
+    "/paper-folders",
+    response_model=PaperFolderResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_paper_folder(
+    payload: PaperFolderCreateRequest,
+    container=Depends(services),
+) -> PaperFolderResponse:
+    return _paper_folder_response(container.documents.create_folder(payload.name))
 
 
 @router.get("/documents", response_model=list[DocumentSummaryResponse])
@@ -141,6 +239,16 @@ async def save_web_source_note(
 
 @router.get("/documents/{document_id}", response_model=DocumentResponse)
 def get_document(document_id: str, container=Depends(services)) -> DocumentResponse:
+    return _document_response(container, document_id)
+
+
+@router.put("/documents/{document_id}/folder", response_model=DocumentResponse)
+def assign_document_folder(
+    document_id: str,
+    payload: PaperFolderAssignmentRequest,
+    container=Depends(services),
+) -> DocumentResponse:
+    container.documents.assign_folder(document_id, payload.folder_id)
     return _document_response(container, document_id)
 
 
@@ -296,6 +404,15 @@ def _document_summary(document) -> DocumentSummaryResponse:
         metadata=document.metadata_json or {},
         created_at=document.created_at,
         updated_at=document.updated_at,
+    )
+
+
+def _paper_folder_response(folder) -> PaperFolderResponse:
+    return PaperFolderResponse(
+        id=folder.id,
+        name=folder.name,
+        created_at=folder.created_at,
+        updated_at=folder.updated_at,
     )
 
 

@@ -7,25 +7,46 @@ resolved metadata and model outputs, never the persisted API key.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from ipaddress import ip_address
 import logging
 from typing import Any, Literal
+from urllib.parse import urlsplit
 
-import anyio
 from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 
 from backend.core.config import Settings
-from backend.observability.llm_logging import LLMCallLogger, logged_http_client
-from backend.providers.errors import ProviderDiscoveryError, ProviderRuntimeError
+from backend.providers.logging import LLMCallLogger, logged_http_client
 from backend.providers.models import ProviderProfile as ProviderProfileRecord
 from backend.providers.ollama import OllamaClient, OllamaError
 from backend.providers.schemas import ProviderModel as ProviderModelEntry
-from backend.providers.types import AgentModelDefaults, ModelReference
+from backend.providers.types import (
+    AgentModelDefaults,
+    ModelReference,
+    ProviderDiscoveryError,
+    ProviderRuntimeError,
+)
+from backend.providers.inference import InferenceScheduler
 
-Capability = Literal["chat", "embedding", "vision", "tools", "speech"]
+Capability = Literal["chat", "embedding", "vision", "tools"]
 OLLAMA_PLACEHOLDER_KEY = "ollama"
 OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "not-required"
 logger = logging.getLogger(__name__)
+
+
+def uses_local_inference(provider_kind: str, base_url: str) -> bool:
+    if provider_kind == "ollama":
+        return True
+    if provider_kind != "openai_compatible":
+        return False
+    hostname = (urlsplit(base_url).hostname or "").rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +64,10 @@ class ResolvedModel:
     def agent_base_url(self) -> str:
         return f"{self.base_url.rstrip('/')}/v1" if self.kind == "ollama" else self.base_url
 
+    @property
+    def local_inference(self) -> bool:
+        return uses_local_inference(self.kind, self.base_url)
+
 
 class ModelRuntime:
     def __init__(
@@ -50,12 +75,12 @@ class ModelRuntime:
         session_factory: Any,
         settings: Settings,
         ollama: OllamaClient,
-        ollama_gpu_lock: anyio.Lock,
+        inference_scheduler: InferenceScheduler,
     ) -> None:
         self.session_factory = session_factory
         self.settings = settings
         self.ollama = ollama
-        self.ollama_gpu_lock = ollama_gpu_lock
+        self.inference_scheduler = inference_scheduler
         self.llm_logger = LLMCallLogger(settings.llm_log_path)
 
     def profiles(self, *, include_archived: bool = False) -> list[ProviderProfileRecord]:
@@ -130,13 +155,6 @@ class ModelRuntime:
             raise ProviderRuntimeError(
                 f"Model '{model}' is disabled for provider profile '{profile.name}'."
             )
-        if capability == "speech" and (
-            declared_model is None
-            or "speech" not in set(declared_model.get("capabilities") or [])
-        ):
-            raise ProviderRuntimeError(
-                f"Model '{model}' is not configured for speech recognition."
-            )
         return ResolvedModel(
             profile_id=profile.id,
             profile_name=profile.name,
@@ -160,7 +178,11 @@ class ModelRuntime:
         http_client = logged_http_client(
             self.settings,
             resolved.kind,
-            self.ollama_gpu_lock if resolved.kind == "ollama" else None,
+            inference_scheduler=(
+                self.inference_scheduler
+                if resolved.local_inference
+                else None
+            ),
         )
         if resolved.kind == "ollama":
             return AsyncOpenAI(
@@ -231,7 +253,8 @@ class ModelRuntime:
                     profile.api_key,
                     "discovery",
                 )
-                result = await self.client(resolved).models.list()
+                async with self.client(resolved) as client:
+                    result = await client.models.list()
                 discovered = [
                     ProviderModelEntry(
                         name=item.id,
@@ -288,29 +311,6 @@ class ModelRuntime:
                 }
             )
         return list(merged.values())
-    async def transcribe(
-        self,
-        resolved: ResolvedModel,
-        *,
-        filename: str,
-        content: bytes,
-        content_type: str,
-    ) -> str:
-        if resolved.kind == "ollama":
-            raise ProviderRuntimeError("Ollama profiles do not support OpenAI audio transcriptions.")
-        try:
-            async with self.client(resolved) as client:
-                response = await client.audio.transcriptions.create(
-                    model=resolved.model,
-                    file=(filename, content, content_type),
-                )
-        except OpenAIError as exc:
-            raise ProviderRuntimeError(f"Speech transcription failed: {exc}") from exc
-        text = response.text.strip()
-        if not text:
-            raise ProviderRuntimeError("The speech model returned an empty transcription.")
-        return text
-
     async def generate(
         self,
         resolved: ResolvedModel,
@@ -341,7 +341,7 @@ class ModelRuntime:
                 else OllamaClient(
                     self.settings,
                     resolved.base_url,
-                    request_lock=self.ollama_gpu_lock,
+                    inference_scheduler=self.inference_scheduler,
                 )
             )
             try:
@@ -386,7 +386,8 @@ class ModelRuntime:
         kwargs: dict[str, Any] = {"model": resolved.model, "messages": payload, "temperature": temperature}
         if format_ is not None:
             kwargs["response_format"] = _openai_response_format(format_)
-        response = await self.client(resolved).chat.completions.create(**kwargs)
+        async with self.client(resolved) as client:
+            response = await client.chat.completions.create(**kwargs)
         text = response.choices[0].message.content or ""
         if on_token and text:
             await on_token(text)
@@ -400,7 +401,7 @@ class ModelRuntime:
                 else OllamaClient(
                     self.settings,
                     resolved.base_url,
-                    request_lock=self.ollama_gpu_lock,
+                    inference_scheduler=self.inference_scheduler,
                 )
             )
             try:
@@ -414,7 +415,11 @@ class ModelRuntime:
                 provider=resolved.kind, model=resolved.model, operation="ollama.embed", request={"input": inputs}, response=response
             )
             return response
-        response = await self.client(resolved).embeddings.create(model=resolved.model, input=inputs)
+        async with self.client(resolved) as client:
+            response = await client.embeddings.create(
+                model=resolved.model,
+                input=inputs,
+            )
         return [item.embedding for item in response.data]
 
 

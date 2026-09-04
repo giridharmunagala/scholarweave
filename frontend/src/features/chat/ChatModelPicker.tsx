@@ -21,8 +21,10 @@ export function ChatModelPicker({
 
   return (
     <div className="chat-model-picker">
+      <span className="chat-model-picker-label">Main</span>
       <ModelSelect
         id="chat-model"
+        ariaLabel="Main model"
         options={options}
         value={value}
         disabled={disabled}
@@ -32,7 +34,7 @@ export function ChatModelPicker({
       />
       {!options.length ? (
         <small className="chat-model-picker-hint">
-          No tool-capable models. <Link to="/settings">Configure providers</Link>.
+          No enabled models. <Link to="/settings">Configure providers</Link>.
         </small>
       ) : null}
     </div>
@@ -40,24 +42,19 @@ export function ChatModelPicker({
 }
 
 export function chatModelSelectOptions(providers: Provider[]): ModelOption[] {
-  return providers.flatMap((provider) =>
-    provider.models
-      .filter(
-        (model) =>
-          modelIsEnabled(model)
-          && (
-            !model.capabilities?.length
-            || model.capabilities.includes('tools')
-          ),
-      )
-      .map((model) => ({
-        providerId: provider.id,
-        providerName: provider.name,
-        providerKind: provider.kind,
-        model: model.name,
-        capabilities: model.capabilities ?? [],
-      })),
-  );
+  return providers
+    .filter((provider) => provider.state !== 'archived')
+    .flatMap((provider) =>
+      provider.models
+        .filter(modelIsEnabled)
+        .map((model) => ({
+          providerId: provider.id,
+          providerName: provider.name,
+          providerKind: provider.kind,
+          model: model.name,
+          capabilities: model.capabilities ?? [],
+        })),
+    );
 }
 
 export function chatModelOptions(providers: Provider[]) {
@@ -95,4 +92,17 @@ export function preferredChatModel(
   return preferred.provider_profile_id && preferred.model
     ? preferred
     : settings.default_model_references.chat ?? {};
+}
+
+/**
+ * The reference the run will actually use. An empty picker means "workspace
+ * default", so anything that inspects the model — reasoning levels, for
+ * instance — has to look at the default rather than the blank selection.
+ */
+export function resolveModelReference(
+  reference: ModelReference,
+  settings: Pick<Settings, 'default_model_references'> | null,
+): ModelReference {
+  if (reference.provider_profile_id && reference.model) return reference;
+  return settings?.default_model_references.chat ?? {};
 }

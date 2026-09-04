@@ -77,23 +77,6 @@ class DocumentFormatter:
         return chunks[: self.settings.max_chunks_per_document]
 
     @staticmethod
-    def figure_markdown(figures: list[dict[str, Any]]) -> str:
-        return "\n".join(
-            f"![{figure['alt']}]({figure['path']})" for figure in figures
-        )
-
-    def append_missing_figure_references(
-        self,
-        text: str,
-        figures: list[dict[str, Any]],
-    ) -> str:
-        missing = [figure for figure in figures if figure["path"] not in text]
-        if not missing:
-            return text
-        references = self.figure_markdown(missing)
-        return f"{text.rstrip()}\n\n### Figures\n\n{references}".strip()
-
-    @staticmethod
     def _looks_like_heading(text: str) -> bool:
         stripped = text.strip()
         if "\n" in stripped or len(stripped) > 120:
@@ -104,11 +87,5 @@ class DocumentFormatter:
         return (title_pattern and stripped == stripped.title()) or stripped.isupper()
 
     @staticmethod
-    def build_markdown(title: str, pages: list[dict[str, Any]]) -> str:
-        parts = [f"# {title}"]
-        for page in pages:
-            parts.append(f"\n## Page {page['page']}\n")
-            if page.get("llm_enhancement_note"):
-                parts.append(f"> **OCR note:** {page['llm_enhancement_note']}")
-            parts.append(page["text"] or "*(No text extracted)*")
-        return "\n\n".join(parts)
+    def build_markdown(pages: list[dict[str, Any]]) -> str:
+        return "\n\n".join(str(page.get("text") or "") for page in pages)

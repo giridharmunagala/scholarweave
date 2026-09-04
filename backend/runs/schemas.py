@@ -3,9 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from backend.agents.blueprint import AgentBlueprint, ReasoningEffort
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RunSchema(BaseModel):
@@ -159,7 +157,6 @@ class ToolAttemptResponse(RunSchema):
 
 class RunResponse(RunSchema):
     id: str
-    agent_revision_id: str | None
     conversation_id: str | None
     agent_name: str
     status: Literal["pending", "running", "paused", "completed", "failed", "cancelled"]
@@ -180,18 +177,12 @@ class RunResponse(RunSchema):
     goal_state: dict[str, Any] | None
 
 
-class RunCreateRequest(RunSchema):
-    agent_revision_id: str | None = None
-    blueprint: AgentBlueprint | None = None
-    input: str | list[dict[str, Any]]
-    conversation_id: str | None = None
-    reasoning_effort: ReasoningEffort | None = None
-
-    @model_validator(mode="after")
-    def require_one_agent_source(self) -> "RunCreateRequest":
-        if bool(self.agent_revision_id) == bool(self.blueprint):
-            raise ValueError("Provide exactly one of agent_revision_id or blueprint.")
-        return self
+class PromptSnapshotResponse(RunSchema):
+    run_id: str
+    prompt_revision: str | None
+    agents: list[dict[str, Any]]
+    tools: list[dict[str, Any]]
+    activated_skills: list[dict[str, Any]]
 
 
 class StopAndAnswerResponse(RunSchema):
@@ -217,7 +208,6 @@ class InterruptionResolutionRequest(RunSchema):
 def run_response(record) -> RunResponse:
     return RunResponse(
         id=record.id,
-        agent_revision_id=record.agent_revision_id,
         conversation_id=record.conversation_id,
         agent_name=record.agent_name,
         status=record.status,

@@ -28,29 +28,27 @@ const NAV_ITEMS: NavEntry[] = [
  */
 export function AppShell({ children }: { children: ReactNode }) {
   return (
-    <>
-      <div className="app-shell">
-        <nav className="rail" aria-label="Primary">
-          <Link className="rail-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
-            <span className="rail-mark">SW</span>
-          </Link>
+    <div className="app-shell">
+      <nav className="rail" aria-label="Primary">
+        <Link className="rail-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
+          <span className="rail-mark">SW</span>
+        </Link>
 
-          <div className="rail-nav">
-            {NAV_ITEMS.map((item) => (
-              <NavLink key={item.to} to={item.to} title={item.label}>
-                <Icon name={item.icon} size={19} />
-                <span className="rail-label">{item.label}</span>
-              </NavLink>
-            ))}
-          </div>
+        <div className="rail-nav">
+          {NAV_ITEMS.map((item) => (
+            <NavLink key={item.to} to={item.to} title={item.label}>
+              <Icon name={item.icon} size={19} />
+              <span className="rail-label">{item.label}</span>
+            </NavLink>
+          ))}
+        </div>
 
-          <div className="rail-foot">
-            <ThemeSwitcher />
-          </div>
-        </nav>
+        <div className="rail-foot">
+          <ThemeSwitcher />
+        </div>
+      </nav>
 
-        <main className="app-main">{children}</main>
-      </div>
-    </>
+      <main className="app-main">{children}</main>
+    </div>
   );
 }

@@ -9,12 +9,14 @@ from typing import Any
 from openai import OpenAIError
 
 from backend.core.config import Settings
-from backend.documents.errors import DocumentProcessingError, ProgressCallback, report_progress
+from backend.core.errors import DocumentProcessingError
 from backend.documents.formatting import DocumentFormatter
-from backend.providers.errors import ProviderRuntimeError
+from backend.providers.types import ProviderRuntimeError
+from backend.utils import ProgressCallback, report_progress
 from backend.providers.ollama import OllamaClient, OllamaError
 from backend.providers.runtime import ModelRuntime, ResolvedModel
 from backend.providers.types import AgentModelDefaults, ModelReference
+from backend.prompting.registry import PromptRegistry
 
 
 OCR_QUALITY_LEVELS = ("good", "average", "poor")
@@ -37,11 +39,13 @@ class VisionEnhancer:
         ollama: OllamaClient,
         model_runtime: ModelRuntime,
         formatter: DocumentFormatter,
+        prompts: PromptRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.ollama = ollama
         self.model_runtime = model_runtime
         self.formatter = formatter
+        self.prompts = prompts
 
     def resolve_enhancement_model(
         self,
@@ -203,19 +207,15 @@ class VisionEnhancer:
                 issues = ["OCR produced no text for this page."]
             else:
                 prompt = (
-                    "You are grading how faithfully an OCR transcription captured a single PDF "
-                    "page. Compare the OCR TEXT against the supplied page image and rate it.\n\n"
-                    "Rate 'good' when the OCR text is complete and accurate: reading order is "
-                    "correct, no meaningful text is missing, numbers and citations match the "
-                    "image, and equations and tables remain understandable.\n"
-                    "Rate 'average' when the text is usable but imperfect, for example a few "
-                    "garbled words, dropped headers or footnotes, or loose table formatting.\n"
-                    "Rate 'poor' when the text needs rework: significant content is missing, "
-                    "the reading order is scrambled, columns are interleaved, numbers or "
-                    "equations are corrupted, or tables are destroyed.\n\n"
-                    "Do not rewrite or transcribe the page. List concise, specific issues and "
-                    "return only the requested JSON object.\n\n"
-                    f"OCR TEXT:\n{ocr_text}"
+                    (
+                        self.prompts.render("ocr-triage")
+                        if self.prompts is not None
+                        else (
+                            "Grade how faithfully OCR captured one PDF page. Do not rewrite it. "
+                            "Return only the requested quality JSON."
+                        )
+                    )
+                    + f"\n\nOCR TEXT:\n{ocr_text}"
                 )
                 try:
                     response = await self._generate_vision(
@@ -286,17 +286,20 @@ class VisionEnhancer:
             image_png = page.get("_image_png")
             if not isinstance(image_png, bytes):
                 raise DocumentProcessingError(f"Rendered image is missing for page {page['page']}")
-            figures = page.get("figures", [])
-            figure_lines = self.formatter.figure_markdown(figures)
             prompt = (
-                "Transcribe and reconstruct this single PDF page as faithful Markdown using the "
-                "page image as the source of truth and the OCR text as a draft. "
-                "Correct OCR errors only when the image supports the correction. Preserve every "
-                "heading, paragraph, list, equation, footnote, and table; use GitHub-flavored "
-                "Markdown tables when appropriate. Do not summarize, explain, or invent content. "
-                "You must return the reconstructed page, even when the OCR draft is sparse. "
-                "Return only the page Markdown without analysis or a code fence.\n\n"
-                f"OCR TEXT:\n{page.get('raw_text') or '(empty)'}"
+                (
+                    self.prompts.render("ocr-reconstruction")
+                    if self.prompts is not None
+                    else (
+                        "Transcribe and reconstruct this single PDF page as faithful Markdown using "
+                        "the page image as the source of truth and the OCR text as a draft. Correct "
+                        "OCR errors only when the image supports the correction. Preserve every "
+                        "heading, paragraph, list, equation, footnote, and table; use GitHub-flavored "
+                        "Markdown tables when appropriate. Do not summarize, explain, or invent "
+                        "content. Return only the page Markdown without analysis or a code fence."
+                    )
+                )
+                + f"\n\nOCR TEXT:\n{page.get('raw_text') or '(empty)'}"
             )
             quality_issues = page.get("ocr_quality_issues")
             if quality_issues:
@@ -304,13 +307,6 @@ class VisionEnhancer:
                 prompt += (
                     "\n\nA quality check flagged the following problems with the OCR draft. "
                     f"Pay particular attention to them:\n{joined}"
-                )
-            if figure_lines:
-                prompt += (
-                    "\n\nThe following local figure references were extracted from this page. "
-                    "Place each reference once near its caption or most relevant surrounding text, "
-                    "without changing its URL or alt text:\n"
-                    f"{figure_lines}"
                 )
             try:
                 response = await self._generate_vision(
@@ -330,10 +326,7 @@ class VisionEnhancer:
                     )
                     self._use_ocr_fallback(page, detail)
                 else:
-                    page["text"] = self.formatter.append_missing_figure_references(
-                        enhanced,
-                        figures,
-                    )
+                    page["text"] = enhanced
                     page["llm_enhanced"] = True
                     page["llm_validation_status"] = "pending"
                     page.pop("llm_enhancement_note", None)
@@ -383,19 +376,16 @@ class VisionEnhancer:
                     f"Rendered image is missing for validation of page {page['page']}"
                 )
             prompt = (
-                "You are grading a Markdown reconstruction of a single PDF page. Compare the "
-                "CANDIDATE MARKDOWN against the supplied page image and the OCR draft.\n\n"
-                "Rate 'good' when the candidate faithfully represents the page.\n"
-                "Rate 'average' when it represents the page but has minor formatting or "
-                "wording slips.\n"
-                "Rate 'poor' when it omits meaningful content, invents content, changes numbers "
-                "or citations, scrambles reading order, corrupts equations, or materially "
-                "misrepresents tables.\n\n"
-                "Local /api/artifacts/ image references are system-added and must not lower the "
-                "rating. List concise, specific issues and return only the requested JSON "
-                "object.\n\n"
-                f"OCR DRAFT:\n{page.get('raw_text') or '(empty)'}\n\n"
-                f"CANDIDATE MARKDOWN:\n{page.get('text') or '(empty)'}"
+                (
+                    self.prompts.render("ocr-validation")
+                    if self.prompts is not None
+                    else (
+                        "Grade this Markdown reconstruction against the page image and OCR draft. "
+                        "Return only the requested quality JSON."
+                    )
+                )
+                + f"\n\nOCR DRAFT:\n{page.get('raw_text') or '(empty)'}\n\n"
+                + f"CANDIDATE MARKDOWN:\n{page.get('text') or '(empty)'}"
             )
             try:
                 response = await self._generate_vision(
@@ -436,10 +426,7 @@ class VisionEnhancer:
             )
 
     def _keep_ocr_text(self, page: dict[str, Any]) -> None:
-        page["text"] = self.formatter.append_missing_figure_references(
-            str(page.get("raw_text") or page.get("text") or ""),
-            page.get("figures", []),
-        )
+        page["text"] = str(page.get("raw_text") or page.get("text") or "")
         page["llm_enhanced"] = False
         for key in ("llm_enhancement_note", "llm_validation_status", "llm_validation_issues", "llm_validation_quality"):
             page.pop(key, None)
@@ -474,10 +461,7 @@ class VisionEnhancer:
         return {"quality": quality, "issues": issues}, None
 
     def _use_ocr_fallback(self, page: dict[str, Any], reason: str) -> None:
-        page["text"] = self.formatter.append_missing_figure_references(
-            str(page.get("raw_text") or page.get("text") or ""),
-            page.get("figures", []),
-        )
+        page["text"] = str(page.get("raw_text") or page.get("text") or "")
         page["llm_enhanced"] = False
         page["llm_enhancement_note"] = (
             f"No LLM enhancement was applied because {reason}. "

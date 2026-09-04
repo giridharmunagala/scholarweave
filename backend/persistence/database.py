@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Engine, Text, create_engine, inspect
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.types import TypeDecorator
 
 from backend.core.config import Settings
-from backend.core.json import dumps_json, loads_json
+from backend.utils import dumps_json, loads_json
 
-SCHEMA_GENERATION = 2
+SCHEMA_GENERATION = 5
 _LEGACY_COMPACTION_MARKER = "[ScholarWeave history compacted]"
 _ARTIFACTS_BACKUP_TABLE = "_sdk_cutover_artifacts"
 _CHUNKS_BACKUP_TABLE = "_sdk_cutover_document_chunks"
@@ -64,12 +65,16 @@ _OBSOLETE_SETTING_KEYS = (
     "max_concurrent_nodes",
     "max_subagent_depth",
     "max_subworkflow_depth",
+    "python_node_enabled",
+    "python_node_timeout_seconds",
+    "python_node_memory_mb",
+    "python_node_allowed_imports",
+    "python_tool_enabled",
+    "python_tool_timeout_seconds",
+    "python_tool_memory_mb",
+    "python_tool_allowed_imports",
 )
 _RENAMED_SETTING_KEYS = {
-    "python_node_enabled": "python_tool_enabled",
-    "python_node_timeout_seconds": "python_tool_timeout_seconds",
-    "python_node_memory_mb": "python_tool_memory_mb",
-    "python_node_allowed_imports": "python_tool_allowed_imports",
     "max_context_chars": "retrieval_max_context_chars",
 }
 
@@ -96,6 +101,7 @@ def create_session_factory(settings: Settings) -> sessionmaker[Session]:
     engine = create_engine(
         f"sqlite:///{settings.database_path}",
         connect_args={"check_same_thread": False},
+        poolclass=NullPool,
         future=True,
     )
     _cut_over_schema(engine, settings)
@@ -134,14 +140,11 @@ def _remove_legacy_compaction_items(engine: Engine) -> None:
 
 
 def _register_models() -> None:
-    from backend.agents import models as agent_models  # noqa: F401
     from backend.conversations import models as conversation_models  # noqa: F401
     from backend.core import models as core_models  # noqa: F401
-    from backend.direct_agents import models as direct_agent_models  # noqa: F401
     from backend.documents import models as document_models  # noqa: F401
     from backend.providers import models as provider_models  # noqa: F401
     from backend.runs import models as run_models  # noqa: F401
-    from backend.tools import models as tool_models  # noqa: F401
     from backend.workspace import models as workspace_models  # noqa: F401
 
 

@@ -1,0 +1,10 @@
+{
+  "label": "Organize research library",
+  "description": "List paper folders and assignments, create a named folder, or move a paper into a folder. Use a null folder_id with move_paper to return a paper to the default Papers group.",
+  "parameter_descriptions": {
+    "action": "Use list to inspect current organization, create_folder to add one folder, or move_paper to assign a paper.",
+    "folder_name": "The new folder name for create_folder; otherwise null.",
+    "document_id": "The local paper ID for move_paper; otherwise null.",
+    "folder_id": "The destination folder ID for move_paper, or null to use the default Papers group."
+  }
+}

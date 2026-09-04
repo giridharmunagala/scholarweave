@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,7 @@ from agents import (
     Agent,
     AgentsException,
     FileSearchTool,
+    FunctionTool,
     ModelSettings,
     RunConfig,
     ToolExecutionConfig,
@@ -24,16 +26,22 @@ from backend.agents.blueprint import (
     WebSearchToolSpec,
 )
 from backend.agents.catalog import GuardrailCatalog, ToolCatalog
-from backend.agents.instructions import with_global_agent_instructions
+from backend.agents.instructions import GLOBAL_AGENT_INSTRUCTIONS, with_global_agent_instructions
 from backend.agents.output import JsonSchemaOutput, with_json_schema_output_instructions
 from backend.core.errors import ValidationError
 from backend.core.config import Settings
-from backend.providers.errors import ProviderRuntimeError
-from backend.providers.types import AgentModelResolver, ModelReference, ResolvedAgentModel
-from backend.runtime.context import ScholarWeaveContext
-from backend.runtime.context_budget import create_context_budget_filter
-from backend.runtime.hooks import ScholarWeaveRunHooks
-from backend.runtime.sdk_compat import assert_supported_sdk
+from backend.providers.types import (
+    AgentModelResolver,
+    ModelReference,
+    ProviderRuntimeError,
+    ResolvedAgentModel,
+)
+from backend.prompting.registry import PromptRegistry
+from backend.agents.context import ScholarWeaveContext
+from backend.agents.context_budget import create_context_budget_filter
+from backend.runs.hooks import ScholarWeaveRunHooks
+from backend.providers.inference import InferenceScheduler
+from backend.agents.sdk import assert_supported_sdk
 from backend.tools.failures import nested_agent_failure_handler
 
 UNLIMITED_AGENT_TOOL_TURNS = 2_147_483_647
@@ -48,6 +56,8 @@ class CompiledAgent:
     run_config: RunConfig
     max_turns: int
     completion_validator: Callable[[ScholarWeaveContext], None] | None = None
+    completion_policy_id: str | None = None
+    context_window_tokens: int | None = None
 
 
 class AgentCompiler:
@@ -57,13 +67,22 @@ class AgentCompiler:
         tool_catalog: ToolCatalog,
         guardrail_catalog: GuardrailCatalog | None = None,
         settings: Settings | None = None,
+        prompts: PromptRegistry | None = None,
+        inference_scheduler: InferenceScheduler | None = None,
     ) -> None:
         self._models = model_resolver
         self._tools = tool_catalog
         self._guardrails = guardrail_catalog or GuardrailCatalog()
         self._settings = settings
+        self._prompts = prompts
+        self._inference_scheduler = inference_scheduler
 
-    def compile(self, blueprint: AgentBlueprint) -> CompiledAgent:
+    def compile(
+        self,
+        blueprint: AgentBlueprint,
+        *,
+        context_window_tokens: int | None = None,
+    ) -> CompiledAgent:
         assert_supported_sdk()
         issues = self._reference_issues(blueprint)
         if issues:
@@ -93,6 +112,11 @@ class AgentCompiler:
             )
             instructions = with_global_agent_instructions(
                 spec.instructions,
+                global_instructions=(
+                    self._prompts.render("global")
+                    if self._prompts is not None
+                    else GLOBAL_AGENT_INSTRUCTIONS
+                ),
                 timezone_name=self._settings.user_timezone if self._settings else None,
                 user_profile=self._settings.user_profile if self._settings else None,
             )
@@ -141,19 +165,29 @@ class AgentCompiler:
 
         agent_tools_by_owner: dict[str, list[Tool]] = {agent_id: [] for agent_id in agents_by_id}
         for spec in blueprint.agent_tools:
-            agent_tools_by_owner[spec.owner_agent_id].append(
-                agents_by_id[spec.delegate_agent_id].as_tool(
-                    tool_name=spec.tool_name,
-                    tool_description=spec.tool_description,
-                    max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
-                    hooks=ScholarWeaveRunHooks(),
-                    failure_error_function=nested_agent_failure_handler(
-                        spec.tool_name,
-                        agents_by_id[spec.delegate_agent_id].name,
-                    ),
-                    needs_approval=spec.needs_approval,
-                )
+            agent_tool = agents_by_id[spec.delegate_agent_id].as_tool(
+                tool_name=spec.tool_name,
+                tool_description=spec.tool_description,
+                max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
+                hooks=ScholarWeaveRunHooks(),
+                failure_error_function=nested_agent_failure_handler(
+                    spec.tool_name,
+                    agents_by_id[spec.delegate_agent_id].name,
+                ),
+                needs_approval=spec.needs_approval,
             )
+            if spec.serialize_calls:
+                agent_tool = self._serialize_agent_tool(
+                    agent_tool,
+                    self._inference_scheduler,
+                )
+            elif spec.max_parallel_calls is not None:
+                agent_tool = self._parallel_agent_tool(
+                    agent_tool,
+                    spec.max_parallel_calls,
+                    self._inference_scheduler,
+                )
+            agent_tools_by_owner[spec.owner_agent_id].append(agent_tool)
 
         for agent_id, agent in agents_by_id.items():
             spec = agent_specs[agent_id]
@@ -184,6 +218,15 @@ class AgentCompiler:
                 for guardrail_id in spec.output_guardrail_ids
             ]
 
+        effective_context_window = (
+            context_window_tokens
+            or resolved_models[blueprint.entry_agent_id].context_window_tokens
+            or (
+                getattr(self._settings, "agent_context_window_tokens", None)
+                if self._settings is not None
+                else None
+            )
+        )
         return CompiledAgent(
             blueprint=blueprint,
             entry_agent=agents_by_id[blueprint.entry_agent_id],
@@ -203,23 +246,82 @@ class AgentCompiler:
                 call_model_input_filter=(
                     create_context_budget_filter(
                         self._settings,
-                        {
-                            id(agents_by_id[agent_id]): context_window
-                            for agent_id, resolved in resolved_models.items()
-                            if (context_window := resolved.context_window_tokens)
-                            is not None
-                        },
+                        (
+                            {
+                                id(agents_by_id[agent_id]): context_window_tokens
+                                for agent_id in resolved_models
+                            }
+                            if context_window_tokens is not None
+                            else {
+                                id(agents_by_id[agent_id]): context_window
+                                for agent_id, resolved in resolved_models.items()
+                                if (context_window := resolved.context_window_tokens)
+                                is not None
+                            }
+                        ),
                         {
                             id(agent): agent_id
                             for agent_id, agent in agents_by_id.items()
                         },
+                        prompt_registry=self._prompts,
                     )
                     if self._settings is not None
                     else None
                 ),
             ),
             max_turns=blueprint.run.max_turns,
+            context_window_tokens=effective_context_window,
         )
+
+    @staticmethod
+    def _serialize_agent_tool(
+        tool: FunctionTool,
+        inference_scheduler: InferenceScheduler | None = None,
+    ) -> FunctionTool:
+        invoke = tool.on_invoke_tool
+        tool_name = tool.name
+        active = False
+
+        async def invoke_serially(context: Any, input_json: str) -> str:
+            nonlocal active
+            if active:
+                return (
+                    f"Rejected: {tool_name} already has a call in progress and runs exactly one "
+                    "call at a time. This call was not started, so nothing was read, written, or "
+                    "saved for it. Never place two of these calls in the same turn: wait for the "
+                    "in-flight receipt, then issue this call again on its own."
+                )
+            active = True
+            try:
+                if inference_scheduler is not None:
+                    async with inference_scheduler.exclusive():
+                        return await invoke(context, input_json)
+                return await invoke(context, input_json)
+            finally:
+                active = False
+
+        tool.on_invoke_tool = invoke_serially
+        return tool
+
+    @staticmethod
+    def _parallel_agent_tool(
+        tool: FunctionTool,
+        limit: int,
+        inference_scheduler: InferenceScheduler | None = None,
+    ) -> FunctionTool:
+        invoke = tool.on_invoke_tool
+        semaphore = asyncio.Semaphore(limit)
+        inference_group = object()
+
+        async def invoke_with_limit(context: Any, input_json: str) -> str:
+            async with semaphore:
+                if inference_scheduler is None:
+                    return await invoke(context, input_json)
+                async with inference_scheduler.parallel(inference_group, limit):
+                    return await invoke(context, input_json)
+
+        tool.on_invoke_tool = invoke_with_limit
+        return tool
 
     def validate(self, blueprint: AgentBlueprint) -> tuple[str, ...]:
         try:

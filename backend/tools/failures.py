@@ -6,9 +6,9 @@ from typing import Any
 from agents.tool import with_function_tool_failure_error_handler
 from agents.tool_context import ToolContext
 
-from backend.runtime.context import ScholarWeaveContext
-from backend.runtime.context import unwrap_scholar_context
-from backend.runtime.lifecycle import finish_agent_invocation
+from backend.agents.context import ScholarWeaveContext
+from backend.agents.context import unwrap_scholar_context
+from backend.runs.hooks import finish_agent_invocation
 
 _FAILURES_KEY = "_recoverable_tool_failures"
 _INFORMATION_FAILURE_COUNTS_KEY = "_consecutive_information_failure_counts"
@@ -70,7 +70,10 @@ def recoverable_tool_invoker(
     )
 
 
-def nested_agent_failure_handler(tool_name: str, agent_name: str):
+def nested_agent_failure_handler(
+    tool_name: str,
+    agent_name: str,
+) -> Callable[[Any, Exception], Awaitable[str]]:
     async def handle(context: Any, error: Exception) -> str:
         _record_failure(context, tool_name, error)
         scholar_context = unwrap_scholar_context(context)
@@ -80,11 +83,7 @@ def nested_agent_failure_handler(tool_name: str, agent_name: str):
             "failed",
             error=f"{type(error).__name__}: {error}",
         )
-        plan = scholar_context.metadata.get("extended_work_plan")
-        notes = scholar_context.metadata.get("extended_work_notes")
-        priorities = scholar_context.metadata.get("extended_work_priorities")
-        budget = scholar_context.metadata.get("extended_work_budget")
-        budget_usage = scholar_context.metadata.get("extended_work_safety_usage")
+        plan = scholar_context.metadata.get("work_plan")
         partial_state = {
             "plan": [
                 {
@@ -94,11 +93,6 @@ def nested_agent_failure_handler(tool_name: str, agent_name: str):
                         "title",
                         "status",
                         "summary",
-                        "instructions",
-                        "expected_output",
-                        "effort",
-                        "source_target",
-                        "rationale",
                     )
                 }
                 for task in plan
@@ -106,39 +100,11 @@ def nested_agent_failure_handler(tool_name: str, agent_name: str):
             ]
             if isinstance(plan, list)
             else [],
-            "saved_notes": [
-                {
-                    "note_id": note.get("id"),
-                    "task_id": note.get("task_id"),
-                    "title": note.get("title"),
-                    "summary": note.get("summary"),
-                    "source_count": len(note.get("sources", []))
-                    if isinstance(note.get("sources"), list)
-                    else 0,
-                }
-                for note in notes.values()
-                if isinstance(note, dict)
-            ]
-            if isinstance(notes, dict)
-            else [],
-            "priority_decisions": [
-                {
-                    key: value
-                    for key, value in decision.items()
-                    if not key.startswith("_")
-                }
-                for decision in priorities[-20:]
-                if isinstance(decision, dict)
-            ]
-            if isinstance(priorities, list)
-            else [],
-            "budget": budget if isinstance(budget, dict) else {},
-            "safety_usage": budget_usage if isinstance(budget_usage, dict) else {},
         }
         return (
             f"The sub-agent stopped before completion: {type(error).__name__}: {error}. "
-            f"Partial saved state: {partial_state}. Summarize the usable progress, read any saved "
-            "notes that are relevant, and delegate only the unfinished scope to a fresh sub-agent."
+            f"Partial plan state: {partial_state}. Summarize the usable progress and delegate only "
+            "the unfinished scope to a fresh sub-agent."
         )
 
     return handle
@@ -176,7 +142,7 @@ def _record_failure(
         context.context.metadata[_FAILURES_KEY] = failures
     consecutive_information_failures = 0
     failure_limit_reached = False
-    if catalog_id and is_information_tool(catalog_id):
+    if catalog_id and is_failure_limited_tool(catalog_id):
         counts = context.context.metadata.setdefault(
             _INFORMATION_FAILURE_COUNTS_KEY,
             {},
@@ -210,7 +176,7 @@ def _record_failure(
         "retryable": retryable,
         "unknown_outcome": unknown_outcome,
     }
-    if catalog_id and is_information_tool(catalog_id):
+    if catalog_id and is_failure_limited_tool(catalog_id):
         failure.update(
             {
                 "consecutive_information_failures": consecutive_information_failures,
@@ -219,43 +185,6 @@ def _record_failure(
         )
     failures[_tool_call_key(context, tool_name)] = failure
     return failure
-
-
-def nested_agent_failure_handler(
-    tool_name: str,
-    agent_name: str,
-) -> Callable[[Any, Exception], Awaitable[str]]:
-    async def handle(context: Any, error: Exception) -> str:
-        scholar_context = unwrap_scholar_context(context)
-        _record_failure(context, tool_name, error)
-        await finish_agent_invocation(
-            scholar_context,
-            agent_name,
-            "failed",
-            error=str(error) or type(error).__name__,
-        )
-        notes = scholar_context.metadata.get("extended_work_notes")
-        summaries = (
-            [
-                str(note.get("summary"))
-                for note in notes.values()
-                if isinstance(note, dict) and note.get("summary")
-            ]
-            if isinstance(notes, dict)
-            else []
-        )
-        checkpoint = (
-            " Saved progress: " + " ".join(summaries)
-            if summaries
-            else ""
-        )
-        return (
-            f"{agent_name} failed: {type(error).__name__}: {error}.{checkpoint} "
-            "Keep completed work, then delegate only the unfinished scope to a fresh "
-            "sub-agent or continue directly."
-        )
-
-    return handle
 
 
 def _failure_policy(error: Exception) -> tuple[str, bool]:
@@ -301,6 +230,10 @@ def is_information_tool(catalog_id: str) -> bool:
     }
 
 
+def is_failure_limited_tool(catalog_id: str) -> bool:
+    return is_information_tool(catalog_id) or catalog_id == "research.sources.acquire"
+
+
 def tool_enabled_after_failures(
     catalog_id: str,
 ) -> Callable[[Any, Any], bool]:
@@ -316,13 +249,62 @@ def record_tool_success(
     context: ScholarWeaveContext,
     catalog_id: str | None,
 ) -> None:
-    if not catalog_id or not is_information_tool(catalog_id):
+    if not catalog_id or not is_failure_limited_tool(catalog_id):
         return
     counts = context.metadata.get(_INFORMATION_FAILURE_COUNTS_KEY)
     if isinstance(counts, dict):
         counts.pop(catalog_id, None)
         if not counts:
             context.metadata.pop(_INFORMATION_FAILURE_COUNTS_KEY, None)
+    disabled = context.metadata.get(_DISABLED_INFORMATION_TOOLS_KEY)
+    if isinstance(disabled, list) and catalog_id in disabled:
+        disabled[:] = [item for item in disabled if item != catalog_id]
+        if not disabled:
+            context.metadata.pop(_DISABLED_INFORMATION_TOOLS_KEY, None)
+
+
+def restore_tool_failure_state_from_attempts(
+    metadata: dict[str, Any],
+    attempts: list[Any],
+) -> None:
+    final_attempts: dict[tuple[str, str], tuple[int, str]] = {}
+    for index, attempt in enumerate(attempts):
+        catalog_id = getattr(attempt, "catalog_id", None)
+        if not isinstance(catalog_id, str) or not is_failure_limited_tool(catalog_id):
+            continue
+        call_id = getattr(attempt, "tool_call_id", None)
+        call_key = str(call_id) if call_id else f"attempt-{index}"
+        final_attempts[(catalog_id, call_key)] = (
+            index,
+            str(getattr(attempt, "status", "")),
+        )
+
+    counts: dict[str, int] = {}
+    disabled: list[str] = []
+    for (catalog_id, _call_id), (_index, status) in sorted(
+        final_attempts.items(),
+        key=lambda item: item[1][0],
+    ):
+        if status == "completed":
+            counts.pop(catalog_id, None)
+            if catalog_id in disabled:
+                disabled.remove(catalog_id)
+            continue
+        if status not in {"failed", "unknown_outcome"}:
+            continue
+        counts[catalog_id] = counts.get(catalog_id, 0) + 1
+        if (
+            counts[catalog_id] >= MAX_CONSECUTIVE_INFORMATION_FAILURES
+            and catalog_id not in disabled
+        ):
+            disabled.append(catalog_id)
+
+    metadata.pop(_INFORMATION_FAILURE_COUNTS_KEY, None)
+    metadata.pop(_DISABLED_INFORMATION_TOOLS_KEY, None)
+    restore_tool_failure_state(
+        metadata,
+        {"counts": counts, "disabled": disabled},
+    )
 
 
 def serialize_tool_failure_state(metadata: dict[str, Any]) -> dict[str, Any]:

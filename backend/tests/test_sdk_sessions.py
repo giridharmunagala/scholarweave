@@ -6,7 +6,7 @@ import pytest
 from agents import SQLiteSession, TResponseInputItem
 
 from backend.agents.blueprint import SessionPolicySpec
-from backend.runtime.sessions import SdkSessionFactory
+from backend.conversations.sessions import SdkSessionFactory
 
 
 @pytest.fixture
@@ -30,6 +30,35 @@ async def test_session_factory_uses_unmodified_sqlite_history(tmp_path: Path) ->
 
     assert await session.get_items() == items
     assert factory.get("conversation", policy) is session
+    await factory.close()
+
+
+@pytest.mark.anyio
+async def test_session_factory_evicts_wrapped_session_and_closes_all(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    closed: list[str] = []
+    original_close = SQLiteSession.close
+
+    def recording_close(self) -> None:
+        closed.append(self.session_id)
+        original_close(self)
+
+    monkeypatch.setattr(SQLiteSession, "close", recording_close)
+    factory = SdkSessionFactory(tmp_path / "sessions.sqlite3")
+    policy = SessionPolicySpec(messages_only=True)
+    wrapped = factory.get("conversation", policy)
+    other = factory.get("other", SessionPolicySpec())
+
+    await wrapped.add_items([{"role": "user", "content": "delete me"}])
+    await factory.evict("conversation", clear=True)
+    assert "conversation" in closed
+    assert factory.get("conversation", SessionPolicySpec()) is not wrapped
+
+    await factory.close()
+    assert "other" in closed
+    assert other is not None
 
 
 def test_legacy_compaction_policy_is_ignored() -> None:

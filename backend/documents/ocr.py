@@ -9,25 +9,20 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+import pypdfium2
+import pytesseract
+from PIL import Image
 from pypdf import PdfReader
 
 from backend.core.config import Settings
-from backend.documents.errors import (
-    DocumentProcessingError,
-    ProgressCallback,
-    report_progress,
-)
+from backend.core.errors import DocumentProcessingError
+from backend.utils import ProgressCallback, report_progress
 
 class DocumentOCR:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
     def available(self) -> bool:
-        try:
-            import pytesseract
-            import pypdfium2  # noqa: F401
-        except ImportError:
-            return False
         tesseract_path = self._tesseract_path()
         if tesseract_path is None:
             return False
@@ -172,9 +167,6 @@ class DocumentOCR:
         return await self._tesseract_image(image_png, page_number)
 
     async def _tesseract_image(self, image_png: bytes, page_number: int) -> str:
-        import pytesseract
-        from PIL import Image
-
         tesseract_path = self._tesseract_path()
         if tesseract_path is None:
             raise self._unavailable_error(page_number)
@@ -230,8 +222,6 @@ class DocumentOCR:
 
     @staticmethod
     def render_page_png(pdf_path: Path, zero_based_page_index: int) -> bytes:
-        import pypdfium2
-
         document = pypdfium2.PdfDocument(str(pdf_path))
         try:
             page = document[zero_based_page_index]
@@ -254,8 +244,12 @@ class DocumentOCR:
             r"C:\Program Files (x86)\Tesseract-OCR\tessdata",
         ]
         for candidate in candidates:
-            if candidate and Path(candidate).is_dir():
-                return f'--tessdata-dir "{candidate}"'
+            if not candidate:
+                continue
+            tessdata_dir = Path(candidate.strip('"'))
+            if tessdata_dir.is_dir():
+                os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
+                return ""
         return ""
 
     @staticmethod

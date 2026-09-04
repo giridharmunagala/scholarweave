@@ -1,0 +1,7 @@
+{
+  "label": "Set conversation title",
+  "description": "Set the persisted conversation title exactly once during the first turn. Infer a concise title that captures the user's intent instead of copying or truncating the message. This tool is not available on later turns.",
+  "parameter_descriptions": {
+    "title": "A concise, descriptive conversation title of at most 120 characters."
+  }
+}

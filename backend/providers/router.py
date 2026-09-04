@@ -3,16 +3,11 @@ from __future__ import annotations
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     Query,
-    UploadFile,
-    WebSocket,
-    WebSocketDisconnect,
     status,
 )
 
-from backend.api.dependencies import services
+from backend.core.http import services
 from backend.providers.schemas import (
     ProviderCreate,
     ProviderModelsResponse,
@@ -20,106 +15,14 @@ from backend.providers.schemas import (
     ProviderUpdate,
     ProviderVerifyRequest,
     ProviderVerifyResponse,
-    TranscriptionResponse,
-    BuiltInSpeechStatus,
 )
-from backend.providers.errors import ProviderRuntimeError
-from backend.providers.types import ModelReference
 from backend.providers.service import ProviderService
 
 router = APIRouter(prefix="/providers", tags=["providers"])
-MAX_AUDIO_BYTES = 25 * 1024 * 1024
-UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
 def provider_service(container=Depends(services)) -> ProviderService:
     return container.providers
-
-
-async def _read_audio_upload(file: UploadFile) -> bytes:
-    content = bytearray()
-    try:
-        while chunk := await file.read(UPLOAD_CHUNK_BYTES):
-            content.extend(chunk)
-            if len(content) > MAX_AUDIO_BYTES:
-                raise ProviderRuntimeError(
-                    "The recorded audio exceeds the 25 MB limit."
-                )
-    finally:
-        await file.close()
-    if not content:
-        raise ProviderRuntimeError("The recorded audio is empty.")
-    return bytes(content)
-
-
-@router.get("/speech/builtin/status", response_model=BuiltInSpeechStatus)
-def built_in_speech_status(container=Depends(services)) -> BuiltInSpeechStatus:
-    return container.builtin_speech.status()
-
-
-@router.post("/speech/builtin/install", response_model=BuiltInSpeechStatus)
-async def install_built_in_speech(container=Depends(services)) -> BuiltInSpeechStatus:
-    return await container.builtin_speech.install()
-
-
-@router.delete("/speech/builtin", response_model=BuiltInSpeechStatus)
-async def uninstall_built_in_speech(container=Depends(services)) -> BuiltInSpeechStatus:
-    return await container.builtin_speech.uninstall()
-
-
-@router.post("/speech/builtin/start", response_model=BuiltInSpeechStatus)
-async def start_built_in_speech(container=Depends(services)) -> BuiltInSpeechStatus:
-    return await container.builtin_speech.start()
-
-
-@router.websocket("/speech/builtin/stream")
-async def stream_with_built_in_speech(
-    websocket: WebSocket,
-    container=Depends(services),
-) -> None:
-    await websocket.accept()
-    try:
-        session = await container.builtin_speech.create_session()
-        await websocket.send_json({"type": "ready"})
-        while True:
-            message = await websocket.receive()
-            if message["type"] == "websocket.disconnect":
-                break
-            content = message.get("bytes")
-            if content is not None:
-                text = await session.accept_pcm(content)
-                if not await _send_speech_message(
-                    websocket,
-                    {"type": "partial", "text": text},
-                ):
-                    break
-            elif message.get("text") == "finish":
-                text = await session.finish()
-                if await _send_speech_message(
-                    websocket,
-                    {"type": "final", "text": text},
-                ):
-                    await websocket.close()
-                break
-    except WebSocketDisconnect:
-        pass
-    except ProviderRuntimeError as exc:
-        if await _send_speech_message(
-            websocket,
-            {"type": "error", "message": str(exc)},
-        ):
-            await websocket.close(code=1011)
-
-
-async def _send_speech_message(
-    websocket: WebSocket,
-    message: dict[str, str],
-) -> bool:
-    try:
-        await websocket.send_json(message)
-        return True
-    except (WebSocketDisconnect, RuntimeError):
-        return False
 
 
 @router.get("", response_model=list[ProviderResponse])
@@ -178,20 +81,3 @@ async def verify_provider(
     service: ProviderService = Depends(provider_service),
 ) -> ProviderVerifyResponse:
     return await service.verify(profile_id, model_name=payload.model)
-
-
-@router.post("/speech/transcriptions", response_model=TranscriptionResponse)
-async def transcribe_speech(
-    file: UploadFile = File(...),
-    provider_profile_id: str = Form(...),
-    model: str = Form(...),
-    service: ProviderService = Depends(provider_service),
-) -> TranscriptionResponse:
-    content = await _read_audio_upload(file)
-    text = await service.transcribe(
-        ModelReference(provider_profile_id=provider_profile_id, model=model),
-        filename=file.filename or "recording.webm",
-        content=content,
-        content_type=file.content_type or "application/octet-stream",
-    )
-    return TranscriptionResponse(text=text)

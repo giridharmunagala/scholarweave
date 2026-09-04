@@ -17,7 +17,7 @@ from agents import (
     ToolCallOutputItem,
 )
 
-from backend.runtime.serialization import to_jsonable
+from backend.utils import to_jsonable
 
 
 def project_run_item(item: RunItem) -> dict[str, Any]:

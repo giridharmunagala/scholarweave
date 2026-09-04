@@ -5,9 +5,45 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.agents.blueprint import ModelReferenceSpec, ReasoningEffort
+from backend.runs.schemas import RunResponse
+
 
 class ResearchSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class PaperSummaryRunRequest(ResearchSchema):
+    model_reference: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
+    reasoning_effort: ReasoningEffort | None = None
+
+
+class PaperSummaryRunResponse(ResearchSchema):
+    run: RunResponse
+    prompt_revision: str
+
+
+class PaperSummaryVersionResponse(ResearchSchema):
+    id: str
+    document_id: str
+    run_id: str
+    path: str
+    created_at: datetime
+    prompt_revision: str | None
+    review_summary: str
+    citation_count: int
+    status: str
+
+
+class PaperSummaryContentResponse(ResearchSchema):
+    version: PaperSummaryVersionResponse
+    content: str
+
+
+class PaperSummaryPromotionResponse(ResearchSchema):
+    version: PaperSummaryVersionResponse
+    summary_path: str
+    content: str
 
 
 class ArtifactResponse(ResearchSchema):
@@ -49,6 +85,21 @@ class DocumentSummaryResponse(ResearchSchema):
 class DocumentResponse(DocumentSummaryResponse):
     artifacts: list[ArtifactResponse]
     chunks: list[DocumentChunkResponse]
+
+
+class PaperFolderCreateRequest(ResearchSchema):
+    name: str = Field(min_length=1, max_length=100)
+
+
+class PaperFolderAssignmentRequest(ResearchSchema):
+    folder_id: str | None
+
+
+class PaperFolderResponse(ResearchSchema):
+    id: str
+    name: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class IngestionOptionsResponse(ResearchSchema):

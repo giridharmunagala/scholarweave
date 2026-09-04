@@ -7,9 +7,9 @@ from agents import TResponseInputItem
 from backend.agents.blueprint import SessionPolicySpec
 from backend.conversations.models import ConversationRecord
 from backend.conversations.repository import ConversationRepository
-from backend.runtime.serialization import to_jsonable
-from backend.runtime.sessions import SdkSessionFactory
-from backend.runtime.steering import strip_steering_marker
+from backend.utils import to_jsonable
+from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.steering import strip_steering_marker
 
 
 class ConversationService:
@@ -26,14 +26,12 @@ class ConversationService:
         *,
         title: str,
         kind: str,
-        agent_revision_id: str | None,
         model_reference: dict[str, Any],
         session_policy: SessionPolicySpec,
     ) -> ConversationRecord:
         return self._repository.create(
             title=title,
             kind=kind,
-            agent_revision_id=agent_revision_id,
             model_reference=model_reference,
             session_policy=session_policy.model_dump(mode="json"),
         )
@@ -56,13 +54,20 @@ class ConversationService:
     def touch(self, conversation_id: str, preview: str) -> ConversationRecord:
         return self._repository.touch(conversation_id, preview=preview)
 
+    def set_title(self, conversation_id: str, title: str) -> ConversationRecord:
+        normalized = " ".join(title.split())
+        if not normalized:
+            raise ValueError("Conversation title cannot be empty.")
+        if len(normalized) > 120:
+            raise ValueError("Conversation title cannot exceed 120 characters.")
+        return self._repository.set_title(conversation_id, title=normalized)
+
     async def delete(
         self,
         conversation_id: str,
     ) -> None:
         record = self.get(conversation_id)
-        policy = SessionPolicySpec.model_validate(record.session_policy_json)
-        await self._sessions.clear(record.id, policy)
+        await self._sessions.evict(record.id, clear=True)
         self._repository.delete(conversation_id)
 
 

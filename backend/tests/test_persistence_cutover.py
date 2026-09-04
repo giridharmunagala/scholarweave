@@ -27,16 +27,15 @@ def test_sdk_schema_cutover_backs_up_and_preserves_research_data(tmp_path) -> No
     session_factory = create_session_factory(settings)
     engine = session_factory.kw["bind"]
     tables = set(inspect(engine).get_table_names())
+    claim_columns = {
+        column["name"] for column in inspect(engine).get_columns("agent_run_claims")
+    }
 
     assert {
         "provider_profiles",
         "documents",
         "artifacts",
         "document_chunks",
-        "agent_definitions",
-        "agent_revisions",
-        "function_tool_definitions",
-        "function_tool_revisions",
         "conversations",
         "agent_runs",
         "agent_run_items",
@@ -51,7 +50,12 @@ def test_sdk_schema_cutover_backs_up_and_preserves_research_data(tmp_path) -> No
         "runs",
         "node_runs",
         "run_events",
+        "agent_definitions",
+        "agent_revisions",
+        "function_tool_definitions",
+        "function_tool_revisions",
     }.isdisjoint(tables)
+    assert {"run_id", "owner_id", "generation", "token", "expires_at"} <= claim_columns
 
     with engine.connect() as connection:
         assert connection.execute(text("SELECT name FROM provider_profiles")).scalar_one() == "Provider"
@@ -62,8 +66,8 @@ def test_sdk_schema_cutover_backs_up_and_preserves_research_data(tmp_path) -> No
             text("SELECT value_json FROM app_settings WHERE key='schema_generation'")
         ).scalar_one() == str(SCHEMA_GENERATION)
         assert connection.execute(
-            text("SELECT value_json FROM app_settings WHERE key='python_tool_enabled'")
-        ).scalar_one() == "true"
+            text("SELECT COUNT(*) FROM app_settings WHERE key='python_tool_enabled'")
+        ).scalar_one() == 0
         assert connection.execute(
             text("SELECT COUNT(*) FROM app_settings WHERE key='agent_todo_max_items'")
         ).scalar_one() == 0

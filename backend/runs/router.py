@@ -4,11 +4,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import StreamingResponse
 
-from backend.api.dependencies import services
+from backend.core.http import services
+from backend.runs.broker import SubscriberLagged
 from backend.runs.schemas import (
+    PromptSnapshotResponse,
     RunEventResponse,
     RunResponse,
     SteeringMessageRequest,
@@ -40,6 +42,23 @@ def list_runs(
 @router.get("/{run_id}", response_model=RunResponse)
 def get_run(run_id: str, service: RunService = Depends(run_service)) -> RunResponse:
     return run_response(service.get(run_id))
+
+
+@router.delete("/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_run(
+    run_id: str,
+    service: RunService = Depends(run_service),
+) -> Response:
+    service.delete(run_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{run_id}/prompt-snapshot", response_model=PromptSnapshotResponse)
+def get_prompt_snapshot(
+    run_id: str,
+    service: RunService = Depends(run_service),
+) -> PromptSnapshotResponse:
+    return PromptSnapshotResponse.model_validate(service.prompt_snapshot(run_id))
 
 
 @router.post("/{run_id}/cancel", response_model=RunResponse)
@@ -122,6 +141,8 @@ async def stream_events(
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
                     continue
+                if isinstance(event, SubscriberLagged):
+                    break
                 sequence = int(event["sequence"])
                 if sequence <= cursor:
                     continue

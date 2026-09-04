@@ -12,6 +12,7 @@ from sqlalchemy import select
 from backend.app import create_app
 from backend.bootstrap import create_services
 from backend.documents import DocumentProcessingError
+from backend.documents.formatting import DocumentFormatter
 from backend.documents.paper import build_paper_manifest
 from backend.providers.ollama import OllamaError
 from backend.documents.models import Artifact, Document, DocumentChunk
@@ -36,7 +37,6 @@ def test_paper_manifest_has_stable_reading_structure() -> None:
                 "text": "Method text",
             }
         ],
-        figures=[],
     )
 
     assert manifest["schema"] == "scholarweave.paper"
@@ -57,8 +57,58 @@ def test_paper_manifest_has_stable_reading_structure() -> None:
         "char_count": 24,
         "nonempty_page_count": 2,
         "chunk_count": 1,
-        "figure_count": 0,
     }
+
+
+def test_paper_folders_organize_documents(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        document = app.state.services.documents.create_document_from_bytes(
+            b"%PDF-1.4\n%%EOF",
+            filename="organized.pdf",
+            title="Organized Paper",
+        )
+        created = client.post("/api/paper-folders", json={"name": "Methods"})
+        assert created.status_code == 201, created.text
+        folder = created.json()
+
+        assigned = client.put(
+            f"/api/documents/{document.id}/folder",
+            json={"folder_id": folder["id"]},
+        )
+        assert assigned.status_code == 200, assigned.text
+        assert assigned.json()["metadata"]["folder_id"] == folder["id"]
+        assert client.get("/api/paper-folders").json()[0]["name"] == "Methods"
+
+        duplicate = client.post("/api/paper-folders", json={"name": " methods "})
+        assert duplicate.status_code == 409
+
+        unfiled = client.put(
+            f"/api/documents/{document.id}/folder",
+            json={"folder_id": None},
+        )
+        assert unfiled.status_code == 200, unfiled.text
+        assert "folder_id" not in unfiled.json()["metadata"]
+
+
+def test_extracted_markdown_contains_only_paper_text(test_settings) -> None:
+    pages = [
+        {
+            "page": 1,
+            "text": "The title printed in the PDF\n\nAbstract text",
+            "ocr_used": False,
+        },
+        {
+            "page": 2,
+            "text": "Methods text",
+            "ocr_used": False,
+            "llm_enhancement_note": "Processing metadata must not enter the paper text.",
+        },
+    ]
+
+    markdown = DocumentFormatter(test_settings).build_markdown(pages)
+
+    assert markdown == "The title printed in the PDF\n\nAbstract text\n\nMethods text"
 
 
 def test_artifact_records_are_idempotent_by_owned_path(test_settings) -> None:
@@ -581,54 +631,18 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
     document_id = upload.json()["id"]
     ingested = client.post(f"/api/documents/{document_id}/ingest")
 
-    assert ingested.status_code == 200
+    assert ingested.status_code == 200, ingested.text
     payload = ingested.json()
     assert payload["status"] == "ready"
     assert payload["metadata"]["ocr_pages"] == [1]
-    assert payload["metadata"]["figure_count"] == 1
     extracted = "\n".join(chunk["text"] for chunk in payload["chunks"]).lower()
     assert "local ocr research paper" in extracted
-    assert "/api/artifacts/" in extracted
 
     reingested = client.post(f"/api/documents/{document_id}/ingest")
     assert reingested.status_code == 200
-    assert len(reingested.json()["artifacts"]) == 4
+    assert len(reingested.json()["artifacts"]) == 3
 
 
-def test_cmyk_embedded_figure_is_saved_as_png(test_settings, monkeypatch) -> None:
-    image_module = pytest.importorskip("PIL.Image")
-    from backend.documents.figures import FigureExtractor
-    from backend.documents.repository import DocumentRepository
-    from backend.persistence.database import create_session_factory
-    from backend.persistence.files import SafeStorage
-
-    class EmbeddedImage:
-        name = "cmyk-figure"
-        image = image_module.new("CMYK", (256, 256), (0, 128, 128, 0))
-
-    class Page:
-        images = [EmbeddedImage()]
-
-    class Reader:
-        pages = [Page()]
-
-        def __init__(self, _path: str) -> None:
-            pass
-
-    monkeypatch.setattr("backend.documents.figures.PdfReader", Reader)
-    session_factory = create_session_factory(test_settings)
-    storage = SafeStorage(test_settings)
-    repository = DocumentRepository(session_factory, test_settings, storage)
-    extractor = FigureExtractor(test_settings, storage, repository)
-
-    try:
-        figures = extractor.extract(Path("paper.pdf"), "document-id")
-        assert len(figures) == 1
-        artifact = repository.get_artifact(figures[0]["artifact_id"])
-        assert artifact is not None
-        assert repository.artifact_bytes(artifact).startswith(b"\x89PNG")
-    finally:
-        session_factory.kw["bind"].dispose()
 @pytest.mark.anyio
 async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
     services = create_services(test_settings)
@@ -644,7 +658,6 @@ async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
     fake_ollama = FakeOllama()
     services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     image = b"rendered-page"
-    figure_path = "/api/artifacts/figure-id/raw"
     pages = [
         {
             "page": 1,
@@ -653,7 +666,6 @@ async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
             "ocr_used": True,
             "llm_enhanced": False,
             "_image_png": image,
-            "figures": [{"path": figure_path, "alt": "Extracted figure 1 from page 1"}],
         }
     ]
 
@@ -681,7 +693,6 @@ async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
     assert pages[0]["ocr_quality"] == "good"
     assert pages[0]["llm_enhanced"] is False
     assert pages[0]["text"].startswith("A B\n1 2")
-    assert figure_path in pages[0]["text"]
     assert "llm_validation_status" not in pages[0]
     assert progress_events[0] == {
         "phase": "ocr_triage",
@@ -752,7 +763,6 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
     fake_ollama = FakeOllama()
     services.document_vision.ollama = fake_ollama  # type: ignore[assignment]
     image = b"rendered-page"
-    figure_path = "/api/artifacts/figure-id/raw"
     pages = [
         {
             "page": 1,
@@ -761,7 +771,6 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
             "ocr_used": True,
             "llm_enhanced": False,
             "_image_png": image,
-            "figures": [{"path": figure_path, "alt": "Extracted figure 1 from page 1"}],
         }
     ]
 
@@ -789,7 +798,6 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
     assert pages[0]["llm_enhanced"] is True
     assert pages[0]["llm_validation_status"] == "passed"
     assert "| A | B |" in pages[0]["text"]
-    assert figure_path in pages[0]["text"]
     chunks = services.document_formatter.chunk_pages(pages, title="Test")
     assert any("| A | B |\n|---|---|\n| 1 | 2 |" in chunk["text"] for chunk in chunks)
     phases = [event["phase"] for event in progress_events]
@@ -910,8 +918,8 @@ async def test_llm_rewrite_falls_back_to_ocr_when_response_is_empty(test_setting
         "No LLM enhancement was applied because the model returned only an internal "
         "thinking trace. The original OCR output is used directly."
     )
-    markdown = services.document_formatter.build_markdown("Paper", pages)
-    assert "**OCR note:** No LLM enhancement was applied" in markdown
+    markdown = services.document_formatter.build_markdown(pages)
+    assert markdown == "Original OCR content"
 
 
 @pytest.mark.anyio
@@ -1031,27 +1039,3 @@ async def test_forced_ocr_uses_embedded_text_when_tesseract_fails(
     assert pages[0]["raw_text"] == "Reliable embedded page text"
     assert pages[0]["ocr_used"] is False
     assert "embedded text was used instead" in pages[0]["ocr_fallback_note"]
-
-
-def test_extracted_figures_are_local_raw_artifacts(test_settings, tmp_path) -> None:
-    image_module = pytest.importorskip("PIL.Image")
-    app = create_app(test_settings)
-    services = app.state.services
-    image = image_module.new("RGB", (500, 300), "blue")
-    pdf_path = tmp_path / "figure.pdf"
-    image.save(pdf_path, "PDF")
-
-    figures = services.document_figures.extract(pdf_path, "document-id")
-
-    assert len(figures) == 1
-    figure = figures[0]
-    artifact = services.documents.get_artifact(figure["artifact_id"])
-    assert artifact is not None
-    assert artifact.kind == "extracted_figure"
-    assert artifact.media_type == "image/png"
-    assert figure["path"] == f"/api/artifacts/{artifact.id}/raw?sha256={artifact.sha256}"
-    assert services.documents.artifact_bytes(artifact).startswith(b"\x89PNG")
-    response = TestClient(app).get(figure["path"])
-    assert response.status_code == 200
-    assert response.headers["content-type"] == "image/png"
-    assert response.content.startswith(b"\x89PNG")

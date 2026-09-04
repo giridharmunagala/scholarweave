@@ -2,10 +2,28 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from agents import Model
 from openai import AsyncOpenAI
+
+if TYPE_CHECKING:
+    from backend.providers.schemas import ProviderModel
+
+
+class ProviderRuntimeError(RuntimeError):
+    pass
+
+
+class ProviderDiscoveryError(ProviderRuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        manual_models: list[ProviderModel],
+    ) -> None:
+        super().__init__(message)
+        self.manual_models = manual_models
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +60,7 @@ class ResolvedAgentModel:
     model_name: str | None = None
     responses_client: AsyncOpenAI | None = None
     context_window_tokens: int | None = None
+    local_inference: bool = False
 
 
 class AgentModelResolver(Protocol):

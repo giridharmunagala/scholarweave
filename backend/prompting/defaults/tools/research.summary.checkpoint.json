@@ -1,0 +1,11 @@
+{
+  "label": "Paper summary checkpoint",
+  "description": "Maintain the temporary, run-scoped evidence checkpoint for one paper summary. Append compact evidence immediately after each read batch; the runtime verifies the durable write and blocks every next batch until it succeeds. Read it in bounded slices before drafting or when resuming. The checkpoint is retained across context compaction and removed with run artifacts.",
+  "parameter_descriptions": {
+    "document_id": "The exact local document ID being summarized.",
+    "action": "Use append after each paper-read batch, or read to retrieve a bounded checkpoint slice.",
+    "content": "For append, compact new evidence with page/chunk coverage, citations, exact results, limitations, unresolved questions, and remaining coverage. Use null for read.",
+    "offset": "For read, the zero-based character offset. Start at 0 and follow next_offset. Use null for append.",
+    "limit": "For read, at most 8000 characters. Use null for append."
+  }
+}

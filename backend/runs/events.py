@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from backend.runs.broker import EventBroker
-from backend.runs.repository import RunRepository
+from backend.runs.repository import RunLease, RunRepository
 
 
 class RunEventSink(Protocol):
@@ -32,12 +32,17 @@ class PersistedRunEventSink:
         run_id: str,
         repository: RunRepository,
         broker: EventBroker,
+        lease: Callable[[], RunLease | None] | None = None,
     ) -> None:
         self._run_id = run_id
         self._repository = repository
         self._broker = broker
+        self._lease = lease
         self._lock = asyncio.Lock()
         self._next_sequence = repository.next_event_sequence(run_id)
+
+    def current_lease(self) -> RunLease | None:
+        return self._lease() if self._lease is not None else None
 
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         async with self._lock:
@@ -69,10 +74,19 @@ class PersistedRunEventSink:
         events: list[tuple[str, dict[str, Any]]],
     ) -> None:
         start_sequence = self._take_sequences(len(events))
-        records = self._repository.add_events(
-            self._run_id,
-            events,
-            start_sequence=start_sequence,
+        lease = self._lease() if self._lease is not None else None
+        records = (
+            self._repository.add_events_owned(
+                lease,
+                events,
+                start_sequence=start_sequence,
+            )
+            if lease is not None
+            else self._repository.add_events(
+                self._run_id,
+                events,
+                start_sequence=start_sequence,
+            )
         )
         for event in records:
             await self._broker.publish(
@@ -141,6 +155,10 @@ class BufferedRunEventSink:
         self._output_tokens_estimated = False
         self._prompt_seconds = 0.0
         self._generation_seconds = 0.0
+
+    def current_lease(self) -> RunLease | None:
+        current_lease = getattr(self._downstream, "current_lease", None)
+        return current_lease() if current_lease is not None else None
 
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         async with self._lock:

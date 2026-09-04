@@ -14,7 +14,7 @@ ProviderKind = Literal[
     "azure_foundry",
     "openai_compatible",
 ]
-ModelCapability = Literal["chat", "embedding", "vision", "tools", "speech"]
+ModelCapability = Literal["chat", "embedding", "vision", "tools"]
 
 
 class ProviderSchema(BaseModel):
@@ -91,18 +91,3 @@ class ProviderVerifyResponse(ProviderSchema):
     reachable: bool
     tool_calling: bool
     detail: str
-
-
-class TranscriptionResponse(ProviderSchema):
-    text: str
-
-
-class BuiltInSpeechStatus(ProviderSchema):
-    state: Literal["not_installed", "installing", "ready", "running", "error"]
-    available: bool
-    installed: bool
-    running: bool
-    model: str
-    downloaded_bytes: int = 0
-    total_bytes: int
-    error: str | None = None

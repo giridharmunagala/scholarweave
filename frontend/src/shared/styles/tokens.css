@@ -51,7 +51,6 @@
 [data-theme='paper'] {
   color-scheme: light;
   --bg: #f3ebdf;
-  --wallpaper: url('/wallpapers/terracotta.svg');
   --surface: #fffdf7;
   --surface-2: #f4ebdd;
   --surface-3: #e9ddc9;
@@ -92,7 +91,6 @@
 [data-theme='cloud'] {
   color-scheme: light;
   --bg: #eceff0;
-  --wallpaper: url('/wallpapers/harbour.svg');
   --surface: #ffffff;
   --surface-2: #f1f4f3;
   --surface-3: #e2e8e7;
@@ -133,7 +131,6 @@
 [data-theme='slate'] {
   color-scheme: dark;
   --bg: #131520;
-  --wallpaper: url('/wallpapers/aurora.svg');
   --surface: #1e2130;
   --surface-2: #272b3d;
   --surface-3: #333850;
@@ -175,7 +172,6 @@
 [data-theme='amoled'] {
   color-scheme: dark;
   --bg: #000000;
-  --wallpaper: url('/wallpapers/neon.svg');
   --surface: #100c1e;
   --surface-2: #191233;
   --surface-3: #241b46;
@@ -217,7 +213,6 @@
 [data-theme='forest'] {
   color-scheme: dark;
   --bg: #14170f;
-  --wallpaper: url('/wallpapers/canopy.svg');
   --surface: #1f2318;
   --surface-2: #282d20;
   --surface-3: #343a2a;
@@ -253,9 +248,289 @@
   --scrim: rgb(8 12 6 / 46%);
 }
 
+/* ----------------------------------------------------------------- Snow --- */
+/* Pure white with vivid indigo and violet accents — the most colourful light. */
+[data-theme='snow'] {
+  color-scheme: light;
+  --bg: #f7f8fd;
+  --surface: #ffffff;
+  --surface-2: #f3f4fd;
+  --surface-3: #e7e8fa;
+  --surface-inset: #fafbff;
+  --border: #e3e5f4;
+  --border-strong: #c2c6e6;
+  --text: #1e2235;
+  --text-strong: #0b0e1c;
+  --muted: #5b6180;
+  --accent: #4f46e5;
+  --accent-strong: #3d34cc;
+  --accent-2: #ec4899;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e8e7fe;
+  --success: #0d9488;
+  --warning: #b45309;
+  --danger: #dc2657;
+  --agent: #4f46e5;
+  --tool: #0d9488;
+  --handoff: #ea8c00;
+  --guardrail: #dc2657;
+  --hosted: #db2777;
+  --rail-solid: #2a2570;
+  --rail-deep: #17124a;
+  --rail-edge: #100d38;
+  --list-bg: #f3f4ff;
+  --canvas-bg: #ffffff;
+  --divider: #dcdff2;
+  --shadow-sm: 0 1px 2px rgb(30 30 80 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(30 30 80 / 28%);
+  --shadow-lg: 0 28px 56px -26px rgb(30 30 80 / 38%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(16 18 40 / 36%);
+}
+
+/* ----------------------------------------------------------------- Mint --- */
+/* Airy white with fresh teal and green highlights. */
+[data-theme='mint'] {
+  color-scheme: light;
+  --bg: #eaf6f1;
+  --surface: #fbfffd;
+  --surface-2: #e3f3eb;
+  --surface-3: #cfe9dd;
+  --surface-inset: #f1faf6;
+  --border: #cce4d8;
+  --border-strong: #98c8b3;
+  --text: #14261f;
+  --text-strong: #05140e;
+  --muted: #45675a;
+  --accent: #0b8f6b;
+  --accent-strong: #076d52;
+  --accent-2: #0284c7;
+  --accent-contrast: #ffffff;
+  --accent-soft: #d4f0e4;
+  --success: #087f61;
+  --warning: #a86a08;
+  --danger: #cf3b52;
+  --agent: #0f9d76;
+  --tool: #0284c7;
+  --handoff: #c2740a;
+  --guardrail: #cf3b52;
+  --hosted: #7c3aed;
+  --rail-solid: #0d4f3c;
+  --rail-deep: #063025;
+  --rail-edge: #04211a;
+  --list-bg: #e3f3eb;
+  --canvas-bg: #fbfffd;
+  --divider: #c3ddd1;
+  --shadow-sm: 0 1px 2px rgb(10 60 45 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(10 60 45 / 24%);
+  --shadow-lg: 0 28px 56px -26px rgb(10 60 45 / 32%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(6 34 26 / 34%);
+}
+
+/* -------------------------------------------------------------- Blossom --- */
+/* White with rose and violet — soft but saturated. */
+[data-theme='blossom'] {
+  color-scheme: light;
+  --bg: #fdf5f9;
+  --surface: #ffffff;
+  --surface-2: #fbedf4;
+  --surface-3: #f5dbe8;
+  --surface-inset: #fef8fb;
+  --border: #f2dde8;
+  --border-strong: #dfb8cd;
+  --text: #2c1c26;
+  --text-strong: #190910;
+  --muted: #6d5060;
+  --accent: #d43f8d;
+  --accent-strong: #b02570;
+  --accent-2: #7c3aed;
+  --accent-contrast: #ffffff;
+  --accent-soft: #fbe2ef;
+  --success: #12876a;
+  --warning: #b3730a;
+  --danger: #d33049;
+  --agent: #d43f8d;
+  --tool: #12876a;
+  --handoff: #b3730a;
+  --guardrail: #d33049;
+  --hosted: #7c3aed;
+  --rail-solid: #52123c;
+  --rail-deep: #350a26;
+  --rail-edge: #26061b;
+  --list-bg: #fbedf4;
+  --canvas-bg: #ffffff;
+  --divider: #efd3e2;
+  --shadow-sm: 0 1px 2px rgb(90 20 60 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(90 20 60 / 24%);
+  --shadow-lg: 0 28px 56px -26px rgb(90 20 60 / 32%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(50 14 34 / 34%);
+}
+
+/* --------------------------------------------------------------- Citrus --- */
+/* Bright white with amber, lime and sky accents. */
+[data-theme='citrus'] {
+  color-scheme: light;
+  --bg: #fdfaf0;
+  --surface: #ffffff;
+  --surface-2: #fbf4e2;
+  --surface-3: #f4e9cd;
+  --surface-inset: #fefcf5;
+  --border: #efe4cb;
+  --border-strong: #d6c295;
+  --text: #2a2415;
+  --text-strong: #171204;
+  --muted: #6a5c3c;
+  --accent: #c2740a;
+  --accent-strong: #96590a;
+  --accent-2: #4d7c0f;
+  --accent-contrast: #ffffff;
+  --accent-soft: #fbeed2;
+  --success: #4d7c0f;
+  --warning: #b45309;
+  --danger: #cc3341;
+  --agent: #c2740a;
+  --tool: #4d7c0f;
+  --handoff: #0284c7;
+  --guardrail: #cc3341;
+  --hosted: #7c3aed;
+  --rail-solid: #4a3308;
+  --rail-deep: #2e1f04;
+  --rail-edge: #211603;
+  --list-bg: #fbf4e2;
+  --canvas-bg: #ffffff;
+  --divider: #ecdfc2;
+  --shadow-sm: 0 1px 2px rgb(90 65 10 / 8%);
+  --shadow-md: 0 10px 24px -12px rgb(90 65 10 / 24%);
+  --shadow-lg: 0 28px 56px -26px rgb(90 65 10 / 32%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(46 34 8 / 34%);
+}
+
+/* -------------------------------------------------------------- Sunrise --- */
+/* Bright light theme with warm rose and amber highlights. */
+[data-theme='sunrise'] {
+  color-scheme: light;
+  --bg: #fdf4ef;
+  --surface: #fffaf6;
+  --surface-2: #fbeee5;
+  --surface-3: #f4e0d2;
+  --surface-inset: #fdf6f0;
+  --border: #f0dccd;
+  --border-strong: #dcbda6;
+  --text: #3a251d;
+  --text-strong: #24120c;
+  --muted: #7a5747;
+  --accent: #e0533f;
+  --accent-strong: #b93a2a;
+  --accent-2: #d08700;
+  --accent-contrast: #ffffff;
+  --accent-soft: #fce3dc;
+  --success: #12805d;
+  --warning: #b3730a;
+  --danger: #c9314b;
+  --agent: #e0533f;
+  --tool: #12805d;
+  --handoff: #d08700;
+  --guardrail: #c9314b;
+  --hosted: #8b47c6;
+  --rail-solid: #5a2418;
+  --rail-deep: #3a140c;
+  --rail-edge: #2a0e08;
+  --list-bg: #fbeee5;
+  --canvas-bg: #fffaf6;
+  --divider: #ecd5c4;
+  --shadow-sm: 0 1px 2px rgb(120 60 40 / 10%);
+  --shadow-md: 0 8px 20px -10px rgb(120 60 40 / 26%);
+  --shadow-lg: 0 26px 54px -26px rgb(120 60 40 / 34%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(70 40 30 / 34%);
+}
+
+/* --------------------------------------------------------------- Aurora --- */
+/* Deep indigo dark theme with vivid violet and cyan highlights. */
+[data-theme='aurora'] {
+  color-scheme: dark;
+  --bg: #0c0a1b;
+  --surface: #15132a;
+  --surface-2: #1d1a38;
+  --surface-3: #282349;
+  --surface-inset: #100e21;
+  --border: #2e2a52;
+  --border-strong: #453e72;
+  --text: #ece9fb;
+  --text-strong: #ffffff;
+  --muted: #a9a2cf;
+  --accent: #a77bff;
+  --accent-strong: #c8aeff;
+  --accent-2: #38d6e2;
+  --accent-contrast: #120a25;
+  --accent-soft: #26204a;
+  --success: #3fd9b0;
+  --warning: #ffc457;
+  --danger: #ff6f91;
+  --agent: #a77bff;
+  --tool: #3fd9b0;
+  --handoff: #ffc457;
+  --guardrail: #ff6f91;
+  --hosted: #38d6e2;
+  --rail-solid: #241160;
+  --rail-deep: #120833;
+  --rail-edge: #0b0522;
+  --list-bg: #171432;
+  --canvas-bg: #100e21;
+  --divider: #322d5b;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 45%);
+  --shadow-md: 0 10px 26px -12px rgb(10 4 30 / 68%);
+  --shadow-lg: 0 28px 60px -26px rgb(10 4 30 / 78%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(8 5 20 / 62%);
+}
+
+/* ----------------------------------------------------------------- Nord --- */
+/* Cool arctic dark theme with soft frost highlights. */
+[data-theme='nord'] {
+  color-scheme: dark;
+  --bg: #2e3440;
+  --surface: #363d4b;
+  --surface-2: #3f4757;
+  --surface-3: #4a5364;
+  --surface-inset: #2b313c;
+  --border: #48505f;
+  --border-strong: #5c6779;
+  --text: #e5e9f0;
+  --text-strong: #ffffff;
+  --muted: #b3bccb;
+  --accent: #88c0d0;
+  --accent-strong: #b3dbe6;
+  --accent-2: #b48ead;
+  --accent-contrast: #1c2129;
+  --accent-soft: #3b4a53;
+  --success: #a3be8c;
+  --warning: #ebcb8b;
+  --danger: #d98a92;
+  --agent: #88c0d0;
+  --tool: #a3be8c;
+  --handoff: #ebcb8b;
+  --guardrail: #d98a92;
+  --hosted: #b48ead;
+  --rail-solid: #242a35;
+  --rail-deep: #191d25;
+  --rail-edge: #12151b;
+  --list-bg: #333a47;
+  --canvas-bg: #2e3440;
+  --divider: #464e5d;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 32%);
+  --shadow-md: 0 10px 26px -12px rgb(0 0 0 / 48%);
+  --shadow-lg: 0 28px 60px -26px rgb(0 0 0 / 58%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(20 24 31 / 56%);
+}
+
 /* ============================================================ Colour layer ===
  *
- * Everything below is derived from the five palettes above, so a new theme only
+ * Everything below is derived from the palettes above, so a new theme only
  * has to declare its base colours and inherits a full set of roles, markdown
  * surfaces and gradients.
  *
@@ -281,62 +556,23 @@
 
   /* The rail is a dark branded column in every theme, light and dark alike, so it
    * carries its own foreground ramp rather than the page's. */
-  --rail-bg: linear-gradient(180deg,
-    color-mix(in srgb, var(--rail-solid) calc(78% - 34% * var(--glass-open)), transparent) 0%,
-    color-mix(in srgb, var(--rail-deep) calc(88% - 34% * var(--glass-open)), transparent) 100%);
+  --rail-bg: linear-gradient(180deg, var(--rail-solid) 0%, var(--rail-deep) 100%);
   --rail-fg: rgb(255 255 255 / 68%);
   --rail-fg-strong: #ffffff;
   --rail-hover: rgb(255 255 255 / 12%);
   --rail-active: rgb(255 255 255 / 19%);
 
-  /* Glass. Surfaces are translucent so the wallpaper reads through them; the blur
-   * keeps whatever is behind from competing with the text on top. Opacity is tuned
-   * per role — reading surfaces stay the most solid.
-   *
-   * `--glass-open` dials the whole set at once: 0 is fully solid, 1 opens the
-   * surfaces right up for a photo you actually want to see. Themes ship at 0.3,
-   * which is the most the secondary text ramp takes while staying above 4.5:1 over
-   * the busiest part of a wallpaper — enough that the backdrop reads through the
-   * chat, which covers the whole viewport and otherwise hid it completely. Past
-   * that it is opt-in, and the blur, saturation, edge highlight and text halo all
-   * scale up to compensate. */
-  --glass-open: 0.3;
-  /* Deliberately shallow. A heavy frost turns the wallpaper into a smear, and that is
-   * most obvious on the chat page: it is the one page with no `.app-main` gutter, so
-   * every pixel sits behind this filter with no crisp wallpaper beside it. Softening
-   * the backdrop is what the `Soften` control is for, so this stays close to zero and
-   * only lifts once the surfaces are thin enough to need the help. */
-  --glass-blur: blur(calc(1px + 9px * var(--glass-open)))
-    saturate(calc(165% + 60% * var(--glass-open)));
-  --glass-list: color-mix(in srgb, var(--list-bg) calc(70% - 44% * var(--glass-open)), transparent);
-  --glass-canvas: color-mix(in srgb, var(--canvas-bg) calc(76% - 50% * var(--glass-open)), transparent);
-  --glass-panel: color-mix(in srgb, var(--surface) calc(70% - 44% * var(--glass-open)), transparent);
-  --glass-card: color-mix(in srgb, var(--surface) calc(58% - 34% * var(--glass-open)), transparent);
-  --glass-inset: color-mix(in srgb, var(--surface) calc(88% - 34% * var(--glass-open)), transparent);
-  /* The chat page is the one screen with no gutter, so a single flat tint across it
-   * reads as a haze over the whole wallpaper. These two split that tint by where the
-   * words actually are: `column` backs the centred reading band a little harder so
-   * prose stays legible over a busy photo, `void` lets the empty margins fall away to
-   * nothing. Both start from the same `--glass-canvas` figure and only diverge as
-   * `--glass-open` rises, so at 0 the split collapses and the page is flat again. */
-  --glass-column: color-mix(in srgb, var(--canvas-bg) calc(76% - 36% * var(--glass-open)), transparent);
-  --glass-void: color-mix(in srgb, var(--canvas-bg) max(0%, calc(76% - 84% * var(--glass-open))), transparent);
-  /* The composer keeps its own warmer list tint, so it needs a matching fade-out for
-   * the flanks either side of the input, which hold nothing. */
-  --glass-list-void: color-mix(in srgb, var(--list-bg) max(0%, calc(70% - 78% * var(--glass-open))), transparent);
-  --glass-edge: rgb(255 255 255 / calc(22% + 20% * var(--glass-open)));
-
-  /* A halo of the page colour hugging each glyph. At --glass-open: 0 the radius and
-   * the alpha are both zero, so it costs nothing until it is needed. */
-  --glass-halo: 0 0 calc(7px * var(--glass-open))
-    color-mix(in srgb, var(--bg) calc(92% * var(--glass-open)), transparent);
-
-  /* Wallpaper controls. A theme's generated backdrop needs none of these, so
-   * they default to inert; an uploaded image overrides them on <html>. */
-  --wallpaper-dim: 0%;
-  --wallpaper-blur: 0px;
-  --wallpaper-size: cover;
-  --wallpaper-repeat: no-repeat;
+  --glass-blur: none;
+  --glass-blur-wide: none;
+  --glass-list: var(--list-bg);
+  --glass-canvas: var(--canvas-bg);
+  --glass-panel: var(--surface);
+  --glass-card: var(--surface);
+  --glass-inset: var(--surface-inset);
+  --glass-column: var(--canvas-bg);
+  --glass-void: var(--canvas-bg);
+  --glass-list-void: var(--list-bg);
+  --glass-edge: var(--border);
 
   /* Conversation roles. What I said, what came back, what it thought, what it ran. */
   --user-bg: linear-gradient(135deg, color-mix(in srgb, var(--accent) 20%, var(--surface)) 0%, color-mix(in srgb, var(--accent) 11%, var(--surface)) 100%);
@@ -383,7 +619,12 @@
  * on hue separation that colour-mix cannot invent. Light themes use One Light,
  * dark themes One Dark — both long-proven at these contrast levels. */
 [data-theme='paper'],
-[data-theme='cloud'] {
+[data-theme='cloud'],
+[data-theme='snow'],
+[data-theme='mint'],
+[data-theme='blossom'],
+[data-theme='citrus'],
+[data-theme='sunrise'] {
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.16'/%3E%3C/svg%3E");
   --syn-comment: #9195a1;
   --syn-string: #3f8f3e;
@@ -402,7 +643,9 @@
 
 [data-theme='slate'],
 [data-theme='amoled'],
-[data-theme='forest'] {
+[data-theme='forest'],
+[data-theme='aurora'],
+[data-theme='nord'] {
   --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.1'/%3E%3C/svg%3E");
   --syn-comment: #7d8799;
   --syn-string: #98c379;

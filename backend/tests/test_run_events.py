@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from backend.runs.broker import EventBroker
+from backend.runs.broker import EventBroker, SubscriberLagged
 from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
 
 
@@ -382,3 +384,28 @@ async def test_event_broker_replays_live_history_until_run_finishes() -> None:
         {"sequence": 5, "event_type": "run.completed", "payload": {}},
     )
     assert await broker.events_after("run-1", -1) == []
+
+
+@pytest.mark.anyio
+async def test_event_broker_evicts_slow_subscriber_without_blocking_publishers() -> None:
+    broker = EventBroker(subscriber_queue_size=1)
+
+    async with broker.subscribe("run-1") as queue:
+        await broker.publish(
+            "run-1",
+            {"sequence": 0, "event_type": "model.stream", "payload": {}},
+        )
+        await asyncio.wait_for(
+            broker.publish(
+                "run-1",
+                {"sequence": 1, "event_type": "model.stream", "payload": {}},
+            ),
+            timeout=0.1,
+        )
+        assert isinstance(queue.get_nowait(), SubscriberLagged)
+        assert "run-1" not in broker._queues
+        assert [
+            event["sequence"] for event in await broker.events_after("run-1", -1)
+        ] == [0, 1]
+
+    assert "run-1" not in broker._queues

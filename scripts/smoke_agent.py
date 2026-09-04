@@ -1,6 +1,6 @@
-"""Run an SDK blueprint against the configured default Ollama profile.
+"""Run the research agent against the configured default Ollama profile.
 
-Usage: ``python scripts/smoke_agent.py ["Paper research assistant"] [model]``
+Usage: ``python scripts/smoke_agent.py [model]``
 """
 
 from __future__ import annotations
@@ -8,13 +8,13 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from backend.agents.templates import starter_blueprints
+from backend.conversations.autonomous import research_blueprint
 from backend.bootstrap import create_services
 from backend.core.config import Settings
 
 
-AGENT_NAME = sys.argv[1] if len(sys.argv) > 1 else "Paper research assistant"
-MODEL = sys.argv[2] if len(sys.argv) > 2 else None
+AGENT_NAME = "ScholarWeave research"
+MODEL = sys.argv[1] if len(sys.argv) > 1 else None
 
 
 async def main() -> None:
@@ -36,8 +36,8 @@ async def main() -> None:
                 "tools": reference,
             }
 
-        blueprint = next(
-            item for item in starter_blueprints() if item.name == AGENT_NAME
+        blueprint = research_blueprint(
+            services.settings.default_model_references.get("chat", {})
         )
         compiled = services.compiler.compile(blueprint)
         run = await services.runs.run_now(

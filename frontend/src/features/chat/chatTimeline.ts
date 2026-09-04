@@ -584,6 +584,63 @@ export function dedupeSources(sources: TimelineSource[]): TimelineSource[] {
   return [...seen.values()];
 }
 
+/* ---------------------------------------------------------- live status --- */
+
+export interface LiveActivity {
+  phase: 'starting' | 'thinking' | 'tool' | 'agent' | 'writing';
+  label: string;
+  detail: string | null;
+  completedSteps: number;
+}
+
+/**
+ * The one sentence that answers "what is it doing right now?". The newest unfinished step
+ * wins, because that is the work the reader is actually waiting on.
+ */
+export function describeLiveActivity(
+  timeline: TurnTimeline,
+  options: { writing?: boolean } = {},
+): LiveActivity {
+  const completedSteps = timeline.steps.filter(
+    (step) => !(step.kind === 'reasoning' && step.streaming)
+      && !((step.kind === 'tool' || step.kind === 'agent') && step.status === 'running'),
+  ).length;
+
+  for (let index = timeline.steps.length - 1; index >= 0; index -= 1) {
+    const step = timeline.steps[index];
+    if (step.kind === 'tool' && step.status === 'running') {
+      return {
+        phase: 'tool',
+        label: `Using ${humanizeToolName(step.name)}`,
+        detail: step.query ? truncate(prettyTarget(step.query), 90) : step.detail,
+        completedSteps,
+      };
+    }
+    if (step.kind === 'agent' && step.status === 'running') {
+      return {
+        phase: 'agent',
+        label: `Running agent ${step.name}`,
+        detail: null,
+        completedSteps,
+      };
+    }
+    if (step.kind === 'reasoning' && step.streaming) {
+      return { phase: 'thinking', label: 'Thinking', detail: null, completedSteps };
+    }
+  }
+
+  if (options.writing) {
+    return { phase: 'writing', label: 'Writing the answer', detail: null, completedSteps };
+  }
+  const lastTool = [...timeline.steps].reverse().find((step) => step.kind === 'tool');
+  return {
+    phase: 'starting',
+    label: completedSteps ? 'Working' : 'Starting the run',
+    detail: lastTool && lastTool.kind === 'tool' ? `Finished ${humanizeToolName(lastTool.name)}` : null,
+    completedSteps,
+  };
+}
+
 /* -------------------------------------------------------------- formatting --- */
 
 export function formatStepDuration(seconds: number | null): string | null {

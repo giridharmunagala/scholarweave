@@ -7,7 +7,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.config import Settings
-from backend.core.vectors import cosine_similarity
+from backend.utils import cosine_similarity
 from backend.documents.models import DocumentChunk
 
 

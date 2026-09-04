@@ -27,3 +27,7 @@ class ValidationError(ApplicationError):
     def __init__(self, message: str, *, issues: Iterable[str] = ()) -> None:
         super().__init__(message)
         self.issues = tuple(issues)
+
+
+class DocumentProcessingError(RuntimeError):
+    pass

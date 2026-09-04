@@ -1,0 +1,7 @@
+{
+  "label": "Create work plan",
+  "description": "Create one concise plan for the autonomous run before starting research.",
+  "parameter_descriptions": {
+    "items": "One to ten concrete work items, each with a stable short ID and an outcome-focused title."
+  }
+}

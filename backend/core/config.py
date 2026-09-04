@@ -23,11 +23,12 @@ class Settings(BaseSettings):
     documents_dir: Path | None = None
     database_path: Path | None = None
     llm_log_path: Path | None = None
+    prompt_config_dir: Path | None = None
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     default_model_references: dict[str, dict[str, str | None]] = Field(default_factory=dict)
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
-    request_timeout_seconds: float = 60.0
+    request_timeout_seconds: float = 300.0
     agent_context_window_tokens: int = Field(default=32_768, ge=4_096, le=2_000_000)
     agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.95)
     agent_context_compaction_target_tokens: int = Field(
@@ -42,8 +43,8 @@ class Settings(BaseSettings):
     tool_result_max_tokens: int = Field(default=3_000, ge=512, le=16_000)
     agent_epoch_max_turns: int = Field(default=12, ge=2, le=100)
     agent_max_epochs: int = Field(default=8, ge=1, le=50)
-    agent_run_timeout_seconds: float = Field(default=1_800.0, ge=30.0)
-    tool_call_timeout_seconds: float = Field(default=120.0, ge=1.0)
+    agent_run_timeout_seconds: float = Field(default=3_600.0, ge=30.0)
+    tool_call_timeout_seconds: float = Field(default=600.0, ge=1.0)
     tool_read_retry_attempts: int = Field(default=2, ge=1, le=5)
 
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
@@ -63,30 +64,6 @@ class Settings(BaseSettings):
     run_retention_days: int = Field(default=2, ge=1, le=365)
     user_timezone: str = "Asia/Kolkata"
     user_profile: str = "Based in Hyderabad, Telangana, India."
-
-    python_tool_enabled: bool = True
-    python_tool_timeout_seconds: float = 10.0
-    python_tool_memory_mb: int = 512
-    python_tool_allowed_imports: list[str] = Field(
-        default_factory=lambda: [
-            "base64",
-            "collections",
-            "datetime",
-            "functools",
-            "hashlib",
-            "itertools",
-            "json",
-            "math",
-            "random",
-            "re",
-            "statistics",
-            "string",
-            "textwrap",
-            "unicodedata",
-            "urllib.parse",
-            "uuid",
-        ]
-    )
 
     max_upload_bytes: int = 40 * 1024 * 1024
     max_workspace_file_bytes: int = 2 * 1024 * 1024
@@ -121,6 +98,9 @@ class Settings(BaseSettings):
         self.documents_dir = (self.documents_dir or self.data_dir / "documents").resolve()
         self.database_path = (self.database_path or self.data_dir / "metadata.sqlite3").resolve()
         self.llm_log_path = (self.llm_log_path or self.data_dir / "llm_calls.jsonl").resolve()
+        self.prompt_config_dir = (
+            self.prompt_config_dir or self.data_dir / "config"
+        ).resolve()
         return self
 
     def ensure_directories(self) -> None:
@@ -129,5 +109,6 @@ class Settings(BaseSettings):
             self.workspace_dir,
             self.artifacts_dir,
             self.documents_dir,
+            self.prompt_config_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,5 @@
+{
+  "label": "Read work plan",
+  "description": "Read all autonomous work items and identify what remains open.",
+  "parameter_descriptions": {}
+}

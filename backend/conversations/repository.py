@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.conversations.models import ConversationRecord
 from backend.core.errors import NotFoundError
-from backend.core.time import utcnow
+from backend.utils import utcnow
 
 
 class ConversationRepository:
@@ -19,7 +19,6 @@ class ConversationRepository:
         *,
         title: str,
         kind: str,
-        agent_revision_id: str | None,
         model_reference: dict[str, Any],
         session_policy: dict[str, Any],
     ) -> ConversationRecord:
@@ -27,7 +26,6 @@ class ConversationRepository:
             record = ConversationRecord(
                 title=title,
                 kind=kind,
-                agent_revision_id=agent_revision_id,
                 model_reference_json=model_reference,
                 session_policy_json=session_policy,
             )
@@ -56,6 +54,17 @@ class ConversationRepository:
             if record is None:
                 raise NotFoundError("Conversation was not found.")
             record.last_message_preview = preview[:500]
+            record.updated_at = utcnow()
+            session.commit()
+            session.refresh(record)
+            return record
+
+    def set_title(self, conversation_id: str, *, title: str) -> ConversationRecord:
+        with self._sessions() as session:
+            record = session.get(ConversationRecord, conversation_id)
+            if record is None:
+                raise NotFoundError("Conversation was not found.")
+            record.title = title
             record.updated_at = utcnow()
             session.commit()
             session.refresh(record)

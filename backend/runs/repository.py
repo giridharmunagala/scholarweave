@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import uuid
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import delete, func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.errors import NotFoundError
@@ -17,29 +20,53 @@ from backend.runs.models import (
     AgentToolAttemptRecord,
     RunInterruptionRecord,
 )
-from backend.core.time import utcnow
+from backend.utils import utcnow
+
+
+@dataclass(frozen=True)
+class RunLease:
+    run_id: str
+    owner_id: str
+    generation: int
+    token: str
+    claimed_at: datetime
+    expires_at: datetime
+
+    @property
+    def duration_seconds(self) -> float:
+        return max(0.0, (self.expires_at - self.claimed_at).total_seconds())
+
+
+class LeaseOwnershipError(RuntimeError):
+    pass
 
 
 class RunRepository:
+    DEFAULT_LEASE_SECONDS = 300.0
+
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self._sessions = session_factory
 
     def create(
         self,
         *,
-        agent_revision_id: str | None,
         conversation_id: str | None,
         agent_name: str,
         input_value: Any,
         blueprint: dict[str, Any],
+        context_window_tokens: int | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+        completion_policy_id: str | None = None,
     ) -> AgentRunRecord:
         with self._sessions() as session:
             record = AgentRunRecord(
-                agent_revision_id=agent_revision_id,
                 conversation_id=conversation_id,
                 agent_name=agent_name,
                 input_json=input_value,
                 blueprint_json=blueprint,
+                context_window_tokens=context_window_tokens,
+                runtime_metadata_json=runtime_metadata or {},
+                completion_policy_id=completion_policy_id,
             )
             session.add(record)
             session.commit()
@@ -87,37 +114,121 @@ class RunRepository:
                 record.started_at = utcnow()
             session.commit()
 
-    def claim(self, run_id: str, owner_id: str) -> bool:
+    def mark_running_owned(self, lease: RunLease) -> None:
         with self._sessions() as session:
-            existing = session.get(AgentRunClaimRecord, run_id)
-            if existing is not None:
-                return False
-            session.add(AgentRunClaimRecord(run_id=run_id, owner_id=owner_id))
-            try:
-                session.commit()
-            except IntegrityError:
-                session.rollback()
-                return False
-            return True
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            record = self._run(session, lease.run_id)
+            if record.status not in {"pending", "running"}:
+                raise LeaseOwnershipError(
+                    f"Run {lease.run_id} is no longer executable."
+                )
+            record.status = "running"
+            record.error = None
+            record.state_json = None
+            if record.started_at is None:
+                record.started_at = utcnow()
+            session.commit()
 
-    def release_claim(self, run_id: str, owner_id: str) -> None:
+    def claim(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        now: datetime | None = None,
+        lease_seconds: float = DEFAULT_LEASE_SECONDS,
+    ) -> RunLease | None:
+        claimed_at = now or utcnow()
+        expires_at = claimed_at + timedelta(seconds=lease_seconds)
+        token = str(uuid.uuid4())
         with self._sessions() as session:
-            session.execute(
-                delete(AgentRunClaimRecord).where(
-                    AgentRunClaimRecord.run_id == run_id,
-                    AgentRunClaimRecord.owner_id == owner_id,
+            statement = sqlite_insert(AgentRunClaimRecord).values(
+                run_id=run_id,
+                owner_id=owner_id,
+                token=token,
+                claimed_at=claimed_at,
+                expires_at=expires_at,
+            )
+            statement = statement.on_conflict_do_update(
+                index_elements=[AgentRunClaimRecord.run_id],
+                set_={
+                    "owner_id": owner_id,
+                    "generation": AgentRunClaimRecord.generation + 1,
+                    "token": token,
+                    "claimed_at": claimed_at,
+                    "expires_at": expires_at,
+                },
+                where=AgentRunClaimRecord.expires_at <= claimed_at,
+            )
+            result = session.execute(statement)
+            session.commit()
+            if result.rowcount != 1:
+                return None
+            claim = session.get(AgentRunClaimRecord, run_id)
+            return self._lease(claim) if claim is not None else None
+
+    def renew_claim(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        generation: int,
+        token: str,
+        now: datetime | None = None,
+        lease_seconds: float = DEFAULT_LEASE_SECONDS,
+    ) -> RunLease | None:
+        renewed_at = now or utcnow()
+        with self._sessions() as session:
+            conditions = [
+                AgentRunClaimRecord.run_id == run_id,
+                AgentRunClaimRecord.owner_id == owner_id,
+                AgentRunClaimRecord.generation == generation,
+                AgentRunClaimRecord.token == token,
+                AgentRunClaimRecord.expires_at > renewed_at,
+            ]
+            result = session.execute(
+                update(AgentRunClaimRecord)
+                .where(*conditions)
+                .values(
+                    claimed_at=renewed_at,
+                    expires_at=renewed_at + timedelta(seconds=lease_seconds),
                 )
             )
             session.commit()
+            if result.rowcount != 1:
+                return None
+            claim = session.get(AgentRunClaimRecord, run_id)
+            return self._lease(claim) if claim is not None else None
 
-    def clear_stale_claims(self, owner_id: str) -> None:
+    def release_claim(
+        self,
+        run_id: str,
+        owner_id: str,
+        *,
+        generation: int,
+        token: str,
+    ) -> bool:
         with self._sessions() as session:
-            session.execute(
-                delete(AgentRunClaimRecord).where(
-                    AgentRunClaimRecord.owner_id != owner_id
-                )
-            )
+            conditions = [
+                AgentRunClaimRecord.run_id == run_id,
+                AgentRunClaimRecord.owner_id == owner_id,
+                AgentRunClaimRecord.generation == generation,
+                AgentRunClaimRecord.token == token,
+            ]
+            result = session.execute(delete(AgentRunClaimRecord).where(*conditions))
             session.commit()
+            return result.rowcount == 1
+
+    def validate_claim(self, lease: RunLease, *, now: datetime | None = None) -> bool:
+        with self._sessions() as session:
+            return self._owns_claim(session, lease, now=now or utcnow())
+
+    def update_runtime_metadata(
+        self,
+        run_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        self._update(run_id, runtime_metadata_json=metadata)
 
     def incomplete(self) -> list[AgentRunRecord]:
         with self._sessions() as session:
@@ -146,6 +257,29 @@ class RunRepository:
             session.refresh(epoch)
             return epoch
 
+    def begin_epoch_owned(
+        self,
+        lease: RunLease,
+        input_value: Any,
+    ) -> AgentRunEpochRecord:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            maximum = session.scalar(
+                select(func.max(AgentRunEpochRecord.epoch_index)).where(
+                    AgentRunEpochRecord.run_id == lease.run_id
+                )
+            )
+            epoch = AgentRunEpochRecord(
+                run_id=lease.run_id,
+                epoch_index=(maximum if maximum is not None else -1) + 1,
+                input_json=input_value,
+            )
+            session.add(epoch)
+            session.commit()
+            session.refresh(epoch)
+            return epoch
+
     def finish_epoch(
         self,
         epoch_id: str,
@@ -158,6 +292,29 @@ class RunRepository:
         with self._sessions() as session:
             epoch = session.get(AgentRunEpochRecord, epoch_id)
             if epoch is None:
+                raise NotFoundError("Run epoch was not found.")
+            epoch.status = status
+            epoch.terminal_reason = terminal_reason
+            epoch.usage_json = usage or {}
+            epoch.error = error
+            epoch.finished_at = utcnow()
+            session.commit()
+
+    def finish_epoch_owned(
+        self,
+        lease: RunLease,
+        epoch_id: str,
+        *,
+        status: str,
+        terminal_reason: str,
+        usage: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            epoch = session.get(AgentRunEpochRecord, epoch_id)
+            if epoch is None or epoch.run_id != lease.run_id:
                 raise NotFoundError("Run epoch was not found.")
             epoch.status = status
             epoch.terminal_reason = terminal_reason
@@ -199,29 +356,19 @@ class RunRepository:
     def update_usage(self, run_id: str, usage: dict[str, Any]) -> None:
         self._update(run_id, usage_json=usage)
 
+    def update_usage_owned(self, lease: RunLease, usage: dict[str, Any]) -> None:
+        self._update_owned(lease, usage_json=usage)
+
     def abandon_incomplete_epochs(self, run_id: str) -> None:
         with self._sessions() as session:
-            epochs = session.scalars(
-                select(AgentRunEpochRecord).where(
-                    AgentRunEpochRecord.run_id == run_id,
-                    AgentRunEpochRecord.status == "running",
-                )
-            )
-            for epoch in epochs:
-                epoch.status = "abandoned"
-                epoch.terminal_reason = "process_interrupted"
-                epoch.finished_at = utcnow()
-            attempts = session.scalars(
-                select(AgentToolAttemptRecord).where(
-                    AgentToolAttemptRecord.run_id == run_id,
-                    AgentToolAttemptRecord.status == "started",
-                )
-            )
-            for attempt in attempts:
-                attempt.status = "unknown_outcome"
-                attempt.failure_category = "process_interrupted"
-                attempt.error = "Process stopped before the tool outcome was persisted."
-                attempt.finished_at = utcnow()
+            self._abandon_incomplete_epochs(session, run_id)
+            session.commit()
+
+    def abandon_incomplete_epochs_owned(self, lease: RunLease) -> None:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            self._abandon_incomplete_epochs(session, lease.run_id)
             session.commit()
 
     def begin_tool_attempt(
@@ -248,6 +395,32 @@ class RunRepository:
             session.refresh(record)
             return record
 
+    def begin_tool_attempt_owned(
+        self,
+        lease: RunLease,
+        *,
+        epoch_id: str | None,
+        tool_call_id: str,
+        catalog_id: str,
+        attempt: int,
+        arguments: dict[str, Any],
+    ) -> AgentToolAttemptRecord:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            record = AgentToolAttemptRecord(
+                run_id=lease.run_id,
+                epoch_id=epoch_id,
+                tool_call_id=tool_call_id,
+                catalog_id=catalog_id,
+                attempt=attempt,
+                arguments_json=arguments,
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
     def finish_tool_attempt(
         self,
         attempt_id: str,
@@ -262,6 +435,33 @@ class RunRepository:
         with self._sessions() as session:
             record = session.get(AgentToolAttemptRecord, attempt_id)
             if record is None:
+                raise NotFoundError("Tool attempt was not found.")
+            record.status = status
+            record.result_json = result
+            record.result_ref = result_ref
+            record.failure_category = failure_category
+            record.retryable = retryable
+            record.error = error
+            record.finished_at = utcnow()
+            session.commit()
+
+    def finish_tool_attempt_owned(
+        self,
+        lease: RunLease,
+        attempt_id: str,
+        *,
+        status: str,
+        result: Any = None,
+        result_ref: str | None = None,
+        failure_category: str | None = None,
+        retryable: bool = False,
+        error: str | None = None,
+    ) -> None:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            record = session.get(AgentToolAttemptRecord, attempt_id)
+            if record is None or record.run_id != lease.run_id:
                 raise NotFoundError("Tool attempt was not found.")
             record.status = status
             record.result_json = result
@@ -335,11 +535,46 @@ class RunRepository:
             finished_at=utcnow(),
         )
 
+    def complete_owned(
+        self,
+        lease: RunLease,
+        *,
+        final_output: Any,
+        last_agent_name: str,
+        usage: dict[str, Any],
+    ) -> bool:
+        return self._terminal_update_owned(
+            lease,
+            status="completed",
+            require_no_cancel=True,
+            final_output_json=final_output,
+            last_agent_name=last_agent_name,
+            usage_json=usage,
+            state_json=None,
+        )
+
     def pause(self, run_id: str, *, state: dict[str, Any]) -> None:
         self._update(run_id, status="paused", state_json=state)
 
+    def pause_owned(self, lease: RunLease, *, state: dict[str, Any]) -> bool:
+        return self._terminal_update_owned(
+            lease,
+            status="paused",
+            require_no_cancel=True,
+            state_json=state,
+            finished=False,
+        )
+
     def fail(self, run_id: str, error: str) -> None:
         self._update(run_id, status="failed", error=error, finished_at=utcnow())
+
+    def fail_owned(self, lease: RunLease, error: str) -> bool:
+        return self._terminal_update_owned(
+            lease,
+            status="failed",
+            require_no_cancel=True,
+            error=error,
+        )
 
     def cancel(self, run_id: str) -> None:
         self._update(
@@ -349,8 +584,26 @@ class RunRepository:
             finished_at=utcnow(),
         )
 
-    def request_cancel(self, run_id: str) -> None:
-        self._update(run_id, cancel_requested=True)
+    def cancel_owned(self, lease: RunLease) -> bool:
+        return self._terminal_update_owned(
+            lease,
+            status="cancelled",
+            require_cancel=True,
+            cancel_requested=True,
+        )
+
+    def request_cancel(self, run_id: str) -> bool:
+        with self._sessions() as session:
+            result = session.execute(
+                update(AgentRunRecord)
+                .where(
+                    AgentRunRecord.id == run_id,
+                    AgentRunRecord.status.in_(("pending", "running")),
+                )
+                .values(cancel_requested=True)
+            )
+            session.commit()
+            return result.rowcount == 1
 
     def add_items(self, run_id: str, items: list[dict[str, Any]]) -> None:
         if not items:
@@ -372,6 +625,34 @@ class RunRepository:
                         item_json=item,
                     )
                 )
+            session.commit()
+
+    def add_items_owned(
+        self,
+        lease: RunLease,
+        items: list[dict[str, Any]],
+    ) -> None:
+        if not items:
+            return
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            maximum = session.scalar(
+                select(func.max(AgentRunItemRecord.item_index)).where(
+                    AgentRunItemRecord.run_id == lease.run_id
+                )
+            )
+            start = (maximum if maximum is not None else -1) + 1
+            session.add_all(
+                AgentRunItemRecord(
+                    run_id=lease.run_id,
+                    item_index=start + offset,
+                    item_type=item["type"],
+                    agent_name=item["agent_name"],
+                    item_json=item,
+                )
+                for offset, item in enumerate(items)
+            )
             session.commit()
 
     def next_event_sequence(self, run_id: str) -> int:
@@ -417,6 +698,38 @@ class RunRepository:
             records = [
                 AgentRunEventRecord(
                     run_id=run_id,
+                    sequence=start_sequence + offset,
+                    event_type=event_type,
+                    payload_json=payload,
+                )
+                for offset, (event_type, payload) in enumerate(events)
+            ]
+            session.add_all(records)
+            session.commit()
+            return records
+
+    def add_events_owned(
+        self,
+        lease: RunLease,
+        events: list[tuple[str, dict[str, Any]]],
+        *,
+        start_sequence: int | None = None,
+    ) -> list[AgentRunEventRecord]:
+        if not events:
+            return []
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            if start_sequence is None:
+                maximum = session.scalar(
+                    select(func.max(AgentRunEventRecord.sequence)).where(
+                        AgentRunEventRecord.run_id == lease.run_id
+                    )
+                )
+                start_sequence = (maximum if maximum is not None else -1) + 1
+            records = [
+                AgentRunEventRecord(
+                    run_id=lease.run_id,
                     sequence=start_sequence + offset,
                     event_type=event_type,
                     payload_json=payload,
@@ -545,6 +858,117 @@ class RunRepository:
             for key, value in values.items():
                 setattr(record, key, value)
             session.commit()
+
+    def _update_owned(self, lease: RunLease, **values: Any) -> None:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            record = self._run(session, lease.run_id)
+            for key, value in values.items():
+                setattr(record, key, value)
+            session.commit()
+
+    def _terminal_update_owned(
+        self,
+        lease: RunLease,
+        *,
+        status: str,
+        require_no_cancel: bool = False,
+        require_cancel: bool = False,
+        finished: bool = True,
+        **values: Any,
+    ) -> bool:
+        with self._sessions() as session:
+            self._begin_immediate(session)
+            self._require_claim(session, lease)
+            record = self._run(session, lease.run_id)
+            if record.status not in {"pending", "running"}:
+                return False
+            if require_no_cancel and record.cancel_requested:
+                return False
+            if require_cancel and not record.cancel_requested:
+                return False
+            record.status = status
+            if finished:
+                record.finished_at = utcnow()
+            for key, value in values.items():
+                setattr(record, key, value)
+            session.commit()
+            return True
+
+    @staticmethod
+    def _lease(record: AgentRunClaimRecord) -> RunLease:
+        return RunLease(
+            run_id=record.run_id,
+            owner_id=record.owner_id,
+            generation=record.generation,
+            token=record.token,
+            claimed_at=record.claimed_at,
+            expires_at=record.expires_at,
+        )
+
+    @staticmethod
+    def _run(session: Session, run_id: str) -> AgentRunRecord:
+        record = session.get(AgentRunRecord, run_id)
+        if record is None:
+            raise NotFoundError("Run was not found.")
+        return record
+
+    @staticmethod
+    def _owns_claim(
+        session: Session,
+        lease: RunLease,
+        *,
+        now: datetime,
+    ) -> bool:
+        return (
+            session.scalar(
+                select(func.count())
+                .select_from(AgentRunClaimRecord)
+                .where(
+                    AgentRunClaimRecord.run_id == lease.run_id,
+                    AgentRunClaimRecord.owner_id == lease.owner_id,
+                    AgentRunClaimRecord.generation == lease.generation,
+                    AgentRunClaimRecord.token == lease.token,
+                    AgentRunClaimRecord.expires_at > now,
+                )
+            )
+            == 1
+        )
+
+    def _require_claim(self, session: Session, lease: RunLease) -> None:
+        if not self._owns_claim(session, lease, now=utcnow()):
+            raise LeaseOwnershipError(
+                f"Run {lease.run_id} claim generation {lease.generation} is no longer owned."
+            )
+
+    @staticmethod
+    def _begin_immediate(session: Session) -> None:
+        session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+
+    @staticmethod
+    def _abandon_incomplete_epochs(session: Session, run_id: str) -> None:
+        epochs = session.scalars(
+            select(AgentRunEpochRecord).where(
+                AgentRunEpochRecord.run_id == run_id,
+                AgentRunEpochRecord.status == "running",
+            )
+        )
+        for epoch in epochs:
+            epoch.status = "abandoned"
+            epoch.terminal_reason = "process_interrupted"
+            epoch.finished_at = utcnow()
+        attempts = session.scalars(
+            select(AgentToolAttemptRecord).where(
+                AgentToolAttemptRecord.run_id == run_id,
+                AgentToolAttemptRecord.status == "started",
+            )
+        )
+        for attempt in attempts:
+            attempt.status = "unknown_outcome"
+            attempt.failure_category = "process_interrupted"
+            attempt.error = "Process stopped before the tool outcome was persisted."
+            attempt.finished_at = utcnow()
 
     @staticmethod
     def _load_relations(record: AgentRunRecord) -> None:

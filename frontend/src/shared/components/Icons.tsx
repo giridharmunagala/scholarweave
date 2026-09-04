@@ -39,8 +39,6 @@ export type IconName =
   | 'bulb'
   | 'globe'
   | 'refresh'
-  | 'speaker'
-  | 'microphone'
   | 'expand'
   | 'file';
 
@@ -78,8 +76,6 @@ const PATHS: Record<IconName, string> = {
   bulb: 'M9.5 18h5m-4.5 3h4M12 3a6 6 0 0 1 3.7 10.7c-.6.5-.95 1.1-1.05 1.8l-.1.5h-5.1l-.1-.5c-.1-.7-.45-1.3-1.05-1.8A6 6 0 0 1 12 3Z',
   globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Zm0-18c-2.5 2.2-3.8 5.2-3.8 9s1.3 6.8 3.8 9c2.5-2.2 3.8-5.2 3.8-9S14.5 5.2 12 3ZM3.5 9.5h17m-17 5h17',
   refresh: 'M20 12a8 8 0 1 1-2.6-5.9M20 4v4.5h-4.5',
-  speaker: 'M11 5 6.5 8.5H4a1 1 0 0 0-1 1v5a1 1 0 0 0 1 1h2.5L11 19V5Zm4 3.5a5 5 0 0 1 0 7M17.5 6a8 8 0 0 1 0 12',
-  microphone: 'M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-7 9a7 7 0 0 0 14 0M12 19v3m-4 0h8',
   expand: 'M9 4H5a1 1 0 0 0-1 1v4m11-5h4a1 1 0 0 1 1 1v4M9 20H5a1 1 0 0 1-1-1v-4m11 5h4a1 1 0 0 0 1-1v-4',
   file: 'M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm7 0v5h5',
 };

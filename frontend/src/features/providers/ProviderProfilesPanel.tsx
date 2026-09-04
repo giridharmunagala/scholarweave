@@ -20,7 +20,7 @@ const emptyProvider: ProviderCreate = {
   api_key: null,
   models: [],
 };
-const modelCapabilities = ['chat', 'tools', 'embedding', 'vision', 'speech'] as const;
+const modelCapabilities = ['chat', 'tools', 'embedding', 'vision'] as const;
 type ModelCapability = (typeof modelCapabilities)[number];
 
 export function ProviderProfilesPanel({
@@ -565,19 +565,14 @@ export function ProviderProfilesPanel({
                           />
                           {model.enabled ? 'Enabled' : 'Disabled'}
                         </label>
-                        {model.capabilities?.includes('speech')
-                        && !model.capabilities.some((capability) => capability === 'chat' || capability === 'tools') ? (
-                          <span className="field-hint">Test in chat</span>
-                        ) : (
-                          <button
-                            className="button secondary small"
-                            type="button"
-                            disabled={busy === `verify:${key}`}
-                            onClick={() => void verify(catalogProvider, model.name)}
-                          >
-                            Verify
-                          </button>
-                        )}
+                        <button
+                          className="button secondary small"
+                          type="button"
+                          disabled={busy === `verify:${key}`}
+                          onClick={() => void verify(catalogProvider, model.name)}
+                        >
+                          Verify
+                        </button>
                         {result ? (
                           <StatusPill value={result.reachable ? 'reachable' : 'failed'} />
                         ) : null}

@@ -1,0 +1,9 @@
+{
+  "label": "Acquire research source",
+  "description": "Download and prepare one selected public PDF or HTML page so its full content can be read and cited. Search the local library first when acquiring a paper. Use only an exact URL supplied by the user or returned by a source search; never construct or guess alternate URLs. Acquisition is idempotent: matching source URLs, arXiv identifiers (across versions), or exact titles reuse the local document and report already_in_library instead of downloading again. Do not use this for metadata-only inspection or repeatedly retry unavailable sources.",
+  "parameter_descriptions": {
+    "kind": "Use paper for a public PDF and web_page for an HTML page.",
+    "url": "The exact public source URL supplied by the user or returned by a source search; never a guessed URL.",
+    "title": "A human-readable title when known; otherwise use JSON null, never the string \"null\"."
+  }
+}

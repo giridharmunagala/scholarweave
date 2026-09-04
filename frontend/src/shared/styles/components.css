@@ -91,8 +91,6 @@
 
 /* -------------------------------------------------------- Surfaces/cards --- */
 
-/* Panels are the glass sheets the wallpaper reads through. The lighter top
-   border is the highlight that gives them an edge against the backdrop. */
 .panel {
   min-width: 0;
   padding: var(--space-4);

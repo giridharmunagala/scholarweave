@@ -1,0 +1,9 @@
+{
+  "label": "Read stored tool result",
+  "description": "Read a bounded character slice of a large tool result that was stored after truncation. Use only a result_ref returned by a prior tool, and request the smallest slice needed. Advance offset to continue; do not restart at zero repeatedly. The content retains the trust level of the original tool result.",
+  "parameter_descriptions": {
+    "result_ref": "The exact stored result reference returned by a prior tool.",
+    "offset": "Zero-based character offset into the stored result.",
+    "limit": "Maximum characters to return, from 256 to 16000."
+  }
+}

@@ -9,13 +9,13 @@ from datetime import datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 import anyio
 import httpx
 
 from backend.core.config import Settings
-from backend.core.time import utcnow
+from backend.utils import utcnow
 from backend.documents import DocumentService
 from backend.documents.models import Document
 from backend.workspace.service import WorkspaceDocument, WorkspaceService
@@ -189,8 +189,8 @@ class SourceDownloadService:
         title: str | None,
         arxiv_only: bool,
     ) -> Document:
-        existing = self._find_document_by_source(normalized_url)
-        if existing is not None and existing.status == "ready":
+        existing = self.find_document(normalized_url, title=title)
+        if existing is not None:
             return existing
         content, final_url, headers = await self._download(
             normalized_url,
@@ -342,10 +342,32 @@ class SourceDownloadService:
             tags=["web-source", *(tags or [])],
         )
 
-    def _find_document_by_source(self, url: str) -> Document | None:
+    def find_document(self, url: str, *, title: str | None = None) -> Document | None:
+        source_key = _source_key(url)
+        arxiv_key = _arxiv_key(url)
+        title_key = _title_key(title)
         for document in self._documents.list_documents():
             metadata = document.metadata_json if isinstance(document.metadata_json, dict) else {}
-            if metadata.get("source_url") == url:
+            candidates = (
+                metadata.get("source_url"),
+                metadata.get("resolved_source_url"),
+            )
+            if source_key and any(
+                _source_key(candidate) == source_key
+                for candidate in candidates
+                if isinstance(candidate, str)
+            ):
+                return document
+            if arxiv_key and (
+                any(
+                    _arxiv_key(candidate) == arxiv_key
+                    for candidate in candidates
+                    if isinstance(candidate, str)
+                )
+                or _arxiv_key(document.source_filename) == arxiv_key
+            ):
+                return document
+            if title_key and _title_key(document.title) == title_key:
                 return document
         return None
 
@@ -477,6 +499,51 @@ class SourceDownloadService:
 
 def _normalize_inline(value: str) -> str:
     return _WHITESPACE.sub(" ", value).strip()
+
+
+def _source_key(value: str) -> str:
+    try:
+        parsed = urlsplit(value.strip())
+    except ValueError:
+        return ""
+    if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
+        return ""
+    hostname = parsed.hostname.casefold()
+    port = parsed.port
+    netloc = hostname
+    if port and port != (443 if parsed.scheme.casefold() == "https" else 80):
+        netloc = f"{hostname}:{port}"
+    path = parsed.path.rstrip("/") or "/"
+    return urlunsplit(
+        (parsed.scheme.casefold(), netloc, path, parsed.query, "")
+    )
+
+
+def _arxiv_key(value: str) -> str:
+    candidate = value.strip()
+    parsed = urlparse(candidate)
+    if parsed.hostname:
+        if parsed.hostname.casefold() not in _ARXIV_HOSTS:
+            return ""
+        candidate = unquote(parsed.path).strip("/")
+        for prefix in ("abs/", "pdf/"):
+            if candidate.casefold().startswith(prefix):
+                candidate = candidate[len(prefix) :]
+                break
+    else:
+        candidate = unquote(candidate).strip("/")
+    if candidate.casefold().endswith(".pdf"):
+        candidate = candidate[:-4]
+    candidate = re.sub(r"v\d+$", "", candidate, flags=re.IGNORECASE)
+    if not re.fullmatch(r"(?:\d{4}\.\d{4,5}|[a-z-]+/\d{7})", candidate, re.I):
+        return ""
+    return candidate.casefold()
+
+
+def _title_key(value: str | None) -> str:
+    if not value:
+        return ""
+    return " ".join(re.findall(r"\w+", value.casefold()))
 
 
 def _charset(content_type: str) -> str | None:

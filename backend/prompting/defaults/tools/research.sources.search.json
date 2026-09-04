@@ -1,0 +1,8 @@
+{
+  "label": "Search research sources",
+  "description": "Find candidate evidence with DuckDuckGo, arXiv, or Wikipedia when the conversation and local library lack it. Prefer arXiv for scholarly papers, Wikipedia for direct encyclopedic orientation, and DuckDuckGo for the general web. Treat search results as leads; acquire and read a selected source before relying on its contents.",
+  "parameter_descriptions": {
+    "provider": "Use arxiv for papers and preprints, wikipedia for encyclopedic topics, or web for general DuckDuckGo search.",
+    "query": "A focused search query containing the key topic, entity, or paper title; avoid broad multi-part questions."
+  }
+}

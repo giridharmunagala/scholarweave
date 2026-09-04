@@ -3,7 +3,6 @@ from __future__ import annotations
 from agents import Agent, AgentsException, RunConfig, Runner, function_tool
 from openai import OpenAIError
 
-from backend.providers.errors import ProviderDiscoveryError, ProviderRuntimeError
 from backend.providers.ollama import OllamaError
 from backend.providers.reasoning import infer_reasoning_efforts
 from backend.providers.runtime import ModelRuntime
@@ -17,7 +16,12 @@ from backend.providers.schemas import (
     ProviderVerifyResponse,
 )
 from backend.providers.sdk_models import ProfileModelResolver, SdkClientPool
-from backend.providers.types import ModelReference
+from backend.providers.types import (
+    ModelReference,
+    ProviderDiscoveryError,
+    ProviderRuntimeError,
+)
+from backend.prompting.registry import PromptRegistry
 
 
 class ProviderService:
@@ -27,11 +31,13 @@ class ProviderService:
         runtime: ModelRuntime,
         model_resolver: ProfileModelResolver,
         clients: SdkClientPool,
+        prompts: PromptRegistry | None = None,
     ) -> None:
         self._repository = repository
         self._runtime = runtime
         self._models = model_resolver
         self._clients = clients
+        self._prompts = prompts
 
     def list(self, *, include_archived: bool = False) -> list[ProviderResponse]:
         return [
@@ -79,22 +85,6 @@ class ProviderService:
         record = self._repository.archive(profile_id)
         self._clients.invalidate_profile(profile_id)
         return self._response(record)
-
-    async def transcribe(
-        self,
-        model_reference: ModelReference,
-        *,
-        filename: str,
-        content: bytes,
-        content_type: str,
-    ) -> str:
-        resolved = self._runtime.resolve("speech", model_reference=model_reference)
-        return await self._runtime.transcribe(
-            resolved,
-            filename=filename,
-            content=content,
-            content_type=content_type,
-        )
 
     async def discover(self, profile_id: str) -> ProviderModelsResponse:
         record = self._repository.get(profile_id)
@@ -210,8 +200,12 @@ class ProviderService:
             agent = Agent(
                 name="Provider verification",
                 instructions=(
-                    "Call record_colour exactly once with the colour named by the user, "
-                    "then answer done."
+                    self._prompts.render("provider-verification")
+                    if self._prompts is not None
+                    else (
+                        "Call record_colour exactly once with the colour named by the user, "
+                        "then answer done."
+                    )
                 ),
                 model=resolved.model,
                 tools=[record_colour],

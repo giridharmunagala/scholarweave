@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.errors import ConflictError, NotFoundError
 from backend.providers.models import ProviderProfile
-from backend.core.time import utcnow
+from backend.utils import utcnow
 
 
 class ProviderRepository:

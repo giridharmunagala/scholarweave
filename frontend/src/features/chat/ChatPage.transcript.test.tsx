@@ -169,7 +169,6 @@ class FakeServer {
   startRun(content: string) {
     const run: Record<string, any> = {
       id: `run-${this.turnIndex + 1}`,
-      agent_revision_id: null,
       conversation_id: CONVERSATION_ID,
       agent_name: 'ScholarWeave autonomous agent',
       status: 'pending',
@@ -231,6 +230,7 @@ const server = new FakeServer();
 let lastMessageRequest: Record<string, unknown> | null = null;
 let lastSteeringRequest: Record<string, unknown> | null = null;
 let deliverAppliedBeforeSteeringResponse = false;
+let conversationDeleted = false;
 
 class FakeEventSource {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
@@ -265,6 +265,7 @@ class FakeEventSource {
 }
 
 const SETTINGS = {
+  agent_context_window_tokens: 32768,
   default_model_references: {
     chat: { provider_profile_id: 'p1', model: 'gemini' },
   },
@@ -280,6 +281,7 @@ const PROVIDERS = [
       id: 'gemini',
       name: 'gemini',
       enabled: true,
+      context_window_tokens: 65536,
       reasoning_efforts: ['low', 'medium', 'high'],
     }],
   },
@@ -294,7 +296,6 @@ function conversationSummary() {
     id: CONVERSATION_ID,
     title: 'Recorded chat',
     kind: 'autonomous',
-    agent_revision_id: null,
     model_reference: SETTINGS.default_model_references.chat,
     session_policy: {},
     status: 'idle',
@@ -310,25 +311,22 @@ function installFetch() {
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = init?.method ?? 'GET';
-      if (url.endsWith('/api/agent/conversations')) return respond([conversationSummary()]);
+      if (url.endsWith('/api/agent/conversations')) {
+        return respond(conversationDeleted ? [] : [conversationSummary()]);
+      }
       if (url.endsWith('/api/providers')) return respond(PROVIDERS);
       if (url.endsWith('/api/settings')) return respond(SETTINGS);
-      if (url.endsWith('/api/providers/speech/builtin/status')) {
-        return respond({
-          state: 'ready',
-          available: true,
-          installed: true,
-          running: false,
-          model: 'nvidia/nemotron-speech-streaming-en-0.6b',
-          downloaded_bytes: 0,
-          total_bytes: 463_945_051,
-          error: null,
-        });
-      }
       if (url.includes(`/api/agent/conversations/${CONVERSATION_ID}/messages`) && method === 'POST') {
         lastMessageRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
         const { content } = lastMessageRequest as { content: string };
         return respond({ conversation: {}, run: server.startRun(content) });
+      }
+      if (
+        url.endsWith(`/api/conversations/${CONVERSATION_ID}`)
+        && method === 'DELETE'
+      ) {
+        conversationDeleted = true;
+        return respond(null);
       }
       if (url.endsWith(`/api/agent/conversations/${CONVERSATION_ID}`)) {
         return respond({ ...conversationSummary(), items: server.sessionItems });
@@ -398,6 +396,7 @@ describe('chat transcript detail', () => {
     lastMessageRequest = null;
     lastSteeringRequest = null;
     deliverAppliedBeforeSteeringResponse = false;
+    conversationDeleted = false;
     window.localStorage.clear();
     installFetch();
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
@@ -457,7 +456,26 @@ describe('chat transcript detail', () => {
     await flush();
   };
 
-  it('sends the selected reasoning effort and bounded fast-answer controls', async () => {
+  it('deletes an old conversation from its visible list control', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true));
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+
+    const deleteButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Delete Recorded chat"]',
+    );
+    expect(deleteButton).not.toBeNull();
+
+    await act(async () => {
+      deleteButton!.click();
+    });
+    await flush();
+
+    expect(conversationDeleted).toBe(true);
+    expect(container.querySelector('[aria-label="Delete Recorded chat"]')).toBeNull();
+  });
+
+  it('sends the selected reasoning effort, context size, and bounded fast-answer controls', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
@@ -465,10 +483,16 @@ describe('chat transcript detail', () => {
       '[aria-label="Reasoning effort"]',
     )!;
     expect(container.querySelector('[aria-label="Work mode"]')).toBeNull();
+    const contextSize = container.querySelector<HTMLSelectElement>(
+      '[aria-label="Context size"]',
+    )!;
+    expect(contextSize.value).toBe('65536');
 
     await act(async () => {
       reasoning.value = 'high';
       reasoning.dispatchEvent(new Event('change', { bubbles: true }));
+      contextSize.value = '131072';
+      contextSize.dispatchEvent(new Event('change', { bubbles: true }));
       container
         .querySelector('[aria-label="Toggle fast answer"]')!
         .dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -492,6 +516,7 @@ describe('chat transcript detail', () => {
       web_enabled: true,
       fast_answer: true,
       web_search_limit: 4,
+      context_window_tokens: 131072,
     });
     expect(lastMessageRequest).not.toHaveProperty('work_mode');
     expect(lastMessageRequest).not.toHaveProperty('work_budget');
@@ -533,6 +558,22 @@ describe('chat transcript detail', () => {
     await send(TURNS[0].input);
 
     const source = server.listeners.get('run-1');
+    expect(container.querySelector('.chat-header .chat-working')).toBeNull();
+    expect(container.querySelector('.chat-header .status-pill')).toBeNull();
+    expect(container.querySelector('.message-list .live-activity')).not.toBeNull();
+    await act(async () => {
+      source?.deliver({
+        sequence: 0,
+        event_type: 'context.compaction_started',
+        payload: { estimated_tokens_before: 24000 },
+      });
+    });
+    await flush(2);
+    expect(text(container.querySelector('.compaction-indicator'))).toContain('Compacting context');
+    expect(container.querySelector('.compaction-indicator')?.getAttribute('title')).toContain(
+      '24,000 tokens',
+    );
+
     // Watch the very first reasoning burst, before any tool has interrupted it.
     await act(async () => {
       source?.deliver(BUILT[0].events[0]);
@@ -550,7 +591,20 @@ describe('chat transcript detail', () => {
         source?.deliver(event);
       });
     }
+    await act(async () => {
+      source?.deliver({
+        sequence: 900,
+        event_type: 'context.compacted',
+        payload: {
+          estimated_tokens_before: 24000,
+          estimated_tokens_after: 8000,
+        },
+      });
+    });
     await flush(3);
+    expect(text(container.querySelector('.compaction-indicator'))).toContain('Context compacted');
+    const activityToggle = container.querySelector('[aria-label="Show run activity"]');
+    expect(activityToggle?.parentElement?.lastElementChild).toBe(activityToggle);
 
     server.completeRun('run-1', 0);
     await act(async () => {

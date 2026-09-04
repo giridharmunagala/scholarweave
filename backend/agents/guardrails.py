@@ -15,7 +15,7 @@ from agents import (
 from backend.agents.blueprint import GuardrailSpec
 from backend.agents.catalog import GuardrailCatalog, GuardrailDefinition
 from backend.core.errors import ValidationError
-from backend.runtime.serialization import to_jsonable
+from backend.utils import to_jsonable
 
 _DEFAULT_MAX_CHARACTERS = 50_000
 _CONFIG_SCHEMA = {
