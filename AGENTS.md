@@ -1,6 +1,7 @@
 # AGENTS.md
 
-ScholarWeave is a local-first LLM research workspace. Keep it focused on:
+ScholarWeave is a local-first LLM research workspace for one researcher on one local machine. There
+are no accounts, teams, sharing, permissions, or collaborative editing. Keep it focused on:
 
 1. chat with DuckDuckGo, arXiv, Wikipedia, PDF/HTML acquisition, and workspace read/write tools;
 2. autonomous research driven by a small pending-work tracker;
@@ -11,7 +12,8 @@ Read [docs/architecture.md](docs/architecture.md) for the runtime flow and
 
 ## Non-negotiable rules
 
-1. Keep `openai-agents==0.19.4` and `openapi-typescript==7.13.0` exactly pinned.
+1. Keep `openapi-typescript==7.13.0` exactly pinned. The agent runtime is native: talk to every
+   provider through the official `openai` client and `/v1/chat/completions` only.
 2. Never hand-edit `frontend/openapi.json` or `frontend/src/api/schema.generated.ts`. After changing
    a router or Pydantic API schema, run `cd frontend && npm run generate:api`.
 3. Routers call services, services call repositories, and repositories own database sessions.
@@ -51,7 +53,7 @@ Minimum validation:
 | `core` | settings, health, shared errors, HTTP dependencies | `core/config.py`, `core/http.py` |
 | `persistence` | SQLite setup and safe files | `persistence/database.py` |
 | `providers` | provider profiles, model clients, inference scheduling and model-call logs | `providers/runtime.py` |
-| `agents` | blueprint-to-SDK compilation, run context and compaction | `agents/compiler.py`, `agents/context.py` |
+| `agents` | native harness, blueprint compilation, run context and compaction | `agents/harness.py`, `agents/compiler.py` |
 | `tools` | fixed model tool surface and work-plan helpers | `tools/catalog.py`, `tools/runtime.py` |
 | `runs` | execution, events, SSE, recovery | `runs/service.py` |
 | `conversations` | chat records, session history and chat/deep-work blueprints | `conversations/service.py`, `conversations/autonomous.py` |
@@ -80,10 +82,16 @@ router -> service -> repository -> SQLite
 
 ### Chat and Deep Work
 
-Conversation routes compile a blueprint, create a run, and start the SDK runner. SDK stream events
-are projected into persisted run events and published over SSE. Deep Work adds `create_work_plan`,
-`read_work_plan`, and `update_work_item`; the run loop continues while an item is pending or in
-progress.
+Conversation routes compile a blueprint, create a run, and start the native harness
+(`backend/agents/harness.py`). The harness streams one Chat Completions request per turn, executes
+tool calls, and emits named run events through the run context; those events are persisted and
+published over SSE. Deep Work adds `create_work_plan`, `read_work_plan`, and `update_work_item`; the
+run loop continues while an item is pending or in progress.
+
+Delegation is explicit: a blueprint `agent_tools` entry exposes one isolated sub-agent as a tool.
+The sub-agent sees only the request text, never the coordinator transcript. Delegation depth is
+capped at two levels (coordinator -> sub-agent -> nested helper); an agent at depth 2 cannot
+delegate.
 
 ### Papers
 
@@ -109,4 +117,4 @@ Complete model guidance lives under `backend/prompting/defaults/tools/`.
 - Existing databases use a schema cutover strategy, not Alembic migrations. Read the persistence
   code before altering an existing table.
 - There is no authentication. Bind to `127.0.0.1`.
-- Tests use a real local OpenAI-compatible stub provider; prefer it over mocking the SDK.
+- Tests use a real local OpenAI-compatible stub provider; prefer it over mocking the harness.

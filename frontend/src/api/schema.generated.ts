@@ -953,34 +953,6 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
-        /** HandoffCallRunItem */
-        HandoffCallRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "handoff_call_item";
-        };
-        /** HandoffOutputRunItem */
-        HandoffOutputRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /** Source Agent */
-            source_agent: string;
-            /** Target Agent */
-            target_agent: string;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "handoff_output_item";
-        };
         /** HealthResponse */
         HealthResponse: {
             /** Data Dir */
@@ -991,8 +963,8 @@ export interface components {
             frontend_available: boolean;
             /** Ocr Available */
             ocr_available: boolean;
-            /** Sdk Version */
-            sdk_version: string;
+            /** Runtime Version */
+            runtime_version: string;
             /** Status */
             status: string;
         };
@@ -1016,42 +988,6 @@ export interface components {
             recommended_mode: "embedded" | "ocr";
             /** Total Pages */
             total_pages: number;
-        };
-        /** McpApprovalRequestRunItem */
-        McpApprovalRequestRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "mcp_approval_request_item";
-        };
-        /** McpApprovalResponseRunItem */
-        McpApprovalResponseRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "mcp_approval_response_item";
-        };
-        /** McpListToolsRunItem */
-        McpListToolsRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "mcp_list_tools_item";
         };
         /** MessageRunItem */
         MessageRunItem: {
@@ -1351,32 +1287,6 @@ export interface components {
             /** Sequence */
             sequence: number;
         };
-        /** RunInterruptionResponse */
-        RunInterruptionResponse: {
-            /**
-             * Created At
-             * Format: date-time
-             */
-            created_at: string;
-            /** Id */
-            id: string;
-            /** Item */
-            item: components["schemas"]["ToolApprovalRunItem"] | {
-                [key: string]: unknown;
-            };
-            /** Item Key */
-            item_key: string;
-            /** Resolved At */
-            resolved_at: string | null;
-            /** Response */
-            response: {
-                [key: string]: unknown;
-            } | null;
-            /** Status */
-            status: string;
-            /** Tool Name */
-            tool_name: string | null;
-        };
         /** RunResponse */
         RunResponse: {
             /** Agent Name */
@@ -1408,10 +1318,8 @@ export interface components {
             id: string;
             /** Input */
             input: unknown;
-            /** Interruptions */
-            interruptions: components["schemas"]["RunInterruptionResponse"][];
             /** Items */
-            items: (components["schemas"]["MessageRunItem"] | components["schemas"]["ToolCallRunItem"] | components["schemas"]["ToolOutputRunItem"] | components["schemas"]["HandoffCallRunItem"] | components["schemas"]["HandoffOutputRunItem"] | components["schemas"]["ReasoningRunItem"] | components["schemas"]["ToolApprovalRunItem"] | components["schemas"]["ToolSearchCallRunItem"] | components["schemas"]["ToolSearchOutputRunItem"] | components["schemas"]["McpListToolsRunItem"] | components["schemas"]["McpApprovalRequestRunItem"] | components["schemas"]["McpApprovalResponseRunItem"])[];
+            items: (components["schemas"]["MessageRunItem"] | components["schemas"]["ToolCallRunItem"] | components["schemas"]["ToolOutputRunItem"] | components["schemas"]["ReasoningRunItem"])[];
             /** Last Agent Name */
             last_agent_name: string | null;
             /** Started At */
@@ -1420,7 +1328,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "pending" | "running" | "paused" | "completed" | "failed" | "cancelled";
+            status: "pending" | "running" | "completed" | "failed" | "cancelled";
             /** Tool Attempts */
             tool_attempts: components["schemas"]["ToolAttemptResponse"][];
             /** Usage */
@@ -1472,8 +1380,6 @@ export interface components {
             agent_max_epochs: number;
             /** Agent Run Timeout Seconds */
             agent_run_timeout_seconds: number;
-            /** Agent Tracing Enabled */
-            agent_tracing_enabled: boolean;
             /** Artifacts Dir */
             artifacts_dir: string;
             /** Data Dir */
@@ -1531,8 +1437,6 @@ export interface components {
             agent_max_epochs?: number | null;
             /** Agent Run Timeout Seconds */
             agent_run_timeout_seconds?: number | null;
-            /** Agent Tracing Enabled */
-            agent_tracing_enabled?: boolean | null;
             /** Default Model References */
             default_model_references?: {
                 [key: string]: components["schemas"]["ModelReferenceSpec"];
@@ -1582,24 +1486,6 @@ export interface components {
         StopAndAnswerResponse: {
             answer_run: components["schemas"]["RunResponse"];
             stopped_run: components["schemas"]["RunResponse"];
-        };
-        /** ToolApprovalRunItem */
-        ToolApprovalRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Item Key */
-            item_key: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /** Tool Name */
-            tool_name?: string | null;
-            /** Tool Namespace */
-            tool_namespace?: string | null;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "tool_approval_item";
         };
         /** ToolAttemptResponse */
         ToolAttemptResponse: {
@@ -1666,30 +1552,6 @@ export interface components {
              * @enum {string}
              */
             type: "tool_call_output_item";
-        };
-        /** ToolSearchCallRunItem */
-        ToolSearchCallRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "tool_search_call_item";
-        };
-        /** ToolSearchOutputRunItem */
-        ToolSearchOutputRunItem: {
-            /** Agent Name */
-            agent_name: string;
-            /** Raw Item */
-            raw_item: unknown;
-            /**
-             * @description discriminator enum property added by openapi-typescript
-             * @enum {string}
-             */
-            type: "tool_search_output_item";
         };
         /** ValidationError */
         ValidationError: {

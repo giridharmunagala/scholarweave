@@ -4,26 +4,29 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from agents import (
-    Agent,
-    ModelBehaviorError,
-    OpenAIChatCompletionsModel,
-    OpenAIResponsesModel,
-    Runner,
-    function_tool,
-)
 from openai import AsyncOpenAI
 
-from backend.agents.output import JsonSchemaOutput
-from backend.providers.runtime import ModelRuntime, ResolvedModel
-from backend.providers.sdk_models import (
-    CompatibleChatCompletionsModel,
-    ProfileModelResolver,
-    SdkClientPool,
-    _replay_same_model_reasoning,
+from backend.agents.compiler import AgentCompiler
+from backend.agents.blueprint import AgentBlueprint
+from backend.agents.context import ScholarWeaveContext
+from backend.agents.harness import (
+    AgentDefinition,
+    JsonSchemaOutput,
+    ModelBehaviorError,
+    ModelSettings,
+    RunSettings,
+    run_agent,
 )
+from backend.providers.binding import ProfileModelResolver, ProviderClientPool
+from backend.providers.runtime import ModelRuntime, ResolvedModel
 from backend.providers.types import ModelReference
 from backend.providers.inference import InferenceScheduler
+from backend.tools.catalog import create_tool_catalog
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
 
 
 class Runtime:
@@ -33,10 +36,12 @@ class Runtime:
         *,
         preserve_thinking: bool = False,
         base_url: str = "https://api.openai.com/v1",
+        context_window_tokens: int | None = None,
     ) -> None:
         self.kind = kind
         self.preserve_thinking = preserve_thinking
         self.base_url = base_url
+        self.context_window_tokens = context_window_tokens
         self.client_calls = 0
         self.capabilities: list[str] = []
 
@@ -49,6 +54,7 @@ class Runtime:
             base_url=self.base_url,
             api_key="test",
             model=model_reference.model or "test-model",
+            context_window_tokens=self.context_window_tokens,
             preserve_thinking=self.preserve_thinking,
         )
 
@@ -125,23 +131,32 @@ async def test_transient_openai_clients_are_closed_on_success_and_error(
 
 
 @pytest.mark.anyio
-async def test_openai_profile_uses_responses_and_reuses_client() -> None:
-    runtime = Runtime("openai")
-    pool = SdkClientPool(runtime)  # type: ignore[arg-type]
-    resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
+async def test_every_provider_kind_binds_one_chat_completions_client() -> None:
+    for kind, parallel in (
+        ("openai", True),
+        ("azure_openai", True),
+        ("azure_foundry", True),
+        ("ollama", False),
+        ("openai_compatible", False),
+    ):
+        runtime = Runtime(kind, context_window_tokens=16_384)
+        pool = ProviderClientPool(runtime)  # type: ignore[arg-type]
+        resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
 
-    first = resolver.resolve_agent_model(ModelReference("profile", "gpt-4.1"))
-    second = resolver.resolve_agent_model(
-        ModelReference("profile", "gpt-4.1"),
-        require_tools=True,
-    )
+        first = resolver.resolve_agent_model(ModelReference("profile", "model-a"))
+        second = resolver.resolve_agent_model(
+            ModelReference("profile", "model-a"),
+            require_tools=True,
+        )
 
-    assert isinstance(first.model, OpenAIResponsesModel)
-    assert isinstance(second.model, OpenAIResponsesModel)
-    assert first.supports_responses is True
-    assert runtime.capabilities == ["chat", "chat"]
-    assert runtime.client_calls == 1
-    await pool.close()
+        assert first.model_name == "model-a"
+        assert first.provider_kind == kind
+        assert first.supports_parallel_tool_calls is parallel
+        assert first.context_window_tokens == 16_384
+        assert first.client is second.client
+        assert runtime.capabilities == ["chat", "chat"]
+        assert runtime.client_calls == 1
+        await pool.close()
 
 
 @pytest.mark.anyio
@@ -163,7 +178,7 @@ async def test_client_pool_retires_invalidated_clients_until_safe_shutdown() -> 
             return client
 
     runtime = ClientRuntime()
-    pool = SdkClientPool(runtime)  # type: ignore[arg-type]
+    pool = ProviderClientPool(runtime)  # type: ignore[arg-type]
     resolved = ResolvedModel(
         profile_id="profile",
         profile_name="Profile",
@@ -235,33 +250,14 @@ async def test_only_local_provider_clients_use_inference_scheduler(
 
 
 @pytest.mark.anyio
-async def test_compatible_profile_can_replay_same_model_reasoning() -> None:
+async def test_compatible_profile_preserves_model_thinking_flag() -> None:
     runtime = Runtime("openai_compatible", preserve_thinking=True)
-    pool = SdkClientPool(runtime)  # type: ignore[arg-type]
+    pool = ProviderClientPool(runtime)  # type: ignore[arg-type]
     resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
 
     resolved = resolver.resolve_agent_model(ModelReference("profile", "local-qwen"))
 
-    assert isinstance(resolved.model, OpenAIChatCompletionsModel)
-    assert resolved.model.should_replay_reasoning_content is _replay_same_model_reasoning
-    same_model = type(
-        "ReplayContext",
-        (),
-        {
-            "model": "local-qwen",
-            "reasoning": type("Reasoning", (), {"origin_model": "local-qwen"})(),
-        },
-    )()
-    other_model = type(
-        "ReplayContext",
-        (),
-        {
-            "model": "local-qwen",
-            "reasoning": type("Reasoning", (), {"origin_model": "other-model"})(),
-        },
-    )()
-    assert resolved.model.should_replay_reasoning_content(same_model) is True
-    assert resolved.model.should_replay_reasoning_content(other_model) is False
+    assert resolved.preserve_thinking is True
     await pool.close()
 
 
@@ -275,8 +271,8 @@ async def test_compatible_profile_locality_is_propagated_to_run_model() -> None:
         "openai_compatible",
         base_url="https://openrouter.ai/api/v1",
     )
-    local_pool = SdkClientPool(local_runtime)  # type: ignore[arg-type]
-    hosted_pool = SdkClientPool(hosted_runtime)  # type: ignore[arg-type]
+    local_pool = ProviderClientPool(local_runtime)  # type: ignore[arg-type]
+    hosted_pool = ProviderClientPool(hosted_runtime)  # type: ignore[arg-type]
 
     local = ProfileModelResolver(
         local_runtime, local_pool  # type: ignore[arg-type]
@@ -292,33 +288,13 @@ async def test_compatible_profile_locality_is_propagated_to_run_model() -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("provider_kind", ["ollama", "openai_compatible"])
-async def test_local_profile_uses_buffered_chat_completions(provider_kind: str) -> None:
-    runtime = Runtime(provider_kind)
-    pool = SdkClientPool(runtime)  # type: ignore[arg-type]
-    resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
-
-    resolved = resolver.resolve_agent_model(ModelReference("profile", "qwen"))
-
-    assert isinstance(resolved.model, OpenAIChatCompletionsModel)
-    assert isinstance(resolved.model, CompatibleChatCompletionsModel)
-    assert resolved.model._buffer_streamed_tool_calls is True
-    assert resolved.supports_responses is False
-    assert resolved.supports_hosted_tools is False
-    await pool.close()
-
-
-@pytest.mark.anyio
 async def test_compatible_model_does_not_combine_tool_and_json_schema_grammars(
     stub_provider,
 ) -> None:
-    runtime = Runtime(
-        "openai_compatible",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    pool = SdkClientPool(runtime)  # type: ignore[arg-type]
+    runtime = Runtime("openai_compatible", base_url=f"{stub_provider.base_url}/v1")
+    pool = ProviderClientPool(runtime)  # type: ignore[arg-type]
     resolver = ProfileModelResolver(runtime, pool)  # type: ignore[arg-type]
-    resolved = resolver.resolve_agent_model(ModelReference("profile", "stub-model"))
+    binding = resolver.resolve_agent_model(ModelReference("profile", "stub-model"))
     output_schema = JsonSchemaOutput(
         "Receipt",
         {
@@ -329,51 +305,79 @@ async def test_compatible_model_does_not_combine_tool_and_json_schema_grammars(
         },
         strict=True,
     )
-
-    @function_tool
-    def inspect_source(source_id: str) -> str:
-        """Inspect one source."""
-
-        return source_id
+    compiled = AgentCompiler(
+        SimpleNamespace(resolve_agent_model=lambda *_args, **_kwargs: binding),
+        create_tool_catalog(),
+    ).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Structured worker",
+                "entry_agent_id": "worker",
+                "agents": [
+                    {
+                        "id": "worker",
+                        "name": "Structured worker",
+                        "instructions": "Return the requested receipt.",
+                        "tool_ids": ["library"],
+                        "output": {
+                            "kind": "json_schema",
+                            "name": "Receipt",
+                            "schema": output_schema.json_schema(),
+                        },
+                    }
+                ],
+                "tools": [
+                    {
+                        "id": "library",
+                        "kind": "function",
+                        "catalog_id": "research.library.search",
+                    }
+                ],
+            }
+        )
+    )
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=SimpleNamespace())
 
     stub_provider.reply = '{"status":"done"}'
-    tool_agent = Agent(
-        name="Structured worker",
-        instructions="Return the requested receipt.",
-        model=resolved.model,
-        output_type=output_schema,
-        tools=[inspect_source],
+    result = await run_agent(
+        compiled.entry_agent,
+        "Finish without using the tool.",
+        context=context,
+        settings=RunSettings(),
+        max_turns=1,
     )
-    result = await Runner.run(tool_agent, "Finish without using the tool.", max_turns=1)
 
     assert result.final_output == {"status": "done"}
     combined_request = stub_provider.requests[-1]
     assert combined_request["tools"][0]["function"]["strict"] is True
     assert combined_request["response_format"] == {"type": "json_object"}
 
-    stream = Runner.run_streamed(
-        tool_agent,
-        "Finish without using the tool.",
-        max_turns=1,
-    )
-    async for _event in stream.stream_events():
-        pass
-
-    assert stream.final_output == {"status": "done"}
-    assert stub_provider.requests[-1]["response_format"] == {"type": "json_object"}
-
     stub_provider.reply = '{"unexpected":"value"}'
     with pytest.raises(ModelBehaviorError, match="failed JSON Schema validation"):
-        await Runner.run(tool_agent, "Return an invalid receipt.", max_turns=1)
+        await run_agent(
+            compiled.entry_agent,
+            "Return an invalid receipt.",
+            context=context,
+            settings=RunSettings(),
+            max_turns=1,
+        )
 
     stub_provider.reply = '{"status":"done"}'
-    plain_agent = Agent(
+    plain_agent = AgentDefinition(
+        id="plain",
         name="Structured worker without tools",
         instructions="Return the requested receipt.",
-        model=resolved.model,
-        output_type=output_schema,
+        binding=binding,
+        model_settings=ModelSettings(),
+        output_schema=output_schema,
     )
-    result = await Runner.run(plain_agent, "Finish.", max_turns=1)
+    result = await run_agent(
+        plain_agent,
+        "Finish.",
+        context=context,
+        settings=RunSettings(),
+        max_turns=1,
+    )
 
     assert result.final_output == {"status": "done"}
     assert stub_provider.requests[-1]["response_format"]["type"] == "json_schema"

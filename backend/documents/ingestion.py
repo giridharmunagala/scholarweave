@@ -7,10 +7,9 @@ import anyio
 from backend.core.config import Settings
 from backend.core.errors import DocumentProcessingError
 from backend.utils import ProgressCallback, report_progress
-from backend.documents.formatting import DocumentFormatter
+from backend.documents.formatting import DocumentFormatter, build_paper_manifest
 from backend.documents.models import Document
 from backend.documents.ocr import DocumentOCR
-from backend.documents.paper import build_paper_manifest
 from backend.documents.repository import DocumentRepository
 from backend.documents.retrieval import RetrievalService
 from backend.documents.vision import OCR_QUALITY_LEVELS, VisionEnhancer

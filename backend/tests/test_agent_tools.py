@@ -7,21 +7,24 @@ from typing import Any
 import pytest
 
 from backend.agents.blueprint import FunctionToolSpec, ModelReferenceSpec
-from backend.conversations.autonomous import (
+from backend.conversations.turns import (
     RESEARCH_TOOL_IDS,
     deep_work_blueprint,
-    paper_work_required,
     research_blueprint,
     validate_paper_work_completion,
 )
-from backend.tools.work import create_work_plan, update_work_item, work_plan
 from backend.core.errors import ValidationError
 from backend.bootstrap import create_services
 from backend.documents.models import Document
 from backend.research.sources import WebSourceUnavailable
 from backend.agents.context import ScholarWeaveContext
 from backend.tools.catalog import APPLICATION_TOOLS, create_tool_catalog
-from backend.tools.runtime import ApplicationToolRuntime
+from backend.tools.runtime import (
+    ApplicationToolRuntime,
+    create_work_plan,
+    update_work_item,
+    work_plan,
+)
 
 
 class Runtime:
@@ -87,7 +90,7 @@ def test_catalog_contains_research_and_persistence_tools() -> None:
 @pytest.mark.anyio
 async def test_conversation_title_tool_is_first_turn_only(test_settings) -> None:
     services = create_services(test_settings)
-    conversation = services.autonomous.create_conversation(
+    conversation = services.conversation_turns.create_conversation(
         title="New research",
         model_reference=ModelReferenceSpec(),
     )
@@ -921,18 +924,18 @@ def test_chat_agent_can_use_persistence_tools_directly() -> None:
     assert blueprint.agent_tools == []
 
 
-def test_paper_intent_enables_mandatory_durable_workflow() -> None:
-    assert paper_work_required("Find papers about retrieval augmented generation")
-    assert paper_work_required("Review https://arxiv.org/pdf/2401.12345")
-    assert not paper_work_required("Find one current web source")
+def test_paper_completion_gate_is_activated_by_model_selected_activity() -> None:
+    validate_paper_work_completion(
+        ScholarWeaveContext(
+            run_id="non-paper-run",
+            tool_runtime=Runtime(),
+        )
+    )
 
-
-def test_paper_completion_gate_requires_read_summary_and_notes() -> None:
     context = ScholarWeaveContext(
         run_id="paper-run",
         tool_runtime=Runtime(),
         metadata={
-            "paper_work_required": True,
             "paper_activity": [
                 {
                     "action": "read",

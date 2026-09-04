@@ -2,24 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from agents import (
-    Model,
-    ModelResponse,
-    ModelSettings,
-    OpenAIChatCompletionsModel,
-    TResponseInputItem,
-    Usage,
-)
-from openai import AsyncOpenAI
 
 from backend.agents.blueprint import AgentBlueprint, SessionPolicySpec
 from backend.agents.compiler import AgentCompiler
+from backend.agents.harness import ModelBinding
 from backend.core.config import Settings
 from backend.core.errors import ConflictError, NotFoundError
-from backend.runs.broker import EventBroker
+from backend.runs.events import EventBroker
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
 from backend.runs.repository import RunRepository
@@ -29,9 +22,10 @@ from backend.runs.service import (
     RunService,
     _restore_pending_steering,
 )
-from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import SteeringMessage
 from backend.conversations.steering import steering_message_id
+from backend.tests.harness_support import FakeClient, stub_binding
 from backend.tools.catalog import create_tool_catalog
 from backend.tools.failures import (
     record_tool_success,
@@ -41,8 +35,8 @@ from backend.tools.failures import (
 
 
 class Resolver:
-    def __init__(self, model) -> None:
-        self.model = model
+    def __init__(self, binding) -> None:
+        self.binding = binding
 
     def resolve_agent_model(
         self,
@@ -50,14 +44,7 @@ class Resolver:
         *,
         require_tools: bool = False,
     ) -> ResolvedAgentModel:
-        return ResolvedAgentModel(
-            self.model,
-            "ollama",
-            False,
-            False,
-            False,
-            model_name="stub-model",
-        )
+        return self.binding
 
 
 class ToolRuntime:
@@ -130,58 +117,20 @@ class BoundingToolRuntime:
         }
 
 
-class FailingModel(Model):
-    async def get_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools,
-        output_schema,
-        handoffs,
-        tracing,
-        *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt,
-    ) -> ModelResponse:
-        raise RuntimeError("Model connection failed.")
-
-    def stream_response(self, *args, **kwargs):
-        async def events():
-            raise RuntimeError("Model connection failed.")
-            yield
-
-        return events()
+def failing_binding() -> ModelBinding:
+    return ModelBinding(
+        client=FakeClient.failing(RuntimeError("Model connection failed.")),
+        model_name="stub-model",
+        provider_kind="ollama",
+    )
 
 
-class BlockingModel(Model):
-    def __init__(self) -> None:
-        self.started = asyncio.Event()
-
-    async def get_response(
-        self,
-        system_instructions: str | None,
-        input: str | list[TResponseInputItem],
-        model_settings: ModelSettings,
-        tools,
-        output_schema,
-        handoffs,
-        tracing,
-        *,
-        previous_response_id: str | None,
-        conversation_id: str | None,
-        prompt,
-    ) -> ModelResponse:
-        return ModelResponse(output=[], usage=Usage(), response_id=None)
-
-    def stream_response(self, *args, **kwargs):
-        async def events():
-            self.started.set()
-            await asyncio.Event().wait()
-            yield
-
-        return events()
+def blocking_binding(started: asyncio.Event) -> ModelBinding:
+    return ModelBinding(
+        client=FakeClient.blocking(started),
+        model_name="stub-model",
+        provider_kind="ollama",
+    )
 
 
 @pytest.fixture
@@ -241,13 +190,9 @@ async def test_run_service_persists_sdk_items_events_and_usage(
         "document_id": None,
         "limit": 10,
     }
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    binding = stub_binding(stub_provider)
     catalog = create_tool_catalog()
-    compiled = AgentCompiler(Resolver(model), catalog).compile(
+    compiled = AgentCompiler(Resolver(binding), catalog).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Researcher",
@@ -280,7 +225,7 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     tool_runtime = ToolRuntime()
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         tool_runtime,
         EventBroker(),
         run_log_dir=settings.data_dir / "run_logs",
@@ -321,7 +266,82 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     assert lifecycle[0].payload_json["invocation_id"] == lifecycle[1].payload_json[
         "invocation_id"
     ]
-    await client.close()
+    await binding.client.close()
+
+
+@pytest.mark.anyio
+async def test_failed_completion_preserves_user_message_for_next_turn(
+    tmp_path,
+    stub_provider,
+) -> None:
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
+        AgentBlueprint.model_validate(
+            {
+                "name": "Researcher",
+                "entry_agent_id": "researcher",
+                "agents": [
+                    {
+                        "id": "researcher",
+                        "name": "Researcher",
+                        "instructions": "Answer the user.",
+                        "tool_ids": [],
+                    }
+                ],
+                "tools": [],
+            }
+        )
+    )
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    sessions = ConversationSessionFactory(settings.database_path)
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        sessions,
+        ToolRuntime(),
+        EventBroker(),
+        settings=settings,
+    )
+
+    first = await service.run_now(
+        compiled,
+        "First turn.",
+        conversation_id="conversation-1",
+    )
+    assert first.status == "completed"
+
+    def reject_completion(_context) -> None:
+        raise ValueError("Completion rejected.")
+
+    rejected = await service.run_now(
+        replace(
+            compiled,
+            completion_validator=reject_completion,
+            completion_policy_id="test-rejection",
+        ),
+        "Second turn must survive.",
+        conversation_id="conversation-1",
+    )
+    assert rejected.status == "failed"
+
+    third = await service.run_now(
+        compiled,
+        "Third turn.",
+        conversation_id="conversation-1",
+    )
+    assert third.status == "completed"
+
+    third_request_messages = stub_provider.requests[2]["messages"]
+    assert any(
+        message.get("role") == "user"
+        and message.get("content") == "Second turn must survive."
+        for message in third_request_messages
+    )
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -330,12 +350,8 @@ async def test_terminal_model_call_continues_with_queued_steering(
     stub_provider,
 ) -> None:
     stub_provider.stream_delay_seconds = 0.5
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Researcher",
@@ -360,7 +376,7 @@ async def test_terminal_model_call_continues_with_queued_steering(
     settings.ensure_directories()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -400,7 +416,7 @@ async def test_terminal_model_call_continues_with_queued_steering(
         event.payload_json["message_id"] == steering.id for event in steering_events
     )
     assert completed.epochs[0].terminal_reason == "steering_continuation"
-    await client.close()
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -409,12 +425,8 @@ async def test_steering_is_not_applied_when_run_budget_is_exhausted(
     stub_provider,
 ) -> None:
     stub_provider.stream_delay_seconds = 0.5
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Researcher",
@@ -438,7 +450,7 @@ async def test_steering_is_not_applied_when_run_budget_is_exhausted(
         database_path=tmp_path / "metadata.sqlite3",
     )
     settings.ensure_directories()
-    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     service = RunService(
         RunRepository(create_session_factory(settings)),
         sessions,
@@ -475,7 +487,7 @@ async def test_steering_is_not_applied_when_run_budget_is_exhausted(
         for item in await session.get_items()
         if isinstance(item, dict)
     )
-    await client.close()
+    await binding.client.close()
 
 
 def test_pending_steering_is_reconstructed_from_durable_events() -> None:
@@ -522,11 +534,7 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
             },
         ),
     ]
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    binding = stub_binding(stub_provider)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -534,7 +542,7 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
         tool_result_max_tokens=512,
     )
     compiled = AgentCompiler(
-        Resolver(model),
+        Resolver(binding),
         create_tool_catalog(),
         settings=settings,
     ).compile(
@@ -565,7 +573,7 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
     tool_runtime = BoundingToolRuntime()
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         tool_runtime,
         EventBroker(),
     )
@@ -598,13 +606,13 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
         if event.event_type == "tool.completed"
     ]
     assert completed_tool_events[0]["result_ref"] == "retained-result"
-    await client.close()
+    await binding.client.close()
 
 
 @pytest.mark.anyio
 async def test_run_failure_settles_active_agent_invocation(tmp_path) -> None:
-    model = FailingModel()
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = failing_binding()
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Failing agent",
@@ -628,7 +636,7 @@ async def test_run_failure_settles_active_agent_invocation(tmp_path) -> None:
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         ToolRuntime(),
         EventBroker(),
     )
@@ -652,8 +660,9 @@ async def test_run_failure_settles_active_agent_invocation(tmp_path) -> None:
 
 @pytest.mark.anyio
 async def test_run_cancellation_supersedes_active_agent_invocation(tmp_path) -> None:
-    model = BlockingModel()
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    started = asyncio.Event()
+    binding = blocking_binding(started)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Blocking agent",
@@ -677,7 +686,7 @@ async def test_run_cancellation_supersedes_active_agent_invocation(tmp_path) -> 
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         ToolRuntime(),
         EventBroker(),
     )
@@ -686,7 +695,7 @@ async def test_run_cancellation_supersedes_active_agent_invocation(tmp_path) -> 
         "Wait.",
         conversation_id=None,
     )
-    await asyncio.wait_for(model.started.wait(), timeout=2)
+    await asyncio.wait_for(started.wait(), timeout=2)
 
     await service.cancel(created.id)
     task = service._tasks.get(created.id)
@@ -721,7 +730,7 @@ async def test_run_service_clear_history_preserves_active_runs(tmp_path) -> None
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         ToolRuntime(),
         EventBroker(),
     )
@@ -761,10 +770,10 @@ async def test_run_service_deletes_only_finished_runs(tmp_path) -> None:
     )
     settings.ensure_directories()
     repository = RunRepository(create_session_factory(settings))
-    sdk_sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     service = RunService(
         repository,
-        sdk_sessions,
+        sessions,
         ToolRuntime(),
         EventBroker(),
     )
@@ -786,7 +795,7 @@ async def test_run_service_deletes_only_finished_runs(tmp_path) -> None:
         input_value="waiting",
         blueprint={},
     )
-    standalone = sdk_sessions.get(
+    standalone = sessions.get(
         f"run:{finished.id}",
         SessionPolicySpec(),
     )
@@ -798,7 +807,7 @@ async def test_run_service_deletes_only_finished_runs(tmp_path) -> None:
         repository.get(finished.id)
     with pytest.raises(ConflictError, match="finished run"):
         service.delete(pending.id)
-    assert await sdk_sessions.get(
+    assert await sessions.get(
         f"run:{finished.id}",
         SessionPolicySpec(),
     ).get_items() == []
@@ -817,7 +826,7 @@ async def test_remote_cancellation_records_intent_without_terminalizing_owner_ru
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         ToolRuntime(),
         EventBroker(),
     )
@@ -855,12 +864,8 @@ async def test_tool_failure_is_returned_to_model_without_failing_run(
         "url": "https://example.com/unavailable",
         "title": None,
     }
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Web researcher",
@@ -892,7 +897,7 @@ async def test_tool_failure_is_returned_to_model_without_failing_run(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         FailingToolRuntime(),
         EventBroker(),
     )
@@ -909,7 +914,7 @@ async def test_tool_failure_is_returned_to_model_without_failing_run(
     assert "try a different tool or source" in tool_outputs[0]
     assert any(event.event_type == "tool.failed" for event in run.events)
     assert not any(event.event_type == "run.failed" for event in run.events)
-    await client.close()
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -925,12 +930,8 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
         )
         for index in range(3)
     ]
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Loop-aware researcher",
@@ -991,7 +992,7 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
     runtime = FailingToolRuntime()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         runtime,
         EventBroker(),
     )
@@ -1021,7 +1022,11 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
         if event.event_type == "tool.failed"
     ]
     assert failures[-1]["failure_limit_reached"] is True
-    await client.close()
+    assert failures[-1]["display_message"] == (
+        "This tool was paused after three consecutive failures. The agent will use "
+        "another available source or explain what could not be verified."
+    )
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -1041,12 +1046,8 @@ async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
         )
         for index in range(3)
     ]
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Acquisition-aware researcher",
@@ -1084,7 +1085,7 @@ async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
     runtime = FailingToolRuntime()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         runtime,
         EventBroker(),
     )
@@ -1108,7 +1109,7 @@ async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
         assert "search_research_library" in offered_tools
     finally:
         await service.close()
-        await client.close()
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -1117,12 +1118,8 @@ async def test_cancel_immediately_stops_model_stream(
     stub_provider,
 ) -> None:
     stub_provider.stream_delay_seconds = 10
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Researcher",
@@ -1145,7 +1142,7 @@ async def test_cancel_immediately_stops_model_stream(
     settings.ensure_directories()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         ToolRuntime(),
         EventBroker(),
     )
@@ -1165,7 +1162,7 @@ async def test_cancel_immediately_stops_model_stream(
     assert cancelled.status == "cancelled"
     assert pending.id not in service._tasks
     assert any(event.event_type == "run.cancelled" for event in cancelled.events)
-    await client.close()
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -1179,12 +1176,8 @@ async def test_cancel_immediately_propagates_to_active_tool(
         "document_id": None,
         "limit": 10,
     }
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Researcher",
@@ -1216,7 +1209,7 @@ async def test_cancel_immediately_propagates_to_active_tool(
     runtime = BlockingToolRuntime()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         runtime,
         EventBroker(),
     )
@@ -1232,7 +1225,7 @@ async def test_cancel_immediately_propagates_to_active_tool(
 
     assert cancelled.status == "cancelled"
     assert runtime.cancelled.is_set()
-    await client.close()
+    await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -1241,12 +1234,8 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
     stub_provider,
 ) -> None:
     stub_provider.stream_delay_seconds = 10
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
                 "name": "Researcher",
@@ -1275,7 +1264,7 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
         database_path=tmp_path / "metadata.sqlite3",
     )
     settings.ensure_directories()
-    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     service = RunService(
         RunRepository(create_session_factory(settings)),
         sessions,
@@ -1322,7 +1311,7 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
     assert answer.blueprint_json["description"] == STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION
     assert answer.blueprint_json["tools"] == []
     assert answer.blueprint_json["run"]["max_turns"] == 1
-    recovered_answer = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
+    recovered_answer = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(answer.blueprint_json)
     )
     assert recovered_answer.max_turns == 1
@@ -1339,173 +1328,4 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
         isinstance(item, dict) and item.get("role") == "assistant"
         for item in session_items
     )
-    await client.close()
-
-
-@pytest.mark.anyio
-async def test_run_service_serializes_approval_and_resumes_sdk_state(
-    tmp_path,
-    stub_provider,
-) -> None:
-    stub_provider.call_tool = "search_research_library"
-    stub_provider.tool_arguments = {
-        "query": None,
-        "document_id": None,
-        "limit": 10,
-    }
-    client = AsyncOpenAI(
-        api_key="test",
-        base_url=f"{stub_provider.base_url}/v1",
-    )
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
-    compiled = AgentCompiler(Resolver(model), create_tool_catalog()).compile(
-        AgentBlueprint.model_validate(
-            {
-                "name": "Approval researcher",
-                "entry_agent_id": "researcher",
-                "agents": [
-                    {
-                        "id": "researcher",
-                        "name": "Researcher",
-                        "instructions": "Use the paper list tool, then answer.",
-                        "tool_ids": ["papers"],
-                    }
-                ],
-                "tools": [
-                    {
-                        "id": "papers",
-                        "kind": "function",
-                        "catalog_id": "research.library.search",
-                        "needs_approval": True,
-                    }
-                ],
-            }
-        )
-    )
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        workspace_dir=tmp_path / "workspace",
-        database_path=tmp_path / "metadata.sqlite3",
-    )
-    settings.ensure_directories()
-    repository = RunRepository(create_session_factory(settings))
-    tool_runtime = ToolRuntime()
-    service = RunService(
-        repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
-        tool_runtime,
-        EventBroker(),
-    )
-
-    run = service.create(
-        compiled,
-        "List the papers.",
-        conversation_id=None,
-        runtime_metadata={
-            "work_plan": [
-                {
-                    "id": "papers",
-                    "title": "List the papers",
-                    "status": "in_progress",
-                    "summary": "",
-                }
-            ]
-        },
-    )
-    for _attempt in range(200):
-        paused = service.get(run.id)
-        if paused.status in {"paused", "completed", "failed", "cancelled"}:
-            break
-        await asyncio.sleep(0.01)
-
-    assert paused.status == "paused"
-    assert paused.state_json
-    expected_plan = [
-        {
-            "id": "papers",
-            "title": "List the papers",
-            "status": "in_progress",
-            "summary": "",
-        }
-    ]
-    assert paused.state_json["context"]["context"]["metadata"] == {
-        "work_plan": expected_plan
-    }
-    assert len(paused.interruptions) == 1
-    assert paused.interruptions[0].status == "pending"
-    assert tool_runtime.calls == []
-
-    await service.resolve_interruption(
-        compiled,
-        run_id=paused.id,
-        interruption_id=paused.interruptions[0].id,
-        approved=True,
-    )
-    for _attempt in range(200):
-        resumed = service.get(paused.id)
-        if resumed.status in {"completed", "failed", "cancelled"}:
-            break
-        await asyncio.sleep(0.01)
-
-    assert resumed.status == "completed", resumed.error
-    assert resumed.interruptions[0].status == "approved"
-    assert tool_runtime.calls == [
-        (
-            "research.library.search",
-            {"query": None, "document_id": None, "limit": 10},
-        )
-    ]
-    assert tool_runtime.context_metadata[0]["work_plan"] == expected_plan
-    assert sum(item.item_type == "tool_call_item" for item in resumed.items) == 1
-    assert sum(item.item_type == "tool_call_output_item" for item in resumed.items) == 1
-    assert any(event.event_type == "run.paused" for event in resumed.events)
-    assert any(event.event_type == "run.completed" for event in resumed.events)
-    lifecycle = [
-        event
-        for event in resumed.events
-        if event.event_type
-        in {"agent.started", "agent.completed", "agent.superseded"}
-    ]
-    assert [event.event_type for event in lifecycle[:4]] == [
-        "agent.started",
-        "agent.superseded",
-        "agent.started",
-        "agent.completed",
-    ]
-    assert lifecycle[0].payload_json["invocation_id"] == lifecycle[1].payload_json[
-        "invocation_id"
-    ]
-    assert lifecycle[2].payload_json["invocation_id"] == lifecycle[3].payload_json[
-        "invocation_id"
-    ]
-    assert lifecycle[0].payload_json["invocation_id"] != lifecycle[2].payload_json[
-        "invocation_id"
-    ]
-
-    rejected = await service.run_now(compiled, "List the papers again.")
-    await service.resolve_interruption(
-        compiled,
-        run_id=rejected.id,
-        interruption_id=rejected.interruptions[0].id,
-        approved=False,
-        rejection_message="The paper list is not needed.",
-    )
-    for _attempt in range(200):
-        rejected = service.get(rejected.id)
-        if rejected.status in {"completed", "failed", "cancelled"}:
-            break
-        await asyncio.sleep(0.01)
-
-    assert rejected.status == "completed", rejected.error
-    assert rejected.interruptions[0].status == "rejected"
-    assert rejected.interruptions[0].response_json == {
-        "approved": False,
-        "message": "The paper list is not needed.",
-    }
-    assert tool_runtime.calls == [
-        (
-            "research.library.search",
-            {"query": None, "document_id": None, "limit": 10},
-        )
-    ]
-    await client.close()
+    await binding.client.close()

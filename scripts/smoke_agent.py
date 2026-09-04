@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from backend.conversations.autonomous import research_blueprint
+from backend.conversations.turns import research_blueprint
 from backend.bootstrap import create_services
 from backend.core.config import Settings
 

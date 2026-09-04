@@ -4,10 +4,9 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from agents.run_config import ModelInputData
-
-from backend.core.errors import ConflictError
 from backend.agents.context import ScholarWeaveContext
+from backend.agents.harness import RunInputItems
+from backend.core.errors import ConflictError
 
 _STEERING_MARKER_PREFIX = "<!-- scholarweave-steering:"
 _STEERING_MARKER_SUFFIX = " -->\n"
@@ -60,30 +59,27 @@ class SteeringInbox:
 
     async def apply(
         self,
-        model_data: ModelInputData,
+        items: RunInputItems,
         context: ScholarWeaveContext,
         *,
         present_message_ids: set[str] | None = None,
-    ) -> ModelInputData:
+    ) -> RunInputItems:
         pending = self._drain()
         if pending:
             await self.persist(pending)
             self._replay.extend(pending)
             await emit_steering_applied(context, pending)
         if not self._replay:
-            return model_data
+            return items
         present_message_ids = present_message_ids or set()
-        return ModelInputData(
-            input=[
-                *model_data.input,
-                *(
-                    message.input_item()
-                    for message in self._replay
-                    if message.id not in present_message_ids
-                ),
-            ],
-            instructions=model_data.instructions,
-        )
+        return [
+            *items,
+            *(
+                message.input_item()
+                for message in self._replay
+                if message.id not in present_message_ids
+            ),
+        ]
 
     async def persist(self, messages: list[SteeringMessage]) -> None:
         if self._session is None:

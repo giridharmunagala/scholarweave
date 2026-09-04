@@ -1,60 +1,126 @@
+"""Compile a persisted blueprint into native agent definitions for the harness."""
+
 from __future__ import annotations
 
-import asyncio
+import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any
-
-from agents import (
-    Agent,
-    AgentsException,
-    FileSearchTool,
-    FunctionTool,
-    ModelSettings,
-    RunConfig,
-    ToolExecutionConfig,
-    WebSearchTool,
-    handoff,
-)
-from agents.run_config import SessionSettings
-from agents.tool import Tool
+from zoneinfo import ZoneInfo
 
 from backend.agents.blueprint import (
     AgentBlueprint,
-    FileSearchToolSpec,
     FunctionToolSpec,
-    WebSearchToolSpec,
+    ModelSettingsSpec,
+    ReasoningSpec,
 )
-from backend.agents.catalog import GuardrailCatalog, ToolCatalog
-from backend.agents.instructions import GLOBAL_AGENT_INSTRUCTIONS, with_global_agent_instructions
-from backend.agents.output import JsonSchemaOutput, with_json_schema_output_instructions
-from backend.core.errors import ValidationError
+from backend.agents.catalog import ToolCatalog
+from backend.agents.context import ScholarWeaveContext
+from backend.agents.context_budget import ContextBudgetPolicy
+from backend.agents.harness import (
+    MAX_DELEGATION_DEPTH,
+    AgentDefinition,
+    FunctionTool,
+    HarnessError,
+    JsonSchemaOutput,
+    ModelSettings,
+    RunSettings,
+    delegation_tool,
+)
 from backend.core.config import Settings
+from backend.core.errors import ValidationError
+from backend.prompting.registry import PromptRegistry, default_prompt_registry
+from backend.providers.inference import InferenceScheduler
 from backend.providers.types import (
     AgentModelResolver,
     ModelReference,
     ProviderRuntimeError,
     ResolvedAgentModel,
 )
-from backend.prompting.registry import PromptRegistry
-from backend.agents.context import ScholarWeaveContext
-from backend.agents.context_budget import create_context_budget_filter
 from backend.runs.hooks import ScholarWeaveRunHooks
-from backend.providers.inference import InferenceScheduler
-from backend.agents.sdk import assert_supported_sdk
-from backend.tools.failures import nested_agent_failure_handler
 
-UNLIMITED_AGENT_TOOL_TURNS = 2_147_483_647
-MAX_AGENT_TOOL_DEPTH = 2
+UNLIMITED_AGENT_TOOL_TURNS = 100
+GLOBAL_AGENT_INSTRUCTIONS = default_prompt_registry().render("global")
+
+
+def current_system_information(
+    at: datetime | None = None,
+    *,
+    timezone_name: str | None = None,
+    user_profile: str | None = None,
+) -> str:
+    """Describe the current local date, time, timezone, and optional user context."""
+    current = at or datetime.now().astimezone()
+    if current.tzinfo is None:
+        raise ValueError("System information requires a timezone-aware datetime.")
+    if timezone_name:
+        current = current.astimezone(ZoneInfo(timezone_name))
+    offset = current.strftime("%z")
+    formatted_offset = f"{offset[:3]}:{offset[3:]}"
+    current_timezone_name = current.tzname() or "local"
+    information = (
+        "System information:\n"
+        f"Current date: {current.date().isoformat()}\n"
+        f"Current time: {current.strftime('%H:%M:%S')} "
+        f"{current_timezone_name} (UTC{formatted_offset})"
+    )
+    if user_profile:
+        information += f"\nUser context: {user_profile.strip()}"
+    return information
+
+
+def with_global_agent_instructions(
+    instructions: str,
+    *,
+    global_instructions: str = GLOBAL_AGENT_INSTRUCTIONS,
+    at: datetime | None = None,
+    timezone_name: str | None = None,
+    user_profile: str | None = None,
+) -> str:
+    """Append shared policy and current system information to agent instructions."""
+    combined = instructions.rstrip()
+    global_instructions = global_instructions.strip()
+    if global_instructions and global_instructions not in combined:
+        combined = f"{combined}\n\n{global_instructions}"
+    return (
+        f"{combined}\n\n"
+        f"{current_system_information(at, timezone_name=timezone_name, user_profile=user_profile)}"
+    )
+
+
+def with_json_schema_output_instructions(
+    instructions: str,
+    schema_name: str,
+    schema: dict[str, Any],
+) -> str:
+    """Append a provider-independent requirement to return only schema-valid JSON."""
+    serialized_schema = json.dumps(
+        schema,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"{instructions.rstrip()}\n\n"
+        "Structured output requirement:\n"
+        f"Return only one JSON value matching the {schema_name} schema below. "
+        "Do not return Markdown fences, headings, commentary, or an answer to the user's "
+        "request outside that JSON value. This requirement applies even when the provider "
+        "does not enforce its response-format setting.\n"
+        f"{serialized_schema}"
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class CompiledAgent:
     blueprint: AgentBlueprint
-    entry_agent: Agent[ScholarWeaveContext]
-    agents_by_id: dict[str, Agent[ScholarWeaveContext]]
+    entry_agent: AgentDefinition
+    agents_by_id: dict[str, AgentDefinition]
     resolved_models: dict[str, ResolvedAgentModel]
-    run_config: RunConfig
+    run_settings: RunSettings
     max_turns: int
+    context_policy: ContextBudgetPolicy | None = None
     completion_validator: Callable[[ScholarWeaveContext], None] | None = None
     completion_policy_id: str | None = None
     context_window_tokens: int | None = None
@@ -65,14 +131,12 @@ class AgentCompiler:
         self,
         model_resolver: AgentModelResolver,
         tool_catalog: ToolCatalog,
-        guardrail_catalog: GuardrailCatalog | None = None,
         settings: Settings | None = None,
         prompts: PromptRegistry | None = None,
         inference_scheduler: InferenceScheduler | None = None,
     ) -> None:
         self._models = model_resolver
         self._tools = tool_catalog
-        self._guardrails = guardrail_catalog or GuardrailCatalog()
         self._settings = settings
         self._prompts = prompts
         self._inference_scheduler = inference_scheduler
@@ -83,12 +147,12 @@ class AgentCompiler:
         *,
         context_window_tokens: int | None = None,
     ) -> CompiledAgent:
-        assert_supported_sdk()
+        """Validate a blueprint and compile its agents, tools, and run settings."""
         issues = self._reference_issues(blueprint)
         if issues:
             raise ValidationError("Agent blueprint is invalid.", issues=issues)
 
-        agents_by_id: dict[str, Agent[ScholarWeaveContext]] = {}
+        agents_by_id: dict[str, AgentDefinition] = {}
         resolved_models: dict[str, ResolvedAgentModel] = {}
         agent_specs = {spec.id: spec for spec in blueprint.agents}
 
@@ -101,7 +165,7 @@ class AgentCompiler:
                 require_tools=self._agent_requires_tools(spec.id, blueprint),
             )
             resolved_models[spec.id] = resolved
-            output_type = (
+            output_schema = (
                 JsonSchemaOutput(
                     spec.output.name,
                     spec.output.schema_,
@@ -126,97 +190,84 @@ class AgentCompiler:
                     spec.output.name,
                     spec.output.schema_,
                 )
-            agents_by_id[spec.id] = Agent[ScholarWeaveContext](
+            agents_by_id[spec.id] = AgentDefinition(
+                id=spec.id,
                 name=spec.name,
-                handoff_description=spec.description,
+                description=spec.description,
                 instructions=instructions,
-                model=resolved.model,
-                model_settings=self._model_settings(spec.model_settings, resolved),
-                output_type=output_type,
-                tool_use_behavior=spec.tool_use_behavior,
-                reset_tool_choice=spec.reset_tool_choice,
+                binding=resolved,
+                model_settings=self._model_settings(spec.model_settings),
+                output_schema=output_schema,
+                stop_on_first_tool=spec.tool_use_behavior == "stop_on_first_tool",
             )
 
-        guardrails = {spec.id: spec for spec in blueprint.guardrails}
-        tools_by_id: dict[str, Tool] = {}
-        for spec in blueprint.tools:
-            tool = self._compile_tool(spec, blueprint, resolved_models)
-            if isinstance(spec, FunctionToolSpec):
-                tool.tool_input_guardrails = [
-                    self._guardrails.build_tool_input(guardrails[guardrail_id])
-                    for guardrail_id in spec.input_guardrail_ids
-                ]
-                tool.tool_output_guardrails = [
-                    self._guardrails.build_tool_output(guardrails[guardrail_id])
-                    for guardrail_id in spec.output_guardrail_ids
-                ]
-            tools_by_id[spec.id] = tool
+        run_settings = RunSettings(
+            max_turns=blueprint.run.max_turns,
+            max_tool_concurrency=blueprint.run.max_tool_concurrency,
+            max_input_characters=blueprint.run.max_input_characters,
+            max_output_characters=blueprint.run.max_output_characters,
+            workflow_name=blueprint.name,
+        )
+        context_policy = (
+            ContextBudgetPolicy(
+                self._settings,
+                context_window_tokens_by_agent={
+                    agent_id: window
+                    for agent_id, resolved in resolved_models.items()
+                    if (window := context_window_tokens or resolved.context_window_tokens)
+                    is not None
+                },
+                prompt_registry=self._prompts,
+            )
+            if self._settings is not None
+            else None
+        )
 
-        handoffs_by_source: dict[str, list[Any]] = {agent_id: [] for agent_id in agents_by_id}
-        for spec in blueprint.handoffs:
-            handoffs_by_source[spec.source_agent_id].append(
-                handoff(
-                    agents_by_id[spec.target_agent_id],
-                    tool_name_override=spec.tool_name,
-                    tool_description_override=spec.tool_description,
-                    nest_handoff_history=spec.nest_handoff_history,
+        tools_by_id = {
+            spec.id: self._tools.build_function_tool(spec) for spec in blueprint.tools
+        }
+        depths = self._delegation_depths(blueprint)
+        hooks = ScholarWeaveRunHooks()
+        delegations_by_owner: dict[str, list[FunctionTool]] = {
+            agent_id: [] for agent_id in agents_by_id
+        }
+        # Build deepest delegations first so a delegate already carries its own
+        # sub-agent tools when its owner wraps it.
+        for spec in sorted(
+            blueprint.agent_tools,
+            key=lambda item: depths[item.delegate_agent_id],
+            reverse=True,
+        ):
+            delegate = agents_by_id[spec.delegate_agent_id]
+            delegate.tools = self._bound_tools(
+                agent_specs[spec.delegate_agent_id],
+                tools_by_id,
+                delegations_by_owner[spec.delegate_agent_id],
+            )
+            delegations_by_owner[spec.owner_agent_id].append(
+                self._serialized(
+                    delegation_tool(
+                        owner_depth=depths[spec.owner_agent_id],
+                        delegate=delegate,
+                        tool_name=spec.tool_name,
+                        tool_description=spec.tool_description,
+                        max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
+                        settings=run_settings,
+                        hooks=hooks,
+                        context_policy=context_policy,
+                        serialize_calls=spec.serialize_calls,
+                    ),
+                    serialize=spec.serialize_calls,
                 )
             )
-
-        agent_tools_by_owner: dict[str, list[Tool]] = {agent_id: [] for agent_id in agents_by_id}
-        for spec in blueprint.agent_tools:
-            agent_tool = agents_by_id[spec.delegate_agent_id].as_tool(
-                tool_name=spec.tool_name,
-                tool_description=spec.tool_description,
-                max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
-                hooks=ScholarWeaveRunHooks(),
-                failure_error_function=nested_agent_failure_handler(
-                    spec.tool_name,
-                    agents_by_id[spec.delegate_agent_id].name,
-                ),
-                needs_approval=spec.needs_approval,
-            )
-            if spec.serialize_calls:
-                agent_tool = self._serialize_agent_tool(
-                    agent_tool,
-                    self._inference_scheduler,
-                )
-            elif spec.max_parallel_calls is not None:
-                agent_tool = self._parallel_agent_tool(
-                    agent_tool,
-                    spec.max_parallel_calls,
-                    self._inference_scheduler,
-                )
-            agent_tools_by_owner[spec.owner_agent_id].append(agent_tool)
 
         for agent_id, agent in agents_by_id.items():
-            spec = agent_specs[agent_id]
-            bound_tools = [tools_by_id[tool_id] for tool_id in spec.tool_ids]
-            bound_tools.extend(agent_tools_by_owner[agent_id])
-            if self._settings is not None and bound_tools and not any(
-                getattr(tool, "name", None) == "read_tool_result"
-                for tool in bound_tools
-            ):
-                bound_tools.append(
-                    self._tools.build_function_tool(
-                        FunctionToolSpec(
-                            id="context-result-reader",
-                            catalog_id="tool.results.read",
-                        )
-                    )
-                )
-            self._validate_tool_names(agent_id, bound_tools)
-            self._validate_hosted_tools(agent_id, bound_tools, resolved_models[agent_id])
-            agent.tools = bound_tools
-            agent.handoffs = handoffs_by_source[agent_id]
-            agent.input_guardrails = [
-                self._guardrails.build_input(guardrails[guardrail_id])
-                for guardrail_id in spec.input_guardrail_ids
-            ]
-            agent.output_guardrails = [
-                self._guardrails.build_output(guardrails[guardrail_id])
-                for guardrail_id in spec.output_guardrail_ids
-            ]
+            agent.tools = self._bound_tools(
+                agent_specs[agent_id],
+                tools_by_id,
+                delegations_by_owner[agent_id],
+            )
+            self._validate_tool_names(agent_id, agent.tools)
 
         effective_context_window = (
             context_window_tokens
@@ -232,131 +283,57 @@ class AgentCompiler:
             entry_agent=agents_by_id[blueprint.entry_agent_id],
             agents_by_id=agents_by_id,
             resolved_models=resolved_models,
-            run_config=RunConfig(
-                workflow_name=blueprint.name,
-                tracing_disabled=not blueprint.run.tracing_enabled,
-                session_settings=SessionSettings(
-                    limit=blueprint.session.history_max_items
-                ),
-                tool_not_found_behavior="return_error_to_model",
-                tool_name_collision_policy="error",
-                tool_execution=ToolExecutionConfig(
-                    max_function_tool_concurrency=blueprint.run.max_tool_concurrency
-                ),
-                call_model_input_filter=(
-                    create_context_budget_filter(
-                        self._settings,
-                        (
-                            {
-                                id(agents_by_id[agent_id]): context_window_tokens
-                                for agent_id in resolved_models
-                            }
-                            if context_window_tokens is not None
-                            else {
-                                id(agents_by_id[agent_id]): context_window
-                                for agent_id, resolved in resolved_models.items()
-                                if (context_window := resolved.context_window_tokens)
-                                is not None
-                            }
-                        ),
-                        {
-                            id(agent): agent_id
-                            for agent_id, agent in agents_by_id.items()
-                        },
-                        prompt_registry=self._prompts,
-                    )
-                    if self._settings is not None
-                    else None
-                ),
-            ),
+            run_settings=run_settings,
             max_turns=blueprint.run.max_turns,
+            context_policy=context_policy,
             context_window_tokens=effective_context_window,
         )
-
-    @staticmethod
-    def _serialize_agent_tool(
-        tool: FunctionTool,
-        inference_scheduler: InferenceScheduler | None = None,
-    ) -> FunctionTool:
-        invoke = tool.on_invoke_tool
-        tool_name = tool.name
-        active = False
-
-        async def invoke_serially(context: Any, input_json: str) -> str:
-            nonlocal active
-            if active:
-                return (
-                    f"Rejected: {tool_name} already has a call in progress and runs exactly one "
-                    "call at a time. This call was not started, so nothing was read, written, or "
-                    "saved for it. Never place two of these calls in the same turn: wait for the "
-                    "in-flight receipt, then issue this call again on its own."
-                )
-            active = True
-            try:
-                if inference_scheduler is not None:
-                    async with inference_scheduler.exclusive():
-                        return await invoke(context, input_json)
-                return await invoke(context, input_json)
-            finally:
-                active = False
-
-        tool.on_invoke_tool = invoke_serially
-        return tool
-
-    @staticmethod
-    def _parallel_agent_tool(
-        tool: FunctionTool,
-        limit: int,
-        inference_scheduler: InferenceScheduler | None = None,
-    ) -> FunctionTool:
-        invoke = tool.on_invoke_tool
-        semaphore = asyncio.Semaphore(limit)
-        inference_group = object()
-
-        async def invoke_with_limit(context: Any, input_json: str) -> str:
-            async with semaphore:
-                if inference_scheduler is None:
-                    return await invoke(context, input_json)
-                async with inference_scheduler.parallel(inference_group, limit):
-                    return await invoke(context, input_json)
-
-        tool.on_invoke_tool = invoke_with_limit
-        return tool
 
     def validate(self, blueprint: AgentBlueprint) -> tuple[str, ...]:
         try:
             self.compile(blueprint)
         except ValidationError as exc:
             return exc.issues or (exc.message,)
-        except (AgentsException, ProviderRuntimeError, ValueError) as exc:
+        except (HarnessError, ProviderRuntimeError, ValueError) as exc:
             return (str(exc),)
         return ()
 
-    def _compile_tool(
+    def _bound_tools(
         self,
         spec: Any,
-        blueprint: AgentBlueprint,
-        resolved_models: dict[str, ResolvedAgentModel],
-    ) -> Tool:
-        if isinstance(spec, FunctionToolSpec):
-            return self._tools.build_function_tool(spec)
-        if isinstance(spec, WebSearchToolSpec):
-            self._require_hosted_tool_provider(spec.id, blueprint, resolved_models)
-            return WebSearchTool(
-                search_context_size=spec.search_context_size,
-                external_web_access=spec.external_web_access,
+        tools_by_id: dict[str, FunctionTool],
+        delegations: list[FunctionTool],
+    ) -> list[FunctionTool]:
+        bound = [tools_by_id[tool_id] for tool_id in spec.tool_ids]
+        bound.extend(delegations)
+        if (
+            self._settings is not None
+            and bound
+            and not any(tool.name == "read_tool_result" for tool in bound)
+        ):
+            bound.append(
+                self._tools.build_function_tool(
+                    FunctionToolSpec(
+                        id="context-result-reader",
+                        catalog_id="tool.results.read",
+                    )
+                )
             )
-        if isinstance(spec, FileSearchToolSpec):
-            self._require_hosted_tool_provider(spec.id, blueprint, resolved_models)
-            return FileSearchTool(
-                vector_store_ids=spec.vector_store_ids,
-                max_num_results=spec.max_num_results,
-                include_search_results=spec.include_search_results,
-            )
-        raise ValidationError(
-            "Agent blueprint contains an unsupported tool.",
-            issues=[f"Unsupported tool kind on '{spec.id}'."],
-        )
+        return bound
+
+    def _serialized(self, tool: FunctionTool, *, serialize: bool) -> FunctionTool:
+        """Route serialized delegations through the exclusive-inference scheduler."""
+        scheduler = self._inference_scheduler
+        if not serialize or scheduler is None:
+            return tool
+        invoke = tool.on_invoke_tool
+
+        async def invoke_exclusively(invocation: Any, raw_arguments: str) -> Any:
+            async with scheduler.exclusive():
+                return await invoke(invocation, raw_arguments)
+
+        tool.on_invoke_tool = invoke_exclusively
+        return tool
 
     @staticmethod
     def _agent_requires_tools(agent_id: str, blueprint: AgentBlueprint) -> bool:
@@ -364,31 +341,34 @@ class AgentCompiler:
         return bool(
             spec.tool_ids
             or any(item.owner_agent_id == agent_id for item in blueprint.agent_tools)
-            or any(item.source_agent_id == agent_id for item in blueprint.handoffs)
         )
 
     @staticmethod
-    def _model_settings(spec: Any, resolved: ResolvedAgentModel) -> ModelSettings:
-        parallel = spec.parallel_tool_calls
-        if parallel is None:
-            parallel = resolved.supports_parallel_tool_calls
+    def _model_settings(spec: ModelSettingsSpec) -> ModelSettings:
         return ModelSettings(
             temperature=spec.temperature,
             top_p=spec.top_p,
             frequency_penalty=spec.frequency_penalty,
             presence_penalty=spec.presence_penalty,
             tool_choice=spec.tool_choice,
-            parallel_tool_calls=parallel,
-            truncation=spec.truncation,
+            parallel_tool_calls=spec.parallel_tool_calls,
             max_tokens=spec.max_tokens,
-            reasoning=(
-                spec.reasoning.model_dump(exclude_none=True)
-                if spec.reasoning is not None
-                else None
+            reasoning_effort=(
+                spec.reasoning.effort if spec.reasoning is not None else None
             ),
             verbosity=spec.verbosity,
-            include_usage=True,
         )
+
+    @staticmethod
+    def _delegation_depths(blueprint: AgentBlueprint) -> dict[str, int]:
+        """Depth 0 is the coordinator; delegates inherit their owner's depth plus one."""
+        depths = {spec.id: 0 for spec in blueprint.agents}
+        for _ in range(MAX_DELEGATION_DEPTH + 1):
+            for relation in blueprint.agent_tools:
+                owner = depths.get(relation.owner_agent_id, 0)
+                current = depths.get(relation.delegate_agent_id, 0)
+                depths[relation.delegate_agent_id] = max(current, owner + 1)
+        return depths
 
     @staticmethod
     def _reference_issues(blueprint: AgentBlueprint) -> list[str]:
@@ -403,11 +383,8 @@ class AgentCompiler:
 
         agent_ids = {spec.id for spec in blueprint.agents}
         tool_ids = {spec.id for spec in blueprint.tools}
-        guardrail_ids = {spec.id for spec in blueprint.guardrails}
         duplicates([spec.id for spec in blueprint.agents], "agent")
         duplicates([spec.id for spec in blueprint.tools], "tool")
-        duplicates([spec.id for spec in blueprint.guardrails], "guardrail")
-        duplicates([spec.id for spec in blueprint.handoffs], "handoff")
         duplicates([spec.id for spec in blueprint.agent_tools], "agent-tool")
 
         if blueprint.entry_agent_id not in agent_ids:
@@ -416,199 +393,111 @@ class AgentCompiler:
             for tool_id in spec.tool_ids:
                 if tool_id not in tool_ids:
                     issues.append(f"Agent '{spec.id}' references missing tool '{tool_id}'.")
-            for guardrail_id in spec.input_guardrail_ids:
-                guardrail = next((item for item in blueprint.guardrails if item.id == guardrail_id), None)
-                if guardrail is None:
-                    issues.append(f"Agent '{spec.id}' references missing input guardrail '{guardrail_id}'.")
-                elif guardrail.kind != "input":
-                    issues.append(f"Guardrail '{guardrail_id}' is not an input guardrail.")
-            for guardrail_id in spec.output_guardrail_ids:
-                guardrail = next((item for item in blueprint.guardrails if item.id == guardrail_id), None)
-                if guardrail is None:
-                    issues.append(f"Agent '{spec.id}' references missing output guardrail '{guardrail_id}'.")
-                elif guardrail.kind != "output":
-                    issues.append(f"Guardrail '{guardrail_id}' is not an output guardrail.")
-        for spec in blueprint.tools:
-            if not isinstance(spec, FunctionToolSpec):
-                continue
-            for guardrail_id in spec.input_guardrail_ids:
-                guardrail = next(
-                    (item for item in blueprint.guardrails if item.id == guardrail_id),
-                    None,
-                )
-                if guardrail is None:
-                    issues.append(
-                        f"Tool '{spec.id}' references missing input guardrail "
-                        f"'{guardrail_id}'."
-                    )
-                elif guardrail.kind != "tool_input":
-                    issues.append(
-                        f"Guardrail '{guardrail_id}' is not a tool input guardrail."
-                    )
-            for guardrail_id in spec.output_guardrail_ids:
-                guardrail = next(
-                    (item for item in blueprint.guardrails if item.id == guardrail_id),
-                    None,
-                )
-                if guardrail is None:
-                    issues.append(
-                        f"Tool '{spec.id}' references missing output guardrail "
-                        f"'{guardrail_id}'."
-                    )
-                elif guardrail.kind != "tool_output":
-                    issues.append(
-                        f"Guardrail '{guardrail_id}' is not a tool output guardrail."
-                    )
-        for spec in blueprint.handoffs:
-            if spec.source_agent_id not in agent_ids:
-                issues.append(f"Handoff '{spec.id}' has missing source agent '{spec.source_agent_id}'.")
-            if spec.target_agent_id not in agent_ids:
-                issues.append(f"Handoff '{spec.id}' has missing target agent '{spec.target_agent_id}'.")
-            if spec.source_agent_id == spec.target_agent_id:
-                issues.append(f"Handoff '{spec.id}' cannot target its source agent.")
         for spec in blueprint.agent_tools:
             if spec.owner_agent_id not in agent_ids:
-                issues.append(f"Agent tool '{spec.id}' has missing owner agent '{spec.owner_agent_id}'.")
+                issues.append(
+                    f"Agent tool '{spec.id}' has missing owner agent '{spec.owner_agent_id}'."
+                )
             if spec.delegate_agent_id not in agent_ids:
-                issues.append(f"Agent tool '{spec.id}' has missing delegate agent '{spec.delegate_agent_id}'.")
+                issues.append(
+                    f"Agent tool '{spec.id}' has missing delegate agent "
+                    f"'{spec.delegate_agent_id}'."
+                )
             if spec.owner_agent_id == spec.delegate_agent_id:
                 issues.append(f"Agent tool '{spec.id}' cannot delegate to its owner agent.")
-        issues.extend(AgentCompiler._agent_tool_topology_issues(blueprint, agent_ids))
+        issues.extend(AgentCompiler._delegation_topology_issues(blueprint, agent_ids))
         return issues
 
     @staticmethod
-    def _agent_tool_topology_issues(
+    def _delegation_topology_issues(
         blueprint: AgentBlueprint,
         agent_ids: set[str],
     ) -> list[str]:
-        graph: dict[str, list[tuple[str, int]]] = {
-            agent_id: [] for agent_id in agent_ids
-        }
-        for relation in blueprint.handoffs:
-            source = relation.source_agent_id
-            target = relation.target_agent_id
-            if source not in agent_ids or target not in agent_ids or source == target:
-                continue
-            graph[source].append((target, 0))
+        """Reject delegation cycles and paths deeper than coordinator -> sub -> helper."""
+        graph: dict[str, list[str]] = {agent_id: [] for agent_id in agent_ids}
         for relation in blueprint.agent_tools:
             owner = relation.owner_agent_id
             delegate = relation.delegate_agent_id
             if owner not in agent_ids or delegate not in agent_ids or owner == delegate:
                 continue
-            graph[owner].append((delegate, 1))
+            graph[owner].append(delegate)
 
         issues: list[str] = []
-        seen_states: set[tuple[str, int]] = set()
 
-        def validate_path(
-            agent_id: str,
-            *,
-            depth: int,
-            path: list[str],
-            path_depths: dict[str, int],
-        ) -> None:
-            state = (agent_id, depth)
-            if state in seen_states:
-                return
-            seen_states.add(state)
-            current_path = [*path, agent_id]
-            current_depths = {**path_depths, agent_id: depth}
-            for delegate, edge_depth in graph[agent_id]:
-                next_depth = depth + edge_depth
-                delegation_path = [*current_path, delegate]
-                if delegate in current_depths:
-                    cycle_depth = next_depth - current_depths[delegate]
-                    if cycle_depth > 0:
-                        cycle_start = current_path.index(delegate)
-                        cycle = [*current_path[cycle_start:], delegate]
-                        message = (
-                            "Agent-tool delegation contains a cycle with recursive nesting: "
-                            + " -> ".join(f"'{item}'" for item in cycle)
-                            + "."
-                        )
-                        if message not in issues:
-                            issues.append(message)
+        def walk(agent_id: str, depth: int, path: list[str]) -> None:
+            for delegate in graph[agent_id]:
+                delegation_path = [*path, agent_id, delegate]
+                if delegate in path or delegate == agent_id:
+                    cycle_start = delegation_path.index(delegate)
+                    message = (
+                        "Agent-tool delegation contains a cycle: "
+                        + " -> ".join(f"'{item}'" for item in delegation_path[cycle_start:])
+                        + "."
+                    )
+                    if message not in issues:
+                        issues.append(message)
                     continue
-                if next_depth > MAX_AGENT_TOOL_DEPTH:
+                if depth + 1 > MAX_DELEGATION_DEPTH:
                     message = (
                         f"Agent-tool delegation exceeds maximum depth "
-                        f"{MAX_AGENT_TOOL_DEPTH}: "
+                        f"{MAX_DELEGATION_DEPTH}: "
                         + " -> ".join(f"'{item}'" for item in delegation_path)
                         + "."
                     )
                     if message not in issues:
                         issues.append(message)
                     continue
-                validate_path(
-                    delegate,
-                    depth=next_depth,
-                    path=current_path,
-                    path_depths=current_depths,
-                )
+                walk(delegate, depth + 1, [*path, agent_id])
 
-        for agent_id in agent_ids:
-            validate_path(
-                agent_id,
-                depth=0,
-                path=[],
-                path_depths={},
-            )
+        for agent_id in sorted(agent_ids):
+            walk(agent_id, 0, [])
         return issues
 
     @staticmethod
-    def _validate_tool_names(agent_id: str, tools: list[Tool]) -> None:
+    def _validate_tool_names(agent_id: str, tools: list[FunctionTool]) -> None:
         names: set[str] = set()
-        duplicates: set[str] = set()
+        duplicated: set[str] = set()
         for tool in tools:
-            name = getattr(tool, "name", type(tool).__name__)
-            if name in names:
-                duplicates.add(name)
-            names.add(name)
-        if duplicates:
+            if tool.name in names:
+                duplicated.add(tool.name)
+            names.add(tool.name)
+        if duplicated:
             raise ValidationError(
                 "Agent has colliding tool names.",
                 issues=[
                     f"Agent '{agent_id}' binds duplicate tool name '{name}'."
-                    for name in sorted(duplicates)
+                    for name in sorted(duplicated)
                 ],
             )
 
-    @staticmethod
-    def _validate_hosted_tools(
-        agent_id: str,
-        tools: list[Tool],
-        resolved: ResolvedAgentModel,
-    ) -> None:
-        if resolved.supports_hosted_tools:
-            return
-        hosted = [
-            type(tool).__name__
-            for tool in tools
-            if isinstance(tool, (WebSearchTool, FileSearchTool))
-        ]
-        if hosted:
-            raise ValidationError(
-                "Hosted SDK tools require a Responses-compatible provider.",
-                issues=[f"Agent '{agent_id}' cannot use hosted tool '{name}'." for name in hosted],
-            )
 
-    @staticmethod
-    def _require_hosted_tool_provider(
-        tool_id: str,
-        blueprint: AgentBlueprint,
-        resolved_models: dict[str, ResolvedAgentModel],
-    ) -> None:
-        consumers = [agent.id for agent in blueprint.agents if tool_id in agent.tool_ids]
-        unsupported = [
-            agent_id
-            for agent_id in consumers
-            if not resolved_models[agent_id].supports_hosted_tools
-        ]
-        if unsupported:
-            raise ValidationError(
-                "Hosted SDK tools require a Responses-compatible provider.",
-                issues=[
-                    f"Agent '{agent_id}' cannot bind hosted tool '{tool_id}'."
-                    for agent_id in unsupported
-                ],
-            )
+def with_reasoning_effort(compiled: CompiledAgent, effort: str | None) -> CompiledAgent:
+    """Return a copy of the compiled agents that request one reasoning effort."""
+    if effort is None:
+        return compiled
+    blueprint = compiled.blueprint.model_copy(deep=True)
+    for agent in blueprint.agents:
+        agent.model_settings.reasoning = ReasoningSpec(effort=effort)
+    agents_by_id = {
+        agent_id: replace(
+            agent,
+            model_settings=replace(agent.model_settings, reasoning_effort=effort),
+        )
+        for agent_id, agent in compiled.agents_by_id.items()
+    }
+    return replace(
+        compiled,
+        blueprint=blueprint,
+        agents_by_id=agents_by_id,
+        entry_agent=agents_by_id[blueprint.entry_agent_id],
+    )
+
+
+__all__ = [
+    "AgentCompiler",
+    "CompiledAgent",
+    "current_system_information",
+    "with_global_agent_instructions",
+    "with_json_schema_output_instructions",
+    "with_reasoning_effort",
+]

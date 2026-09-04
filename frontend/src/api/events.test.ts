@@ -2,16 +2,20 @@ import { describe, expect, it } from 'vitest';
 
 import { RUN_EVENT_TYPES, subscribeToRun, type RunStreamEvent } from './events';
 
-describe('SDK run event subscription', () => {
-  it('subscribes to interruption and guardrail lifecycle events', () => {
+describe('run event subscription', () => {
+  it('subscribes to the native run lifecycle events', () => {
     expect(RUN_EVENT_TYPES).toEqual(
       expect.arrayContaining([
-        'run.paused',
-        'guardrail.result',
-        'guardrail.tripwire',
-        'approval.requested',
-        'approval.resolved',
+        'run.started',
+        'run.completed',
+        'run.failed',
+        'run.cancelled',
+        'run.policy.rejected',
+        'context.compacted',
       ]),
+    );
+    expect(RUN_EVENT_TYPES).not.toEqual(
+      expect.arrayContaining(['run.paused', 'guardrail.tripwire', 'approval.requested']),
     );
   });
 

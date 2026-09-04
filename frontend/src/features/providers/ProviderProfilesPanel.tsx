@@ -270,7 +270,7 @@ export function ProviderProfilesPanel({
   return (
     <Panel
       title="Provider profiles"
-      description="OpenAI uses Responses; Ollama and compatible profiles use Chat Completions."
+      description="All chat providers use the OpenAI-compatible Chat Completions protocol."
       actions={
         <button className="button secondary" type="button" onClick={() => setShowCreate((value) => !value)}>
           <Icon name={showCreate ? 'close' : 'plus'} />

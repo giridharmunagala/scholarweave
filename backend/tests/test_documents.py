@@ -13,7 +13,7 @@ from backend.app import create_app
 from backend.bootstrap import create_services
 from backend.documents import DocumentProcessingError
 from backend.documents.formatting import DocumentFormatter
-from backend.documents.paper import build_paper_manifest
+from backend.documents.formatting import build_paper_manifest
 from backend.providers.ollama import OllamaError
 from backend.documents.models import Artifact, Document, DocumentChunk
 

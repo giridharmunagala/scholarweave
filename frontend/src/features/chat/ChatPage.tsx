@@ -860,6 +860,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
               {current?.items.map((item, index) => {
                 if (!item.text?.trim()) return null;
                 const role = item.role ?? item.type;
+                if (role !== 'user' && role !== 'assistant') return null;
                 const responseRun = reasoningAnchors.responseByIndex.get(index) ?? null;
                 return (
                   <Fragment key={index}>
@@ -1278,11 +1279,11 @@ function MessageActions({
 }
 
 function isTerminalRun(run: Run): boolean {
-  return ['completed', 'failed', 'cancelled', 'paused'].includes(run.status);
+  return ['completed', 'failed', 'cancelled'].includes(run.status);
 }
 
 function isTerminalEvent(eventType: string): boolean {
-  return ['run.completed', 'run.failed', 'run.cancelled', 'run.paused'].includes(eventType);
+  return ['run.completed', 'run.failed', 'run.cancelled'].includes(eventType);
 }
 
 function displayStream(run: Run): ChatStreamState {

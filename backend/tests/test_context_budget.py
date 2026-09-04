@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from agents.run_config import CallModelData, ModelInputData
 
-from backend.core.config import Settings
 from backend.agents.context import ScholarWeaveContext, ToolReceipt
 from backend.agents.context_budget import (
+    CHECKPOINT_MESSAGE_PREFIX,
+    ContextBudgetPolicy,
     _adaptive_target_tokens,
-    create_context_budget_filter,
 )
+from backend.agents.harness import AgentDefinition, ModelBinding, ModelSettings
+from backend.conversations.steering import (
+    SteeringInbox,
+    SteeringMessage,
+    steering_message_id,
+)
+from backend.core.config import Settings
 from backend.runs.hooks import start_agent_invocation
-from backend.conversations.steering import SteeringInbox, SteeringMessage, steering_message_id
+from backend.tests.harness_support import FakeClient
 
 
 class Runtime:
@@ -69,25 +75,63 @@ class Session:
         return list(self.items)
 
 
-class SummaryModel:
-    def __init__(self) -> None:
-        self.calls: list[dict] = []
+def summarizing_client(text: str = "The research objective remains active; prior evidence was retained.") -> FakeClient:
+    async def create(**parameters: Any):
+        client.requests.append(parameters)
+        return _Completion(text)
 
-    async def get_response(self, **kwargs):
-        self.calls.append(kwargs)
-        return SimpleNamespace(
-            output=[
-                {
-                    "type": "message",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": "The research objective remains active; prior evidence was retained.",
-                        }
-                    ],
-                }
-            ]
-        )
+    client = FakeClient(create)
+    return client
+
+
+class _Completion:
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"choices": [{"message": {"role": "assistant", "content": self._text}}]}
+
+
+def agent(
+    name: str = "Worker",
+    *,
+    client: FakeClient | None = None,
+    agent_id: str = "worker",
+) -> AgentDefinition:
+    return AgentDefinition(
+        id=agent_id,
+        name=name,
+        instructions="Research carefully.",
+        binding=ModelBinding(
+            client=client or summarizing_client(),
+            model_name="stub-model",
+            provider_kind="ollama",
+        ),
+        model_settings=ModelSettings(),
+    )
+
+
+def policy(settings: Settings, **overrides: Any) -> ContextBudgetPolicy:
+    return ContextBudgetPolicy(settings, **overrides)
+
+
+async def prepare(
+    settings: Settings,
+    definition: AgentDefinition,
+    items: list[dict[str, Any]],
+    context: ScholarWeaveContext,
+    *,
+    instructions: str = "",
+    turn_index: int = 1,
+    **overrides: Any,
+):
+    return await policy(settings, **overrides).prepare(
+        definition,
+        items,
+        instructions,
+        context,
+        turn_index=turn_index,
+    )
 
 
 @pytest.fixture
@@ -120,41 +164,32 @@ async def test_steering_is_injected_at_the_next_model_call_boundary(tmp_path) ->
     session = Session()
     inbox.bind_session(session)
     context.metadata["_steering_inbox"] = inbox
-    budget_filter = create_context_budget_filter(settings)
-    agent = SimpleNamespace(name="Worker")
+    definition = agent()
     first_input = [{"role": "user", "content": "Research the topic."}]
 
-    first = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(input=first_input, instructions=None),
-            agent=agent,
-            context=context,
-        )
-    )
+    first = await prepare(settings, definition, list(first_input), context)
     message = inbox.queue("Answer directly with the evidence already found.")
-    second = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    *first_input,
-                    {"role": "assistant", "content": "I will search first."},
-                ],
-                instructions=None,
-            ),
-            agent=agent,
-            context=context,
-        )
+    second = await prepare(
+        settings,
+        definition,
+        [*first_input, {"role": "assistant", "content": "I will search first."}],
+        context,
     )
 
     steering_item = {
         "role": "user",
         "content": "Answer directly with the evidence already found.",
     }
-    assert steering_item not in first.input
-    assert second.input[-1] == steering_item
+    assert steering_item not in first.items
+    assert second.items[-1] == steering_item
+    assert second.working_items is not None
+    assert steering_item not in second.working_items
     assert len(session.items) == 1
     assert steering_message_id(session.items[0]) == message.id
-    assert ("steering.applied", {"message_id": message.id, "content": message.content}) in sink.events
+    assert (
+        "steering.applied",
+        {"message_id": message.id, "content": message.content},
+    ) in sink.events
 
 
 @pytest.mark.anyio
@@ -167,142 +202,88 @@ async def test_summary_checkpoint_replaces_raw_paper_batch_on_next_turn(tmp_path
     context = ScholarWeaveContext(run_id="summary-run", tool_runtime=Runtime())
     raw_pages = "raw paper page content " * 1_000
     understanding = "Pages 1-10 understanding with key methods and results [p.4]."
-    filtered = await create_context_budget_filter(settings)(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
+    prepared = await prepare(
+        settings,
+        agent("Paper Summarizer"),
+        [
+            {
+                "type": "function_call",
+                "name": "paper_summary_checkpoint",
+                "call_id": "checkpoint-read-1",
+                "arguments": json.dumps(
                     {
-                        "type": "function_call",
-                        "name": "paper_summary_checkpoint",
-                        "call_id": "checkpoint-read-1",
-                        "arguments": json.dumps(
-                            {
-                                "document_id": "paper-1",
-                                "action": "read",
-                                "content": None,
-                                "offset": 0,
-                                "limit": 8000,
-                            }
-                        ),
-                    },
+                        "document_id": "paper-1",
+                        "action": "read",
+                        "content": None,
+                        "offset": 0,
+                        "limit": 8000,
+                    }
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "checkpoint-read-1",
+                "output": json.dumps(
                     {
-                        "type": "function_call_output",
-                        "call_id": "checkpoint-read-1",
-                        "output": json.dumps(
-                            {
-                                "status": "available",
-                                "checkpoint_path": "checkpoint.md",
-                                "content": "prior checkpoint evidence",
-                            }
-                        ),
-                    },
+                        "status": "available",
+                        "checkpoint_path": "checkpoint.md",
+                        "content": "prior checkpoint evidence",
+                    }
+                ),
+            },
+            {
+                "type": "function_call",
+                "name": "read_paper_summary_batch",
+                "call_id": "read-1",
+                "arguments": '{"document_id":"paper-1","action":"pages","start":1}',
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "read-1",
+                "output": raw_pages,
+            },
+            {
+                "type": "function_call",
+                "name": "paper_summary_checkpoint",
+                "call_id": "checkpoint-1",
+                "arguments": json.dumps(
                     {
-                        "type": "function_call",
-                        "name": "read_paper_summary_batch",
-                        "call_id": "read-1",
-                        "arguments": '{"document_id":"paper-1","action":"pages","start":1}',
-                    },
+                        "document_id": "paper-1",
+                        "action": "append",
+                        "content": understanding,
+                        "offset": None,
+                        "limit": None,
+                    }
+                ),
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "checkpoint-1",
+                "output": json.dumps(
                     {
-                        "type": "function_call_output",
-                        "call_id": "read-1",
-                        "output": raw_pages,
-                    },
-                    {
-                        "type": "function_call",
-                        "name": "paper_summary_checkpoint",
-                        "call_id": "checkpoint-1",
-                        "arguments": json.dumps(
-                            {
-                                "document_id": "paper-1",
-                                "action": "append",
-                                "content": understanding,
-                                "offset": None,
-                                "limit": None,
-                            }
-                        ),
-                    },
-                    {
-                        "type": "function_call_output",
-                        "call_id": "checkpoint-1",
-                        "output": json.dumps(
-                            {
-                                "status": "appended",
-                                "checkpoint_path": "checkpoint.md",
-                                "checkpointed_batch": 1,
-                                "coverage": {"kind": "pages", "start": 1, "end": 10},
-                            }
-                        ),
-                    },
-                ],
-                instructions=None,
-            ),
-            agent=SimpleNamespace(name="Paper Summarizer"),
-            context=context,
-        )
+                        "status": "appended",
+                        "checkpoint_path": "checkpoint.md",
+                        "checkpointed_batch": 1,
+                        "coverage": {"kind": "pages", "start": 1, "end": 10},
+                    }
+                ),
+            },
+        ],
+        context,
     )
 
-    checkpoint_read_output = json.loads(filtered.input[1]["output"])
-    read_output = json.loads(filtered.input[3]["output"])
+    checkpoint_read_output = json.loads(prepared.items[1]["output"])
+    read_output = json.loads(prepared.items[3]["output"])
     assert checkpoint_read_output["status"] == "replaced_by_summary_checkpoint"
     assert read_output["status"] == "replaced_by_summary_checkpoint"
     assert read_output["checkpoint_path"] == "checkpoint.md"
     assert read_output["checkpointed_batch"] == 1
     assert read_output["coverage"] == {"kind": "pages", "start": 1, "end": 10}
-    assert raw_pages not in json.dumps(filtered.input)
-    assert "prior checkpoint evidence" not in json.dumps(filtered.input)
-    assert understanding not in json.dumps(filtered.input)
-    assert json.loads(filtered.input[4]["arguments"])["content"] is None
-
-
-@pytest.mark.anyio
-async def test_compaction_does_not_duplicate_replayed_steering(tmp_path) -> None:
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        workspace_dir=tmp_path / "workspace",
-        agent_context_window_tokens=4_096,
-        agent_context_high_water_ratio=0.7,
-        agent_context_compaction_target_tokens=1_024,
-    )
-    context = ScholarWeaveContext(
-        run_id="run-1",
-        conversation_id="conversation-1",
-        tool_runtime=Runtime(),
-    )
-    inbox = SteeringInbox()
-    inbox.bind_session(Session())
-    context.metadata["_steering_inbox"] = inbox
-    budget_filter = create_context_budget_filter(settings)
-    agent = SimpleNamespace(name="Worker")
-    initial_input = [
-        {"role": "user", "content": "Research the topic."},
-        {"role": "assistant", "content": "Prior reasoning " * 1_000},
-    ]
-    inbox.queue("Give the conclusion as soon as this call finishes.")
-
-    first = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(input=initial_input, instructions=None),
-            agent=agent,
-            context=context,
-        )
-    )
-    second = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[*initial_input, {"role": "assistant", "content": "New evidence."}],
-                instructions=None,
-            ),
-            agent=agent,
-            context=context,
-        )
-    )
-
-    steering_item = {
-        "role": "user",
-        "content": "Give the conclusion as soon as this call finishes.",
-    }
-    assert first.input.count(steering_item) == 1
-    assert second.input.count(steering_item) == 1
+    assert raw_pages not in json.dumps(prepared.items)
+    assert "prior checkpoint evidence" not in json.dumps(prepared.items)
+    assert understanding not in json.dumps(prepared.items)
+    assert json.loads(prepared.items[4]["arguments"])["content"] is None
+    assert prepared.working_items == prepared.items
 
 
 @pytest.mark.anyio
@@ -340,25 +321,23 @@ async def test_recovered_steering_already_in_session_is_not_replayed_twice(
     inbox.restore(message.id, message.content)
     context.metadata["_steering_inbox"] = inbox
 
-    filtered = await create_context_budget_filter(settings)(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    message.session_item(),
-                    {"role": "user", "content": "Resume after restart."},
-                ],
-                instructions=None,
-            ),
-            agent=SimpleNamespace(name="Worker"),
-            context=context,
-        )
+    prepared = await prepare(
+        settings,
+        agent(),
+        [
+            message.session_item(),
+            {"role": "user", "content": "Resume after restart."},
+        ],
+        context,
     )
 
-    assert filtered.input.count(message.input_item()) == 1
+    assert prepared.items.count(message.input_item()) == 1
 
 
 @pytest.mark.anyio
-async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) -> None:
+async def test_high_water_compaction_replaces_raw_history_with_checkpoint(
+    tmp_path,
+) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -406,43 +385,35 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
             "text": "Evidence excerpt.",
         },
     }
-    budget_filter = create_context_budget_filter(settings)
-    agent = SimpleNamespace(name="Worker", model=SummaryModel())
-
+    summarizer = summarizing_client()
+    definition = agent(client=summarizer)
     original_user_message = {
         "role": "user",
         "content": "Research the topic exactly as requested — keep this punctuation!",
     }
-    compacted = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    original_user_message,
-                    {
-                        "role": "assistant",
-                        "content": "Prior reasoning " * 1_000,
-                    },
-                    large_result,
-                ],
-                instructions="Use cited evidence.",
-            ),
-            agent=agent,
-            context=context,
-        )
+
+    compacted = await prepare(
+        settings,
+        definition,
+        [
+            original_user_message,
+            {"role": "assistant", "content": "Prior reasoning " * 1_000},
+            large_result,
+        ],
+        context,
+        instructions="Use cited evidence.",
     )
 
-    serialized = json.dumps(compacted.input)
+    serialized = json.dumps(compacted.items)
     assert "Prior reasoning Prior reasoning" not in serialized
-    assert original_user_message in compacted.input
+    assert original_user_message in compacted.items
     assert "artifact-1" in serialized
     assert "The research objective remains active" in serialized
-    assert len(agent.model.calls) == 1
+    assert len(summarizer.requests) == 1
+    assert summarizer.requests[0].get("stream") is None
     checkpoint = context.metadata["context_checkpoints"][0]
     assert checkpoint["summary_method"] == "model"
-    assert checkpoint["references"] == [
-        "artifact-1",
-        "https://example.com/source",
-    ]
+    assert checkpoint["references"] == ["artifact-1", "https://example.com/source"]
     assert checkpoint["activity"][0]["title"] == "Created papers/paper-1/notes.md"
     assert checkpoint["work_state"]["paper_activity"][0]["document_id"] == "paper-1"
     lifecycle = [
@@ -450,21 +421,60 @@ async def test_high_water_filter_replaces_raw_history_with_checkpoint(tmp_path) 
         for event_type, payload in sink.events
         if event_type.startswith("agent.")
     ]
-    assert lifecycle[0] == (
-        "agent.started",
-        {"agent_name": "Worker", "invocation_id": invocation_id},
-    )
-    assert len(lifecycle) == 1
+    assert lifecycle == [
+        ("agent.started", {"agent_name": "Worker", "invocation_id": invocation_id})
+    ]
     compaction_events = [
         event_type
         for event_type, _ in sink.events
         if event_type.startswith("context.compact")
     ]
     assert compaction_events == ["context.compaction_started", "context.compacted"]
+    assert compacted.working_items is not None
+    assert compacted.working_items[0]["content"].startswith(CHECKPOINT_MESSAGE_PREFIX)
 
 
 @pytest.mark.anyio
-async def test_filter_persists_compacted_history_across_model_turns(tmp_path) -> None:
+async def test_compaction_falls_back_when_the_summarizer_fails(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        agent_context_window_tokens=4_096,
+        agent_context_high_water_ratio=0.7,
+        agent_context_compaction_target_tokens=1_024,
+        tool_result_max_tokens=16_000,
+    )
+    sink = Sink()
+    context = ScholarWeaveContext(
+        run_id="run-1",
+        tool_runtime=Runtime(),
+        event_sink=sink,
+    )
+    from openai import APIError
+
+    failing = FakeClient.failing(
+        APIError("provider down", request=None, body=None)  # type: ignore[arg-type]
+    )
+
+    compacted = await prepare(
+        settings,
+        agent(client=failing),
+        [
+            {"role": "user", "content": "Research the topic."},
+            {"role": "assistant", "content": "Prior reasoning " * 1_000},
+        ],
+        context,
+    )
+
+    assert context.metadata["context_checkpoints"][0]["summary_method"] == (
+        "structured_fallback"
+    )
+    assert "context.compaction_failed" in [event_type for event_type, _ in sink.events]
+    assert compacted.items[0]["content"].startswith(CHECKPOINT_MESSAGE_PREFIX)
+
+
+@pytest.mark.anyio
+async def test_compacted_history_is_adopted_as_the_working_set(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -474,133 +484,27 @@ async def test_filter_persists_compacted_history_across_model_turns(tmp_path) ->
         tool_result_max_tokens=16_000,
     )
     context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
-    agent = SimpleNamespace(name="Worker")
-    budget_filter = create_context_budget_filter(settings)
+    definition = agent()
+    budget = policy(settings)
     initial_input = [
         {"role": "user", "content": "Research the topic."},
         {"role": "assistant", "content": "Prior reasoning " * 1_000},
     ]
 
-    first = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(input=initial_input, instructions=None),
-            agent=agent,
-            context=context,
-        )
-    )
-    second = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[*initial_input, {"role": "assistant", "content": "New turn."}],
-                instructions=None,
-            ),
-            agent=agent,
-            context=context,
-        )
-    )
+    first = await budget.prepare(definition, list(initial_input), "", context, turn_index=1)
+    working = [*first.working_items, {"role": "assistant", "content": "New turn."}]
+    second = await budget.prepare(definition, working, "", context, turn_index=2)
 
-    assert "Prior reasoning Prior reasoning" not in json.dumps(second.input)
-    assert {"role": "assistant", "content": "New turn."} in second.input
+    assert "Prior reasoning Prior reasoning" not in json.dumps(second.items)
+    assert {"role": "assistant", "content": "New turn."} in second.items
     assert len(context.metadata["context_checkpoints"]) == 1
-    assert first.input[0]["role"] == "user"
+    assert first.items[0]["content"].startswith(CHECKPOINT_MESSAGE_PREFIX)
 
 
 @pytest.mark.anyio
-async def test_compaction_state_is_isolated_per_agent(tmp_path) -> None:
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        workspace_dir=tmp_path / "workspace",
-        agent_context_window_tokens=4_096,
-        agent_context_high_water_ratio=0.7,
-        agent_context_compaction_target_tokens=1_024,
-        tool_result_max_tokens=16_000,
-    )
-    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
-    budget_filter = create_context_budget_filter(settings)
-    shared_input = [
-        {"role": "user", "content": "Research independently."},
-        {"role": "assistant", "content": "Prior reasoning " * 1_000},
-    ]
-
-    worker_a = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(input=shared_input, instructions=None),
-            agent=SimpleNamespace(name="Worker A"),
-            context=context,
-        )
-    )
-    worker_b = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(input=shared_input, instructions=None),
-            agent=SimpleNamespace(name="Worker B"),
-            context=context,
-        )
-    )
-
-    assert len(context.metadata["context_checkpoints"]) == 2
-    assert json.loads(worker_a.input[0]["content"].split("\n\n", 1)[1])["agent_name"] == "Worker A"
-    assert json.loads(worker_b.input[0]["content"].split("\n\n", 1)[1])["agent_name"] == "Worker B"
-
-
-@pytest.mark.anyio
-async def test_compaction_keeps_divergent_invocations_for_same_agent_separate(tmp_path) -> None:
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        workspace_dir=tmp_path / "workspace",
-        agent_context_window_tokens=4_096,
-        agent_context_high_water_ratio=0.7,
-        agent_context_compaction_target_tokens=1_024,
-        tool_result_max_tokens=16_000,
-    )
-    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
-    agent = SimpleNamespace(name="Shared worker")
-    budget_filter = create_context_budget_filter(settings)
-    initial_input = [
-        {"role": "user", "content": "Research independently."},
-        {"role": "assistant", "content": "Prior reasoning " * 1_000},
-    ]
-    await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(input=initial_input, instructions=None),
-            agent=agent,
-            context=context,
-        )
-    )
-    await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    *initial_input,
-                    {"role": "assistant", "content": "Branch A " * 2_000},
-                ],
-                instructions=None,
-            ),
-            agent=agent,
-            context=context,
-        )
-    )
-    branch_b = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    *initial_input,
-                    {"role": "assistant", "content": "Branch B " * 2_000},
-                ],
-                instructions=None,
-            ),
-            agent=agent,
-            context=context,
-        )
-    )
-
-    states = context.metadata["_context_compaction_states"]["Shared worker"]
-    assert len(states) == 2
-    assert states[1]["source_input"][-1]["content"].startswith("Branch B")
-    assert "Branch A" not in json.dumps(branch_b.input)
-
-
-@pytest.mark.anyio
-async def test_compaction_keeps_tool_call_and_output_in_one_recent_chunk(tmp_path) -> None:
+async def test_compaction_keeps_tool_call_and_output_in_one_recent_chunk(
+    tmp_path,
+) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -622,28 +526,24 @@ async def test_compaction_keeps_tool_call_and_output_in_one_recent_chunk(tmp_pat
         "output": '{"result":"found"}',
     }
 
-    compacted = await create_context_budget_filter(settings)(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    {"role": "user", "content": "Research the topic."},
-                    {"role": "assistant", "content": "Prior reasoning " * 1_000},
-                    call,
-                    output,
-                ],
-                instructions=None,
-            ),
-            agent=SimpleNamespace(name="Worker"),
-            context=context,
-        )
+    compacted = await prepare(
+        settings,
+        agent(),
+        [
+            {"role": "user", "content": "Research the topic."},
+            {"role": "assistant", "content": "Prior reasoning " * 1_000},
+            call,
+            output,
+        ],
+        context,
     )
 
-    assert call in compacted.input
-    assert output in compacted.input
+    assert call in compacted.items
+    assert output in compacted.items
 
 
 @pytest.mark.anyio
-async def test_completed_hosted_call_does_not_absorb_newer_messages(tmp_path) -> None:
+async def test_compaction_preserves_the_newest_user_request(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -655,27 +555,18 @@ async def test_completed_hosted_call_does_not_absorb_newer_messages(tmp_path) ->
     context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
     latest = {"role": "user", "content": "LATEST REQUEST"}
 
-    compacted = await create_context_budget_filter(settings)(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    {"role": "assistant", "content": "Old reasoning " * 1_000},
-                    {
-                        "type": "web_search_call",
-                        "id": "search-1",
-                        "status": "completed",
-                    },
-                    {"role": "assistant", "content": "Large search analysis " * 500},
-                    latest,
-                ],
-                instructions=None,
-            ),
-            agent=SimpleNamespace(name="Worker"),
-            context=context,
-        )
+    compacted = await prepare(
+        settings,
+        agent(),
+        [
+            {"role": "assistant", "content": "Old reasoning " * 1_000},
+            {"role": "assistant", "content": "Large search analysis " * 500},
+            latest,
+        ],
+        context,
     )
 
-    assert latest in compacted.input
+    assert latest in compacted.items
 
 
 @pytest.mark.anyio
@@ -691,18 +582,14 @@ async def test_stored_checkpoint_includes_model_summary(tmp_path) -> None:
     runtime = CheckpointRuntime()
     context = ScholarWeaveContext(run_id="run-1", tool_runtime=runtime)
 
-    await create_context_budget_filter(settings)(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    {"role": "user", "content": "Research the topic."},
-                    {"role": "assistant", "content": "Prior reasoning " * 1_000},
-                ],
-                instructions=None,
-            ),
-            agent=SimpleNamespace(name="Worker", model=SummaryModel()),
-            context=context,
-        )
+    await prepare(
+        settings,
+        agent(),
+        [
+            {"role": "user", "content": "Research the topic."},
+            {"role": "assistant", "content": "Prior reasoning " * 1_000},
+        ],
+        context,
     )
 
     assert runtime.stored[0]["summary_method"] == "model"
@@ -710,7 +597,9 @@ async def test_stored_checkpoint_includes_model_summary(tmp_path) -> None:
 
 
 @pytest.mark.anyio
-async def test_input_filter_bounds_non_application_tool_outputs(tmp_path) -> None:
+async def test_oversized_tool_outputs_are_bounded_before_the_model_sees_them(
+    tmp_path,
+) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -718,33 +607,28 @@ async def test_input_filter_bounds_non_application_tool_outputs(tmp_path) -> Non
     )
     runtime = Runtime()
     context = ScholarWeaveContext(run_id="run-1", tool_runtime=runtime)
-    budget_filter = create_context_budget_filter(settings)
 
-    filtered = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    {
-                        "type": "function_call_output",
-                        "name": "custom_large_tool",
-                        "call_id": "call-1",
-                        "output": "large " * 2_000,
-                    }
-                ],
-                instructions=None,
-            ),
-            agent=SimpleNamespace(name="Worker"),
-            context=context,
-        )
+    prepared = await prepare(
+        settings,
+        agent(),
+        [
+            {
+                "type": "function_call_output",
+                "name": "custom_large_tool",
+                "call_id": "call-1",
+                "output": "large " * 2_000,
+            }
+        ],
+        context,
     )
 
     assert runtime.bounded == [("custom_large_tool", "large " * 2_000)]
-    assert filtered.input[0]["call_id"] == "call-1"
-    assert json.loads(filtered.input[0]["output"])["result_ref"] == "retained-result"
+    assert prepared.items[0]["call_id"] == "call-1"
+    assert json.loads(prepared.items[0]["output"])["result_ref"] == "retained-result"
 
 
 @pytest.mark.anyio
-async def test_input_filter_uses_selected_models_context_window(tmp_path) -> None:
+async def test_bounding_uses_the_selected_models_context_window(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -754,25 +638,21 @@ async def test_input_filter_uses_selected_models_context_window(tmp_path) -> Non
     )
     runtime = Runtime()
     context = ScholarWeaveContext(run_id="run-1", tool_runtime=runtime)
-    agent = SimpleNamespace(name="Small local model")
-    budget_filter = create_context_budget_filter(settings, {id(agent): 4_096})
+    definition = agent(agent_id="small-local-model")
 
-    filtered = await budget_filter(
-        CallModelData(
-            model_data=ModelInputData(
-                input=[
-                    {
-                        "type": "function_call_output",
-                        "call_id": "call-1",
-                        "output": "large " * 1_000,
-                    }
-                ],
-                instructions=None,
-            ),
-            agent=agent,
-            context=context,
-        )
+    prepared = await prepare(
+        settings,
+        definition,
+        [
+            {
+                "type": "function_call_output",
+                "call_id": "call-1",
+                "output": "large " * 1_000,
+            }
+        ],
+        context,
+        context_window_tokens_by_agent={"small-local-model": 4_096},
     )
 
-    assert runtime.bounded == [("sdk.tool_output", "large " * 1_000)]
-    assert json.loads(filtered.input[0]["output"])["result_ref"] == "retained-result"
+    assert runtime.bounded == [("tool_output", "large " * 1_000)]
+    assert json.loads(prepared.items[0]["output"])["result_ref"] == "retained-result"

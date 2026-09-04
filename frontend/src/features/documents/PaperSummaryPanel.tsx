@@ -5,7 +5,7 @@ import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { ErrorNotice, Loading, Panel, StatusPill } from '../../shared/components/Ui';
 import { summaryApi, type SummaryContent, type SummaryRun, type SummaryVersion } from './summaryApi';
 
-const TERMINAL_EVENTS = new Set(['run.completed', 'run.failed', 'run.cancelled', 'run.paused']);
+const TERMINAL_EVENTS = new Set(['run.completed', 'run.failed', 'run.cancelled']);
 
 export function PaperSummaryPanel({
   documentId,

@@ -7,8 +7,8 @@ from typing import Any
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from backend.core.config import RUNTIME_VERSION
 from backend.persistence import Base, JSONText
-from backend.agents.sdk import SUPPORTED_SDK_VERSION
 from backend.utils import utcnow
 
 
@@ -28,8 +28,7 @@ class AgentRunRecord(Base):
     usage_json: Mapped[Any] = mapped_column(JSONText, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     trace_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    sdk_version: Mapped[str] = mapped_column(String(32), default=SUPPORTED_SDK_VERSION)
-    state_json: Mapped[Any | None] = mapped_column(JSONText, nullable=True)
+    runtime_version: Mapped[str] = mapped_column(String(32), default=RUNTIME_VERSION)
     context_window_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     runtime_metadata_json: Mapped[Any] = mapped_column(JSONText, default=dict)
     completion_policy_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -46,10 +45,6 @@ class AgentRunRecord(Base):
     events: Mapped[list["AgentRunEventRecord"]] = relationship(
         back_populates="run",
         order_by="AgentRunEventRecord.sequence",
-        cascade="all, delete-orphan",
-    )
-    interruptions: Mapped[list["RunInterruptionRecord"]] = relationship(
-        back_populates="run",
         cascade="all, delete-orphan",
     )
     epochs: Mapped[list["AgentRunEpochRecord"]] = relationship(
@@ -93,22 +88,6 @@ class AgentRunEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     run: Mapped[AgentRunRecord] = relationship(back_populates="events")
-
-
-class RunInterruptionRecord(Base):
-    __tablename__ = "agent_run_interruptions"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
-    run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id", ondelete="CASCADE"))
-    item_key: Mapped[str] = mapped_column(String(255))
-    tool_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(String(32), default="pending")
-    item_json: Mapped[Any] = mapped_column(JSONText)
-    response_json: Mapped[Any | None] = mapped_column(JSONText, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    run: Mapped[AgentRunRecord] = relationship(back_populates="interruptions")
 
 
 class AgentRunClaimRecord(Base):

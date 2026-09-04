@@ -1,4 +1,4 @@
-"""Provider profiles and SDK model construction."""
+"""Provider profiles and native model bindings."""
 
 from backend.providers.types import AgentModelResolver, ResolvedAgentModel
 

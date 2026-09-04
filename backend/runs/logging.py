@@ -54,7 +54,7 @@ def _run_details(record: Any) -> dict[str, Any]:
             "usage": record.usage_json or {},
             "error": record.error,
             "trace_id": record.trace_id,
-            "sdk_version": record.sdk_version,
+            "runtime_version": record.runtime_version,
             "cancel_requested": record.cancel_requested,
             "created_at": record.created_at,
             "started_at": started_at,
@@ -98,14 +98,5 @@ def _run_details(record: Any) -> dict[str, Any]:
                 "finished_at": attempt.finished_at,
             }
             for attempt in record.tool_attempts
-        ],
-        "interruptions": [
-            {
-                "tool_name": interruption.tool_name,
-                "status": interruption.status,
-                "created_at": interruption.created_at,
-                "resolved_at": interruption.resolved_at,
-            }
-            for interruption in record.interruptions
         ],
     }

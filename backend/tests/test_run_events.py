@@ -8,8 +8,12 @@ from typing import Any
 
 import pytest
 
-from backend.runs.broker import EventBroker, SubscriberLagged
-from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
+from backend.runs.events import (
+    BufferedRunEventSink,
+    EventBroker,
+    PersistedRunEventSink,
+    SubscriberLagged,
+)
 
 
 class RecordingSink:
@@ -278,6 +282,9 @@ async def test_stream_performance_uses_reported_tokens_and_measured_phases() -> 
         "model_calls": 1,
         "input_tokens": 200,
         "output_tokens": 80,
+        "delegated_model_calls": 0,
+        "delegated_input_tokens": 0,
+        "delegated_output_tokens": 0,
         "input_tokens_estimated": False,
         "output_tokens_estimated": False,
         "prompt_seconds": 2.0,

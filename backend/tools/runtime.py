@@ -11,12 +11,11 @@ from typing import Any
 
 from stop_words import get_stop_words
 
-from backend.tools.work import create_work_plan, update_work_item, work_plan
 from backend.core.errors import NotFoundError
 from backend.core.config import Settings
 from backend.conversations.service import ConversationService
 from backend.documents import DocumentService
-from backend.documents.paper import manifest_pages
+from backend.documents.formatting import manifest_pages
 from backend.documents.retrieval import RetrievalService
 from backend.agents.context import ScholarWeaveContext, ToolReceipt
 from backend.runs.repository import LeaseOwnershipError, RunRepository
@@ -26,12 +25,14 @@ from backend.prompting.registry import PromptRegistry
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService, WebSourceUnavailable
 from backend.tools.catalog import APPLICATION_TOOL_HANDLERS
+from backend.tools.failures import classify_tool_error
 from backend.workspace.service import WorkspaceService
 
 
 _WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
 _WEB_SEARCH_CACHE_KEY = "web_search_results"
 _WEB_SEARCH_ATTEMPTS_KEY = "web_search_attempted_queries"
+PLAN_KEY = "work_plan"
 _NULL_TOOL_LITERALS = {"null", "none"}
 _SEARCH_STOP_WORDS = frozenset(get_stop_words("en"))
 _PAPER_CITATION_PATTERN = re.compile(
@@ -165,6 +166,84 @@ def _search_words(value: str) -> list[str]:
     ]
 
 
+def create_work_plan(
+    arguments: dict[str, Any],
+    context: ScholarWeaveContext,
+) -> dict[str, Any]:
+    """Create the run's immutable set of work-item identities and initial states."""
+    if context.metadata.get(PLAN_KEY):
+        raise ValueError("This run already has a work plan.")
+    raw_items = arguments.get("items")
+    if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 10:
+        raise ValueError("A work plan must contain between 1 and 10 items.")
+
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            raise ValueError("Each work item must be an object.")
+        item_id = str(raw_item.get("id") or "").strip()
+        title = str(raw_item.get("title") or "").strip()
+        if not item_id or not title:
+            raise ValueError("Each work item requires a non-empty id and title.")
+        if item_id in seen:
+            raise ValueError(f"Duplicate work item id '{item_id}'.")
+        seen.add(item_id)
+        items.append(
+            {
+                "id": item_id,
+                "title": title,
+                "status": "pending",
+                "summary": "",
+            }
+        )
+    context.metadata[PLAN_KEY] = items
+    return work_plan(context)
+
+
+def update_work_item(
+    arguments: dict[str, Any],
+    context: ScholarWeaveContext,
+) -> dict[str, Any]:
+    """Update one work item's state while enforcing terminal-state summaries."""
+    items = _work_items(context)
+    item_id = str(arguments.get("id") or "").strip()
+    status = str(arguments.get("status") or "").strip()
+    summary = str(arguments.get("summary") or "").strip()
+    if status not in {"in_progress", "completed", "blocked"}:
+        raise ValueError("Work item status must be in_progress, completed, or blocked.")
+    item = next((candidate for candidate in items if candidate["id"] == item_id), None)
+    if item is None:
+        raise ValueError(f"Unknown work item '{item_id}'.")
+    if status in {"completed", "blocked"} and not summary:
+        raise ValueError("Completed or blocked work items require a summary.")
+    item["status"] = status
+    item["summary"] = summary
+    return work_plan(context)
+
+
+def work_plan(context: ScholarWeaveContext) -> dict[str, Any]:
+    """Return a detached snapshot of all work items and the unfinished subset."""
+    items = _work_items(context)
+    pending = [
+        dict(item)
+        for item in items
+        if item["status"] not in {"completed", "blocked"}
+    ]
+    return {
+        "items": [dict(item) for item in items],
+        "pending": pending,
+        "complete": not pending,
+    }
+
+
+def _work_items(context: ScholarWeaveContext) -> list[dict[str, str]]:
+    items = context.metadata.get(PLAN_KEY)
+    if not isinstance(items, list) or not items:
+        raise ValueError("Create a work plan before reading or updating it.")
+    return items
+
+
 class ApplicationToolRuntime:
     def __init__(
         self,
@@ -200,6 +279,7 @@ class ApplicationToolRuntime:
         *,
         tool_call_id: str | None = None,
     ) -> Any:
+        """Dispatch one catalog tool and record its bounded result and activity metadata."""
         handler_name = APPLICATION_TOOL_HANDLERS.get(catalog_id)
         if handler_name is None:
             raise ValueError(f"Unknown application tool '{catalog_id}'.")
@@ -315,7 +395,7 @@ class ApplicationToolRuntime:
                     )
                 raise
             except Exception as error:
-                category, transient = _classify_tool_error(error)
+                category, transient = classify_tool_error(error)
                 retryable = safe_retry and transient and attempt_number < attempts
                 status = "failed" if safe_retry else "unknown_outcome"
                 if attempt is not None:
@@ -557,6 +637,7 @@ class ApplicationToolRuntime:
         *,
         max_tokens: int | None = None,
     ) -> Any:
+        """Return a model-safe result, persisting oversized payloads behind a result reference."""
         if isinstance(result, dict) and result.get("result_ref") and result.get("truncated"):
             return result
         if catalog_id == "tool.results.read":
@@ -1746,21 +1827,3 @@ _SAFE_READ_PREFIXES = (
 
 def _is_safe_read(catalog_id: str) -> bool:
     return any(catalog_id.startswith(prefix) for prefix in _SAFE_READ_PREFIXES)
-
-
-def _classify_tool_error(error: Exception) -> tuple[str, bool]:
-    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
-        return "timeout", True
-    status_code = getattr(error, "status_code", None)
-    message = str(error).casefold()
-    if status_code == 429:
-        return "rate_limited", True
-    if (isinstance(status_code, int) and status_code >= 500) or any(
-        marker in message for marker in ("http 500", "http 502", "http 503", "http 504")
-    ):
-        return "upstream_unavailable", True
-    if isinstance(error, (ConnectionError, OSError)):
-        return "transport", True
-    if isinstance(error, (ValueError, TypeError, KeyError)):
-        return "invalid_input", False
-    return "tool_error", False

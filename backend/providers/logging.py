@@ -50,7 +50,7 @@ class LLMCallLogger:
 
 
 class LoggingTransport(httpx.AsyncBaseTransport):
-    """Logs OpenAI-compatible LLM endpoints used by the Agents SDK."""
+    """Logs OpenAI-compatible LLM endpoint traffic."""
 
     def __init__(self, logger: LLMCallLogger, provider: str, transport: httpx.AsyncBaseTransport | None = None) -> None:
         self._logger = logger

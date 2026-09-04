@@ -4,11 +4,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from agents import Model
-from openai import AsyncOpenAI
+from backend.agents.harness import ModelBinding
 
 if TYPE_CHECKING:
     from backend.providers.schemas import ProviderModel
+
+# The harness model binding is the only "resolved model" the application needs.
+ResolvedAgentModel = ModelBinding
 
 
 class ProviderRuntimeError(RuntimeError):
@@ -48,19 +50,6 @@ class AgentModelDefaults:
     chat: ModelReference | None = None
     embedding: ModelReference | None = None
     vision: ModelReference | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedAgentModel:
-    model: Model
-    provider_kind: str
-    supports_responses: bool
-    supports_hosted_tools: bool
-    supports_parallel_tool_calls: bool
-    model_name: str | None = None
-    responses_client: AsyncOpenAI | None = None
-    context_window_tokens: int | None = None
-    local_inference: bool = False
 
 
 class AgentModelResolver(Protocol):

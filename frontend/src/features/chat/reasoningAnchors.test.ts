@@ -36,7 +36,6 @@ function run(id: string, input: string, reasoning: string): Run {
         created_at: '2026-08-06T00:00:00Z',
       },
     ],
-    interruptions: [],
   } as unknown as Run;
 }
 

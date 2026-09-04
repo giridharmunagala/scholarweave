@@ -183,6 +183,47 @@ describe('live activity status', () => {
       label: 'Using Search papers',
       detail: 'transformer scaling laws',
     });
+
+    describe('tool failure messages', () => {
+      it('shows the readable failure message instead of the raw exception', () => {
+        const timeline = buildTurnTimeline([
+          event(1, 'tool.started', {
+            tool_name: 'download_web_page',
+            tool_call_id: 'call-1',
+          }),
+          event(2, 'tool.failed', {
+            tool_name: 'download_web_page',
+            tool_call_id: 'call-1',
+            category: 'upstream_unavailable',
+            error: 'HTTPStatusError: 503 Service Unavailable at https://provider.internal',
+            display_message: 'The source is temporarily unavailable. The agent can try another source.',
+          }),
+        ], { settled: true });
+
+        expect(timeline.steps.filter((step) => step.kind === 'tool')).toMatchObject([
+          {
+            status: 'failed',
+            detail: 'The source is temporarily unavailable. The agent can try another source.',
+          },
+        ]);
+      });
+
+      it('uses a readable category fallback for older persisted events', () => {
+        const timeline = buildTurnTimeline([
+          event(1, 'tool.failed', {
+            tool_name: 'search_web',
+            category: 'rate_limited',
+            error: 'RateLimitError: raw provider response',
+          }),
+        ], { settled: true });
+
+        expect(timeline.steps.filter((step) => step.kind === 'tool')).toMatchObject([
+          {
+            detail: 'The service is temporarily limiting requests. The agent can retry shortly.',
+          },
+        ]);
+      });
+    });
   });
 
   it('reports thinking while reasoning streams and counts the settled steps behind it', () => {

@@ -1,4 +1,4 @@
-"""A tiny OpenAI-compatible server for deterministic SDK integration tests.
+"""A tiny OpenAI-compatible server for deterministic harness integration tests.
 
 Implements enough of ``/v1/chat/completions`` to exercise plain replies, streaming,
 tool calls, model discovery, and embeddings without a live provider.
@@ -105,7 +105,7 @@ class StubProvider:
         return _message(self._reply_for(payload))
 
     def stream(self, payload: dict[str, Any]) -> str:
-        """Re-renders a scripted reply as the SSE chunks the SDK's streaming path expects."""
+        """Re-render a scripted reply as Chat Completions SSE chunks."""
         completion = self.responses(payload)
         message = completion["choices"][0]["message"]
         head = {
@@ -145,7 +145,7 @@ class StubProvider:
 
 @pytest.fixture()
 def stub_provider():
-    """Runs the stub on a real socket, because the SDK builds its own HTTP client."""
+    """Run the stub on a real socket so the native client uses its production path."""
     provider = StubProvider()
     app = FastAPI()
 

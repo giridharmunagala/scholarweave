@@ -1,6 +1,6 @@
-"""Persisted SDK blueprints and compilation into real SDK agents."""
+"""Persisted agent blueprints and the native harness that runs them.
 
-from backend.agents.blueprint import AgentBlueprint
-from backend.agents.compiler import AgentCompiler, CompiledAgent
-
-__all__ = ["AgentBlueprint", "AgentCompiler", "CompiledAgent"]
+Submodules are imported directly (``backend.agents.harness``,
+``backend.agents.compiler``) so provider and runtime modules can depend on the
+harness without an import cycle through this package.
+"""

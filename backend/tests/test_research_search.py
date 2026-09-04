@@ -10,7 +10,7 @@ import pytest
 from ddgs.exceptions import DDGSException, RatelimitException
 from ddgs.engines.duckduckgo import Duckduckgo
 
-from backend.conversations.autonomous import RESEARCH_TOOL_IDS, autonomous_blueprint
+from backend.conversations.turns import RESEARCH_TOOL_IDS, autonomous_blueprint
 from backend.prompting.registry import default_prompt_registry
 from backend.bootstrap import create_services
 from backend.core.config import Settings

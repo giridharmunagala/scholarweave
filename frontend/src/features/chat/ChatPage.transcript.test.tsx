@@ -137,6 +137,13 @@ function buildTurn(turn: Turn, runId: string) {
 
   const sessionItems = [
     { id: `${runId}-u`, type: 'message', role: 'user', text: turn.input, created_at: new Date(clock).toISOString() },
+    {
+      id: `${runId}-r`,
+      type: 'reasoning',
+      role: null,
+      text: 'Internal reasoning must stay in activity.',
+      created_at: new Date(clock).toISOString(),
+    },
     ...turn.replies.map((reply, index) => ({
       id: `${runId}-s${index}`,
       type: 'message',
@@ -183,7 +190,6 @@ class FakeServer {
       finished_at: null,
       items: [],
       events: [],
-      interruptions: [],
     };
     this.runs.push(run);
     this.turnIndex += 1;
@@ -530,6 +536,9 @@ describe('chat transcript detail', () => {
       await runTurn(turn);
 
       expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
+      expect(text(container.querySelector('.message-list'))).not.toContain(
+        'Internal reasoning must stay in activity.',
+      );
       expect(container.querySelectorAll('.activity-sidebar .turn-timeline')).toHaveLength(turn + 1);
       expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
       expect(container.querySelectorAll('.timeline-row.live')).toHaveLength(0);

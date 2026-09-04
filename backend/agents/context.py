@@ -45,7 +45,7 @@ class ToolReceipt:
 
 @dataclass(slots=True)
 class ScholarWeaveContext:
-    """Local run dependencies; the SDK never places this object in model input."""
+    """Local run dependencies; the harness never places this object in model input."""
 
     run_id: str
     tool_runtime: ToolRuntime
@@ -57,21 +57,3 @@ class ScholarWeaveContext:
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.event_sink is not None:
             await self.event_sink.emit(event_type, payload)
-
-
-def unwrap_scholar_context(value: Any) -> ScholarWeaveContext:
-    """Unwrap SDK and nested-agent context wrappers without depending on SDK internals."""
-
-    current = value
-    seen: set[int] = set()
-    for _ in range(8):
-        if isinstance(current, ScholarWeaveContext):
-            return current
-        marker = id(current)
-        if marker in seen:
-            break
-        seen.add(marker)
-        current = getattr(current, "context", None)
-        if current is None:
-            break
-    raise TypeError("A ScholarWeaveContext could not be found in the SDK context wrapper.")

@@ -10,54 +10,44 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from agents import (
-    InputGuardrailTripwireTriggered,
-    MaxTurnsExceeded,
-    ModelSettings,
-    OutputGuardrailTripwireTriggered,
-    RunContextWrapper,
-    Runner,
-    RunResult,
-    RunResultStreaming,
-    RunState,
-    TResponseInputItem,
-    ToolInputGuardrailTripwireTriggered,
-    ToolOutputGuardrailTripwireTriggered,
-)
-
-from backend.agents.blueprint import ReasoningEffort, ReasoningSpec
-from backend.agents.compiler import CompiledAgent
 from backend.agents.blueprint import AgentBlueprint
-from backend.agents.compiler import AgentCompiler
-from backend.core.config import Settings
-from backend.core.errors import ConflictError, NotFoundError
-from backend.utils import to_jsonable, utcnow
-from backend.runs.broker import EventBroker
-from backend.runs.events import BufferedRunEventSink, PersistedRunEventSink
-from backend.runs.projector import project_run_item, project_stream_event, run_item_key
-from backend.runs.repository import (
-    LeaseOwnershipError,
-    RunLease,
-    RunRepository,
+from backend.agents.compiler import AgentCompiler, CompiledAgent, with_reasoning_effort
+from backend.agents.context import ScholarWeaveContext, ToolRuntime
+from backend.agents.harness import (
+    ConversationItem,
+    MaxTurnsExceeded,
+    RunInput,
+    RunPolicyViolation,
+    RunResult,
+    item_text,
+    run_streamed,
 )
-from backend.agents.context import ScholarWeaveContext, ToolReceipt, ToolRuntime
-from backend.runs.hooks import ScholarWeaveRunHooks
-from backend.providers.inference import InferenceScheduler
-from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import (
     SteeringInbox,
     SteeringMessage,
     emit_steering_applied,
 )
+from backend.core.config import Settings
+from backend.core.errors import ConflictError, NotFoundError
 from backend.prompting.registry import PromptRegistry
-from backend.runs.logging import RunDetailLogger
-from backend.tools.failures import (
-    restore_tool_failure_state,
-    restore_tool_failure_state_from_attempts,
-    serialize_tool_failure_state,
+from backend.providers.inference import InferenceScheduler
+from backend.providers.reasoning import ReasoningEffort
+from backend.runs.events import (
+    BufferedRunEventSink,
+    EventBroker,
+    PersistedRunEventSink,
 )
+from backend.runs.hooks import ScholarWeaveRunHooks
+from backend.runs.logging import RunDetailLogger
+from backend.runs.repository import (
+    LeaseOwnershipError,
+    RunLease,
+    RunRepository,
+)
+from backend.tools.failures import restore_tool_failure_state_from_attempts
+from backend.utils import merge_usage, to_jsonable, utcnow
 
-RunInput = str | list[TResponseInputItem]
 logger = logging.getLogger(__name__)
 STOP_AND_ANSWER_PROMPT = (
     "Stop all further research. Answer the user's request now using only the conversation "
@@ -66,15 +56,13 @@ STOP_AND_ANSWER_PROMPT = (
     "attempt additional tool calls."
 )
 STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION = "scholarweave:internal:stop-and-answer"
-GuardrailTripwire = (
-    InputGuardrailTripwireTriggered
-    | OutputGuardrailTripwireTriggered
-    | ToolInputGuardrailTripwireTriggered
-    | ToolOutputGuardrailTripwireTriggered
-)
 
 
 class RunLeaseLost(RuntimeError):
+    pass
+
+
+class RunBudgetExceeded(RuntimeError):
     pass
 
 
@@ -82,42 +70,6 @@ class RunLeaseLost(RuntimeError):
 class LeaseDeadline:
     lease: RunLease
     monotonic_expires_at: float
-
-
-def _with_reasoning_effort(
-    compiled: CompiledAgent,
-    reasoning_effort: ReasoningEffort | None,
-) -> CompiledAgent:
-    if reasoning_effort is None:
-        return compiled
-
-    reasoning = {"effort": reasoning_effort}
-    inherited = compiled.run_config.model_settings or ModelSettings()
-    run_config = replace(
-        compiled.run_config,
-        model_settings=inherited.resolve(ModelSettings(reasoning=reasoning)),
-    )
-    blueprint = compiled.blueprint.model_copy(deep=True)
-    for agent in blueprint.agents:
-        agent.model_settings.reasoning = ReasoningSpec(effort=reasoning_effort)
-    return replace(compiled, blueprint=blueprint, run_config=run_config)
-
-
-async def _persist_result_to_session_if_needed(
-    result: RunResult | RunResultStreaming,
-    *,
-    runner_session: Any,
-    conversation_session: Any,
-) -> None:
-    if runner_session is not None or conversation_session is None:
-        return
-    original_items = (
-        [{"role": "user", "content": result.input}]
-        if isinstance(result.input, str)
-        else list(result.input)
-    )
-    continuation_items = result.to_input_list(mode="normalized")
-    await conversation_session.add_items(continuation_items[len(original_items) :])
 
 
 def _restore_pending_steering(events: list[Any]) -> SteeringInbox:
@@ -150,7 +102,7 @@ class RunService:
     def __init__(
         self,
         repository: RunRepository,
-        sessions: SdkSessionFactory,
+        sessions: ConversationSessionFactory,
         tool_runtime: ToolRuntime,
         event_broker: EventBroker,
         *,
@@ -179,7 +131,7 @@ class RunService:
         self._completion_validators = dict(completion_validators or {})
         self._owner_id = str(uuid.uuid4())
         self._closing = False
-        self._active_streams: dict[str, RunResultStreaming] = {}
+        self._active_runs: dict[str, Any] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._compiled_runs: dict[str, CompiledAgent] = {}
         self._event_sinks: dict[str, PersistedRunEventSink] = {}
@@ -200,6 +152,7 @@ class RunService:
         self._recovery_task = asyncio.create_task(self._recovery_loop())
 
     async def _recover_incomplete_once(self, compiler: AgentCompiler) -> None:
+        """Restart interrupted runs from durable conversation and journal state."""
         for record in self._repository.incomplete():
             try:
                 lease_deadline = await self._acquire_claim(record.id)
@@ -214,7 +167,6 @@ class RunService:
                 record = self._repository.get(record.id)
                 if record.status not in {"pending", "running"}:
                     continue
-                runtime_context: ScholarWeaveContext | None = None
                 if record.cancel_requested:
                     if self._repository.cancel_owned(lease_deadline.lease):
                         await self._event_sink(record.id).emit(
@@ -223,10 +175,8 @@ class RunService:
                         )
                     continue
                 if record.conversation_id is not None:
-                    self._steering_inboxes[record.id] = (
-                        _restore_pending_steering(
-                            self._repository.events_after(record.id)
-                        )
+                    self._steering_inboxes[record.id] = _restore_pending_steering(
+                        self._repository.events_after(record.id)
                     )
                 compiled = compiler.compile(
                     AgentBlueprint.model_validate(record.blueprint_json),
@@ -246,64 +196,19 @@ class RunService:
                         completion_validator=validator,
                         completion_policy_id=record.completion_policy_id,
                     )
-                if record.status == "pending":
-                    if record.state_json:
-                        sink = self._event_sink(record.id)
-                        serialized_context = record.state_json.get(
-                            "context", {}
-                        ).get("context", {})
-                        serialized_metadata = (
-                            serialized_context.get("metadata")
-                            if isinstance(serialized_context, dict)
-                            else None
-                        )
-                        runtime_context = ScholarWeaveContext(
-                            run_id=record.id,
-                            conversation_id=record.conversation_id,
-                            tool_runtime=self._tool_runtime,
-                            event_sink=sink,
-                            metadata={
-                                **(
-                                    dict(record.runtime_metadata_json)
-                                    if isinstance(
-                                        record.runtime_metadata_json, dict
-                                    )
-                                    else {}
-                                ),
-                                **(
-                                    dict(serialized_metadata)
-                                    if isinstance(serialized_metadata, dict)
-                                    else {}
-                                ),
-                            },
-                        )
-                        _restore_tool_failure_state_from_run_state(
-                            runtime_context,
-                            record.state_json,
-                        )
-                        input_value = await RunState.from_json(
-                            compiled.entry_agent,
-                            record.state_json,
-                            context_override=RunContextWrapper(runtime_context),
-                        )
-                    else:
-                        input_value = record.input_json
-                    recovered = False
+                recovered = record.status != "pending"
+                if recovered:
+                    self._repository.abandon_incomplete_epochs_owned(lease_deadline.lease)
+                if not recovered:
+                    input_value = record.input_json
                 elif (
                     record.conversation_id is not None
                     and compiled.blueprint.description
                     == STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION
                 ):
-                    self._repository.abandon_incomplete_epochs_owned(
-                        lease_deadline.lease
-                    )
-                    entry_model = compiled.resolved_models[
-                        compiled.blueprint.entry_agent_id
-                    ]
                     session = self._sessions.get(
                         record.conversation_id,
                         compiled.blueprint.session,
-                        entry_model,
                     )
                     stop_prompt = _stop_and_answer_prompt_from_compiled(compiled)
                     input_value = _stop_and_answer_input(
@@ -311,36 +216,30 @@ class RunService:
                         await session.get_items(),
                         stop_prompt,
                     )
-                    recovered = True
                 else:
-                    self._repository.abandon_incomplete_epochs_owned(
-                        lease_deadline.lease
-                    )
                     input_value = (
                         self._prompts.render("run-recovery", run_id=record.id)
                         if self._prompts is not None
                         else _recovery_instruction(record.id)
                     )
-                    recovered = True
-                if recovered:
-                    runtime_context = ScholarWeaveContext(
-                        run_id=record.id,
-                        conversation_id=record.conversation_id,
-                        tool_runtime=self._tool_runtime,
-                        event_sink=self._event_sink(record.id),
-                        metadata={
-                            **(
-                                dict(record.runtime_metadata_json)
-                                if isinstance(record.runtime_metadata_json, dict)
-                                else {}
-                            ),
-                            "recovered": True,
-                        },
-                    )
-                    restore_tool_failure_state_from_attempts(
-                        runtime_context.metadata,
-                        self._repository.get(record.id).tool_attempts,
-                    )
+                runtime_context = ScholarWeaveContext(
+                    run_id=record.id,
+                    conversation_id=record.conversation_id,
+                    tool_runtime=self._tool_runtime,
+                    event_sink=self._event_sink(record.id),
+                    metadata={
+                        **(
+                            dict(record.runtime_metadata_json)
+                            if isinstance(record.runtime_metadata_json, dict)
+                            else {}
+                        ),
+                        "recovered": recovered,
+                    },
+                )
+                restore_tool_failure_state_from_attempts(
+                    runtime_context.metadata,
+                    self._repository.get(record.id).tool_attempts,
+                )
                 lease_deadline = await self._renew_claim(lease_deadline)
                 self._schedule(
                     record.id,
@@ -419,7 +318,7 @@ class RunService:
         reasoning_effort: ReasoningEffort | None = None,
         runtime_metadata: dict[str, Any] | None = None,
     ):
-        compiled = _with_reasoning_effort(compiled, reasoning_effort)
+        compiled = with_reasoning_effort(compiled, reasoning_effort)
         _validate_completion_policy(compiled)
         record = self._repository.create(
             conversation_id=conversation_id,
@@ -467,7 +366,7 @@ class RunService:
         self,
         run_id: str,
         compiled: CompiledAgent,
-        input_value: RunInput | RunState[ScholarWeaveContext],
+        input_value: RunInput,
         *,
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
@@ -523,7 +422,7 @@ class RunService:
     async def run_now(
         self,
         compiled: CompiledAgent,
-        input_value: RunInput | RunState[ScholarWeaveContext],
+        input_value: RunInput,
         *,
         conversation_id: str | None = None,
     ):
@@ -531,9 +430,7 @@ class RunService:
         record = self._repository.create(
             conversation_id=conversation_id,
             agent_name=compiled.blueprint.name,
-            input_value=to_jsonable(input_value)
-            if not isinstance(input_value, RunState)
-            else {"type": "run_state"},
+            input_value=to_jsonable(input_value),
             blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
             context_window_tokens=compiled.context_window_tokens,
             completion_policy_id=compiled.completion_policy_id,
@@ -571,9 +468,9 @@ class RunService:
             return record
         if not self._repository.request_cancel(run_id):
             return self._repository.get(run_id)
-        stream = self._active_streams.get(run_id)
-        if stream is not None:
-            stream.cancel("immediate")
+        active = self._active_runs.get(run_id)
+        if active is not None:
+            active.cancel()
         task = self._tasks.get(run_id)
         if task is not None:
             task.cancel()
@@ -589,7 +486,7 @@ class RunService:
             sink = self._event_sink(run_id)
             await sink.emit("run.cancelled", {"reason": "user_requested"})
         current = self._repository.get(run_id)
-        if current.status in {"completed", "failed", "cancelled", "paused"}:
+        if current.status in {"completed", "failed", "cancelled"}:
             self._log_terminal_run(run_id)
         return self._repository.get(run_id)
 
@@ -615,11 +512,9 @@ class RunService:
                 else STOP_AND_ANSWER_PROMPT
             )
             answer_compiled = _stop_and_answer_compiled(compiled, stop_prompt)
-            entry_model = compiled.resolved_models[compiled.blueprint.entry_agent_id]
             session = self._sessions.get(
                 record.conversation_id,
                 compiled.blueprint.session,
-                entry_model,
             )
             answer_input = _stop_and_answer_input(
                 record.input_json,
@@ -648,11 +543,7 @@ class RunService:
         ]
         for record in active:
             await self.cancel(record.id)
-        tasks = [
-            self._tasks[record.id]
-            for record in active
-            if record.id in self._tasks
-        ]
+        tasks = [self._tasks[record.id] for record in active if record.id in self._tasks]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._wait_for_all_claim_cleanups()
@@ -667,117 +558,6 @@ class RunService:
             if not pending:
                 break
             await asyncio.gather(*pending, return_exceptions=True)
-
-    async def resolve_interruption(
-        self,
-        compiled: CompiledAgent,
-        *,
-        run_id: str,
-        interruption_id: str,
-        approved: bool,
-        rejection_message: str | None = None,
-    ):
-        record = self._repository.get(run_id)
-        if record.status != "paused" or not record.state_json:
-            raise ValueError("Only a paused run can resolve an interruption.")
-        interruption = self._repository.get_interruption(interruption_id)
-        if interruption.run_id != run_id or interruption.status != "pending":
-            raise ValueError("The interruption is not pending for this run.")
-        sink = self._event_sink(run_id)
-        serialized_context = record.state_json.get("context", {}).get("context", {})
-        serialized_context = serialized_context if isinstance(serialized_context, dict) else {}
-        raw_metadata = serialized_context.get("metadata")
-        raw_receipts = serialized_context.get("receipts")
-        live_context = ScholarWeaveContext(
-            run_id=run_id,
-            conversation_id=record.conversation_id,
-            tool_runtime=self._tool_runtime,
-            event_sink=sink,
-            metadata=dict(raw_metadata) if isinstance(raw_metadata, dict) else {},
-            receipts=[
-                ToolReceipt(
-                    kind=str(receipt.get("kind") or ""),
-                    title=str(receipt.get("title") or ""),
-                    description=str(receipt.get("description") or ""),
-                    href=receipt.get("href")
-                    if isinstance(receipt.get("href"), str)
-                    else None,
-                    metadata=dict(receipt.get("metadata") or {}),
-                )
-                for receipt in raw_receipts or []
-                if isinstance(receipt, dict)
-            ],
-        )
-        _restore_tool_failure_state_from_run_state(
-            live_context,
-            record.state_json,
-        )
-        state = await RunState.from_json(
-            compiled.entry_agent,
-            record.state_json,
-            context_override=RunContextWrapper(live_context),
-        )
-        approval_item = next(
-            (
-                item
-                for item in state.get_interruptions()
-                if run_item_key(item) == interruption.item_key
-            ),
-            None,
-        )
-        if approval_item is None:
-            raise ValueError("The SDK run state no longer contains this interruption.")
-        if approved:
-            state.approve(approval_item)
-            status = "approved"
-            response = {"approved": True}
-        else:
-            state.reject(
-                approval_item,
-                rejection_message=rejection_message,
-            )
-            status = "rejected"
-            response = {
-                "approved": False,
-                "message": rejection_message,
-            }
-        persisted_state = state.to_json(
-            context_serializer=lambda context: {
-                "run_id": context.run_id,
-                "conversation_id": context.conversation_id,
-                "metadata": to_jsonable(
-                    _persistable_runtime_metadata(context.metadata)
-                ),
-                "receipts": [
-                    {
-                        "kind": receipt.kind,
-                        "title": receipt.title,
-                        "description": receipt.description,
-                        "href": receipt.href,
-                        "metadata": to_jsonable(receipt.metadata),
-                    }
-                    for receipt in context.receipts
-                ],
-                "tool_failure_state": serialize_tool_failure_state(
-                    context.metadata
-                ),
-            }
-        )
-        self._repository.resolve_interruption(
-            interruption_id,
-            run_id=run_id,
-            status=status,
-            response=response,
-            state=persisted_state,
-        )
-        self._schedule(
-            run_id,
-            compiled,
-            state,
-            conversation_id=record.conversation_id,
-            runtime_context=live_context,
-        )
-        return self._repository.get(run_id)
 
     def delete(self, run_id: str) -> None:
         record = self._repository.get(run_id)
@@ -815,8 +595,8 @@ class RunService:
         if cleanup_task is not None:
             cleanup_task.cancel()
             await asyncio.gather(cleanup_task, return_exceptions=True)
-        for stream in tuple(self._active_streams.values()):
-            stream.cancel("immediate")
+        for active in tuple(self._active_runs.values()):
+            active.cancel()
         tasks = tuple(self._tasks.values())
         for task in tasks:
             task.cancel()
@@ -825,7 +605,7 @@ class RunService:
         await self._wait_for_all_claim_cleanups()
 
     def _delete_history(self, run_ids: list[str]) -> int:
-        active_ids = set(self._active_streams) | {
+        active_ids = set(self._active_runs) | {
             run_id for run_id, task in self._tasks.items() if not task.done()
         }
         deletable = [run_id for run_id in run_ids if run_id not in active_ids]
@@ -912,10 +692,7 @@ class RunService:
                     await asyncio.sleep(min(self._CLAIM_RETRY_SECONDS, remaining))
                     continue
                 confirmed_at = asyncio.get_running_loop().time()
-                if (
-                    confirmed_at
-                    >= lease_deadline.monotonic_expires_at - safety_margin
-                ):
+                if confirmed_at >= lease_deadline.monotonic_expires_at - safety_margin:
                     self._lease_lost_runs.add(run_id)
                     raise RunLeaseLost(
                         f"Run {run_id} claim was not renewed before its safety margin."
@@ -949,7 +726,7 @@ class RunService:
 
     async def _cleanup_cancelled_acquisition(
         self,
-        claim_task: asyncio.Task[RunLease | None],
+        claim_task: "asyncio.Task[RunLease | None]",
     ) -> None:
         try:
             lease = await asyncio.shield(claim_task)
@@ -964,9 +741,8 @@ class RunService:
         if self._active_leases.get(run_id) is None:
             self._active_leases[run_id] = lease
         try:
-            if (
-                self._repository.cancel_requested(run_id)
-                and self._repository.cancel_owned(lease)
+            if self._repository.cancel_requested(run_id) and self._repository.cancel_owned(
+                lease
             ):
                 await self._event_sink(run_id).emit(
                     "run.cancelled",
@@ -1017,9 +793,7 @@ class RunService:
         )
         if lease is None:
             self._lease_lost_runs.add(current.lease.run_id)
-            raise RunLeaseLost(
-                f"Run {current.lease.run_id} claim is no longer owned."
-            )
+            raise RunLeaseLost(f"Run {current.lease.run_id} claim is no longer owned.")
         self._active_leases[current.lease.run_id] = lease
         return LeaseDeadline(
             lease=lease,
@@ -1064,7 +838,7 @@ class RunService:
         self,
         run_id: str,
         compiled: CompiledAgent,
-        input_value: RunInput | RunState[ScholarWeaveContext],
+        input_value: RunInput,
         *,
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
@@ -1073,8 +847,7 @@ class RunService:
         lease_deadline: LeaseDeadline | None = None,
     ) -> None:
         deadline = (
-            asyncio.get_running_loop().time()
-            + self._settings.agent_run_timeout_seconds
+            asyncio.get_running_loop().time() + self._settings.agent_run_timeout_seconds
         )
         await self._execute_run(
             run_id,
@@ -1092,7 +865,7 @@ class RunService:
         self,
         run_id: str,
         compiled: CompiledAgent,
-        input_value: RunInput | RunState[ScholarWeaveContext],
+        input_value: RunInput,
         *,
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
@@ -1205,7 +978,7 @@ class RunService:
         self,
         run_id: str,
         compiled: CompiledAgent,
-        input_value: RunInput | RunState[ScholarWeaveContext],
+        input_value: RunInput,
         *,
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None,
@@ -1242,7 +1015,7 @@ class RunService:
         self,
         run_id: str,
         compiled: CompiledAgent,
-        input_value: RunInput | RunState[ScholarWeaveContext],
+        input_value: RunInput,
         *,
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
@@ -1250,8 +1023,6 @@ class RunService:
         deadline: float,
     ) -> None:
         sink = self._event_sink(run_id)
-        if isinstance(input_value, RunState) and runtime_context is None:
-            raise ValueError("Resuming an SDK RunState requires restored live context.")
         record_metadata = self._repository.get(run_id).runtime_metadata_json
         context = runtime_context or ScholarWeaveContext(
             run_id=run_id,
@@ -1259,11 +1030,7 @@ class RunService:
             tool_runtime=self._tool_runtime,
             event_sink=sink,
             metadata={
-                **(
-                    dict(record_metadata)
-                    if isinstance(record_metadata, dict)
-                    else {}
-                ),
+                **(dict(record_metadata) if isinstance(record_metadata, dict) else {}),
                 **dict(runtime_metadata or {}),
             },
         )
@@ -1292,40 +1059,24 @@ class RunService:
             )
         context.event_sink = sink
         hooks = ScholarWeaveRunHooks()
-        sdk_session_id = conversation_id or _standalone_session_id(run_id)
-        conversation_session = self._sessions.get(
-            sdk_session_id,
-            compiled.blueprint.session,
-        )
-        session = (
-            conversation_session if not isinstance(input_value, RunState) else None
-        )
+        session_id = conversation_id or _standalone_session_id(run_id)
+        session = self._sessions.get(session_id, compiled.blueprint.session)
         steering_inbox = (
             self._steering_inboxes.setdefault(run_id, SteeringInbox())
             if conversation_id is not None
             else None
         )
         if steering_inbox is not None:
-            steering_inbox.bind_session(conversation_session)
+            steering_inbox.bind_session(session)
             context.metadata["_steering_inbox"] = steering_inbox
-        lock = (
-            self._sessions.run_lock(sdk_session_id)
-        )
-        existing_record = self._repository.get(run_id)
-        persisted_item_count = (
-            len(existing_record.items) if isinstance(input_value, RunState) else 0
-        )
         initial_reasoning, initial_assistant = _persisted_stream_text(
-            existing_record.events
+            self._repository.get(run_id).events
         )
         self._repository.mark_running_owned(self._owned_lease(run_id))
         recovered = bool(context.metadata.get("recovered"))
         await sink.emit(
-            "run.resumed" if isinstance(input_value, RunState) else "run.started",
-            {
-                "agent_name": compiled.blueprint.name,
-                "recovered": recovered,
-            },
+            "run.started",
+            {"agent_name": compiled.blueprint.name, "recovered": recovered},
         )
         if recovered:
             await sink.emit(
@@ -1337,12 +1088,10 @@ class RunService:
         try:
             async with asyncio.timeout_at(deadline):
                 self._raise_if_cancelled(run_id)
-                async with lock:
+                async with self._sessions.run_lock(session_id):
                     self._raise_if_cancelled(run_id)
-                    session_snapshot = (
-                        await session.get_items() if session is not None else None
-                    )
-                    epoch_input = input_value
+                    session_checkpoint: int | None = None
+                    epoch_input: RunInput = input_value
                     first_epoch = True
                     consumed_turns = self._repository.consumed_model_turns(run_id)
                     while True:
@@ -1358,9 +1107,7 @@ class RunService:
                         )
                         epoch = self._repository.begin_epoch_owned(
                             self._owned_lease(run_id),
-                            to_jsonable(epoch_input)
-                            if not isinstance(epoch_input, RunState)
-                            else {"type": "approval_resume"},
+                            to_jsonable(epoch_input),
                         )
                         active_epoch_id = epoch.id
                         if epoch.epoch_index >= self._settings.agent_max_epochs:
@@ -1391,12 +1138,8 @@ class RunService:
                         )
                         stream_sink = BufferedRunEventSink(
                             sink,
-                            initial_reasoning=initial_reasoning
-                            if first_epoch
-                            else "",
-                            initial_assistant=initial_assistant
-                            if first_epoch
-                            else "",
+                            initial_reasoning=initial_reasoning if first_epoch else "",
+                            initial_assistant=initial_assistant if first_epoch else "",
                         )
                         context.event_sink = stream_sink
                         if steering_inbox is not None:
@@ -1404,47 +1147,30 @@ class RunService:
                         if deferred_steering:
                             await emit_steering_applied(context, deferred_steering)
                             deferred_steering = []
+                        epoch_items = await _resolved_epoch_input(session, epoch_input)
+                        if session_checkpoint is None:
+                            session_checkpoint = await session.checkpoint()
                         try:
-                            stream = Runner.run_streamed(
+                            handle = run_streamed(
                                 compiled.entry_agent,
-                                epoch_input,
-                                context=context
-                                if not isinstance(epoch_input, RunState)
-                                else None,
+                                epoch_items,
+                                context=context,
+                                settings=compiled.run_settings,
                                 max_turns=epoch_turn_limit,
                                 hooks=hooks,
-                                run_config=compiled.run_config,
-                                session=session,
+                                context_policy=compiled.context_policy,
                             )
-                            self._active_streams[run_id] = stream
+                            self._active_runs[run_id] = handle
                             try:
-                                async for event in stream.stream_events():
-                                    projected = project_stream_event(event)
-                                    if projected is not None:
-                                        await stream_sink.emit(*projected)
+                                result = await handle
                             finally:
                                 await _flush_preserving_cancellation(stream_sink)
                         except MaxTurnsExceeded as exc:
-                            run_data = exc.run_data
-                            _persist_new_items(
-                                self._repository,
-                                self._owned_lease(run_id),
-                                getattr(run_data, "new_items", []),
-                                persisted_item_count if first_epoch else 0,
-                            )
-                            await _persist_result_to_session_if_needed(
-                                run_data,
-                                runner_session=session,
-                                conversation_session=conversation_session,
-                            )
-                            usage = to_jsonable(
-                                getattr(
-                                    getattr(run_data, "context_wrapper", None),
-                                    "usage",
-                                    {},
-                                )
-                            )
+                            usage = exc.run_data.usage.to_dict()
+                            usage["performance"] = stream_sink.performance()
                             usage["model_turns"] = epoch_turn_limit
+                            self._persist_items(run_id, exc.run_data.new_items)
+                            await session.add_items(exc.run_data.generated_items)
                             self._repository.finish_epoch_owned(
                                 self._owned_lease(run_id),
                                 epoch.id,
@@ -1463,7 +1189,7 @@ class RunService:
                             )
                             next_epoch = epoch.epoch_index + 1
                             goal_state = self._repository.get_goal_state(run_id)
-                            continuation = (
+                            epoch_input = (
                                 self._prompts.render(
                                     "run-continuation",
                                     run_id=run_id,
@@ -1481,14 +1207,6 @@ class RunService:
                                     goal_state,
                                 )
                             )
-                            if session is None:
-                                epoch_input = [
-                                    *run_data.to_input_list(mode="normalized"),
-                                    {"role": "user", "content": continuation},
-                                ]
-                            else:
-                                epoch_input = continuation
-                            persisted_item_count = 0
                             consumed_turns += int(usage["model_turns"])
                             first_epoch = False
                             active_epoch_id = None
@@ -1504,15 +1222,13 @@ class RunService:
                             raise
                         finally:
                             await _cleanup_internal_prompt_if_needed(context, session)
-                            self._active_streams.pop(run_id, None)
+                            self._active_runs.pop(run_id, None)
 
-                        epoch_usage = to_jsonable(stream.context_wrapper.usage)
+                        epoch_usage = result.usage.to_dict()
                         epoch_usage["performance"] = stream_sink.performance()
                         epoch_usage["model_turns"] = _epoch_model_turns(
                             epoch_usage,
                             epoch_turn_limit,
-                            consumed_turns,
-                            resumed=isinstance(epoch_input, RunState),
                         )
                         pending_steering = (
                             steering_inbox.take_pending_or_close()
@@ -1520,32 +1236,13 @@ class RunService:
                             else []
                         )
                         if pending_steering:
-                            await self._persist_result_activity(
+                            self._persist_items(run_id, result.new_items)
+                            await session.add_items(result.generated_items)
+                            aggregate_usage = self._finish_epoch(
                                 run_id,
-                                stream,
-                                sink,
-                                persisted_item_count=persisted_item_count
-                                if first_epoch
-                                else 0,
-                            )
-                            await _persist_result_to_session_if_needed(
-                                stream,
-                                runner_session=session,
-                                conversation_session=conversation_session,
-                            )
-                            self._repository.finish_epoch_owned(
-                                self._owned_lease(run_id),
-                                epoch.id,
-                                status="completed",
-                                terminal_reason="steering_continuation",
-                                usage=epoch_usage,
-                            )
-                            aggregate_usage = self._repository.aggregate_epoch_usage(
-                                run_id
-                            )
-                            self._repository.update_usage_owned(
-                                self._owned_lease(run_id),
-                                aggregate_usage,
+                                epoch,
+                                epoch_usage,
+                                "steering_continuation",
                             )
                             await sink.emit(
                                 "run.epoch.completed",
@@ -1557,50 +1254,21 @@ class RunService:
                                 },
                             )
                             await steering_inbox.persist(pending_steering)
-                            if session is None:
-                                epoch_input = [
-                                    *stream.to_input_list(mode="normalized"),
-                                    *(
-                                        message.input_item()
-                                        for message in pending_steering
-                                    ),
-                                ]
-                            else:
-                                epoch_input = []
+                            epoch_input = []
                             deferred_steering = pending_steering
-                            persisted_item_count = 0
                             consumed_turns += int(epoch_usage["model_turns"])
                             first_epoch = False
                             active_epoch_id = None
                             continue
                         work_continuation = _work_continuation(context)
                         if work_continuation is not None:
-                            await self._persist_result_activity(
+                            self._persist_items(run_id, result.new_items)
+                            await session.add_items(result.generated_items)
+                            aggregate_usage = self._finish_epoch(
                                 run_id,
-                                stream,
-                                sink,
-                                persisted_item_count=persisted_item_count
-                                if first_epoch
-                                else 0,
-                            )
-                            await _persist_result_to_session_if_needed(
-                                stream,
-                                runner_session=session,
-                                conversation_session=conversation_session,
-                            )
-                            self._repository.finish_epoch_owned(
-                                self._owned_lease(run_id),
-                                epoch.id,
-                                status="completed",
-                                terminal_reason="work_pending",
-                                usage=epoch_usage,
-                            )
-                            aggregate_usage = self._repository.aggregate_epoch_usage(
-                                run_id
-                            )
-                            self._repository.update_usage_owned(
-                                self._owned_lease(run_id),
-                                aggregate_usage,
+                                epoch,
+                                epoch_usage,
+                                "work_pending",
                             )
                             await sink.emit(
                                 "run.epoch.completed",
@@ -1611,57 +1279,35 @@ class RunService:
                                     "usage": aggregate_usage,
                                 },
                             )
-                            if session is None:
-                                epoch_input = [
-                                    *stream.to_input_list(mode="normalized"),
-                                    {"role": "user", "content": work_continuation},
-                                ]
-                            else:
-                                epoch_input = work_continuation
-                            persisted_item_count = 0
+                            epoch_input = work_continuation
                             consumed_turns += int(epoch_usage["model_turns"])
                             first_epoch = False
                             active_epoch_id = None
                             continue
                         await self._finish_result(
                             run_id,
-                            stream,
+                            result,
                             sink,
-                            performance=stream_sink.performance(),
                             compiled=compiled,
                             context=context,
-                            persisted_item_count=persisted_item_count
-                            if first_epoch
-                            else 0,
                             session=session,
-                            conversation_session=conversation_session,
-                            session_snapshot=session_snapshot,
+                            session_checkpoint=session_checkpoint,
                             epoch_usage=epoch_usage,
                         )
                         finished = self._repository.get(run_id)
-                        terminal_reason = (
-                            "approval_required"
-                            if finished.status == "paused"
-                            else "goal_completed"
-                        )
-                        self._repository.finish_epoch_owned(
-                            self._owned_lease(run_id),
-                            epoch.id,
+                        aggregate_usage = self._finish_epoch(
+                            run_id,
+                            epoch,
+                            epoch_usage,
+                            "goal_completed",
                             status=finished.status,
-                            terminal_reason=terminal_reason,
-                            usage=epoch_usage,
-                        )
-                        aggregate_usage = self._repository.aggregate_epoch_usage(run_id)
-                        self._repository.update_usage_owned(
-                            self._owned_lease(run_id),
-                            aggregate_usage,
                         )
                         await sink.emit(
                             "run.epoch.completed",
                             {
                                 "epoch_id": epoch.id,
                                 "epoch_index": epoch.epoch_index,
-                                "terminal_reason": terminal_reason,
+                                "terminal_reason": "goal_completed",
                                 "usage": aggregate_usage,
                             },
                         )
@@ -1698,24 +1344,13 @@ class RunService:
                 sink,
                 {"error": error, "terminal_reason": "deadline_exceeded"},
             )
-        except (
-            InputGuardrailTripwireTriggered,
-            OutputGuardrailTripwireTriggered,
-            ToolInputGuardrailTripwireTriggered,
-            ToolOutputGuardrailTripwireTriggered,
-        ) as exc:
+        except RunPolicyViolation as exc:
             await _cleanup_internal_prompt_if_needed(context, session)
             if run_id in self._lease_lost_runs:
                 raise asyncio.CancelledError
-            payload = _tripwire_payload(exc)
-            await sink.emit("guardrail.tripwire", payload)
+            await sink.emit("run.policy.rejected", {"policy": exc.policy, **exc.detail})
             error = f"{type(exc).__name__}: {exc}"
-            await self._fail_or_cancel_owned(
-                run_id,
-                error,
-                sink,
-                {"error": error},
-            )
+            await self._fail_or_cancel_owned(run_id, error, sink, {"error": error})
         except LeaseOwnershipError:
             self._lease_lost_runs.add(run_id)
             raise asyncio.CancelledError
@@ -1744,7 +1379,7 @@ class RunService:
                     },
                 )
         finally:
-            self._active_streams.pop(run_id, None)
+            self._active_runs.pop(run_id, None)
             if run_id not in self._tasks:
                 self._event_sinks.pop(run_id, None)
             inbox = self._steering_inboxes.pop(run_id, None)
@@ -1757,11 +1392,34 @@ class RunService:
             if run_id not in self._lease_lost_runs:
                 self._log_terminal_run(run_id)
 
+    def _finish_epoch(
+        self,
+        run_id: str,
+        epoch: Any,
+        epoch_usage: dict[str, Any],
+        terminal_reason: str,
+        *,
+        status: str = "completed",
+    ) -> dict[str, Any]:
+        self._repository.finish_epoch_owned(
+            self._owned_lease(run_id),
+            epoch.id,
+            status=status,
+            terminal_reason=terminal_reason,
+            usage=epoch_usage,
+        )
+        aggregate_usage = self._repository.aggregate_epoch_usage(run_id)
+        self._repository.update_usage_owned(self._owned_lease(run_id), aggregate_usage)
+        return aggregate_usage
+
+    def _persist_items(self, run_id: str, items: list[dict[str, Any]]) -> None:
+        self._repository.add_items_owned(self._owned_lease(run_id), items)
+
     def _log_terminal_run(self, run_id: str) -> None:
         if self._run_logger is None:
             return
         record = self._repository.get(run_id)
-        if record.status not in {"completed", "failed", "cancelled", "paused"}:
+        if record.status not in {"completed", "failed", "cancelled"}:
             return
         try:
             self._run_logger.write(record)
@@ -1789,10 +1447,11 @@ class RunService:
 
     async def _cleanup_standalone_session_if_terminal(self, run_id: str) -> None:
         record = self._repository.get(run_id)
-        if (
-            record.conversation_id is None
-            and record.status in {"completed", "failed", "cancelled"}
-        ):
+        if record.conversation_id is None and record.status in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
             await self._sessions.evict(_standalone_session_id(run_id), clear=True)
 
     def _raise_if_cancelled(self, run_id: str) -> None:
@@ -1806,81 +1465,25 @@ class RunService:
     async def _finish_result(
         self,
         run_id: str,
-        result: RunResult | RunResultStreaming,
+        result: RunResult,
         sink: PersistedRunEventSink,
         *,
-        performance: dict[str, Any],
         compiled: CompiledAgent,
         context: ScholarWeaveContext,
-        persisted_item_count: int,
         session: Any,
-        conversation_session: Any,
-        session_snapshot: list[TResponseInputItem] | None,
+        session_checkpoint: int,
         epoch_usage: dict[str, Any],
     ) -> None:
-        await self._persist_result_activity(
-            run_id,
-            result,
-            sink,
-            persisted_item_count=persisted_item_count,
-        )
-        await _persist_result_to_session_if_needed(
-            result,
-            runner_session=session,
-            conversation_session=conversation_session,
-        )
+        self._persist_items(run_id, result.new_items)
+        await session.add_items(result.generated_items)
 
-        if result.interruptions:
-            await ScholarWeaveRunHooks().supersede_active(context, "run_paused")
-            self._raise_if_lease_lost(run_id)
-            state = result.to_state().to_json(
-                context_serializer=lambda context: {
-                    "run_id": context.run_id,
-                    "conversation_id": context.conversation_id,
-                    "metadata": to_jsonable(
-                        _persistable_runtime_metadata(context.metadata)
-                    ),
-                    "receipts": [
-                        {
-                            "kind": receipt.kind,
-                            "title": receipt.title,
-                            "description": receipt.description,
-                            "href": receipt.href,
-                            "metadata": to_jsonable(receipt.metadata),
-                        }
-                        for receipt in context.receipts
-                    ],
-                    "tool_failure_state": serialize_tool_failure_state(
-                        context.metadata
-                    ),
-                }
-            )
-            for item in result.interruptions:
-                self._repository.add_interruption(
-                    run_id,
-                    item_key=run_item_key(item),
-                    tool_name=item.tool_name,
-                    item=project_run_item(item),
-                )
-            if not self._repository.pause_owned(
-                self._owned_lease(run_id),
-                state=state,
-            ):
-                if self._repository.cancel_owned(self._owned_lease(run_id)):
-                    await sink.emit("run.cancelled", {})
-                return
-            await sink.emit(
-                "run.paused",
-                {"interruptions": [project_run_item(item) for item in result.interruptions]},
-            )
-            return
         if self._repository.get(run_id).cancel_requested:
             await ScholarWeaveRunHooks().supersede_active(context, "run_cancelled")
             self._raise_if_lease_lost(run_id)
             if self._repository.cancel_owned(self._owned_lease(run_id)):
                 await sink.emit("run.cancelled", {})
             return
-        usage = _merge_usage(
+        usage = merge_usage(
             self._repository.aggregate_epoch_usage(run_id),
             epoch_usage,
         )
@@ -1888,66 +1491,47 @@ class RunService:
             try:
                 compiled.completion_validator(context)
             except Exception:
-                if session is not None and session_snapshot is not None:
-                    await session.clear_session()
-                    if session_snapshot:
-                        await session.add_items(session_snapshot)
+                await session.rollback_to(session_checkpoint)
                 raise
         internal_prompt = context.metadata.get("internal_session_prompt")
-        if session is not None and isinstance(internal_prompt, str):
+        if isinstance(internal_prompt, str):
             await _remove_internal_session_prompt(session, internal_prompt)
             context.metadata["internal_session_prompt_removed"] = True
         self._raise_if_lease_lost(run_id)
         completed = self._repository.complete_owned(
             self._owned_lease(run_id),
             final_output=to_jsonable(result.final_output),
-            last_agent_name=result.last_agent.name,
+            last_agent_name=result.last_agent_name,
             usage=usage,
         )
         if not completed:
             if self._repository.cancel_owned(self._owned_lease(run_id)):
-                await ScholarWeaveRunHooks().supersede_active(
-                    context,
-                    "run_cancelled",
-                )
+                await ScholarWeaveRunHooks().supersede_active(context, "run_cancelled")
                 await sink.emit("run.cancelled", {})
             return
         await sink.emit(
             "run.completed",
             {
                 "final_output": to_jsonable(result.final_output),
-                "last_agent_name": result.last_agent.name,
+                "last_agent_name": result.last_agent_name,
                 "usage": usage,
             },
         )
 
-    async def _persist_result_activity(
-        self,
-        run_id: str,
-        result: RunResult | RunResultStreaming,
-        sink: PersistedRunEventSink,
-        *,
-        persisted_item_count: int,
-    ) -> None:
-        projected_items = [
-            project_run_item(item)
-            for item in result.new_items[persisted_item_count:]
-        ]
-        self._repository.add_items_owned(
-            self._owned_lease(run_id),
-            projected_items,
-        )
-        for kind, guardrail_results in (
-            ("input", result.input_guardrail_results),
-            ("output", result.output_guardrail_results),
-            ("tool_input", result.tool_input_guardrail_results),
-            ("tool_output", result.tool_output_guardrail_results),
-        ):
-            for guardrail_result in guardrail_results:
-                await sink.emit(
-                    "guardrail.result",
-                    _guardrail_result_payload(kind, guardrail_result),
-                )
+
+async def _resolved_epoch_input(
+    session: Any,
+    epoch_input: RunInput,
+) -> list[ConversationItem]:
+    """Build one epoch's model input from durable history plus the new items."""
+    history = await session.get_items()
+    if isinstance(epoch_input, str):
+        new_items: list[ConversationItem] = [{"role": "user", "content": epoch_input}]
+    else:
+        new_items = [dict(item) for item in epoch_input if isinstance(item, dict)]
+    if new_items:
+        await session.add_items(new_items)
+    return [*history, *new_items]
 
 
 def _standalone_session_id(run_id: str) -> str:
@@ -1955,20 +1539,12 @@ def _standalone_session_id(run_id: str) -> str:
 
 
 def _validate_completion_policy(compiled: CompiledAgent) -> None:
-    if (
-        compiled.completion_validator is not None
-        and compiled.completion_policy_id is None
-    ):
-        raise ValueError(
-            "A completion validator must have a stable completion_policy_id."
-        )
+    if compiled.completion_validator is not None and compiled.completion_policy_id is None:
+        raise ValueError("A completion validator must have a stable completion_policy_id.")
 
 
 def _uses_local_inference(compiled: CompiledAgent) -> bool:
-    return any(
-        model.local_inference
-        for model in compiled.resolved_models.values()
-    )
+    return any(model.local_inference for model in compiled.resolved_models.values())
 
 
 def _stop_and_answer_compiled(
@@ -1976,47 +1552,35 @@ def _stop_and_answer_compiled(
     prompt: str = STOP_AND_ANSWER_PROMPT,
 ) -> CompiledAgent:
     entry_id = compiled.blueprint.entry_agent_id
-    entry_spec = next(
-        spec for spec in compiled.blueprint.agents if spec.id == entry_id
-    )
+    entry_spec = next(spec for spec in compiled.blueprint.agents if spec.id == entry_id)
     answer_blueprint = compiled.blueprint.model_copy(
         update={
             "description": STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION,
             "agents": [
                 entry_spec.model_copy(
-                    update={
-                        "instructions": prompt,
-                        "output": None,
-                        "tool_ids": [],
-                        "input_guardrail_ids": [],
-                        "output_guardrail_ids": [],
-                    }
+                    update={"instructions": prompt, "output": None, "tool_ids": []}
                 )
             ],
             "tools": [],
-            "handoffs": [],
             "agent_tools": [],
-            "guardrails": [],
             "run": compiled.blueprint.run.model_copy(update={"max_turns": 1}),
         }
     )
-    answer_agent = compiled.entry_agent.clone(
-        name=f"{compiled.entry_agent.name} Available Information Answer",
+    answer_agent = replace(
+        compiled.entry_agent,
         instructions=prompt,
+        name=f"{compiled.entry_agent.name} Available Information Answer",
         tools=[],
-        handoffs=[],
-        mcp_servers=[],
-        output_type=None,
-        input_guardrails=[],
-        output_guardrails=[],
+        output_schema=None,
     )
     return CompiledAgent(
         blueprint=answer_blueprint,
         entry_agent=answer_agent,
         agents_by_id={entry_id: answer_agent},
         resolved_models={entry_id: compiled.resolved_models[entry_id]},
-        run_config=compiled.run_config,
+        run_settings=replace(compiled.run_settings, max_turns=1),
         max_turns=1,
+        context_policy=compiled.context_policy,
         completion_validator=None,
         context_window_tokens=compiled.context_window_tokens,
     )
@@ -2039,25 +1603,22 @@ def _compiled_prompt_snapshot(
                 "id": agent_id,
                 "name": agent.name,
                 "source_instructions": spec.instructions,
-                "effective_instructions": str(agent.instructions or ""),
+                "effective_instructions": agent.instructions,
                 "model": spec.model.model,
                 "provider_profile_id": spec.model.provider_profile_id,
             }
         )
         for tool in agent.tools:
-            name = str(getattr(tool, "name", type(tool).__name__))
-            key = (agent_id, name)
+            key = (agent_id, tool.name)
             if key in seen_tools:
                 continue
             seen_tools.add(key)
             tools.append(
                 {
                     "agent_id": agent_id,
-                    "name": name,
-                    "description": getattr(tool, "description", None),
-                    "parameters_schema": to_jsonable(
-                        getattr(tool, "params_json_schema", None)
-                    ),
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters_schema": to_jsonable(tool.params_json_schema),
                 }
             )
     return {
@@ -2071,23 +1632,20 @@ def _compiled_prompt_snapshot(
 
 def _stop_and_answer_input(
     source_input: RunInput,
-    session_items: list[TResponseInputItem],
+    session_items: list[ConversationItem],
     prompt: str = STOP_AND_ANSWER_PROMPT,
-) -> list[TResponseInputItem]:
-    answer_input: list[TResponseInputItem] = []
+) -> list[ConversationItem]:
+    answer_input: list[ConversationItem] = []
     current_turn_items = _current_turn_session_items(session_items)
     session_text = {
-        text
-        for item in current_turn_items
-        if (text := _session_item_text(item)) is not None
+        text for item in current_turn_items if (text := item_text(item)) is not None
     }
     if isinstance(source_input, str):
         if source_input not in session_text:
             answer_input.append({"role": "user", "content": source_input})
     else:
         serialized_session_items = {
-            json.dumps(to_jsonable(item), sort_keys=True)
-            for item in current_turn_items
+            json.dumps(to_jsonable(item), sort_keys=True) for item in current_turn_items
         }
         answer_input.extend(
             item
@@ -2101,28 +1659,22 @@ def _stop_and_answer_input(
 
 def _stop_and_answer_prompt_from_compiled(compiled: CompiledAgent) -> str:
     entry_id = compiled.blueprint.entry_agent_id
-    entry_spec = next(
-        spec for spec in compiled.blueprint.agents if spec.id == entry_id
-    )
+    entry_spec = next(spec for spec in compiled.blueprint.agents if spec.id == entry_id)
     return entry_spec.instructions
 
 
 def _stop_and_answer_source_items(
     input_value: Any,
     prompt: str = STOP_AND_ANSWER_PROMPT,
-) -> list[TResponseInputItem]:
+) -> list[ConversationItem]:
     if not isinstance(input_value, list):
         return []
-    return [
-        item
-        for item in input_value
-        if _session_item_text(item) != prompt
-    ]
+    return [item for item in input_value if item_text(item) != prompt]
 
 
 def _current_turn_session_items(
-    session_items: list[TResponseInputItem],
-) -> list[TResponseInputItem]:
+    session_items: list[ConversationItem],
+) -> list[ConversationItem]:
     last_assistant = -1
     for index, item in enumerate(session_items):
         raw = to_jsonable(item)
@@ -2132,12 +1684,12 @@ def _current_turn_session_items(
 
 
 async def _remove_internal_session_prompt(session: Any, prompt: str) -> None:
-    popped: list[TResponseInputItem] = []
+    popped: list[ConversationItem] = []
     while True:
         item = await session.pop_item()
         if item is None:
             break
-        if _session_item_text(item) == prompt:
+        if item_text(item) == prompt:
             continue
         popped.append(item)
     if popped:
@@ -2157,81 +1709,6 @@ async def _cleanup_internal_prompt_if_needed(
         return
     await _remove_internal_session_prompt(session, internal_prompt)
     context.metadata["internal_session_prompt_removed"] = True
-
-
-def _session_item_text(item: TResponseInputItem) -> str | None:
-    raw = to_jsonable(item)
-    if not isinstance(raw, dict):
-        return None
-    content = raw.get("content")
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return None
-    parts = [
-        part.get("text")
-        for part in content
-        if isinstance(part, dict) and isinstance(part.get("text"), str)
-    ]
-    return "\n".join(parts) if parts else None
-
-
-def _restore_tool_failure_state_from_run_state(
-    context: ScholarWeaveContext,
-    state: Any,
-) -> None:
-    if not isinstance(state, dict):
-        return
-    context_entry = state.get("context")
-    if not isinstance(context_entry, dict):
-        return
-    serialized_context = context_entry.get("context")
-    if not isinstance(serialized_context, dict):
-        return
-    restore_tool_failure_state(
-        context.metadata,
-        serialized_context.get("tool_failure_state"),
-    )
-
-def _guardrail_result_payload(kind: str, result: Any) -> dict[str, Any]:
-    guardrail = result.guardrail
-    output = result.output
-    payload = {
-        "kind": kind,
-        "guardrail_name": guardrail.get_name(),
-        "output_info": to_jsonable(output.output_info),
-    }
-    tripwire = getattr(output, "tripwire_triggered", None)
-    if tripwire is not None:
-        payload["tripwire_triggered"] = bool(tripwire)
-    behavior = getattr(output, "behavior", None)
-    if behavior is not None:
-        payload["behavior"] = to_jsonable(behavior)
-    return payload
-
-
-def _tripwire_payload(exc: GuardrailTripwire) -> dict[str, Any]:
-    result = getattr(exc, "guardrail_result", None)
-    if result is not None:
-        kind = (
-            "input"
-            if isinstance(exc, InputGuardrailTripwireTriggered)
-            else "output"
-        )
-        return _guardrail_result_payload(kind, result)
-    guardrail = exc.guardrail
-    output = exc.output
-    kind = (
-        "tool_input"
-        if isinstance(exc, ToolInputGuardrailTripwireTriggered)
-        else "tool_output"
-    )
-    return {
-        "kind": kind,
-        "guardrail_name": guardrail.get_name(),
-        "output_info": to_jsonable(output.output_info),
-        "behavior": to_jsonable(output.behavior),
-    }
 
 
 def _persisted_stream_text(events: list[Any]) -> tuple[str, str]:
@@ -2256,10 +1733,6 @@ def _persisted_stream_text(events: list[Any]) -> tuple[str, str]:
     return reasoning, assistant
 
 
-class RunBudgetExceeded(RuntimeError):
-    pass
-
-
 def _persistable_runtime_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     ephemeral_keys = {
         "_steering_inbox",
@@ -2277,18 +1750,6 @@ async def _flush_preserving_cancellation(stream_sink: BufferedRunEventSink) -> N
     except asyncio.CancelledError:
         await flush_task
         raise
-
-
-def _persist_new_items(
-    repository: RunRepository,
-    lease: RunLease,
-    items: list[Any],
-    skip: int,
-) -> None:
-    repository.add_items_owned(
-        lease,
-        [project_run_item(item) for item in items[skip:]],
-    )
 
 
 def _continuation_instruction(
@@ -2328,8 +1789,7 @@ def _work_continuation(context: ScholarWeaveContext) -> str | None:
     pending = [
         item
         for item in plan
-        if isinstance(item, dict)
-        and item.get("status") not in {"completed", "blocked"}
+        if isinstance(item, dict) and item.get("status") not in {"completed", "blocked"}
     ]
     if not pending:
         return None
@@ -2340,13 +1800,7 @@ def _work_continuation(context: ScholarWeaveContext) -> str | None:
     )
 
 
-def _epoch_model_turns(
-    usage: dict[str, Any],
-    limit: int,
-    consumed_turns: int,
-    *,
-    resumed: bool,
-) -> int:
+def _epoch_model_turns(usage: dict[str, Any], limit: int) -> int:
     performance = usage.get("performance")
     if isinstance(performance, dict):
         model_calls = performance.get("model_calls")
@@ -2354,27 +1808,5 @@ def _epoch_model_turns(
             return max(0, min(limit, model_calls))
     requests = usage.get("requests")
     if isinstance(requests, int) and not isinstance(requests, bool):
-        if resumed:
-            return max(0, min(limit, requests - consumed_turns))
         return max(0, min(limit, requests))
     return limit
-
-
-def _merge_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(left)
-    for key, value in right.items():
-        current = merged.get(key)
-        if (
-            isinstance(current, (int, float))
-            and not isinstance(current, bool)
-            and isinstance(value, (int, float))
-            and not isinstance(value, bool)
-        ):
-            merged[key] = current + value
-        elif isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _merge_usage(current, value)
-        elif isinstance(current, list) and isinstance(value, list):
-            merged[key] = [*current, *value][-100:]
-        else:
-            merged[key] = value
-    return merged

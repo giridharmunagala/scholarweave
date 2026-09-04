@@ -18,9 +18,8 @@ from backend.runs.models import (
     AgentRunRecord,
     AgentGoalStateRecord,
     AgentToolAttemptRecord,
-    RunInterruptionRecord,
 )
-from backend.utils import utcnow
+from backend.utils import merge_usage, utcnow
 
 
 @dataclass(frozen=True)
@@ -109,7 +108,6 @@ class RunRepository:
                 raise NotFoundError("Run was not found.")
             record.status = "running"
             record.error = None
-            record.state_json = None
             if record.started_at is None:
                 record.started_at = utcnow()
             session.commit()
@@ -125,7 +123,6 @@ class RunRepository:
                 )
             record.status = "running"
             record.error = None
-            record.state_json = None
             if record.started_at is None:
                 record.started_at = utcnow()
             session.commit()
@@ -334,7 +331,7 @@ class RunRepository:
             for usage in usages:
                 if not isinstance(usage, dict):
                     continue
-                aggregate = _merge_usage(aggregate, usage)
+                aggregate = merge_usage(aggregate, usage)
             return aggregate
 
     def consumed_model_turns(self, run_id: str) -> int:
@@ -531,7 +528,6 @@ class RunRepository:
             final_output_json=final_output,
             last_agent_name=last_agent_name,
             usage_json=usage,
-            state_json=None,
             finished_at=utcnow(),
         )
 
@@ -550,19 +546,6 @@ class RunRepository:
             final_output_json=final_output,
             last_agent_name=last_agent_name,
             usage_json=usage,
-            state_json=None,
-        )
-
-    def pause(self, run_id: str, *, state: dict[str, Any]) -> None:
-        self._update(run_id, status="paused", state_json=state)
-
-    def pause_owned(self, lease: RunLease, *, state: dict[str, Any]) -> bool:
-        return self._terminal_update_owned(
-            lease,
-            status="paused",
-            require_no_cancel=True,
-            state_json=state,
-            finished=False,
         )
 
     def fail(self, run_id: str, error: str) -> None:
@@ -753,71 +736,6 @@ class RunRepository:
                 )
             )
 
-    def add_interruption(
-        self,
-        run_id: str,
-        *,
-        item_key: str,
-        tool_name: str | None,
-        item: dict[str, Any],
-    ) -> RunInterruptionRecord:
-        with self._sessions() as session:
-            record = RunInterruptionRecord(
-                run_id=run_id,
-                item_key=item_key,
-                tool_name=tool_name,
-                item_json=item,
-            )
-            session.add(record)
-            session.commit()
-            session.refresh(record)
-            return record
-
-    def resolve_interruption(
-        self,
-        interruption_id: str,
-        *,
-        run_id: str,
-        status: str,
-        response: dict[str, Any],
-        state: dict[str, Any],
-    ) -> RunInterruptionRecord:
-        with self._sessions() as session:
-            result = session.execute(
-                update(RunInterruptionRecord)
-                .where(
-                    RunInterruptionRecord.id == interruption_id,
-                    RunInterruptionRecord.status == "pending",
-                )
-                .values(
-                    status=status,
-                    response_json=response,
-                    resolved_at=utcnow(),
-                )
-            )
-            if result.rowcount != 1:
-                session.rollback()
-                raise ValueError("The interruption is no longer pending.")
-            run = session.get(AgentRunRecord, run_id)
-            if run is None:
-                session.rollback()
-                raise NotFoundError("Run was not found.")
-            run.status = "pending"
-            run.state_json = state
-            session.commit()
-            record = session.get(RunInterruptionRecord, interruption_id)
-            if record is None:
-                raise NotFoundError("Run interruption was not found.")
-            session.refresh(record)
-            return record
-
-    def get_interruption(self, interruption_id: str) -> RunInterruptionRecord:
-        with self._sessions() as session:
-            record = session.get(RunInterruptionRecord, interruption_id)
-            if record is None:
-                raise NotFoundError("Run interruption was not found.")
-            return record
-
     def delete(self, run_id: str) -> None:
         with self._sessions() as session:
             record = session.get(AgentRunRecord, run_id)
@@ -830,11 +748,6 @@ class RunRepository:
         if not run_ids:
             return
         with self._sessions() as session:
-            session.execute(
-                delete(RunInterruptionRecord).where(
-                    RunInterruptionRecord.run_id.in_(run_ids)
-                )
-            )
             session.execute(
                 delete(AgentRunEventRecord).where(
                     AgentRunEventRecord.run_id.in_(run_ids)
@@ -875,7 +788,6 @@ class RunRepository:
         status: str,
         require_no_cancel: bool = False,
         require_cancel: bool = False,
-        finished: bool = True,
         **values: Any,
     ) -> bool:
         with self._sessions() as session:
@@ -889,8 +801,7 @@ class RunRepository:
             if require_cancel and not record.cancel_requested:
                 return False
             record.status = status
-            if finished:
-                record.finished_at = utcnow()
+            record.finished_at = utcnow()
             for key, value in values.items():
                 setattr(record, key, value)
             session.commit()
@@ -974,27 +885,6 @@ class RunRepository:
     def _load_relations(record: AgentRunRecord) -> None:
         _ = record.items
         _ = record.events
-        _ = record.interruptions
         _ = record.epochs
         _ = record.tool_attempts
         _ = record.goal_state
-
-
-def _merge_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(left)
-    for key, value in right.items():
-        current = merged.get(key)
-        if (
-            isinstance(current, (int, float))
-            and not isinstance(current, bool)
-            and isinstance(value, (int, float))
-            and not isinstance(value, bool)
-        ):
-            merged[key] = current + value
-        elif isinstance(current, dict) and isinstance(value, dict):
-            merged[key] = _merge_usage(current, value)
-        elif isinstance(current, list) and isinstance(value, list):
-            merged[key] = [*current, *value][-100:]
-        else:
-            merged[key] = value
-    return merged

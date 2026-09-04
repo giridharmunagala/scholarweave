@@ -24,7 +24,7 @@ Never hand-edit generated contracts.
 2. Add the named `(arguments, context)` handler to `ApplicationToolRuntime`.
 3. Add `backend/prompting/defaults/tools/<catalog-id>.json` with guidance for every parameter.
 4. Bind the catalog ID in the appropriate blueprint in `backend/conversations/autonomous.py`.
-5. Add a focused test in `backend/tests/test_sdk_tools.py`.
+5. Add a focused test in `backend/tests/test_agent_tools.py`.
 
 Strict schemas must set `additionalProperties: false` and list every property in `required`.
 Represent optional values with a nullable type.
@@ -34,20 +34,29 @@ Represent optional values with a nullable type.
 - Main research prompt: `backend/prompting/defaults/prompts/research.md`
 - Deep Work coordinator: `backend/prompting/defaults/prompts/deep-work-coordinator.md`
 - Focused worker: `backend/prompting/defaults/prompts/deep-work-worker.md`
-- Blueprint/tool assignment: `backend/conversations/autonomous.py`
+- Blueprint/tool assignment and delegation: `backend/conversations/autonomous.py`
+- Model/tool loop, delegation, and policies: `backend/agents/harness.py`
 - Epoch continuation: `backend/runs/service.py`
 
-Use the local stub provider for behavior tests. Script real SDK tool calls rather than mocking the
-compiler or runner.
+Use the local stub provider for behavior tests. Script real tool calls through it rather than
+mocking the compiler or the harness.
+
+## Add a delegated sub-agent
+
+1. Add the delegate agent to the blueprint's `agents` list.
+2. Add an `agent_tools` entry with `owner_agent_id`, `delegate_agent_id`, `tool_name`,
+   `tool_description`, and an optional `max_turns` or `serialize_calls`.
+3. Keep the chain at most two levels deep; the compiler rejects a third level and any cycle.
+4. Remember the sub-agent receives only the `request` string, so its prompt must be self-contained.
 
 ## Change paper ingestion or OCR
 
 Relevant files:
 
 - `backend/documents/ingestion.py`
+- `backend/documents/formatting.py`
 - `backend/documents/ocr.py`
 - `backend/documents/vision.py`
-- `backend/documents/paper.py`
 - `backend/tests/test_documents.py`
 - `backend/tests/test_tesseract_ocr.py`
 

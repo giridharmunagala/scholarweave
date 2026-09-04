@@ -35,78 +35,14 @@ class ToolOutputRunItem(RunSchema):
     tool_origin: Any = None
 
 
-class HandoffCallRunItem(RunSchema):
-    type: Literal["handoff_call_item"]
-    agent_name: str
-    raw_item: Any
-
-
-class HandoffOutputRunItem(RunSchema):
-    type: Literal["handoff_output_item"]
-    agent_name: str
-    raw_item: Any
-    source_agent: str
-    target_agent: str
-
-
 class ReasoningRunItem(RunSchema):
     type: Literal["reasoning_item"]
     agent_name: str
     raw_item: Any
 
 
-class ToolApprovalRunItem(RunSchema):
-    type: Literal["tool_approval_item"]
-    agent_name: str
-    raw_item: Any
-    tool_name: str | None = None
-    tool_namespace: str | None = None
-    item_key: str
-
-
-class ToolSearchCallRunItem(RunSchema):
-    type: Literal["tool_search_call_item"]
-    agent_name: str
-    raw_item: Any
-
-
-class ToolSearchOutputRunItem(RunSchema):
-    type: Literal["tool_search_output_item"]
-    agent_name: str
-    raw_item: Any
-
-
-class McpListToolsRunItem(RunSchema):
-    type: Literal["mcp_list_tools_item"]
-    agent_name: str
-    raw_item: Any
-
-
-class McpApprovalRequestRunItem(RunSchema):
-    type: Literal["mcp_approval_request_item"]
-    agent_name: str
-    raw_item: Any
-
-
-class McpApprovalResponseRunItem(RunSchema):
-    type: Literal["mcp_approval_response_item"]
-    agent_name: str
-    raw_item: Any
-
-
 RunItemResponse = Annotated[
-    MessageRunItem
-    | ToolCallRunItem
-    | ToolOutputRunItem
-    | HandoffCallRunItem
-    | HandoffOutputRunItem
-    | ReasoningRunItem
-    | ToolApprovalRunItem
-    | ToolSearchCallRunItem
-    | ToolSearchOutputRunItem
-    | McpListToolsRunItem
-    | McpApprovalRequestRunItem
-    | McpApprovalResponseRunItem,
+    MessageRunItem | ToolCallRunItem | ToolOutputRunItem | ReasoningRunItem,
     Field(discriminator="type"),
 ]
 
@@ -116,17 +52,6 @@ class RunEventResponse(RunSchema):
     event_type: str
     payload: dict[str, Any]
     created_at: datetime
-
-
-class RunInterruptionResponse(RunSchema):
-    id: str
-    item_key: str
-    tool_name: str | None
-    status: str
-    item: ToolApprovalRunItem | dict[str, Any]
-    response: dict[str, Any] | None
-    created_at: datetime
-    resolved_at: datetime | None
 
 
 class RunEpochResponse(RunSchema):
@@ -159,7 +84,7 @@ class RunResponse(RunSchema):
     id: str
     conversation_id: str | None
     agent_name: str
-    status: Literal["pending", "running", "paused", "completed", "failed", "cancelled"]
+    status: Literal["pending", "running", "completed", "failed", "cancelled"]
     input: Any
     final_output: Any | None
     last_agent_name: str | None
@@ -171,7 +96,6 @@ class RunResponse(RunSchema):
     finished_at: datetime | None
     items: list[RunItemResponse]
     events: list[RunEventResponse]
-    interruptions: list[RunInterruptionResponse]
     epochs: list[RunEpochResponse]
     tool_attempts: list[ToolAttemptResponse]
     goal_state: dict[str, Any] | None
@@ -200,11 +124,6 @@ class SteeringMessageResponse(RunSchema):
     status: Literal["queued"]
 
 
-class InterruptionResolutionRequest(RunSchema):
-    approved: bool
-    rejection_message: str | None = Field(default=None, max_length=2_000)
-
-
 def run_response(record) -> RunResponse:
     return RunResponse(
         id=record.id,
@@ -229,19 +148,6 @@ def run_response(record) -> RunResponse:
                 created_at=event.created_at,
             )
             for event in record.events
-        ],
-        interruptions=[
-            RunInterruptionResponse(
-                id=interruption.id,
-                item_key=interruption.item_key,
-                tool_name=interruption.tool_name,
-                status=interruption.status,
-                item=interruption.item_json,
-                response=interruption.response_json,
-                created_at=interruption.created_at,
-                resolved_at=interruption.resolved_at,
-            )
-            for interruption in record.interruptions
         ],
         epochs=[
             RunEpochResponse(

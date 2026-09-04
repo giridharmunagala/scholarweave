@@ -5,13 +5,10 @@ import inspect
 import json
 from typing import Any
 
-from agents import FunctionTool
-from agents.tool_context import ToolContext
-
 from backend.agents.blueprint import FunctionToolSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
+from backend.agents.harness import FunctionTool, ToolInvocation
 from backend.prompting.registry import PromptRegistry
-from backend.agents.context import ScholarWeaveContext
 from backend.tools.failures import recoverable_tool_invoker, tool_enabled_after_failures
 
 
@@ -428,20 +425,17 @@ def _factory(
     strict_json_schema: bool,
 ):
     def build(spec: FunctionToolSpec) -> FunctionTool:
-        async def invoke(
-            context: ToolContext[ScholarWeaveContext],
-            raw_arguments: str,
-        ) -> Any:
-            arguments = json.loads(raw_arguments)
-            invoker = context.context.tool_runtime.invoke
+        async def invoke(invocation: ToolInvocation, raw_arguments: str) -> Any:
+            arguments = json.loads(raw_arguments or "{}")
+            invoker = invocation.context.tool_runtime.invoke
             if "tool_call_id" in inspect.signature(invoker).parameters:
                 return await invoker(
                     catalog_id,
                     arguments,
-                    context.context,
-                    tool_call_id=context.tool_call_id,
+                    invocation.context,
+                    tool_call_id=invocation.tool_call_id,
                 )
-            return await invoker(catalog_id, arguments, context.context)
+            return await invoker(catalog_id, arguments, invocation.context)
 
         tool_name = spec.name or default_name
         return FunctionTool(
@@ -454,7 +448,6 @@ def _factory(
                 catalog_id=catalog_id,
             ),
             strict_json_schema=strict_json_schema,
-            needs_approval=spec.needs_approval,
             is_enabled=tool_enabled_after_failures(catalog_id),
         )
 

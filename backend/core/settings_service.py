@@ -25,7 +25,6 @@ PERSISTED_SETTING_KEYS = {
     "agent_run_timeout_seconds",
     "tool_call_timeout_seconds",
     "tool_read_retry_attempts",
-    "agent_tracing_enabled",
     "user_timezone",
     "user_profile",
     "retrieval_max_context_chars",
@@ -76,7 +75,6 @@ class SettingsResponse(SettingsSchema):
     agent_run_timeout_seconds: float
     tool_call_timeout_seconds: float
     tool_read_retry_attempts: int
-    agent_tracing_enabled: bool
     user_timezone: str
     user_profile: str
     retrieval_max_context_chars: int
@@ -100,7 +98,6 @@ class SettingsUpdate(SettingsSchema):
     agent_run_timeout_seconds: float | None = Field(default=None, ge=30, le=86_400)
     tool_call_timeout_seconds: float | None = Field(default=None, ge=1, le=3_600)
     tool_read_retry_attempts: int | None = Field(default=None, ge=1, le=5)
-    agent_tracing_enabled: bool | None = None
     user_timezone: str | None = Field(default=None, min_length=1, max_length=100)
     user_profile: str | None = Field(default=None, max_length=2_000)
     retrieval_max_context_chars: int | None = Field(default=None, ge=1_000, le=1_000_000)
@@ -176,7 +173,6 @@ class SettingsService:
             agent_run_timeout_seconds=self.settings.agent_run_timeout_seconds,
             tool_call_timeout_seconds=self.settings.tool_call_timeout_seconds,
             tool_read_retry_attempts=self.settings.tool_read_retry_attempts,
-            agent_tracing_enabled=self.settings.agent_tracing_enabled,
             user_timezone=self.settings.user_timezone,
             user_profile=self.settings.user_profile,
             retrieval_max_context_chars=self.settings.retrieval_max_context_chars,

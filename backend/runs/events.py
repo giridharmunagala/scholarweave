@@ -3,12 +3,90 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Callable
+from collections import defaultdict, deque
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from backend.runs.broker import EventBroker
 from backend.runs.repository import RunLease, RunRepository
+
+
+class SubscriberLagged:
+    """Signals that durable replay must resume from the subscriber's last cursor."""
+
+
+SUBSCRIBER_LAGGED = SubscriberLagged()
+
+
+class EventBroker:
+    """Fan out run events in process while retaining a short replay window."""
+
+    def __init__(self, *, subscriber_queue_size: int = 256) -> None:
+        if subscriber_queue_size < 1:
+            raise ValueError("Subscriber queue size must be positive.")
+        self._subscriber_queue_size = subscriber_queue_size
+        self._queues: dict[
+            str, set[asyncio.Queue[dict[str, Any] | SubscriberLagged]]
+        ] = defaultdict(set)
+        self._history: dict[str, deque[dict[str, Any]]] = {}
+        self._lock = asyncio.Lock()
+
+    async def publish(self, run_id: str, event: dict[str, Any]) -> None:
+        """Publish an event and disconnect subscribers whose queues have overflowed."""
+        async with self._lock:
+            history = self._history.setdefault(run_id, deque(maxlen=512))
+            history.append(event)
+            queues = list(self._queues.get(run_id, set()))
+            if event.get("event_type") in {
+                "run.completed",
+                "run.failed",
+                "run.cancelled",
+            }:
+                self._history.pop(run_id, None)
+            for queue in queues:
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    self._queues[run_id].discard(queue)
+                    while not queue.empty():
+                        queue.get_nowait()
+                    queue.put_nowait(SUBSCRIBER_LAGGED)
+            if run_id in self._queues and not self._queues[run_id]:
+                self._queues.pop(run_id, None)
+
+    async def events_after(
+        self,
+        run_id: str,
+        sequence: int,
+    ) -> list[dict[str, Any]]:
+        """Return buffered events newer than a subscriber's sequence cursor."""
+        async with self._lock:
+            return [
+                event
+                for event in self._history.get(run_id, ())
+                if int(event["sequence"]) > sequence
+            ]
+
+    @asynccontextmanager
+    async def subscribe(
+        self, run_id: str
+    ) -> AsyncIterator[asyncio.Queue[dict[str, Any] | SubscriberLagged]]:
+        """Register a bounded event queue for the lifetime of the context manager."""
+        queue: asyncio.Queue[dict[str, Any] | SubscriberLagged] = asyncio.Queue(
+            maxsize=self._subscriber_queue_size
+        )
+        async with self._lock:
+            self._queues[run_id].add(queue)
+        try:
+            yield queue
+        finally:
+            async with self._lock:
+                queues = self._queues.get(run_id)
+                if queues is not None:
+                    queues.discard(queue)
+                    if not queues:
+                        self._queues.pop(run_id, None)
 
 
 class RunEventSink(Protocol):
@@ -151,6 +229,9 @@ class BufferedRunEventSink:
         self._model_calls = 0
         self._input_tokens = 0
         self._output_tokens = 0
+        self._delegated_model_calls = 0
+        self._delegated_input_tokens = 0
+        self._delegated_output_tokens = 0
         self._input_tokens_estimated = False
         self._output_tokens_estimated = False
         self._prompt_seconds = 0.0
@@ -184,6 +265,9 @@ class BufferedRunEventSink:
             "model_calls": self._model_calls,
             "input_tokens": self._input_tokens,
             "output_tokens": self._output_tokens,
+            "delegated_model_calls": self._delegated_model_calls,
+            "delegated_input_tokens": self._delegated_input_tokens,
+            "delegated_output_tokens": self._delegated_output_tokens,
             "input_tokens_estimated": self._input_tokens_estimated,
             "output_tokens_estimated": self._output_tokens_estimated,
             "prompt_seconds": round(self._prompt_seconds, 6),
@@ -200,16 +284,22 @@ class BufferedRunEventSink:
         raw_type = str(payload.get("raw_type") or "")
         delta = payload.get("delta")
         usage_updated = False
+        delegated = payload.get("delegated") is True
         is_delta = (
             event_type == "model.stream"
             and raw_type.endswith(".delta")
             and isinstance(delta, str)
         )
 
-        if event_type == "model.started":
+        if event_type == "model.started" and not delegated:
             self._start_model_call(payload)
         elif event_type == "model.completed":
-            usage_updated = self._finish_model_call(payload)
+            # A delegated sub-agent's model calls are real spend but they are not the
+            # parent's turns, so they never touch the parent's turn accounting.
+            if delegated:
+                self._record_delegated_model_call(payload)
+            else:
+                usage_updated = self._finish_model_call(payload)
 
         if event_type == "model.stream":
             if raw_type == "response.created":
@@ -244,6 +334,17 @@ class BufferedRunEventSink:
         self._model_generated_chars = 0
         input_chars = payload.get("input_character_count")
         self._model_input_chars = input_chars if isinstance(input_chars, int) else 0
+
+    def _record_delegated_model_call(self, payload: dict[str, Any]) -> None:
+        usage = payload.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        input_tokens = usage.get("input_tokens")
+        output_tokens = usage.get("output_tokens")
+        self._delegated_model_calls += 1
+        if isinstance(input_tokens, int) and input_tokens > 0:
+            self._delegated_input_tokens += input_tokens
+        if isinstance(output_tokens, int) and output_tokens > 0:
+            self._delegated_output_tokens += output_tokens
 
     def _record_generated_delta(self, delta: str) -> None:
         if self._model_started_at is not None and self._first_generated_at is None:

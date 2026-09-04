@@ -28,7 +28,7 @@ async def delete_conversation(
 
 @router.get("/agent/conversations", response_model=list[ConversationResponse])
 def list_research_conversations(container=Depends(services)) -> list[ConversationResponse]:
-    return [_response(record) for record in container.autonomous.list_conversations()]
+    return [_response(record) for record in container.conversation_turns.list_conversations()]
 
 
 @router.post(
@@ -41,7 +41,7 @@ def create_research_conversation(
     container=Depends(services),
 ) -> ConversationResponse:
     return _response(
-        container.autonomous.create_conversation(
+        container.conversation_turns.create_conversation(
             title=payload.title,
             model_reference=payload.model_reference,
         )
@@ -56,8 +56,8 @@ async def get_research_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> ConversationDetailResponse:
-    record = container.autonomous.get_conversation(conversation_id)
-    items = await container.autonomous.conversation_items(conversation_id)
+    record = container.conversation_turns.get_conversation(conversation_id)
+    items = await container.conversation_turns.conversation_items(conversation_id)
     return ConversationDetailResponse(**_response(record).model_dump(), items=items)
 
 
@@ -71,7 +71,7 @@ async def send_research_message(
     payload: ConversationMessageRequest,
     container=Depends(services),
 ) -> ConversationMessageResponse:
-    run = container.autonomous.start_message(
+    run = container.conversation_turns.start_message(
         conversation_id,
         payload.content,
         reasoning_effort=payload.reasoning_effort,
@@ -81,7 +81,7 @@ async def send_research_message(
         context_window_tokens=payload.context_window_tokens,
     )
     return ConversationMessageResponse(
-        conversation=_response(container.autonomous.get_conversation(conversation_id)),
+        conversation=_response(container.conversation_turns.get_conversation(conversation_id)),
         run=run_response(container.runs.get(run.id)),
     )
 
@@ -90,7 +90,7 @@ async def send_research_message(
 def list_deep_work_conversations(container=Depends(services)) -> list[ConversationResponse]:
     return [
         _response(record)
-        for record in container.autonomous.list_deep_work_conversations()
+        for record in container.conversation_turns.list_deep_work_conversations()
     ]
 
 
@@ -104,7 +104,7 @@ def create_deep_work_conversation(
     container=Depends(services),
 ) -> ConversationResponse:
     return _response(
-        container.autonomous.create_deep_work_conversation(
+        container.conversation_turns.create_deep_work_conversation(
             title=payload.title,
             model_reference=payload.model_reference,
         )
@@ -119,8 +119,8 @@ async def get_deep_work_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> ConversationDetailResponse:
-    record = container.autonomous.get_deep_work_conversation(conversation_id)
-    items = await container.autonomous.conversation_items(conversation_id)
+    record = container.conversation_turns.get_deep_work_conversation(conversation_id)
+    items = await container.conversation_turns.conversation_items(conversation_id)
     return ConversationDetailResponse(**_response(record).model_dump(), items=items)
 
 
@@ -134,7 +134,7 @@ async def send_deep_work_message(
     payload: ConversationMessageRequest,
     container=Depends(services),
 ) -> ConversationMessageResponse:
-    run = container.autonomous.start_deep_work_message(
+    run = container.conversation_turns.start_deep_work_message(
         conversation_id,
         payload.content,
         reasoning_effort=payload.reasoning_effort,
@@ -143,7 +143,7 @@ async def send_deep_work_message(
     )
     return ConversationMessageResponse(
         conversation=_response(
-            container.autonomous.get_deep_work_conversation(conversation_id)
+            container.conversation_turns.get_deep_work_conversation(conversation_id)
         ),
         run=run_response(container.runs.get(run.id)),
     )

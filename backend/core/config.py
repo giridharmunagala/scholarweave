@@ -1,4 +1,4 @@
-"""Application configuration with SDK-first runtime settings."""
+"""Application configuration for the native agent runtime."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+RUNTIME_VERSION = "native-1"
 
 
 class Settings(BaseSettings):
@@ -60,7 +61,6 @@ class Settings(BaseSettings):
     max_web_source_bytes: int = 5 * 1024 * 1024
     max_temporary_web_sources: int = Field(default=20, ge=1, le=100)
 
-    agent_tracing_enabled: bool = False
     run_retention_days: int = Field(default=2, ge=1, le=365)
     user_timezone: str = "Asia/Kolkata"
     user_profile: str = "Based in Hyderabad, Telangana, India."

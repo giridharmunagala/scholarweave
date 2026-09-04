@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import replace
 from typing import Any
 
@@ -42,15 +41,6 @@ WORK_PLAN_TOOL_IDS = (
 AUTONOMOUS_TOOL_IDS = RESEARCH_TOOL_IDS
 EXTERNAL_TOOL_IDS = {"search-sources", "acquire-source"}
 FAST_ANSWER_TOOL_IDS = {"search-sources", "acquire-source", "read-web-page"}
-_PAPER_INTENT_PATTERN = re.compile(
-    r"\b(?:paper|papers|preprint|preprints|publication|publications|"
-    r"article|articles|study|studies|arxiv)\b",
-    flags=re.IGNORECASE,
-)
-_PAPER_URL_PATTERN = re.compile(
-    r"https?://\S*(?:arxiv\.org|doi\.org|\.pdf(?:\?|$))",
-    flags=re.IGNORECASE,
-)
 
 
 def _resolve_prompts(prompts: PromptRegistry | None) -> PromptRegistry:
@@ -58,7 +48,7 @@ def _resolve_prompts(prompts: PromptRegistry | None) -> PromptRegistry:
     return prompts if prompts is not None else default_prompt_registry()
 
 
-class AutonomousAgentService:
+class ConversationTurnService:
     def __init__(
         self,
         compiler: AgentCompiler,
@@ -206,17 +196,13 @@ class AutonomousAgentService:
         context_window_tokens: int | None = None,
     ):
         first_turn = not self.get_conversation(conversation_id).last_message_preview.strip()
-        requires_paper_work = self._paper_work_required(
-            message,
-        )
-        effective_fast_answer = fast_answer and not requires_paper_work
         return self._start_message(
             conversation_id,
             message,
             compiled=self.compile_conversation(
                 conversation_id,
                 web_enabled=web_enabled,
-                fast_answer=effective_fast_answer,
+                fast_answer=fast_answer,
                 web_search_limit=web_search_limit,
                 message=message,
                 context_window_tokens=context_window_tokens,
@@ -229,10 +215,9 @@ class AutonomousAgentService:
                         "fast_answer": True,
                         "web_search_limit": web_search_limit,
                     }
-                    if effective_fast_answer
+                    if fast_answer
                     else {}
                 ),
-                "paper_work_required": requires_paper_work,
                 "allow_conversation_title_update": first_turn,
             },
         )
@@ -249,9 +234,6 @@ class AutonomousAgentService:
         first_turn = not self.get_deep_work_conversation(
             conversation_id
         ).last_message_preview.strip()
-        requires_paper_work = self._paper_work_required(
-            message,
-        )
         return self._start_message(
             conversation_id,
             message,
@@ -264,17 +246,10 @@ class AutonomousAgentService:
             ),
             reasoning_effort=reasoning_effort,
             runtime_metadata={
-                "paper_work_required": requires_paper_work,
                 "autonomous_work": True,
                 "allow_conversation_title_update": first_turn,
             },
         )
-
-    def _paper_work_required(
-        self,
-        message: str,
-    ) -> bool:
-        return paper_work_required(message)
 
     def _start_message(
         self,
@@ -315,13 +290,6 @@ def _application_tools(
     return tools
 
 
-def paper_work_required(message: str) -> bool:
-    return bool(
-        _PAPER_INTENT_PATTERN.search(message)
-        or _PAPER_URL_PATTERN.search(message)
-    )
-
-
 def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
     raw_activity = context.metadata.get("paper_activity")
     activity = (
@@ -333,12 +301,8 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
         if isinstance(raw_activity, list)
         else []
     )
-    if not context.metadata.get("paper_work_required") and not activity:
-        return
     if not activity:
-        raise ValidationError(
-            "Paper work cannot complete before a paper is acquired or selected."
-        )
+        return
 
     actions_by_document: dict[str, list[str]] = {}
     titles: dict[str, str] = {}

@@ -2,13 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agents import TResponseInputItem
-
 from backend.agents.blueprint import SessionPolicySpec
+from backend.agents.harness import ConversationItem
 from backend.conversations.models import ConversationRecord
 from backend.conversations.repository import ConversationRepository
 from backend.utils import to_jsonable
-from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import strip_steering_marker
 
 
@@ -16,7 +15,7 @@ class ConversationService:
     def __init__(
         self,
         repository: ConversationRepository,
-        sessions: SdkSessionFactory,
+        sessions: ConversationSessionFactory,
     ) -> None:
         self._repository = repository
         self._sessions = sessions
@@ -71,7 +70,7 @@ class ConversationService:
         self._repository.delete(conversation_id)
 
 
-def _project_session_item(item: TResponseInputItem) -> dict[str, Any]:
+def _project_session_item(item: ConversationItem) -> dict[str, Any]:
     raw = to_jsonable(item)
     if not isinstance(raw, dict):
         return {

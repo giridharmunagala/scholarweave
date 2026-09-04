@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, Response, status
 from fastapi.responses import StreamingResponse
 
 from backend.core.http import services
-from backend.runs.broker import SubscriberLagged
+from backend.runs.events import SubscriberLagged
 from backend.runs.schemas import (
     PromptSnapshotResponse,
     RunEventResponse,
@@ -21,7 +21,7 @@ from backend.runs.schemas import (
 from backend.runs.service import RunService
 
 router = APIRouter(prefix="/runs", tags=["runs"])
-TERMINAL_STATUSES = {"completed", "failed", "cancelled", "paused"}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 
 
 def run_service(container=Depends(services)) -> RunService:

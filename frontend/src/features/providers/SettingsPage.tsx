@@ -71,7 +71,6 @@ export default function SettingsPage() {
     try {
       const next = await providersApi.updateSettings({
         default_model_references: settings.default_model_references,
-        agent_tracing_enabled: settings.agent_tracing_enabled,
         agent_context_window_tokens: settings.agent_context_window_tokens,
         agent_context_high_water_ratio: settings.agent_context_high_water_ratio,
         agent_context_compaction_target_tokens: settings.agent_context_compaction_target_tokens,

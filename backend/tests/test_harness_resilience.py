@@ -7,8 +7,6 @@ import time
 from dataclasses import replace
 
 import pytest
-from agents import OpenAIChatCompletionsModel
-from openai import AsyncOpenAI
 
 from backend.agents.blueprint import AgentBlueprint
 from backend.agents.compiler import AgentCompiler
@@ -16,12 +14,13 @@ from backend.core.config import Settings
 from backend.utils import utcnow
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
-from backend.runs.broker import EventBroker
+from backend.runs.events import EventBroker
 from backend.runs.repository import RunRepository
 from backend.runs.service import LeaseDeadline, RunService, _continuation_instruction
 from backend.agents.context import ScholarWeaveContext
-from backend.conversations.sessions import SdkSessionFactory
+from backend.conversations.sessions import ConversationSessionFactory
 from backend.providers.inference import InferenceScheduler
+from backend.tests.harness_support import stub_binding
 from backend.tools.catalog import create_tool_catalog
 
 
@@ -46,15 +45,7 @@ class _Resolver:
         *,
         require_tools: bool = False,
     ) -> ResolvedAgentModel:
-        return ResolvedAgentModel(
-            self.model,
-            "ollama",
-            False,
-            False,
-            False,
-            model_name="stub-model",
-            local_inference=True,
-        )
+        return self.model
 
 
 class _ToolRuntime:
@@ -116,8 +107,7 @@ async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provide
             {"query": None, "document_id": None, "limit": 10},
         ),
     ]
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -127,7 +117,7 @@ async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provide
     )
     settings.ensure_directories()
     repository = RunRepository(create_session_factory(settings))
-    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     runtime = _ToolRuntime()
     service = RunService(
         repository,
@@ -150,13 +140,12 @@ async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provide
     ]
     assert runtime.calls == ["research.library.search", "research.library.search"]
     assert any(event.event_type == "run.epoch.completed" for event in run.events)
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
 async def test_startup_recovery_abandons_interrupted_epoch(tmp_path, stub_provider) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -181,7 +170,7 @@ async def test_startup_recovery_abandons_interrupted_epoch(tmp_path, stub_provid
     )
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -201,7 +190,7 @@ async def test_startup_recovery_abandons_interrupted_epoch(tmp_path, stub_provid
     assert any(event.event_type == "run.recovered" for event in recovered.events)
     assert service.get(invalid.id).status == "failed"
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -210,8 +199,7 @@ async def test_recovery_retries_live_claim_without_mutating_or_duplicate_schedul
     stub_provider,
     monkeypatch,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -236,7 +224,7 @@ async def test_recovery_retries_live_claim_without_mutating_or_duplicate_schedul
     )
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -279,7 +267,7 @@ async def test_recovery_retries_live_claim_without_mutating_or_duplicate_schedul
     await asyncio.sleep(0.05)
     assert executions == [record.id]
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -289,8 +277,7 @@ async def test_heartbeat_retries_errors_then_cancels_without_releasing_claim(
     monkeypatch,
     caplog,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -298,10 +285,10 @@ async def test_heartbeat_retries_errors_then_cancels_without_releasing_claim(
     )
     settings.ensure_directories()
     repository = RunRepository(create_session_factory(settings))
-    sdk_sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     service = RunService(
         repository,
-        sdk_sessions,
+        sessions,
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -350,7 +337,7 @@ async def test_heartbeat_retries_errors_then_cancels_without_releasing_claim(
         "Lease-sensitive work",
         conversation_id=None,
     )
-    durable_session = sdk_sessions.get(
+    durable_session = sessions.get(
         f"run:{run.id}",
         _compiled(model, settings).blueprint.session,
     )
@@ -391,7 +378,7 @@ async def test_heartbeat_retries_errors_then_cancels_without_releasing_claim(
         token=replacement.token,
     )
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -400,8 +387,7 @@ async def test_slow_renewal_cancels_execution_before_real_lease_safety_expires(
     stub_provider,
     monkeypatch,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -411,7 +397,7 @@ async def test_slow_renewal_cancels_execution_before_real_lease_safety_expires(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -458,7 +444,7 @@ async def test_slow_renewal_cancels_execution_before_real_lease_safety_expires(
         token=replacement.token,
     )
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -467,8 +453,7 @@ async def test_cancelled_claim_acquisition_releases_commit_that_finishes_late(
     stub_provider,
     monkeypatch,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -478,7 +463,7 @@ async def test_cancelled_claim_acquisition_releases_commit_that_finishes_late(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -516,7 +501,7 @@ async def test_cancelled_claim_acquisition_releases_commit_that_finishes_late(
         token=replacement.token,
     )
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -533,7 +518,7 @@ async def test_repeated_cancellation_cannot_strand_delayed_claim(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -589,7 +574,7 @@ async def test_close_drains_cancelled_claim_acquisition_cleanup(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -634,8 +619,7 @@ async def test_cancelled_recovery_handoff_releases_preclaim(
     tmp_path,
     stub_provider,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -645,7 +629,7 @@ async def test_cancelled_recovery_handoff_releases_preclaim(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -691,7 +675,7 @@ async def test_cancelled_recovery_handoff_releases_preclaim(
     previous.cancel()
     await asyncio.gather(previous, return_exceptions=True)
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -700,8 +684,7 @@ async def test_expired_preclaim_is_rejected_before_execution(
     stub_provider,
     monkeypatch,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -711,7 +694,7 @@ async def test_expired_preclaim_is_rejected_before_execution(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -758,7 +741,7 @@ async def test_expired_preclaim_is_rejected_before_execution(
         token=replacement.token,
     )
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -766,8 +749,7 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
     tmp_path,
     stub_provider,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -777,7 +759,6 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
     repository = RunRepository(create_session_factory(settings))
     compiled = _compiled(model, settings)
     metadata = {
-        "paper_work_required": True,
         "paper_activity": [
             {"document_id": "paper-1", "title": "Paper", "action": "read"},
             {
@@ -803,7 +784,7 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
     )
     repository.mark_running(record.id)
     repository.begin_epoch(record.id, "Summarize the paper")
-    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     durable_session = sessions.get(f"run:{record.id}", compiled.blueprint.session)
     await durable_session.add_items(
         [{"role": "user", "content": "Original standalone summary request"}]
@@ -857,7 +838,7 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
     assert session_count == (0,)
     assert item_count == (0,)
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -865,8 +846,7 @@ async def test_run_deadline_includes_waiting_for_exclusive_local_inference(
     tmp_path,
     stub_provider,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -878,7 +858,7 @@ async def test_run_deadline_includes_waiting_for_exclusive_local_inference(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -904,7 +884,7 @@ async def test_run_deadline_includes_waiting_for_exclusive_local_inference(
     assert failed.status == "failed"
     assert "deadline" in (failed.error or "")
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -912,8 +892,7 @@ async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
     tmp_path,
     stub_provider,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -923,7 +902,7 @@ async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
     scheduler = InferenceScheduler()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -957,7 +936,7 @@ async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
 
     assert run.status == "completed", run.error
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -966,8 +945,7 @@ async def test_claim_releases_and_run_fails_when_claimed_setup_raises(
     stub_provider,
     monkeypatch,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -977,7 +955,7 @@ async def test_claim_releases_and_run_fails_when_claimed_setup_raises(
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -1014,7 +992,7 @@ async def test_claim_releases_and_run_fails_when_claimed_setup_raises(
         token=replacement.token,
     )
     await service.close()
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -1039,8 +1017,7 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
             {"query": None, "document_id": None, "limit": 10},
         ),
     ]
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -1051,7 +1028,7 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
     settings.ensure_directories()
     service = RunService(
         RunRepository(create_session_factory(settings)),
-        SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
         _ToolRuntime(),
         EventBroker(),
         settings=settings,
@@ -1067,7 +1044,7 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
     assert "exhausted its 2-turn budget" in (run.error or "")
     assert len(run.epochs) == 1
     assert sum(int(epoch.usage_json["model_turns"]) for epoch in run.epochs) == 2
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio
@@ -1075,15 +1052,14 @@ async def test_queued_run_can_be_cancelled_before_model_start(
     tmp_path,
     stub_provider,
 ) -> None:
-    client = AsyncOpenAI(api_key="test", base_url=f"{stub_provider.base_url}/v1")
-    model = OpenAIChatCompletionsModel(model="stub-model", openai_client=client)
+    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
         database_path=tmp_path / "metadata.sqlite3",
     )
     settings.ensure_directories()
-    sessions = SdkSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
     service = RunService(
         RunRepository(create_session_factory(settings)),
         sessions,
@@ -1103,7 +1079,7 @@ async def test_queued_run_can_be_cancelled_before_model_start(
 
     assert cancelled.status == "cancelled"
     assert not stub_provider.requests
-    await client.close()
+    await model.client.close()
 
 
 @pytest.mark.anyio

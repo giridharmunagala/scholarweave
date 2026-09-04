@@ -5,7 +5,7 @@ import time
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
-from backend.conversations.autonomous import RESEARCH_TOOL_IDS
+from backend.conversations.turns import RESEARCH_TOOL_IDS
 
 
 def configure_provider(client: TestClient, stub_provider) -> str:
@@ -155,7 +155,8 @@ def test_research_agent_uses_only_the_lean_tool_surface(
         assert record.blueprint_json["run"] == {
             "max_turns": 16,
             "max_tool_concurrency": 4,
-            "tracing_enabled": False,
+            "max_input_characters": None,
+            "max_output_characters": None,
         }
 
 

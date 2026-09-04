@@ -37,14 +37,6 @@ export interface ToolStep {
   sources: TimelineSource[];
 }
 
-export interface HandoffStep {
-  kind: 'handoff';
-  id: string;
-  sequence: number;
-  from: string;
-  to: string;
-}
-
 export interface AgentStep {
   kind: 'agent';
   id: string;
@@ -56,7 +48,7 @@ export interface AgentStep {
   seconds: number | null;
 }
 
-export type TurnStep = ReasoningStep | ToolStep | HandoffStep | AgentStep;
+export type TurnStep = ReasoningStep | ToolStep | AgentStep;
 
 export interface TurnTimeline {
   steps: TurnStep[];
@@ -85,14 +77,12 @@ const TERMINAL_EVENTS = new Set([
   'run.completed',
   'run.failed',
   'run.cancelled',
-  'run.paused',
 ]);
 
 type MutableStep =
   | (ReasoningStep & { startedAt: number | null })
   | (ToolStep & { startedAt: number | null; callId: string | null; settled: boolean })
-  | (AgentStep & { startedAt: number | null })
-  | HandoffStep;
+  | (AgentStep & { startedAt: number | null });
 
 export function buildTurnTimeline(
   events: readonly RunStreamEvent[],
@@ -250,24 +240,34 @@ export function buildTurnTimeline(
         target.sources = extractSources(event.payload.result);
       }
       if (status === 'failed') {
-        const message = stringOr(event.payload.error) ?? stringOr(event.payload.message);
-        if (message) target.detail = message;
+        target.detail = readableToolFailure(event.payload);
       }
       if (at !== null) phaseStart = at;
       continue;
     }
 
-    if (event.event_type === 'run.item') {
-      applyRunItem(steps, event, at, closeReasoning);
-      continue;
+    function readableToolFailure(payload: Record<string, unknown>): string {
+      const displayMessage = stringOr(payload.display_message);
+      if (displayMessage) return displayMessage;
+      if (payload.failure_limit_reached === true) {
+        return 'This tool was paused after repeated failures. The agent will use another available source.';
+      }
+      if (payload.unknown_outcome === true) {
+        return 'The tool stopped before it could confirm whether the change was saved.';
+      }
+      const category = stringOr(payload.category);
+      return {
+        timeout: 'The tool took too long to respond. The agent can retry or use another source.',
+        rate_limited: 'The service is temporarily limiting requests. The agent can retry shortly.',
+        upstream_unavailable: 'The external service is temporarily unavailable. The agent can retry or use another source.',
+        transport: 'The tool could not reach its service. Check the connection or try again.',
+        invalid_input: 'The tool could not use this request. The agent will correct it before trying again.',
+      }[category ?? '']
+        ?? 'The tool could not complete this request. The agent will try another available approach.';
     }
 
-    if (event.event_type === 'handoff.completed') {
-      closeReasoning(at);
-      const from = stringOr(event.payload.from_agent);
-      const to = stringOr(event.payload.to_agent);
-      if (!from || !to) continue;
-      steps.push({ kind: 'handoff', id: `handoff-${event.sequence}`, sequence: event.sequence, from, to });
+    if (event.event_type === 'run.item') {
+      applyRunItem(steps, event, at, closeReasoning);
       continue;
     }
 

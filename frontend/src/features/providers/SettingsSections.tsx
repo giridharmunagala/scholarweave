@@ -111,17 +111,6 @@ export function RuntimePanel({
     <>
       <Panel title="Agent runtime" description="Execution limits applied to every agent run.">
         <div className="stack">
-          <div className="setting-row">
-            <div className="setting-label">
-              <strong>SDK tracing</strong>
-              <small>Records detailed OpenAI Agents SDK traces for every run.</small>
-            </div>
-            <Toggle
-              checked={settings.agent_tracing_enabled}
-              label="SDK tracing"
-              onChange={(checked) => onChange({ ...settings, agent_tracing_enabled: checked })}
-            />
-          </div>
           <div className="field-row setting-nested">
             <label className="field">
               Turns per epoch

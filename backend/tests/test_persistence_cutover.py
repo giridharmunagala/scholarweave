@@ -40,9 +40,9 @@ def test_sdk_schema_cutover_backs_up_and_preserves_research_data(tmp_path) -> No
         "agent_runs",
         "agent_run_items",
         "agent_run_events",
-        "agent_run_interruptions",
     } <= tables
     assert {
+        "agent_run_interruptions",
         "agents",
         "agent_versions",
         "custom_node_definitions",

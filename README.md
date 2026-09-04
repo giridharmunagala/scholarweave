@@ -1,6 +1,7 @@
 # ScholarWeave
 
-ScholarWeave is a local-first research workspace with three jobs:
+ScholarWeave is a local-first research workspace for one researcher on one local machine. It has
+three jobs:
 
 1. Talk to an LLM that can search DuckDuckGo, arXiv, and Wikipedia, read and write workspace files,
    and acquire PDF or HTML sources.
@@ -9,6 +10,10 @@ ScholarWeave is a local-first research workspace with three jobs:
 
 Everything runs in one FastAPI/Uvicorn process. The same process serves the API, streams run events,
 and serves the built React application.
+
+The library is intentionally personal: there are no accounts, teams, sharing, permissions, or
+collaborative editing. Conversations, papers, folders, notes, summaries, and runs all implicitly
+belong to the local researcher.
 
 ## What remains
 
@@ -91,10 +96,13 @@ npm run generate:api
 npm run check:api
 ```
 
-Two dependency pins are deliberate and must not drift as a side effect:
+One dependency pin is deliberate and must not drift as a side effect:
 
-- `openai-agents==0.19.4`
 - `openapi-typescript==7.13.0`
+
+The agent runtime is native: ScholarWeave uses the official `openai` client and only the
+`/v1/chat/completions` API, so any OpenAI-compatible endpoint (llama.cpp, Ollama, Azure OpenAI,
+OpenRouter, and similar) works without a vendor agent framework.
 
 ## Configuration and data
 
@@ -121,9 +129,8 @@ Package count is not a product feature, but a few boundaries prevent unsafe coup
 | `core` | settings, health, shared errors and small utilities |
 | `persistence` | database and safe local file access |
 | `providers` | provider profiles and model clients |
-| `agents` | compile the small blueprints into OpenAI Agents SDK objects |
+| `agents` | the native model/tool harness plus blueprint compilation, sessions and compaction |
 | `tools` | the fixed model-callable tool catalog and handlers |
-| `runtime` | SDK context, sessions, compaction, and inference scheduling |
 | `runs` | run lifecycle, persisted events, and SSE |
 | `conversations` | chat records and session history |
 | `autonomous` | research/deep-work blueprints and the work tracker |

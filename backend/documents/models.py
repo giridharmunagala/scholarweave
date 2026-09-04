@@ -68,7 +68,7 @@ class Artifact(Base, TimestampMixin):
         ForeignKey("documents.id"),
         nullable=True,
     )
-    # Historical run IDs are retained as data only. New SDK run ownership is recorded
+    # Historical run IDs are retained as data only. New agent-run ownership is recorded
     # in metadata_json["agent_run_id"], avoiding a second runtime relationship.
     run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     owner_type: Mapped[str] = mapped_column(String(64))

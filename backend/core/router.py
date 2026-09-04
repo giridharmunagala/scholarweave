@@ -11,7 +11,7 @@ router = APIRouter(tags=["application"])
 
 class HealthResponse(BaseModel):
     status: str
-    sdk_version: str
+    runtime_version: str
     database_path: str
     data_dir: str
     frontend_available: bool
@@ -22,7 +22,7 @@ class HealthResponse(BaseModel):
 def health(container=Depends(services)) -> HealthResponse:
     return HealthResponse(
         status="ok",
-        sdk_version=container.sdk_version,
+        runtime_version=container.runtime_version,
         database_path=str(container.settings.database_path),
         data_dir=str(container.settings.data_dir),
         frontend_available=container.settings.frontend_dist_dir.exists(),

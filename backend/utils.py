@@ -81,5 +81,25 @@ def to_jsonable(value: Any) -> Any:
     return str(value)
 
 
+def merge_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    for key, value in right.items():
+        current = merged.get(key)
+        if (
+            isinstance(current, (int, float))
+            and not isinstance(current, bool)
+            and isinstance(value, (int, float))
+            and not isinstance(value, bool)
+        ):
+            merged[key] = current + value
+        elif isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = merge_usage(current, value)
+        elif isinstance(current, list) and isinstance(value, list):
+            merged[key] = [*current, *value][-100:]
+        else:
+            merged[key] = value
+    return merged
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)

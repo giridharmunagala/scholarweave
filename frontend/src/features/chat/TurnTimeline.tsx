@@ -21,8 +21,7 @@ import {
 
 type TimelineRow =
   | { kind: 'reasoning'; step: ReasoningStep }
-  | { kind: 'tools'; steps: ToolStep[] }
-  | { kind: 'handoff'; step: Extract<TurnStep, { kind: 'handoff' }> };
+  | { kind: 'tools'; steps: ToolStep[] };
 
 export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
   if (!timeline.steps.length) return null;
@@ -30,16 +29,6 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
     <div className="turn-timeline" aria-label="Agent activity">
       {groupSteps(timeline.steps).map((row) => {
         if (row.kind === 'reasoning') return <ReasoningRow key={row.step.id} step={row.step} />;
-        if (row.kind === 'handoff') {
-          return (
-            <div className="timeline-row static kind-handoff" key={row.step.id}>
-              <Icon className="timeline-glyph" name="agents" size={15} />
-              <span className="timeline-label">
-                Handed off from <strong>{row.step.from}</strong> to <strong>{row.step.to}</strong>
-              </span>
-            </div>
-          );
-        }
         return row.steps.length === 1 ? (
           <ToolRow key={row.steps[0].id} step={row.steps[0]} />
         ) : (
@@ -195,8 +184,6 @@ function groupSteps(steps: TurnStep[]): TimelineRow[] {
       rows.push({ kind: 'reasoning', step });
       continue;
     }
-    if (step.kind === 'agent') continue;
-    rows.push({ kind: 'handoff', step });
   }
   return rows;
 }

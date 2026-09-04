@@ -15,7 +15,7 @@ from sqlalchemy.types import TypeDecorator
 from backend.core.config import Settings
 from backend.utils import dumps_json, loads_json
 
-SCHEMA_GENERATION = 5
+SCHEMA_GENERATION = 6
 _LEGACY_COMPACTION_MARKER = "[ScholarWeave history compacted]"
 _ARTIFACTS_BACKUP_TABLE = "_sdk_cutover_artifacts"
 _CHUNKS_BACKUP_TABLE = "_sdk_cutover_document_chunks"
@@ -27,8 +27,7 @@ _RUNTIME_TABLES = (
     "agent_run_interruptions",
     "agent_run_events",
     "agent_run_items",
-    "agent_runs",
-    "sdk_session_items",
+    "agent_runs",    "sdk_session_items",
     "sdk_sessions",
     "conversations",
     "function_tool_revisions",

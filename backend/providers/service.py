@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from agents import Agent, AgentsException, RunConfig, Runner, function_tool
+import json
+
 from openai import OpenAIError
 
+from backend.agents.harness import (
+    AgentDefinition,
+    FunctionTool,
+    HarnessError,
+    ModelSettings,
+    RunSettings,
+    ToolInvocation,
+    run_agent,
+)
+from backend.agents.context import ScholarWeaveContext
 from backend.providers.ollama import OllamaError
 from backend.providers.reasoning import infer_reasoning_efforts
 from backend.providers.runtime import ModelRuntime
@@ -15,13 +26,30 @@ from backend.providers.schemas import (
     ProviderUpdate,
     ProviderVerifyResponse,
 )
-from backend.providers.sdk_models import ProfileModelResolver, SdkClientPool
+from backend.providers.binding import ProfileModelResolver, ProviderClientPool
 from backend.providers.types import (
     ModelReference,
     ProviderDiscoveryError,
     ProviderRuntimeError,
 )
 from backend.prompting.registry import PromptRegistry
+
+_VERIFICATION_INSTRUCTIONS = (
+    "Call record_colour exactly once with the colour named by the user, then answer done."
+)
+
+
+class _VerificationToolRuntime:
+    """A no-op tool runtime; provider verification never touches product state."""
+
+    async def invoke(self, catalog_id, arguments, context, *, tool_call_id=None):
+        raise NotImplementedError
+
+    async def bound_tool_result(self, catalog_id, result, context, *, max_tokens=None):
+        return result
+
+    def store_context_checkpoint(self, checkpoint, context):
+        return {}
 
 
 class ProviderService:
@@ -30,7 +58,7 @@ class ProviderService:
         repository: ProviderRepository,
         runtime: ModelRuntime,
         model_resolver: ProfileModelResolver,
-        clients: SdkClientPool,
+        clients: ProviderClientPool,
         prompts: PromptRegistry | None = None,
     ) -> None:
         self._repository = repository
@@ -181,45 +209,63 @@ class ProviderService:
             )
         called = False
 
-        @function_tool
-        def record_colour(colour: str) -> str:
-            """Record the colour from the verification request."""
-
+        async def record_colour(invocation: ToolInvocation, raw_arguments: str) -> str:
             nonlocal called
             called = True
-            return f"recorded {colour}"
+            try:
+                arguments = json.loads(raw_arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            return f"recorded {arguments.get('colour', 'unknown')}"
 
         try:
-            resolved = self._models.resolve_agent_model(
+            binding = self._models.resolve_agent_model(
                 ModelReference(
                     provider_profile_id=profile.id,
                     model=selected,
                 ),
                 require_tools=True,
             )
-            agent = Agent(
+            agent = AgentDefinition(
+                id="provider-verification",
                 name="Provider verification",
                 instructions=(
                     self._prompts.render("provider-verification")
                     if self._prompts is not None
-                    else (
-                        "Call record_colour exactly once with the colour named by the user, "
-                        "then answer done."
-                    )
+                    else _VERIFICATION_INSTRUCTIONS
                 ),
-                model=resolved.model,
-                tools=[record_colour],
+                binding=binding,
+                model_settings=ModelSettings(),
+                tools=[
+                    FunctionTool(
+                        name="record_colour",
+                        description="Record the colour from the verification request.",
+                        params_json_schema={
+                            "type": "object",
+                            "properties": {
+                                "colour": {
+                                    "type": "string",
+                                    "description": "The colour named by the user.",
+                                }
+                            },
+                            "required": ["colour"],
+                            "additionalProperties": False,
+                        },
+                        on_invoke_tool=record_colour,
+                    )
+                ],
             )
-            result = await Runner.run(
+            result = await run_agent(
                 agent,
                 "The colour is teal.",
-                max_turns=3,
-                run_config=RunConfig(
-                    workflow_name="provider-verification",
-                    tracing_disabled=True,
+                context=ScholarWeaveContext(
+                    run_id="provider-verification",
+                    tool_runtime=_VerificationToolRuntime(),
                 ),
+                settings=RunSettings(max_turns=3, workflow_name="provider-verification"),
+                max_turns=3,
             )
-        except (AgentsException, OpenAIError, ProviderRuntimeError) as exc:
+        except (HarnessError, OpenAIError, ProviderRuntimeError) as exc:
             return ProviderVerifyResponse(
                 provider=profile.kind,
                 base_url=profile.base_url,
