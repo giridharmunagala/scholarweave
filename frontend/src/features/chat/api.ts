@@ -27,6 +27,7 @@ function conversationApi(basePath: string) {
     content: string,
     reasoningEffort: ReasoningEffort | null = null,
     webEnabled = true,
+    deepWork = false,
     fastAnswer = false,
     webSearchLimit = 1,
     contextWindowTokens?: number,
@@ -37,6 +38,7 @@ function conversationApi(basePath: string) {
         content,
         reasoning_effort: reasoningEffort ?? undefined,
         web_enabled: webEnabled,
+        deep_work: deepWork,
         fast_answer: fastAnswer,
         web_search_limit: webSearchLimit,
         context_window_tokens: contextWindowTokens,
@@ -61,6 +63,4 @@ function conversationApi(basePath: string) {
     ),
   };
 }
-
 export const chatApi = conversationApi('/agent/conversations');
-export const deepWorkApi = conversationApi('/deep-work/conversations');

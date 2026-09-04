@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.agents.blueprint import (
     ModelReferenceSpec,
@@ -49,9 +49,19 @@ class ConversationMessageRequest(ConversationSchema):
     content: str = Field(min_length=1, max_length=100_000)
     reasoning_effort: ReasoningEffort | None = None
     web_enabled: bool = True
+    deep_work: bool = Field(
+        default=False,
+        description="Permanently enable Deep Work for this conversation.",
+    )
     fast_answer: bool = False
     web_search_limit: int = Field(default=1, ge=1, le=100)
     context_window_tokens: int | None = Field(default=None, ge=4_096, le=2_000_000)
+
+    @model_validator(mode="after")
+    def validate_modes(self) -> "ConversationMessageRequest":
+        if self.deep_work and self.fast_answer:
+            raise ValueError("Fast Answer and Deep Work cannot be enabled together.")
+        return self
 
 
 class ConversationMessageResponse(ConversationSchema):

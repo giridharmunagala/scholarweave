@@ -401,6 +401,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/paper-folders/{folder_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete Paper Folder */
+        delete: operations["delete_paper_folder_api_paper_folders__folder_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers": {
         parameters: {
             query?: never;
@@ -814,6 +831,12 @@ export interface components {
             content: string;
             /** Context Window Tokens */
             context_window_tokens?: number | null;
+            /**
+             * Deep Work
+             * @description Permanently enable Deep Work for this conversation.
+             * @default false
+             */
+            deep_work: boolean;
             /**
              * Fast Answer
              * @default false
@@ -2549,6 +2572,35 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PaperFolderResponse"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_paper_folder_api_paper_folders__folder_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                folder_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

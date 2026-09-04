@@ -114,4 +114,32 @@ describe('TurnTimelineView', () => {
     expect(container.textContent).toContain('search_web');
     expect(container.textContent).toContain('revision-123');
   });
+
+  it('shows a delegated worker while it runs and exposes its completed handoff', async () => {
+    const timeline = {
+      sources: [],
+      toolCount: 0,
+      agentCount: 1,
+      reasoningSeconds: null,
+      running: false,
+      steps: [{
+        kind: 'agent' as const,
+        id: 'worker-1',
+        sequence: 1,
+        completedSequence: 2,
+        name: 'Focused Research Worker',
+        output: '**Evidence handoff:** two sources agree.',
+        status: 'completed' as const,
+        seconds: 8,
+      }],
+    };
+    await act(async () => {
+      root.render(<TurnTimelineView timeline={timeline} />);
+    });
+
+    expect(container.textContent).toContain('Delegated worker');
+    expect(container.textContent).toContain('Focused Research Worker');
+    await act(async () => container.querySelector<HTMLButtonElement>('.kind-agent .timeline-head')!.click());
+    expect(container.innerHTML).toContain('<strong>Evidence handoff:</strong>');
+  });
 });

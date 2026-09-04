@@ -65,6 +65,19 @@ describe('MarkdownViewer', () => {
     expect(html).not.toContain('javascript:');
   });
 
+  it('renders safe semantic HTML for highlighted research notes', () => {
+    const html = renderToStaticMarkup(
+      <MarkdownViewer
+        content={'<details open><summary>Evidence</summary><p><mark>Supported</mark> with <kbd>Ctrl</kbd> and <abbr title="confidence interval">CI</abbr>.</p></details>'}
+      />,
+    );
+
+    expect(html).toContain('<details open="">');
+    expect(html).toContain('<mark>Supported</mark>');
+    expect(html).toContain('<kbd>Ctrl</kbd>');
+    expect(html).toContain('<abbr title="confidence interval">CI</abbr>');
+  });
+
   it('presents a fenced code block as a labelled, highlighted artefact', () => {
     const html = renderToStaticMarkup(
       <MarkdownViewer content={'```python\n# note\ndef run():\n    return 1\n```'} />,

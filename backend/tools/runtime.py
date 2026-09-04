@@ -351,7 +351,19 @@ class ApplicationToolRuntime:
                             timeout=self._settings.tool_call_timeout_seconds,
                         )
                 if journal is not None:
-                    result = await self.bound_tool_result(catalog_id, result, context)
+                    max_tokens = (
+                        6_000
+                        if catalog_id == "research.summary.checkpoint"
+                        and isinstance(result, dict)
+                        and result.get("final_checkpoint") is not None
+                        else None
+                    )
+                    result = await self.bound_tool_result(
+                        catalog_id,
+                        result,
+                        context,
+                        max_tokens=max_tokens,
+                    )
                 if attempt is not None:
                     self._finish_tool_attempt(
                         journal,
@@ -376,6 +388,7 @@ class ApplicationToolRuntime:
                 )
                 await context.emit("tool.application_completed", {"catalog_id": catalog_id})
                 return result
+
             except asyncio.CancelledError:
                 if attempt is not None:
                     status = "cancelled" if safe_retry else "unknown_outcome"
@@ -587,6 +600,15 @@ class ApplicationToolRuntime:
                 pending = state.pop("pending_checkpoint", None)
                 state["checkpoint_path"] = saved.relative_path
                 state["checkpoint_size_characters"] = len(persisted)
+                final_checkpoint = (
+                    persisted
+                    if isinstance(pending, dict)
+                    and (
+                        not pending.get("has_more")
+                        or int(pending.get("batch") or 0) >= 5
+                    )
+                    else None
+                )
                 return {
                     "status": "appended",
                     "checkpoint_path": saved.relative_path,
@@ -603,9 +625,13 @@ class ApplicationToolRuntime:
                     "next_start": (
                         pending.get("next_start") if isinstance(pending, dict) else None
                     ),
+                    "final_checkpoint": final_checkpoint,
                     "instruction": (
-                        "The checkpoint write was verified. The previous raw batch is now "
-                        "discardable; read the next batch if more paper content remains."
+                        "The checkpoint write was verified. Draft directly from final_checkpoint "
+                        "without rereading it."
+                        if final_checkpoint is not None
+                        else "The checkpoint write was verified. The previous raw batch is now "
+                        "discardable; read the next overlapping batch if more paper content remains."
                     ),
                 }
 
@@ -970,20 +996,21 @@ class ApplicationToolRuntime:
         context: ScholarWeaveContext,
     ) -> Any:
         action = str(arguments["action"])
-        delegated = {
-            "document_id": arguments["document_id"],
-            "action": action,
-            "start": arguments.get("start"),
-            "limit": 10,
-        }
-        if action in {"inspect", "prepare"}:
-            return await self._read_research_paper(delegated, context)
-
         document_id = str(arguments["document_id"]).strip()
         batch_counts = context.metadata.setdefault("_paper_summary_read_batches", {})
         if not isinstance(batch_counts, dict):
             batch_counts = {}
             context.metadata["_paper_summary_read_batches"] = batch_counts
+        completed = int(batch_counts.get(document_id, 0))
+        delegated = {
+            "document_id": arguments["document_id"],
+            "action": action,
+            "start": arguments.get("start"),
+            "limit": 10 if completed == 0 or action in {"inspect", "prepare"} else 11,
+        }
+        if action in {"inspect", "prepare"}:
+            return await self._read_research_paper(delegated, context)
+
         async with self._paper_summary_lock:
             state = self._paper_summary_state(context, document_id)
             pending = state.get("pending_checkpoint")
@@ -992,16 +1019,16 @@ class ApplicationToolRuntime:
                     "The previous paper-summary batch must be appended to "
                     f"{pending['checkpoint_path']} before another batch can be read."
                 )
-            completed = int(batch_counts.get(document_id, 0))
             if completed >= 5:
                 raise ValueError(
-                    "Paper summary reading is capped at five 10-page or 10-chunk batches."
+                    "Paper summary reading is capped at five overlapping page or chunk batches."
                 )
             result = await self._read_research_paper(delegated, context)
             completed += 1
             batch_counts[document_id] = completed
             if isinstance(result, dict):
                 coverage = self._paper_summary_coverage(action, delegated, result)
+                next_start = self._paper_summary_next_start(action, result)
                 checkpoint_path = (
                     f"runs/{context.run_id}/paper-summary/{document_id}/checkpoint.md"
                 )
@@ -1009,11 +1036,12 @@ class ApplicationToolRuntime:
                     "batch": completed,
                     "coverage": coverage,
                     "has_more": bool(result.get("has_more")),
-                    "next_start": result.get("next_page", result.get("next_start")),
+                    "next_start": next_start,
                     "checkpoint_path": checkpoint_path,
                 }
                 return {
                     **result,
+                    "next_start": next_start,
                     "summary_batch": completed,
                     "summary_batches_remaining": 5 - completed,
                     "checkpoint_required": True,
@@ -1025,6 +1053,18 @@ class ApplicationToolRuntime:
                     ),
                 }
             return result
+
+    @staticmethod
+    def _paper_summary_next_start(action: str, result: dict[str, Any]) -> int | None:
+        next_start = result.get("next_page", result.get("next_start"))
+        if next_start is None:
+            return None
+        value = int(next_start)
+        if action == "pages":
+            return max(1, value - 1)
+        if action == "chunks":
+            return max(0, value - 1)
+        return value
 
     @staticmethod
     def _paper_summary_state(

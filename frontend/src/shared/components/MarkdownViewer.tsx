@@ -27,8 +27,17 @@ const MARKDOWN_COMPONENTS: Components = {
 };
 const SAFE_HTML_SCHEMA = {
   ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    'abbr',
+    'mark',
+  ],
   attributes: {
     ...defaultSchema.attributes,
+    abbr: [
+      ...(defaultSchema.attributes?.abbr ?? []),
+      'title',
+    ],
     div: [
       ...(defaultSchema.attributes?.div ?? []),
       ['className', 'math', 'math-display'],

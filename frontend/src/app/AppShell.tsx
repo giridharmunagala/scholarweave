@@ -16,7 +16,6 @@ interface NavEntry {
  */
 const NAV_ITEMS: NavEntry[] = [
   { to: '/', label: 'Research', icon: 'search' },
-  { to: '/deep-work', label: 'Deep Work', icon: 'agents' },
   { to: '/library', label: 'Library', icon: 'papers' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
 ];

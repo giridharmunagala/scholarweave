@@ -199,6 +199,12 @@
             ],
             "title": "Context Window Tokens"
           },
+          "deep_work": {
+            "default": false,
+            "description": "Permanently enable Deep Work for this conversation.",
+            "title": "Deep Work",
+            "type": "boolean"
+          },
           "fast_answer": {
             "default": false,
             "title": "Fast Answer",
@@ -3993,6 +3999,41 @@
           }
         },
         "summary": "Create Paper Folder",
+        "tags": [
+          "research"
+        ]
+      }
+    },
+    "/api/paper-folders/{folder_id}": {
+      "delete": {
+        "operationId": "delete_paper_folder_api_paper_folders__folder_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "folder_id",
+            "required": true,
+            "schema": {
+              "title": "Folder Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Paper Folder",
         "tags": [
           "research"
         ]

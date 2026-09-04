@@ -48,7 +48,9 @@ class PaperSummaryService:
         prompt_revision = self._prompts.revision
         instruction = (
             f"Create a reviewed summary version for document_id={document_id!r}, titled "
-            f"{document.title!r}. Read the paper directly, draft and self-check the complete "
+            f"{document.title!r}. This is a fresh summary job, so do not read the empty summary "
+            "checkpoint before inspecting and reading the first paper batch. Read the paper "
+            "directly, draft and self-check the complete "
             "citation-grounded summary, then call save_paper_summary_version exactly once. The save "
             "updates summary.md and retains an immutable version. Finish with the saved version path "
             "and material evidence limits."

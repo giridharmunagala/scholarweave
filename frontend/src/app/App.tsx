@@ -4,7 +4,6 @@ import { useLocation } from './router';
 import { Loading } from '../shared/components/Ui';
 
 const ChatPage = lazy(() => import('../features/chat/ChatPage'));
-const DeepWorkPage = lazy(() => import('../features/chat/DeepWorkPage'));
 const PapersPage = lazy(() => import('../features/documents/PapersPage'));
 const WorkspacePage = lazy(() => import('../features/workspace/WorkspacePage'));
 const SettingsPage = lazy(() => import('../features/providers/SettingsPage'));
@@ -12,8 +11,7 @@ const SettingsPage = lazy(() => import('../features/providers/SettingsPage'));
 export default function App() {
   const { pathname } = useLocation();
   let page = <ChatPage />;
-  if (pathname.startsWith('/deep-work')) page = <DeepWorkPage />;
-  else if (pathname.startsWith('/library/notes') || pathname.startsWith('/workspace')) page = <WorkspacePage />;
+  if (pathname.startsWith('/library/notes') || pathname.startsWith('/workspace')) page = <WorkspacePage />;
   else if (pathname.startsWith('/library') || pathname.startsWith('/papers')) page = <PapersPage />;
   else if (pathname === '/settings') page = <SettingsPage />;
 

@@ -100,15 +100,15 @@ class ConversationTurnService:
         )
 
     def list_conversations(self):
-        return self._conversations.list(kind="autonomous")
+        return self._conversations.list()
 
     def list_deep_work_conversations(self):
         return self._conversations.list(kind="deep_work")
 
     def get_conversation(self, conversation_id: str):
         record = self._conversations.get(conversation_id)
-        if record.kind != "autonomous":
-            raise ValueError("Conversation is not a research chat.")
+        if record.kind not in {"autonomous", "deep_work"}:
+            raise ValueError("Conversation is not a supported research chat.")
         return record
 
     def get_deep_work_conversation(self, conversation_id: str):
@@ -122,6 +122,7 @@ class ConversationTurnService:
         conversation_id: str,
         *,
         web_enabled: bool = True,
+        deep_work: bool = False,
         fast_answer: bool = False,
         web_search_limit: int = 1,
         message: str = "",
@@ -129,20 +130,33 @@ class ConversationTurnService:
         first_turn: bool | None = None,
     ):
         record = self.get_conversation(conversation_id)
+        deep_work = deep_work or record.kind == "deep_work"
+        if deep_work and fast_answer:
+            raise ValidationError("Fast Answer is unavailable in a Deep Work conversation.")
         first_turn = (
             not record.last_message_preview.strip()
             if first_turn is None
             else first_turn
         )
-        compiled = self._compiler.compile(
-            research_blueprint(
+        blueprint = (
+            deep_work_blueprint(
+                record.model_reference_json,
+                web_enabled=web_enabled,
+                prompts=self._prompts,
+                first_turn=first_turn,
+            )
+            if deep_work
+            else research_blueprint(
                 record.model_reference_json,
                 web_enabled=web_enabled,
                 fast_answer=fast_answer,
                 web_search_limit=web_search_limit,
                 prompts=self._prompts,
                 first_turn=first_turn,
-            ),
+            )
+        )
+        compiled = self._compiler.compile(
+            blueprint,
             context_window_tokens=context_window_tokens,
         )
         return replace(
@@ -160,25 +174,14 @@ class ConversationTurnService:
         context_window_tokens: int | None = None,
         first_turn: bool | None = None,
     ):
-        record = self.get_deep_work_conversation(conversation_id)
-        first_turn = (
-            not record.last_message_preview.strip()
-            if first_turn is None
-            else first_turn
-        )
-        compiled = self._compiler.compile(
-            deep_work_blueprint(
-                record.model_reference_json,
-                web_enabled=web_enabled,
-                prompts=self._prompts,
-                first_turn=first_turn,
-            ),
+        self.get_deep_work_conversation(conversation_id)
+        return self.compile_conversation(
+            conversation_id,
+            web_enabled=web_enabled,
+            deep_work=True,
+            message=message,
             context_window_tokens=context_window_tokens,
-        )
-        return replace(
-            compiled,
-            completion_validator=validate_paper_work_completion,
-            completion_policy_id=PAPER_WORK_COMPLETION_POLICY_ID,
+            first_turn=first_turn,
         )
 
     async def conversation_items(self, conversation_id: str):
@@ -191,17 +194,23 @@ class ConversationTurnService:
         *,
         reasoning_effort: ReasoningEffort | None = None,
         web_enabled: bool = True,
+        deep_work: bool = False,
         fast_answer: bool = False,
         web_search_limit: int = 1,
         context_window_tokens: int | None = None,
     ):
-        first_turn = not self.get_conversation(conversation_id).last_message_preview.strip()
+        record = self.get_conversation(conversation_id)
+        first_turn = not record.last_message_preview.strip()
+        deep_work = deep_work or record.kind == "deep_work"
+        if deep_work and record.kind == "autonomous":
+            self._conversations.promote_to_deep_work(conversation_id)
         return self._start_message(
             conversation_id,
             message,
             compiled=self.compile_conversation(
                 conversation_id,
                 web_enabled=web_enabled,
+                deep_work=deep_work,
                 fast_answer=fast_answer,
                 web_search_limit=web_search_limit,
                 message=message,
@@ -210,12 +219,13 @@ class ConversationTurnService:
             ),
             reasoning_effort=reasoning_effort,
             runtime_metadata={
+                **({"autonomous_work": True} if deep_work else {}),
                 **(
                     {
                         "fast_answer": True,
                         "web_search_limit": web_search_limit,
                     }
-                    if fast_answer
+                    if fast_answer and not deep_work
                     else {}
                 ),
                 "allow_conversation_title_update": first_turn,

@@ -265,6 +265,7 @@ async def test_summary_checkpoint_replaces_raw_paper_batch_on_next_turn(tmp_path
                         "checkpoint_path": "checkpoint.md",
                         "checkpointed_batch": 1,
                         "coverage": {"kind": "pages", "start": 1, "end": 10},
+                        "final_checkpoint": "complete compact evidence [p.4]",
                     }
                 ),
             },
@@ -282,6 +283,7 @@ async def test_summary_checkpoint_replaces_raw_paper_batch_on_next_turn(tmp_path
     assert raw_pages not in json.dumps(prepared.items)
     assert "prior checkpoint evidence" not in json.dumps(prepared.items)
     assert understanding not in json.dumps(prepared.items)
+    assert "complete compact evidence [p.4]" in prepared.items[5]["output"]
     assert json.loads(prepared.items[4]["arguments"])["content"] is None
     assert prepared.working_items == prepared.items
 

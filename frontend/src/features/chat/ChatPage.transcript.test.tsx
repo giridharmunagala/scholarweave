@@ -325,7 +325,13 @@ function installFetch() {
       if (url.includes(`/api/agent/conversations/${CONVERSATION_ID}/messages`) && method === 'POST') {
         lastMessageRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
         const { content } = lastMessageRequest as { content: string };
-        return respond({ conversation: {}, run: server.startRun(content) });
+        return respond({
+          conversation: {
+            ...conversationSummary(),
+            kind: lastMessageRequest.deep_work ? 'deep_work' : 'autonomous',
+          },
+          run: server.startRun(content),
+        });
       }
       if (
         url.endsWith(`/api/conversations/${CONVERSATION_ID}`)
@@ -520,12 +526,40 @@ describe('chat transcript detail', () => {
       content: 'Investigate this thoroughly',
       reasoning_effort: 'high',
       web_enabled: true,
+      deep_work: false,
       fast_answer: true,
       web_search_limit: 4,
       context_window_tokens: 131072,
     });
     expect(lastMessageRequest).not.toHaveProperty('work_mode');
     expect(lastMessageRequest).not.toHaveProperty('work_budget');
+  });
+
+  it('permanently enables Deep Work for a main-chat session without a separate page', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+
+    const deepWork = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Toggle deep work"]',
+    )!;
+    expect(deepWork.getAttribute('aria-pressed')).toBe('false');
+
+    await act(async () => {
+      deepWork.click();
+    });
+
+    expect(deepWork.getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('[aria-label="Toggle fast answer"]')).toBeNull();
+    expect(text(container.querySelector('.chat-mode-badge'))).toContain('Deep Work');
+    await send('Investigate this with focused workers');
+
+    expect(lastMessageRequest).toMatchObject({
+      content: 'Investigate this with focused workers',
+      web_enabled: true,
+      deep_work: true,
+      fast_answer: false,
+    });
+    expect(deepWork.disabled).toBe(true);
   });
 
   it('keeps completed activity out of the transcript as the thread grows', async () => {

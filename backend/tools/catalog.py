@@ -294,7 +294,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.summary.read",
         "read_paper_summary_batch",
-        "Inspect or prepare one paper, or read the next 10-page summary batch.",
+        "Inspect or prepare one paper, or read the next summary batch with one-page overlap.",
         _object_schema(
             {
                 "document_id": {"type": "string", "minLength": 1},

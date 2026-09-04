@@ -5,6 +5,7 @@ import type { PromptSnapshot } from './api';
 import {
   formatStepDuration,
   humanizeToolName,
+  type AgentStep,
   type LiveActivity,
   type ReasoningStep,
   type TimelineSource,
@@ -21,6 +22,7 @@ import {
 
 type TimelineRow =
   | { kind: 'reasoning'; step: ReasoningStep }
+  | { kind: 'agent'; step: AgentStep }
   | { kind: 'tools'; steps: ToolStep[] };
 
 export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
@@ -29,6 +31,7 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
     <div className="turn-timeline" aria-label="Agent activity">
       {groupSteps(timeline.steps).map((row) => {
         if (row.kind === 'reasoning') return <ReasoningRow key={row.step.id} step={row.step} />;
+        if (row.kind === 'agent') return <AgentRow key={row.step.id} step={row.step} />;
         return row.steps.length === 1 ? (
           <ToolRow key={row.steps[0].id} step={row.steps[0]} />
         ) : (
@@ -99,7 +102,7 @@ export function ActivitySidebar({
       <header className="activity-sidebar-head">
         <div>
           <strong>Activity</strong>
-          <span>Tools and completed reasoning</span>
+          <span>Workers, tools, and completed reasoning</span>
         </div>
         <button type="button" aria-label="Close activity" onClick={onClose}>
           <Icon name="close" size={15} />
@@ -113,7 +116,7 @@ export function ActivitySidebar({
             <TurnTimelineView timeline={timeline} />
           </section>
         )) : (
-          <p className="activity-sidebar-empty">Tool calls and reasoning will appear here.</p>
+          <p className="activity-sidebar-empty">Delegated workers, tool calls, and reasoning will appear here.</p>
         )}
       </div>
     </aside>
@@ -184,8 +187,50 @@ function groupSteps(steps: TurnStep[]): TimelineRow[] {
       rows.push({ kind: 'reasoning', step });
       continue;
     }
+    if (step.kind === 'agent') {
+      rows.push({ kind: 'agent', step });
+    }
   }
   return rows;
+}
+
+function AgentRow({ step }: { step: AgentStep }) {
+  const [open, setOpen] = useState(false);
+  const running = step.status === 'running';
+  const elapsed = formatStepDuration(step.seconds);
+  const detail = step.output == null ? null : formatPayload(step.output);
+
+  return (
+    <div
+      className={`timeline-row kind-agent${open ? ' open' : ''}${running ? ' live' : ''}${step.status === 'failed' ? ' failed' : ''}`}
+    >
+      <button
+        type="button"
+        className="timeline-head"
+        aria-expanded={detail ? open : undefined}
+        onClick={() => {
+          if (detail) setOpen((value) => !value);
+        }}
+      >
+        {running
+          ? <span className="spinner tiny timeline-glyph" aria-hidden="true" />
+          : <Icon className="timeline-glyph" name="agents" size={15} />}
+        <span className="timeline-label">
+          <span className="timeline-lead">{running ? 'Delegated to' : 'Delegated worker'}</span>
+          <strong>{step.name}</strong>
+          {elapsed ? <small>{elapsed}</small> : null}
+          {step.status === 'failed' ? <em className="timeline-failed">failed</em> : null}
+          {step.status === 'superseded' ? <em>restarted</em> : null}
+        </span>
+        {detail ? <Icon className="timeline-chevron" name="arrowRight" size={13} /> : null}
+      </button>
+      {open && detail ? (
+        <div className="timeline-detail agent">
+          <MarkdownViewer content={detail} />
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function ReasoningRow({ step }: { step: ReasoningStep }) {

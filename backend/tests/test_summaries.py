@@ -35,6 +35,9 @@ def test_summary_blueprint_is_one_model_job_with_direct_read_and_save(test_setti
     assert blueprint.run.max_turns == 40
     assert blueprint.agents[0].model_settings.parallel_tool_calls is False
     assert "citation" in blueprint.agents[0].instructions.casefold()
+    assert "for a fresh job, do not read" in blueprint.agents[0].instructions.casefold()
+    assert "empty run-scoped checkpoint" in blueprint.agents[0].instructions.casefold()
+    assert "250-500 words" in blueprint.agents[0].instructions
 
 
 def test_summary_blueprint_uses_selected_main_model(test_settings) -> None:

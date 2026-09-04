@@ -76,6 +76,7 @@ async def send_research_message(
         payload.content,
         reasoning_effort=payload.reasoning_effort,
         web_enabled=payload.web_enabled,
+        deep_work=payload.deep_work,
         fast_answer=payload.fast_answer,
         web_search_limit=payload.web_search_limit,
         context_window_tokens=payload.context_window_tokens,

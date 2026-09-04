@@ -200,7 +200,7 @@ def test_fast_answer_message_uses_bounded_web_blueprint(
         }
 
 
-def test_deep_work_has_separate_history_and_bounded_worker(
+def test_legacy_deep_work_endpoint_is_listed_in_unified_chat_and_has_bounded_worker(
     test_settings,
     stub_provider,
 ) -> None:
@@ -234,7 +234,9 @@ def test_deep_work_has_separate_history_and_bounded_worker(
             },
         ).json()
         assert conversation["kind"] == "deep_work"
-        assert client.get("/api/agent/conversations").json() == []
+        assert [item["id"] for item in client.get("/api/agent/conversations").json()] == [
+            conversation["id"]
+        ]
         assert [item["id"] for item in client.get("/api/deep-work/conversations").json()] == [
             conversation["id"]
         ]
@@ -265,3 +267,82 @@ def test_deep_work_has_separate_history_and_bounded_worker(
         assert blueprint["agent_tools"][0]["max_turns"] == 24
         assert blueprint["run"]["max_turns"] == 48
         assert blueprint["run"]["max_tool_concurrency"] == 4
+
+
+def test_main_chat_message_can_enable_deep_work(
+    test_settings,
+    stub_provider,
+) -> None:
+    stub_provider.tool_plans = [
+        (
+            "Research this deeply.",
+            "create_work_plan",
+            {"items": [{"id": "answer", "title": "Answer the request"}]},
+        ),
+        (
+            "Autonomous work is not finished",
+            "update_work_item",
+            {
+                "id": "answer",
+                "status": "completed",
+                "summary": "Prepared the answer.",
+            },
+        ),
+    ]
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            "/api/agent/conversations",
+            json={
+                "model_reference": {
+                    "provider_profile_id": profile_id,
+                    "model": "stub-model",
+                },
+            },
+        ).json()
+
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={"content": "Research this deeply.", "deep_work": True},
+        )
+
+        assert response.status_code == 202, response.text
+        assert response.json()["conversation"]["kind"] == "deep_work"
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run
+        stored_run = app.state.services.runs.get(run["id"])
+        assert stored_run.blueprint_json["name"] == "ScholarWeave deep work"
+        assert stored_run.runtime_metadata_json["autonomous_work"] is True
+        assert client.get(
+            f"/api/agent/conversations/{conversation['id']}"
+        ).json()["kind"] == "deep_work"
+        assert app.state.services.conversation_turns.compile_conversation(
+            conversation["id"]
+        ).blueprint.name == "ScholarWeave deep work"
+        incompatible = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={
+                "content": "Try fast mode.",
+                "fast_answer": True,
+            },
+        )
+        assert incompatible.status_code == 400
+        assert "Fast Answer is unavailable" in incompatible.text
+
+
+def test_main_chat_rejects_fast_answer_with_deep_work(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        conversation = client.post("/api/agent/conversations", json={}).json()
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={
+                "content": "Use both incompatible modes.",
+                "deep_work": True,
+                "fast_answer": True,
+            },
+        )
+
+    assert response.status_code == 422
+    assert "Fast Answer and Deep Work cannot be enabled together" in response.text

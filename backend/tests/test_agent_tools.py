@@ -697,7 +697,7 @@ async def test_paper_summary_checkpoint_survives_context_and_is_run_scoped(
 
 
 @pytest.mark.anyio
-async def test_paper_summary_reader_caps_five_ten_page_batches(
+async def test_paper_summary_reader_caps_five_overlapping_page_batches(
     test_settings,
     monkeypatch,
 ) -> None:
@@ -707,19 +707,26 @@ async def test_paper_summary_reader_caps_five_ten_page_batches(
 
     async def read_batch(arguments, _context):
         delegated_calls.append(arguments)
-        return {"pages": [], "has_more": True, "next_page": int(arguments["start"]) + 10}
+        start = int(arguments["start"])
+        limit = int(arguments["limit"])
+        return {
+            "pages": [],
+            "has_more": True,
+            "next_page": start + limit,
+        }
 
     monkeypatch.setattr(runtime, "_read_research_paper", read_batch)
     context = ScholarWeaveContext(run_id="bounded-summary-run", tool_runtime=runtime)
     try:
         results = []
-        for batch in range(5):
+        starts = [1, 10, 20, 30, 40]
+        for start in starts:
             results.append(
                 await runtime._read_paper_summary_batch(
                     {
                         "document_id": "paper-1",
                         "action": "pages",
-                        "start": 1 + batch * 10,
+                        "start": start,
                     },
                     context,
                 )
@@ -741,7 +748,8 @@ async def test_paper_summary_reader_caps_five_ten_page_batches(
         await services.close()
 
     assert [result["summary_batch"] for result in results] == [1, 2, 3, 4, 5]
-    assert all(call["limit"] == 10 for call in delegated_calls)
+    assert [call["limit"] for call in delegated_calls] == [10, 11, 11, 11, 11]
+    assert [result["next_start"] for result in results] == [10, 20, 30, 40, 50]
     assert len(delegated_calls) == 5
 
 
@@ -785,7 +793,64 @@ async def test_paper_summary_reader_requires_checkpoint_before_next_batch(
 
     assert first["checkpoint_required"] is True
     assert first["coverage"] == {"kind": "pages", "start": 1, "end": 10}
+    assert first["next_start"] == 10
     assert first["checkpoint_path"].endswith("/paper-summary/paper-1/checkpoint.md")
+
+
+@pytest.mark.anyio
+async def test_final_paper_summary_checkpoint_is_returned_without_reread(
+    test_settings,
+    monkeypatch,
+) -> None:
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF",
+        filename="short-paper.pdf",
+        title="Short paper",
+    )
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext(run_id="final-checkpoint-run", tool_runtime=runtime)
+
+    async def read_batch(arguments, active_context):
+        runtime._record_paper_activity(
+            active_context,
+            document,
+            "read",
+        )
+        return {
+            "pages": [
+                {
+                    "page_number": 1,
+                    "citation": "p.1",
+                    "text": "paper evidence",
+                }
+            ],
+            "has_more": False,
+            "next_page": 2,
+        }
+
+    monkeypatch.setattr(runtime, "_read_research_paper", read_batch)
+    try:
+        await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "pages", "start": 1},
+            context,
+        )
+        appended = await runtime._paper_summary_checkpoint(
+            {
+                "document_id": document.id,
+                "action": "append",
+                "content": "Contribution and evidence [p.1].",
+                "offset": None,
+                "limit": None,
+            },
+            context,
+        )
+    finally:
+        await services.close()
+
+    assert appended["has_more_paper"] is False
+    assert appended["final_checkpoint"] == "Contribution and evidence [p.1].\n"
+    assert "without rereading" in appended["instruction"]
 
 
 @pytest.mark.anyio

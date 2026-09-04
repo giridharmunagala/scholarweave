@@ -106,14 +106,11 @@ The HTTP surface selects a product workflow; it does not dynamically route among
 
 ```mermaid
 flowchart TD
-    ResearchUI[Research Chat] --> ResearchRoute[Research message route]
-    DeepUI[Deep Work] --> DeepRoute[Deep Work message route]
-
+    ResearchUI[Research Chat] -->|message + session capabilities| ResearchRoute[Conversation message route]
     ResearchRoute --> TurnService[ConversationTurnService]
-    DeepRoute --> TurnService
 
-    TurnService --> ResearchFlow[Research blueprint]
-    TurnService --> DeepFlow[Deep Work blueprint]
+    TurnService -->|standard turn| ResearchFlow[Research blueprint]
+    TurnService -->|conversation promoted to Deep Work| DeepFlow[Deep Work blueprint]
 
     ResearchFlow --> Researcher[Researcher<br/>entry agent]
     DeepFlow --> Coordinator[Coordinator<br/>entry agent]
@@ -122,9 +119,9 @@ flowchart TD
 
 `ConversationTurnService` owns the application use case:
 
-1. Validate the conversation kind.
+1. Validate the conversation.
 2. Detect the first turn.
-3. Build the Research or Deep Work blueprint.
+3. Select the Research or Deep Work blueprint from the conversation's persistent capability.
 4. Apply feature flags such as web access and fast-answer mode.
 5. Compile the blueprint.
 6. Attach the paper-work completion policy.

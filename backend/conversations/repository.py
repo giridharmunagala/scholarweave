@@ -70,6 +70,20 @@ class ConversationRepository:
             session.refresh(record)
             return record
 
+    def promote_to_deep_work(self, conversation_id: str) -> ConversationRecord:
+        with self._sessions() as session:
+            record = session.get(ConversationRecord, conversation_id)
+            if record is None:
+                raise NotFoundError("Conversation was not found.")
+            if record.kind not in {"autonomous", "deep_work"}:
+                raise ValueError("Conversation cannot be promoted to Deep Work.")
+            if record.kind == "autonomous":
+                record.kind = "deep_work"
+                record.updated_at = utcnow()
+                session.commit()
+                session.refresh(record)
+            return record
+
     def delete(self, conversation_id: str) -> None:
         with self._sessions() as session:
             record = session.get(ConversationRecord, conversation_id)

@@ -19,7 +19,6 @@ import {
 } from '../providers/api';
 import {
   chatApi,
-  deepWorkApi,
   type Conversation,
   type ConversationDetail,
   type ModelReference,
@@ -178,8 +177,7 @@ function PaneResizer({
   );
 }
 
-export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'deep-work' }) {
-  const activeChatApi = mode === 'deep-work' ? deepWorkApi : chatApi;
+export function ResearchChatPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -191,6 +189,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   );
   const [contextWindowTokens, setContextWindowTokens] = useState(32_768);
   const [webEnabled, setWebEnabled] = useState(true);
+  const [deepWork, setDeepWork] = useState(false);
   const [fastAnswer, setFastAnswer] = useState(false);
   const [webSearchLimit, setWebSearchLimit] = useState(1);
   const [run, setRun] = useState<Run | null>(null);
@@ -229,8 +228,9 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     () => reasoningEffortsForModel(providers, effectiveModelReference),
     [providers, effectiveModelReference.provider_profile_id, effectiveModelReference.model],
   );
+  const deepWorkLocked = current?.kind === 'deep_work';
 
-  const refreshList = () => activeChatApi.list().then(setConversations);
+  const refreshList = () => chatApi.list().then(setConversations);
   const open = async (
     id: string,
     contextProviders = providers,
@@ -246,8 +246,8 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     setStopping(null);
     setPinnedToBottom(true);
     const [conversationResult, runsResult] = await Promise.allSettled([
-      activeChatApi.get(id),
-      activeChatApi.runs(id),
+      chatApi.get(id),
+      chatApi.runs(id),
     ]);
     if (request !== openRequestRef.current) return;
     if (conversationResult.status === 'rejected') throw conversationResult.reason;
@@ -257,6 +257,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     const conversationRuns = runsForConversation(allRuns, id);
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
     setCurrent(conversation);
+    setDeepWork(conversation.kind === 'deep_work');
     setModelReference(conversation.model_reference);
     setContextWindowTokens(
       configuredContextWindow(
@@ -278,7 +279,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
 
   useEffect(() => {
     Promise.all([
-      activeChatApi.list(),
+      chatApi.list(),
       providersApi.list(),
       providersApi.settings(),
     ])
@@ -382,8 +383,8 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       }
       try {
         const [nextRun, nextConversation] = await Promise.all([
-          knownRun ? Promise.resolve(knownRun) : activeChatApi.run(run.id),
-          conversationId ? activeChatApi.get(conversationId) : Promise.resolve(null),
+          knownRun ? Promise.resolve(knownRun) : chatApi.run(run.id),
+          conversationId ? chatApi.get(conversationId) : Promise.resolve(null),
         ]);
         if (cancelled || lifecycle !== runLifecycleRef.current) return;
         setRun(nextRun);
@@ -407,7 +408,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       if (polling || finalizing || cancelled) return;
       polling = true;
       try {
-        const nextRun = await activeChatApi.run(run.id);
+        const nextRun = await chatApi.run(run.id);
         if (isTerminalRun(nextRun)) await finish(nextRun);
       } catch (nextError) {
         if (!cancelled) setError(nextError);
@@ -526,7 +527,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     setError(null);
     try {
       if (answerWithAvailableInformation) {
-        const response = await activeChatApi.stopAndAnswer(run.id);
+        const response = await chatApi.stopAndAnswer(run.id);
         if (request !== openRequestRef.current) return;
         setRuns((previous) =>
           mergeRun(mergeRun(previous, response.stopped_run), response.answer_run),
@@ -535,7 +536,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
         setStream(displayStream(response.answer_run));
         setSending(true);
       } else {
-        const stoppedRun = await activeChatApi.cancelRun(run.id);
+        const stoppedRun = await chatApi.cancelRun(run.id);
         if (request !== openRequestRef.current) return;
         setRuns((previous) => mergeRun(previous, stoppedRun));
         setRun(stoppedRun);
@@ -559,8 +560,8 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       )
     ) return;
     try {
-      await activeChatApi.remove(id);
-      const remaining = await activeChatApi.list();
+      await chatApi.remove(id);
+      const remaining = await chatApi.list();
       setConversations(remaining);
       if (current?.id === id) {
         resetThread();
@@ -585,7 +586,7 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
       setError(null);
       setContent('');
       try {
-        const message = await activeChatApi.steer(run.id, submitted);
+        const message = await chatApi.steer(run.id, submitted);
         setSteeringMessages((messages) =>
           messages.some((item) => item.id === message.id)
             ? messages
@@ -612,24 +613,30 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
     try {
       let conversation = current;
       if (!conversation) {
-        const created = await activeChatApi.create(modelReference);
+        const created = await chatApi.create(modelReference);
         if (request !== openRequestRef.current) return;
-        conversation = await activeChatApi.get(created.id);
+        conversation = await chatApi.get(created.id);
         if (request !== openRequestRef.current) return;
         setCurrent(conversation);
         setModelReference(conversation.model_reference);
         void refreshList();
       }
-      const response = await activeChatApi.send(
+      const response = await chatApi.send(
         conversation.id,
         submitted,
         reasoningEffort,
         webEnabled,
-        mode === 'research' && fastAnswer,
+        deepWork,
+        !deepWork && fastAnswer,
         webSearchLimit,
         contextWindowTokens,
       );
       if (request !== openRequestRef.current) return;
+      setCurrent((active) => (
+        active
+          ? { ...active, ...response.conversation }
+          : active
+      ));
       setRun(response.run);
       setRuns((previous) => mergeRun(previous, response.run));
       setStream(displayStream(response.run));
@@ -694,11 +701,18 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
   const liveActivity = runActive
     ? describeLiveActivity(liveTimeline, { writing: Boolean(stream.assistant) })
     : null;
+  const activeDelegate = [...liveTimeline.steps]
+    .reverse()
+    .find((step) => step.kind === 'agent' && step.status === 'running');
   const compaction = compactionIndicator(runs, run, stream.events);
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
     () => anchorRunsToItems(current?.items ?? [], runs),
+    [current?.items, runs],
+  );
+  const recoveredRunResponses = useMemo(
+    () => missingRunResponsesByUserIndex(current?.items ?? [], runs),
     [current?.items, runs],
   );
 
@@ -753,6 +767,12 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                   }}
                 >
                   <strong>{conversation.title}</strong>
+                  {conversation.kind === 'deep_work' ? (
+                    <span className="conversation-mode">
+                      <Icon name="agents" size={11} />
+                      Deep Work
+                    </span>
+                  ) : null}
                   <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
                 </button>
                 <button
@@ -797,7 +817,24 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
             >
               <Icon name="sidebar" size={16} />
             </button>
-            <h1>{current?.title ?? (mode === 'deep-work' ? 'New deep work' : 'New research')}</h1>
+            <h1>{current?.title ?? (deepWork ? 'New deep work' : 'New research')}</h1>
+            {deepWork ? (
+              <span className="chat-mode-badge">
+                <Icon name="agents" size={12} />
+                Deep Work
+              </span>
+            ) : null}
+            {activeDelegate?.kind === 'agent' ? (
+              <button
+                type="button"
+                className="delegate-status"
+                onClick={() => setActivityOpen(true)}
+                title="Open delegated worker activity"
+              >
+                <span className="spinner tiny" aria-hidden="true" />
+                {activeDelegate.name} running
+              </button>
+            ) : null}
             {compaction ? (
               <span
                 className={`compaction-indicator ${compaction.state}`}
@@ -836,9 +873,9 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
             >
               {!hasTranscript ? (
                 <div className="chat-welcome">
-                  <h2>{mode === 'deep-work' ? 'What needs deeper research?' : 'What should we research?'}</h2>
+                  <h2>{deepWork ? 'What needs deeper research?' : 'What should we research?'}</h2>
                   <p>
-                    {mode === 'deep-work'
+                    {deepWork
                       ? 'Use focused workers for broad comparisons, literature reviews, and multi-source synthesis.'
                       : 'Ask for evidence, comparisons, open questions, or written notes.'}
                   </p>
@@ -862,6 +899,8 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                 const role = item.role ?? item.type;
                 if (role !== 'user' && role !== 'assistant') return null;
                 const responseRun = reasoningAnchors.responseByIndex.get(index) ?? null;
+                const recoveredResponses = recoveredRunResponses.get(index) ?? [];
+                const recoveredRun = reasoningAnchors.byIndex.get(index) ?? null;
                 return (
                   <Fragment key={index}>
                     <Message
@@ -872,6 +911,25 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                       onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
                       canRetry={!sending}
                     />
+                    {recoveredResponses.map((text, responseIndex) => (
+                      <Message
+                        role="assistant"
+                        text={text}
+                        metrics={
+                          recoveredRun && responseIndex === recoveredResponses.length - 1
+                            ? turnMetrics(recoveredRun)
+                            : null
+                        }
+                        sources={
+                          recoveredRun && responseIndex === recoveredResponses.length - 1
+                            ? timelineFor(recoveredRun).sources
+                            : null
+                        }
+                        onRetry={() => retry(item.text ?? '')}
+                        canRetry={!sending}
+                        key={`${recoveredRun?.id ?? index}-recovered-${responseIndex}`}
+                      />
+                    ))}
                   </Fragment>
                 );
               })}
@@ -953,32 +1011,40 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                       disabled={sending}
                       onChange={selectModel}
                     />
-                    <ReasoningEffortSelect
-                      value={reasoningEffort}
-                      supportedEfforts={supportedReasoningEfforts}
-                      disabled={sending}
-                      onChange={selectReasoningEffort}
-                    />
-                    <label
-                      className="composer-context"
-                      title="Context window used for chat history and automatic compaction"
-                    >
-                      <span>Context</span>
-                      <select
-                        aria-label="Context size"
-                        value={contextWindowTokens}
-                        onChange={(event) => setContextWindowTokens(Number(event.target.value))}
-                        disabled={sending}
-                      >
-                        {[...new Set([...COMMON_CONTEXT_WINDOWS, contextWindowTokens])]
-                          .sort((left, right) => left - right)
-                          .map((tokens) => (
-                            <option key={tokens} value={tokens}>
-                              {contextWindowLabel(tokens)}
-                            </option>
-                          ))}
-                      </select>
-                    </label>
+                    <details className="composer-options">
+                      <summary>
+                        <Icon name="settings" size={13} />
+                        Options
+                      </summary>
+                      <div className="composer-options-popover">
+                        <ReasoningEffortSelect
+                          value={reasoningEffort}
+                          supportedEfforts={supportedReasoningEfforts}
+                          disabled={sending}
+                          onChange={selectReasoningEffort}
+                        />
+                        <label
+                          className="composer-context"
+                          title="Context window used for chat history and automatic compaction"
+                        >
+                          <span>Context</span>
+                          <select
+                            aria-label="Context size"
+                            value={contextWindowTokens}
+                            onChange={(event) => setContextWindowTokens(Number(event.target.value))}
+                            disabled={sending}
+                          >
+                            {[...new Set([...COMMON_CONTEXT_WINDOWS, contextWindowTokens])]
+                              .sort((left, right) => left - right)
+                              .map((tokens) => (
+                                <option key={tokens} value={tokens}>
+                                  {contextWindowLabel(tokens)}
+                                </option>
+                              ))}
+                          </select>
+                        </label>
+                      </div>
+                    </details>
                     <button
                       className={`composer-capability${webEnabled ? ' active' : ''}`}
                       type="button"
@@ -996,7 +1062,28 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                       <Icon name="globe" size={13} />
                       Web
                     </button>
-                    {mode === 'research' ? (
+                    <button
+                      className={`composer-capability${deepWork ? ' active' : ''}`}
+                      type="button"
+                      aria-label="Toggle deep work"
+                      aria-pressed={deepWork}
+                      title={
+                        deepWorkLocked
+                          ? 'Deep Work is permanently enabled for this conversation'
+                          : 'Permanently upgrade this conversation to use a coordinator and focused worker'
+                      }
+                      disabled={sending || deepWorkLocked}
+                      onClick={() => {
+                        setDeepWork((enabled) => {
+                          if (!enabled) setFastAnswer(false);
+                          return !enabled;
+                        });
+                      }}
+                    >
+                      <Icon name="agents" size={13} />
+                      Deep work
+                    </button>
+                    {!deepWork ? (
                       <div className={`fast-answer-control${fastAnswer ? ' active' : ''}`}>
                         <button
                           className="composer-capability"
@@ -1007,7 +1094,10 @@ export function ResearchChatPage({ mode = 'research' }: { mode?: 'research' | 'd
                           disabled={sending}
                           onClick={() => {
                             setFastAnswer((enabled) => {
-                              if (!enabled) setWebEnabled(true);
+                              if (!enabled) {
+                                setWebEnabled(true);
+                                setDeepWork(false);
+                              }
                               return !enabled;
                             });
                           }}
@@ -1398,6 +1488,43 @@ export function anchorRunsToItems(items: ConversationDetail['items'], runs: Run[
     if (lastAssistantIndex >= 0) responseByIndex.set(lastAssistantIndex, runForItem);
   }
   return { byIndex, responseByIndex, anchored };
+}
+
+export function missingRunResponsesByUserIndex(
+  items: ConversationDetail['items'],
+  runs: Run[],
+): Map<number, string[]> {
+  const recovered = new Map<number, string[]>();
+  const anchors = anchorRunsToItems(items, runs);
+
+  for (const [userIndex, runForItem] of anchors.byIndex) {
+    if (!isTerminalRun(runForItem)) continue;
+    const visibleResponses: string[] = [];
+    for (let index = userIndex + 1; index < items.length; index += 1) {
+      const role = items[index].role ?? items[index].type;
+      if (role === 'user') break;
+      if (role === 'assistant' && items[index].text?.trim()) {
+        visibleResponses.push(items[index].text!.trim());
+      }
+    }
+
+    const missing: string[] = [];
+    const unmatchedVisible = [...visibleResponses];
+    for (const runItem of runForItem.items) {
+      if (runItem.type !== 'message_output_item') continue;
+      const response = typeof runItem.content === 'string' ? runItem.content.trim() : '';
+      if (!response) continue;
+      const match = unmatchedVisible.indexOf(response);
+      if (match >= 0) {
+        unmatchedVisible.splice(match, 1);
+      } else {
+        missing.push(response);
+      }
+    }
+    if (missing.length) recovered.set(userIndex, missing);
+  }
+
+  return recovered;
 }
 
 interface TurnMetrics {

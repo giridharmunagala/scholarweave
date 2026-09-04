@@ -61,6 +61,9 @@ class ConversationService:
             raise ValueError("Conversation title cannot exceed 120 characters.")
         return self._repository.set_title(conversation_id, title=normalized)
 
+    def promote_to_deep_work(self, conversation_id: str) -> ConversationRecord:
+        return self._repository.promote_to_deep_work(conversation_id)
+
     async def delete(
         self,
         conversation_id: str,
