@@ -5,6 +5,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from backend.utils import as_utc
+
 
 class RunSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -136,16 +138,16 @@ def run_response(record) -> RunResponse:
         usage=record.usage_json or {},
         error=record.error,
         cancel_requested=record.cancel_requested,
-        created_at=record.created_at,
-        started_at=record.started_at,
-        finished_at=record.finished_at,
+        created_at=as_utc(record.created_at),
+        started_at=as_utc(record.started_at),
+        finished_at=as_utc(record.finished_at),
         items=[item.item_json for item in record.items],
         events=[
             RunEventResponse(
                 sequence=event.sequence,
                 event_type=event.event_type,
                 payload=event.payload_json,
-                created_at=event.created_at,
+                created_at=as_utc(event.created_at),
             )
             for event in record.events
         ],
@@ -157,8 +159,8 @@ def run_response(record) -> RunResponse:
                 terminal_reason=epoch.terminal_reason,
                 usage=epoch.usage_json or {},
                 error=epoch.error,
-                started_at=epoch.started_at,
-                finished_at=epoch.finished_at,
+                started_at=as_utc(epoch.started_at),
+                finished_at=as_utc(epoch.finished_at),
             )
             for epoch in record.epochs
         ],
@@ -174,8 +176,8 @@ def run_response(record) -> RunResponse:
                 retryable=attempt.retryable,
                 result_ref=attempt.result_ref,
                 error=attempt.error,
-                started_at=attempt.started_at,
-                finished_at=attempt.finished_at,
+                started_at=as_utc(attempt.started_at),
+                finished_at=as_utc(attempt.finished_at),
             )
             for attempt in record.tool_attempts
         ],

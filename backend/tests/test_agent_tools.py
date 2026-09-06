@@ -42,6 +42,23 @@ class Runtime:
 
 
 @pytest.mark.anyio
+async def test_summary_tool_exposes_only_document_and_mode() -> None:
+    runtime = Runtime()
+    tool = create_tool_catalog().build_function_tool(
+        FunctionToolSpec(id="summary", catalog_id="research.summary.run"),
+    )
+    context = ScholarWeaveContext(run_id="summary-contract", tool_runtime=runtime)
+    arguments = {"document_id": "paper", "mode": "reviewed"}
+    assert await tool.on_invoke_tool(
+        SimpleNamespace(context=context, tool_call_id="summary"), json.dumps(arguments),
+    ) == {"ok": True}
+    assert set(tool.params_json_schema["properties"]) == {"document_id", "mode"}
+    assert set(tool.params_json_schema["required"]) == {"document_id", "mode"}
+    assert tool.params_json_schema["additionalProperties"] is False
+    assert runtime.calls == [("research.summary.run", arguments, context.run_id)]
+
+
+@pytest.mark.anyio
 async def test_workspace_discovery_tools_are_bound_and_invoke_real_services(test_settings) -> None:
     services = create_services(test_settings)
     try:

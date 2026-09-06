@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ActivitySidebar, TurnTimelineView } from './TurnTimeline';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ActivitySidebar, LiveActivityBar, TurnTimelineView } from './TurnTimeline';
 
 describe('TurnTimelineView', () => {
   let container: HTMLDivElement;
@@ -18,6 +18,27 @@ describe('TurnTimelineView', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
+  });
+
+  it('restores run elapsed time and offers details before any tool completes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T10:02:30Z'));
+    const open = vi.fn();
+    await act(async () => {
+      root.render(<LiveActivityBar
+        activity={{ phase: 'thinking', label: 'Thinking', detail: null, completedSteps: 0 }}
+        startedAt="2026-09-06T10:00:00Z"
+        onOpenActivity={open}
+      />);
+    });
+    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('2m 30s');
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.live-activity-open')!.click();
+      vi.advanceTimersByTime(1000);
+    });
+    expect(open).toHaveBeenCalledOnce();
+    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('2m 31s');
   });
 
   it('marks only the failed tool call red inside a mixed group', async () => {

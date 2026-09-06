@@ -10,7 +10,7 @@
 
 .chat-layout {
   --chat-list-width: 272px;
-  --chat-activity-width: 320px;
+  --chat-activity-width: 380px;
   display: grid;
   grid-template-columns: var(--chat-list-width) minmax(0, 1fr);
   flex: 1 1 auto;
@@ -33,6 +33,7 @@
 }
 /* A drag while resizing must not select transcript text or animate the columns. */
 .chat-layout.resizing { transition: none; user-select: none; }
+.chat-pane-backdrop { display: none; }
 
 /* ------------------------------------------------------- Pane resizers --- */
 
@@ -149,33 +150,20 @@
   font-variant-numeric: tabular-nums;
   transition: opacity var(--dur-fast) var(--ease);
 }
-.conversation:hover .conversation-time { opacity: 0; }
-
 .conversation-delete {
   position: absolute;
-  top: .35rem;
-  right: .3rem;
-  display: grid;
-  place-items: center;
-  padding: .3rem;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--muted);
-  opacity: 1;
-  cursor: pointer;
-  transition: opacity var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  top: .28rem;
+  right: .28rem;
 }
-.conversation:hover .conversation-delete, .conversation-delete:focus-visible { opacity: 1; }
-.conversation-delete:disabled { opacity: .3; cursor: not-allowed; }
-.conversation-delete:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+.conversation:hover .conversation-time { opacity: 0; }
 .conversation-empty { padding: var(--space-4) var(--space-3); color: var(--muted); font-size: var(--text-sm); text-align: center; }
 
 /* -------------------------------------------------------------- Thread --- */
 
 .chat-surface {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
 }
@@ -183,6 +171,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  min-width: 0;
   min-height: 52px;
   padding: var(--space-2) var(--space-4);
   border-bottom: 1px solid var(--divider);
@@ -191,6 +180,7 @@
   -webkit-backdrop-filter: var(--glass-blur);
 }
 .chat-header h1 {
+  flex: 1;
   min-width: 0;
   margin: 0;
   overflow: hidden;
@@ -225,8 +215,8 @@
   display: grid;
   flex: none;
   place-items: center;
-  width: 1.9rem;
-  height: 1.9rem;
+  width: 2rem;
+  height: 2rem;
   padding: 0;
   border: 0;
   border-radius: var(--radius-md);
@@ -235,39 +225,40 @@
   cursor: pointer;
 }
 .chat-list-toggle:hover { background: var(--surface-2); color: var(--text); }
-.activity-toggle {
-  position: relative;
+/*
+ * The two header controls are the only ways to change what the chat shows, so
+ * they carry a visible edge instead of hiding as flat text.
+ */
+.activity-toggle,
+.focus-toggle {
   display: inline-flex;
   flex: none;
   align-items: center;
   justify-content: center;
   gap: .35rem;
   width: auto;
-  min-height: 1.9rem;
-  margin-left: auto;
-  padding: .25rem .5rem;
-  border: 0;
+  min-height: 2rem;
+  padding: .25rem .6rem;
+  border: 1px solid var(--divider);
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
   font-size: var(--text-xs);
+  font-weight: 600;
   white-space: nowrap;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
 }
-.activity-toggle:hover, .activity-toggle.active { background: var(--surface-2); color: var(--text); }
-.activity-toggle .activity-count {
-  position: absolute;
-  top: -.25rem;
-  right: -.35rem;
-  min-width: 1rem;
-  padding: .04rem .22rem;
-  border-radius: var(--radius-pill);
+.activity-toggle:hover,
+.focus-toggle:hover { border-color: var(--border-strong); background: var(--surface-2); color: var(--text-strong); }
+.activity-toggle.active,
+.focus-toggle.active {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--divider));
   background: var(--accent-soft);
   color: var(--accent-strong);
-  font-size: .65rem;
-  font-weight: 700;
-  text-align: center;
 }
+.focus-mode .composer-intent { display: none; }
 .compaction-indicator {
   display: inline-flex;
   align-items: center;
@@ -280,6 +271,9 @@
   font-size: var(--text-xs);
   font-weight: 600;
   white-space: nowrap;
+  max-width: 25%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .compaction-indicator.failed {
   border-color: color-mix(in srgb, var(--danger) 35%, var(--divider));
@@ -288,9 +282,168 @@
 }
 .spinner.tiny { width: 13px; height: 13px; border-width: 2px; }
 
+/*
+ * The live read-out under the header. Its numbers are the buttons that open the
+ * matching section of the Observe panel, so nothing here repeats a control that
+ * already exists in the header.
+ */
+.session-status-strip {
+  align-items: center;
+  gap: .25rem;
+  min-width: 0;
+  min-height: 40px;
+  padding: .3rem calc(var(--space-4) - .5rem);
+  border-bottom: 1px solid var(--divider);
+  background: var(--surface);
+  font-size: var(--text-xs);
+}
+.session-status-strip:not(.meter-row) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-left: var(--space-4);
+  color: var(--muted);
+}
+.session-status-open {
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  padding: .25rem .55rem;
+  background: transparent;
+  color: var(--accent-strong);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.session-status-open:hover { border-color: var(--accent); background: var(--accent-soft); }
+/*
+ * Run state is signalled with colour and a pulse, never with a button shape —
+ * it reports what the session is doing, it does not open anything.
+ */
+.session-status-state.active { align-items: center; gap: .4rem; }
+.session-status-state.active > strong { color: var(--accent-strong); }
+.session-status-state.active::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse-dot 1.6s var(--ease) infinite;
+}
+.session-worker-history > summary { margin: .2rem 0 .5rem; font-size: var(--text-xs); color: var(--muted); cursor: pointer; }
+.session-observability { display: grid; gap: var(--space-4); min-width: 0; }
+.session-observability-section { display: grid; gap: var(--space-2); min-width: 0; }
+.session-observability-section + .session-observability-section {
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--divider);
+}
+.session-observability-section h3 {
+  margin: 0;
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+.session-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .5rem;
+  margin: 0;
+}
+.session-metric {
+  min-width: 0;
+  padding: .55rem .6rem;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+.session-metric dt { color: var(--muted); font-size: var(--text-xs); }
+.session-metric dd {
+  margin: .15rem 0 0;
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.session-observability-note, .session-metric dd.session-observability-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  line-height: 1.5;
+}
+.session-run-list, .session-worker-list, .session-work-plan {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-width: 0;
+}
+.session-worker-row, .session-work-item, .session-run-row {
+  min-width: 0;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-2);
+}
+.session-worker-heading { display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; }
+.session-worker-heading > strong { flex: 1; color: var(--text-strong); font-size: var(--text-sm); }
+.session-worker-heading > small { color: var(--muted); font-size: var(--text-xs); }
+.session-worker-request {
+  margin: .4rem 0;
+  max-height: 8rem;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+.session-worker-phase { margin: .4rem 0; color: var(--accent-strong); font-size: var(--text-xs); overflow-wrap: anywhere; }
+.session-worker-row[data-status="running"] { border-left: 3px solid var(--accent); }
+.session-status-badge {
+  display: inline-flex;
+  padding: .12rem .4rem;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: .65rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.session-status-badge[data-status="running"], .session-status-badge[data-status="in_progress"] {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.session-status-badge[data-status="completed"] { color: var(--accent-strong); }
+.session-status-badge[data-status="failed"], .session-status-badge[data-status="blocked"],
+.session-observability-error { color: var(--danger); }
+.session-observability-error { font-size: var(--text-xs); overflow-wrap: anywhere; }
+.session-work-item { display: grid; gap: .3rem; font-size: var(--text-sm); }
+.session-work-item > .session-status-badge { justify-self: start; }
+.session-run-row > summary, .session-call-details > summary {
+  padding: .2rem 0;
+  cursor: pointer;
+  color: var(--text-strong);
+  font-size: var(--text-xs);
+}
+.session-run-row[open] > summary { margin-bottom: var(--space-2); }
+.session-call-details { margin-top: var(--space-2); }
+.session-call-details pre {
+  max-height: 22rem;
+  overflow: auto;
+  padding: var(--space-2);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .chat-thread {
   position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto;
   min-width: 0;
   min-height: 0;
@@ -312,16 +465,21 @@
    and the composer all line up on the same left edge. */
 .message-list {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--space-5);
   padding: var(--space-2) var(--space-4) var(--space-5);
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   scrollbar-gutter: stable;
   overflow-anchor: none;
 }
 .message-list > * { width: 100%; max-width: var(--reading-max); margin-inline: auto; }
 .message-list:has(.chat-welcome) { align-content: center; }
+.chat-run-error { display: grid; gap: var(--space-2); }
+.chat-run-error summary { cursor: pointer; }
+.chat-run-error pre { margin-bottom: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 
 .chat-welcome { display: grid; gap: var(--space-2); }
 .chat-welcome h2 { margin: 0; color: var(--text-strong); font-size: 1.45rem; font-weight: 650; letter-spacing: -.02em; }
@@ -701,6 +859,10 @@
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
 }
+.activity-sidebar:not([hidden]) {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
 .activity-sidebar-head {
   display: flex;
   align-items: center;
@@ -730,10 +892,29 @@
   display: grid;
   align-content: start;
   gap: var(--space-4);
-  height: calc(100% - 52px);
+  min-height: 0;
   padding: var(--space-3);
   overflow-y: auto;
 }
+.session-trace {
+  border-top: 1px solid var(--divider);
+  padding-top: var(--space-3);
+  min-width: 0;
+}
+.session-trace > summary {
+  padding: .35rem 0;
+  color: var(--text-strong);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  cursor: pointer;
+}
+.session-trace > summary > span {
+  float: right;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
+.session-trace .activity-turn { margin-top: var(--space-3); }
 .activity-turn { display: grid; gap: var(--space-1); }
 .activity-turn h2 {
   margin: 0;
@@ -866,6 +1047,7 @@
 /* -------------------------------------------------------------- Composer --- */
 
 .composer {
+  min-width: 0;
   padding: var(--space-3) var(--space-4) var(--space-4);
   border-top: 1px solid var(--divider);
   background: linear-gradient(
@@ -882,6 +1064,7 @@
 }
 .composer-inner {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
   width: 100%;
   max-width: var(--reading-max);
@@ -914,6 +1097,7 @@
 .composer-box {
   position: relative;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-1);
   padding: var(--space-2) var(--space-2) var(--space-1);
   border: 1px solid var(--divider);
@@ -990,7 +1174,15 @@
   box-shadow: var(--shadow-lg);
 }
 .composer-options-popover .composer-reasoning,
-.composer-options-popover .composer-context { justify-content: space-between; }
+.composer-options-popover .composer-context,
+.composer-options-popover .research-mode-control { justify-content: space-between; }
+.composer-options-popover > .composer-capability { justify-self: start; }
+.composer-options-popover .research-mode-control {
+  display: flex;
+  width: 100%;
+  gap: var(--space-2);
+}
+.composer-options-popover .research-mode-control > span { display: inline; }
 .composer-options-help { margin: 0; font-size: var(--text-xs); color: var(--muted); line-height: 1.5; }
 
 .chat-model-picker {
@@ -1167,7 +1359,7 @@
 .composer-run-answer:hover:not(:disabled) { background: var(--accent-strong); }
 /* ----------------------------------------------------------- Responsive --- */
 
-@media (max-width: 900px) {
+@media (max-width: 1100px) {
   .chat-layout { position: relative; grid-template-columns: minmax(0, 1fr); }
   .chat-layout.collapsed,
   .chat-layout.activity-open, .chat-layout.collapsed.activity-open {
@@ -1179,7 +1371,7 @@
     bottom: 0;
     left: 0;
     z-index: 20;
-    width: var(--chat-list-width, 272px);
+    width: min(var(--chat-list-width, 272px), 85%);
     background: var(--surface);
     box-shadow: var(--shadow-lg);
   }
@@ -1190,8 +1382,16 @@
     right: 0;
     bottom: 0;
     z-index: 21;
-    width: min(var(--chat-activity-width, 320px), 92vw);
+    width: min(var(--chat-activity-width, 380px), 96%);
     box-shadow: var(--shadow-lg);
+  }
+  .chat-pane-backdrop {
+    position: absolute;
+    display: block;
+    inset: 0;
+    z-index: 19;
+    border: 0;
+    background: rgb(0 0 0 / 20%);
   }
   .message.role-user .message-body { max-width: 100%; }
 }
@@ -1200,4 +1400,14 @@
   .chat-header, .message-list, .composer { padding-inline: var(--space-3); }
   .suggestion-grid { grid-template-columns: minmax(0, 1fr); }
   .source-images { grid-auto-columns: 88%; }
+  .focus-toggle > span, .activity-toggle > span:not(.count-badge) { display: none; }
+  .chat-mode-badge { display: none; }
+  .composer-bar { flex-wrap: wrap; }
+  .composer-controls { flex-basis: calc(100% - 2.5rem); }
+  .composer-run-actions { margin-left: auto; }
+  .session-status-strip { gap: .35rem .7rem; padding-inline: var(--space-3); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-layout, .message, .scroll-to-bottom { animation: none; transition: none; }
 }

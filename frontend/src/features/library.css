@@ -60,48 +60,50 @@
 .paper-folder-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 2px;
-}
-.paper-folder-delete {
-  align-self: center;
+  border-radius: var(--radius-sm);
 }
 .paper-folder-select {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+/* Without this the one-word label breaks mid-word ("Fold / er") when the
+   toolbar runs out of room. */
+.paper-folder-select > span { white-space: nowrap; overflow-wrap: normal; }
+.paper-folder-select select { min-width: 9rem; padding-top: .3rem; padding-bottom: .3rem; font-size: var(--text-xs); }
+
+.paper-detail-toolbar {
+  gap: var(--space-2) var(--space-3);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+.paper-detail-toolbar .busy-label {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
   color: var(--muted);
   font-size: var(--text-xs);
 }
-.paper-folder-select select { min-width: 9rem; }
 
 .paper-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-2);
+  align-items: start;
+  gap: .1rem;
   min-width: 0;
   width: 100%;
+  padding: .5rem .6rem;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text);
-  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
-}
-.paper-row-main {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  padding: .55rem .6rem;
-  border: 0;
-  background: transparent;
-  color: inherit;
   text-align: left;
   cursor: pointer;
-}
-.paper-row-main > div { min-width: 0; }
-.paper-row-delete {
-  align-self: center;
-  margin-right: .3rem;
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
 }
 .paper-row strong {
   display: block;
@@ -112,20 +114,19 @@
 }
 .paper-row small {
   display: block;
-  margin-top: .15rem;
   color: var(--muted);
   font-size: var(--text-xs);
   overflow-wrap: anywhere;
 }
-.paper-row:hover { background: var(--surface-2); }
+.paper-row:hover { border-color: var(--border); background: var(--surface-2); }
 .paper-row.active { border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); background: var(--accent-soft); }
 .paper-row.active strong { color: var(--accent-strong); }
 
-.paper-view-switcher { display: flex; justify-content: flex-end; gap: var(--space-2); }
+.paper-view-switcher { align-self: flex-end; margin-left: auto; }
 
 .paper-pdf-viewer {
   display: grid;
-  grid-template-columns: 3rem minmax(0, 1fr);
+  grid-template-columns: 3.5rem minmax(0, 1fr);
   min-height: 70vh;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -143,7 +144,9 @@
   background: var(--surface-2);
 }
 .paper-page-rail button {
+  flex: none;
   min-height: 2rem;
+  padding: 0;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -152,6 +155,9 @@
   font: inherit;
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
+  /* Page numbers are labels, not prose: they must never break across lines. */
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 .paper-page-rail button:hover { background: var(--surface-3); color: var(--text); }
 .paper-page-rail button.active {
@@ -309,16 +315,22 @@
 
 @media (max-width: 900px) {
   .papers-layout { grid-template-columns: minmax(0, 1fr); }
-  .paper-pdf-viewer { grid-template-columns: 2.75rem minmax(0, 1fr); }
+  .paper-pdf-viewer { grid-template-columns: 3.25rem minmax(0, 1fr); }
 }
 
 .workspace-layout {
   display: grid;
   grid-template-columns: minmax(240px, 320px) minmax(0, 1fr);
   gap: var(--space-4);
-  align-items: start;
+  /* Stretch so the editor panel matches the file tree instead of leaving a
+     short, floating card next to a tall list. */
+  align-items: stretch;
 }
-.file-list { display: grid; gap: 2px; max-height: 58vh; overflow-y: auto; }
+.workspace-layout > .panel { display: flex; flex-direction: column; }
+.workspace-layout > .panel > .stack,
+.workspace-layout > .panel > .stack-tight { flex: 1; min-height: 0; align-content: start; }
+.workspace-layout .empty-state { flex: 1; }
+.file-list { display: grid; gap: 2px; align-content: start; flex: 1; min-height: 18rem; max-height: 58vh; overflow-y: auto; }
 .file-tree-folder > summary {
   display: flex;
   align-items: center;
@@ -358,24 +370,7 @@
   color: var(--muted);
   font-size: var(--text-xs);
 }
-.folder-delete-button {
-  display: grid;
-  flex: none;
-  width: 1.65rem;
-  height: 1.65rem;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  place-items: center;
-  background: transparent;
-  color: var(--muted);
-  cursor: pointer;
-}
-.folder-delete-button:hover {
-  background: color-mix(in srgb, var(--danger) 12%, transparent);
-  color: var(--danger);
-}
-.folder-delete-button:disabled { cursor: default; opacity: .45; }
+.folder-delete-button { margin-right: -.2rem; }
 .file-tree-children {
   display: grid;
   gap: 2px;

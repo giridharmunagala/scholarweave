@@ -30,7 +30,7 @@ The chat agent can:
 
 Large tool results are stored locally and can be read back in bounded slices.
 
-Choose a response style in the chat composer:
+Choose a response style under **Options** in the chat composer:
 
 - **Follow my request** (default): discuss, explain, compare, or investigate without automatically
   creating saved summaries or notes. Ask explicitly when you want a durable artifact.
@@ -45,10 +45,15 @@ already collected.
 
 The library's **Discuss paper**, **Analyze summary**, and **Analyze saved work** actions open
 editable drafts in a new chat. They do not send a message or start generation. Suggestions are
-editable drafts too. **Advanced** holds context, reasoning, and the fast-web shortcut; live
-reasoning, per-turn **Performance**, extraction controls, and summary provenance can be expanded
-and collapsed on the same page. **Activity** keeps the full run trace available without filling the
-conversation with diagnostics.
+editable drafts too. **Options** holds response style, web access, Deep Work, context, reasoning,
+and the fast-web shortcut, leaving the composer focused on writing.
+
+The session status strip keeps total token consumption, average prefill/generation speeds, and
+worker progress visible above the conversation. **Observe** opens usage details, worker assignments,
+the work plan, and a collapsible full trace without leaving the chat. Live reasoning and per-turn
+**Performance** remain optional disclosures. **Focus** hides the chat list and closes observability;
+the status strip and one-click access to details remain available. Use **Alt+Shift+F** for Focus,
+**Alt+Shift+A** for Observe, and **Escape** to dismiss options or observability without losing a draft.
 
 Deep Work keeps an explicit plan when research execution is requested. For a collection, keep an index, cited evidence,
 comparisons, and open questions in research notes rather than repeatedly loading every paper into
@@ -167,11 +172,18 @@ Dedicated paper summaries default to reasoning off when supported, with an expli
 selector for single-paper and collection jobs. Their context allowance reserves 10% for safety,
 25% for output, and 65% for input including prompt/tool overhead. Large papers continue through
 durable evidence checkpoints; research-requested summaries use the same isolated serial writer.
+The model-callable summary tool accepts only the paper and summary mode: provider, model, and
+reasoning are runtime-owned, not generated tool arguments. Chat reasoning choices are remembered
+per provider/model, filtered against that model's declared capabilities, and never carried into the
+summary writer. Explicit reasoning overrides in the paper-summary UI/API remain available.
 
 Chat displays overall model token consumption separately from the main agent's current context.
 Prefill and generation speeds are server active-time weighted averages, refreshed at most every
 five seconds. They exclude idle/queue/tool time and show as unavailable when the server does not
 provide timing measurements.
+Conversation-linked runs are preserved by automatic retention so session totals do not silently
+shrink over time. Explicitly clearing/deleting history still removes those measurements; previously
+deleted usage cannot be recovered. Unreported tokens and partial server-timing coverage are labeled.
 
 The response allowance includes a reasoning model's thinking tokens. If generation reaches it,
 the harness automatically recomputes that unfinished turn with a larger allowance, up to the

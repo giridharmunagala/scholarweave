@@ -120,7 +120,6 @@ class PaperSummaryService:
         """Wait for an isolated, durable summary job, not a general research worker."""
         document_id = str(arguments["document_id"])
         mode = arguments.get("mode") or "reviewed"
-        requested = arguments.get("reasoning_effort")
         async with self._agent_summary_lock:
             parent = self._runs.get(context.run_id)
             blueprint = AgentBlueprint.model_validate(parent.blueprint_json)
@@ -131,7 +130,7 @@ class PaperSummaryService:
                 document_id, model_reference=reference, mode=mode,
             )
             metadata["paper_summary_parent_run_id"] = context.run_id
-            effort = _effective_summary_reasoning(compiled, mode, requested)
+            effort = _effective_summary_reasoning(compiled, mode, None)
             job_key = hashlib.sha256(json.dumps([
                 context.run_id, mode, effort, metadata.get("paper_summary_source_version"),
                 metadata.get("paper_summary_model"),

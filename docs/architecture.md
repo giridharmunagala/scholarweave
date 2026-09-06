@@ -340,9 +340,12 @@ child run.
 
 Events are the execution-to-UI contract, not merely logs.
 
-The default research surface prioritizes the answer and editable composer. Live reasoning and
-per-turn performance use collapsed disclosures; the activity panel remains reversible on the same
-page. Model context/reasoning controls and the fast-web shortcut sit under Advanced. Library
+The default research surface prioritizes the answer and editable composer. A session status strip
+exposes cumulative token usage, weighted prefill/generation rates, and task progress. Observe opens
+an overview of usage and workers, with the full trace behind a disclosure. Focus hides the chat list
+and closes the panel while retaining the status strip and access to observability. Live reasoning
+and per-turn performance use collapsed disclosures. Response style, execution capabilities, model
+context/reasoning controls, and the fast-web shortcut sit under Options. Library
 handoffs carry only a draft prompt identifying a paper or workspace path in `/?research=...`;
 opening one starts no run and does not reopen an unrelated conversation. The shared Markdown
 viewer memoizes unchanged content to avoid reparsing historical answers on each stream update.
@@ -390,6 +393,15 @@ Prefill and generation speeds use llama.cpp response `timings` (`prompt_n`/`prom
 timed tokens divided by total server phase time, excluding queueing, tools, idle gaps, and network
 latency. Missing timings display as unavailable; old wall-clock estimates are not relabeled as
 server measurements. Visible speed readings update at most once every five seconds per run.
+Session rates sum timed tokens and active durations across runs rather than averaging run rates.
+Timed-call counters expose coverage; absent counters in older history are unknown, not zero.
+Agent lifecycle and model/tool events carry invocation IDs so concurrent workers with the same name
+remain distinct. Agent starts include a bounded assignment preview with an explicit truncation flag.
+The frontend identifies the coordinator from lifecycle events, not the blueprint's display name.
+
+Conversation-linked runs are excluded from automatic expiry because their events are the durable
+session-usage ledger. Explicit history clearing, run deletion, and conversation deletion still
+remove those records. Measurements from previously deleted history cannot be reconstructed.
 
 ## 10. Durability, epochs, and recovery
 

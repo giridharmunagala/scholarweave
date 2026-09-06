@@ -50,17 +50,22 @@ export function TurnTimelineView({ timeline }: { timeline: TurnTimeline }) {
 export function LiveActivityBar({
   activity,
   onOpenActivity,
+  startedAt,
 }: {
   activity: LiveActivity;
   onOpenActivity?: () => void;
+  startedAt?: string | null;
 }) {
-  const [seconds, setSeconds] = useState(0);
+  const [now, setNow] = useState(Date.now);
+  const mountedAt = useRef(now);
 
   useEffect(() => {
-    const timer = window.setInterval(() => setSeconds((value) => value + 1), 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, []);
 
+  const start = startedAt ? Date.parse(startedAt) : mountedAt.current;
+  const seconds = Math.max(0, (now - (Number.isFinite(start) ? start : mountedAt.current)) / 1000);
   const elapsed = formatStepDuration(seconds);
 
   return (
@@ -71,9 +76,11 @@ export function LiveActivityBar({
         {activity.detail ? <small>{activity.detail}</small> : null}
       </span>
       {elapsed ? <span className="live-activity-elapsed">{elapsed}</span> : null}
-      {onOpenActivity && activity.completedSteps ? (
+      {onOpenActivity ? (
         <button type="button" className="live-activity-open" onClick={onOpenActivity}>
-          {activity.completedSteps} step{activity.completedSteps === 1 ? '' : 's'}
+          {activity.completedSteps
+            ? `${activity.completedSteps} step${activity.completedSteps === 1 ? '' : 's'}`
+            : 'Details'}
         </button>
       ) : null}
     </div>
@@ -85,6 +92,7 @@ export function ActivitySidebar({
   timelines,
   onClose,
   resizer,
+  overview,
 }: {
   open: boolean;
   timelines: {
@@ -95,20 +103,29 @@ export function ActivitySidebar({
   }[];
   onClose: () => void;
   resizer?: ReactNode;
+  overview?: ReactNode;
 }) {
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (open) closeRef.current?.focus();
+  }, [open]);
+
   return (
     <aside className="activity-sidebar" aria-label="Run activity" hidden={!open}>
       {resizer}
       <header className="activity-sidebar-head">
         <div>
-          <strong>Activity</strong>
-          <span>Workers, tools, and completed reasoning</span>
+          <strong>Session observability</strong>
+          <span>Usage, task progress, and execution details</span>
         </div>
-        <button type="button" aria-label="Close activity" onClick={onClose}>
+        <button ref={closeRef} type="button" aria-label="Close activity" onClick={onClose}>
           <Icon name="close" size={15} />
         </button>
       </header>
       <div className="activity-sidebar-scroll">
+        {overview}
+        <details className="session-trace">
+          <summary>Full trace <span>{timelines.length} run{timelines.length === 1 ? '' : 's'}</span></summary>
         {timelines.length ? timelines.map(({ id, label, timeline, snapshot }) => (
           <section className="activity-turn" key={id}>
             <h2>{label}</h2>
@@ -118,6 +135,7 @@ export function ActivitySidebar({
         )) : (
           <p className="activity-sidebar-empty">Delegated workers, tool calls, and reasoning will appear here.</p>
         )}
+        </details>
       </div>
     </aside>
   );

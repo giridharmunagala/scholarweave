@@ -39,7 +39,106 @@
 .button.icon { padding: .45rem; border-radius: var(--radius-md); }
 .button.block { width: 100%; }
 
+/* The one primary action on a screen carries a little lift so it reads first. */
+.button:not(.secondary):not(.ghost):not(.danger) { box-shadow: 0 1px 0 color-mix(in srgb, var(--accent-strong) 55%, transparent), var(--shadow-sm); }
+.button:not(.secondary):not(.ghost):not(.danger):hover { box-shadow: 0 1px 0 color-mix(in srgb, var(--accent-strong) 55%, transparent), var(--shadow-md); }
+.button:not(.secondary):not(.ghost):not(.danger):disabled { box-shadow: none; }
+
 .button-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+/* Pushes everything after it to the trailing edge of a toolbar. */
+.button-row > .row-spacer { flex: 1 1 auto; min-width: 0; }
+
+/*
+ * One icon-only control for the whole app. Every list row, panel header and
+ * toolbar uses this instead of hand-rolling a bare <button> with a trash icon,
+ * so the target size, hover feedback and focus ring are identical everywhere.
+ */
+.icon-button {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), opacity var(--dur-fast) var(--ease);
+}
+.icon-button:hover:not(:disabled) { background: var(--surface-2); color: var(--text-strong); }
+.icon-button:disabled { cursor: not-allowed; opacity: .4; }
+.icon-button.danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
+  color: var(--danger);
+}
+.icon-button.small { width: 1.75rem; height: 1.75rem; }
+
+/*
+ * Destructive row actions stay out of the way until you are actually on the
+ * row, so a long list reads as content rather than a column of red icons.
+ * Keyboard focus and touch pointers still reveal them.
+ */
+.row-action { opacity: 0; }
+:hover > .row-action,
+:focus-within > .row-action,
+.row-action:focus-visible { opacity: 1; }
+@media (hover: none) {
+  .row-action { opacity: 1; }
+}
+
+/*
+ * Compact read-outs used by monitoring surfaces. A meter is a label + value
+ * pair; when it can open a detail view it is a button and gets hover feedback,
+ * which keeps "look at this number" and "go read more" the same affordance.
+ */
+.meter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.meter {
+  display: inline-flex;
+  align-items: baseline;
+  gap: .35rem;
+  min-width: 0;
+  padding: .24rem .55rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.meter > strong { color: var(--text-strong); font-weight: 650; }
+.meter > small { color: var(--muted); font-size: .9em; }
+button.meter {
+  cursor: pointer;
+  border-color: var(--divider);
+  background: var(--surface-2);
+}
+button.meter:hover { border-color: var(--border-strong); background: var(--surface-3); color: var(--text-strong); }
+
+/* An inline count that sits beside a label instead of floating over its corner. */
+.count-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 1.15rem;
+  padding: 0 .3rem;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font-size: .65rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
 
 /* Segmented control, used for compact mutually exclusive choices. */
 .segmented {

@@ -14,6 +14,7 @@ from backend.runs.events import (
     PersistedRunEventSink,
     SubscriberLagged,
 )
+from backend.runs.schemas import run_response
 from backend.utils import merge_usage
 
 
@@ -68,6 +69,8 @@ async def test_retry_retracts_partial_answer_from_persistent_snapshots(prefix: s
 
 
 class SequenceRepository:
+    naive_timestamps = False
+
     def __init__(self) -> None:
         self.writes: list[tuple[int, list[tuple[str, dict[str, Any]]]]] = []
 
@@ -87,7 +90,11 @@ class SequenceRepository:
                 sequence=start_sequence + offset,
                 event_type=event_type,
                 payload_json=payload,
-                created_at=datetime.now(UTC),
+                created_at=(
+                    datetime.now(UTC).replace(tzinfo=None)
+                    if self.naive_timestamps
+                    else datetime.now(UTC)
+                ),
             )
             for offset, (event_type, payload) in enumerate(events)
         ]
@@ -99,6 +106,44 @@ class RecordingBroker:
 
     async def publish(self, _run_id: str, event: dict[str, Any]) -> None:
         self.events.append(event)
+
+
+def test_run_response_marks_sqlite_timestamps_as_utc() -> None:
+    timestamp = datetime(2026, 9, 6, 17, 30)
+    record = SimpleNamespace(
+        id="run-1",
+        conversation_id="conversation-1",
+        agent_name="Researcher",
+        status="running",
+        input_json="question",
+        final_output_json=None,
+        last_agent_name=None,
+        usage_json={},
+        error=None,
+        cancel_requested=False,
+        created_at=timestamp,
+        started_at=timestamp,
+        finished_at=None,
+        items=[],
+        events=[
+            SimpleNamespace(
+                sequence=0,
+                event_type="agent.started",
+                payload_json={},
+                created_at=timestamp,
+            )
+        ],
+        epochs=[],
+        tool_attempts=[],
+        goal_state=None,
+    )
+
+    response = run_response(record)
+
+    assert response.created_at.isoformat().endswith("+00:00")
+    assert response.started_at is not None
+    assert response.started_at.isoformat().endswith("+00:00")
+    assert response.events[0].created_at.isoformat().endswith("+00:00")
 
 
 class TelemetryRepository(SequenceRepository):
@@ -207,6 +252,7 @@ async def test_resuming_legacy_usage_keeps_spend_but_not_wall_clock_rates() -> N
 @pytest.mark.anyio
 async def test_persisted_and_transient_events_share_in_memory_sequence() -> None:
     repository = SequenceRepository()
+    repository.naive_timestamps = True
     broker = RecordingBroker()
     sink = PersistedRunEventSink(
         "run-1",
@@ -225,6 +271,7 @@ async def test_persisted_and_transient_events_share_in_memory_sequence() -> None
 
     assert [event["sequence"] for event in broker.events] == [7, 8, 9, 10]
     assert [start for start, _ in repository.writes] == [7, 9]
+    assert all(event["created_at"].endswith("+00:00") for event in broker.events)
 
 
 @pytest.mark.anyio
@@ -420,6 +467,9 @@ async def test_stream_performance_uses_server_active_time_not_wall_clock() -> No
         "output_tokens_estimated": False,
         "usage_complete": True,
         "timing_source": "server",
+        "rate_units": "tokens/s",
+        "prompt_timed_calls": 1,
+        "generation_timed_calls": 1,
         "timed_prompt_tokens": 100.0,
         "timed_output_tokens": 80.0,
         "prompt_seconds": 0.1,
@@ -532,6 +582,26 @@ async def test_missing_or_invalid_timing_does_not_pollute_measured_rate() -> Non
     assert sink.performance()["input_tokens"] == 3000
     assert sink.performance()["prompt_tokens_per_second"] == 0
     assert sink.performance()["generation_tokens_per_second"] == 20
+    assert sink.performance()["prompt_timed_calls"] == 1
+    assert sink.performance()["generation_timed_calls"] == 1
+
+
+@pytest.mark.anyio
+async def test_terminal_event_uses_authoritative_spend_including_workers() -> None:
+    repository = TelemetryRepository()
+    sink = PersistedRunEventSink("run-1", repository, EventBroker())
+    for call_id, scope in [("main", "main"), ("worker", "delegate"), ("compact", "compaction")]:
+        await sink.emit("model.telemetry", {
+            "model_call_id": call_id, "context_scope": scope, "usage_complete": True,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        })
+    # Epoch result usage only contains the coordinator's model loop.
+    await sink.emit("run.completed", {"usage": {"input_tokens": 10, "output_tokens": 5}})
+    terminal = repository.records[-1].payload_json["usage"]
+    assert terminal == repository.usage
+    assert terminal["input_tokens"] == 30
+    assert terminal["output_tokens"] == 15
+    assert terminal["total_tokens"] == 45
 
 
 @pytest.mark.anyio

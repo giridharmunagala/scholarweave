@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import { Icon } from '../../shared/components/Icons';
 import type { Provider } from '../providers/api';
 import type { ModelReference } from './api';
@@ -32,22 +34,55 @@ const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   max: 'Maximum',
 };
 
-export function readStoredReasoningEffort(): ReasoningEffort | null {
+function modelStorageKey(reference: ModelReference): string | null {
+  return reference.provider_profile_id && reference.model
+    ? `${STORAGE_KEY}:${JSON.stringify([reference.provider_profile_id, reference.model])}`
+    : null;
+}
+
+export function readStoredReasoningEffort(reference: ModelReference = {}): ReasoningEffort | null {
+  const key = modelStorageKey(reference);
+  if (!key) return null;
   try {
-    const saved = localStorage.getItem(STORAGE_KEY);
+    const saved = localStorage.getItem(key);
     return EFFORTS.has(saved as ReasoningEffort) ? saved as ReasoningEffort : null;
   } catch {
     return null;
   }
 }
 
-export function storeReasoningEffort(value: ReasoningEffort | null): void {
+export function storeReasoningEffort(
+  value: ReasoningEffort | null,
+  reference: ModelReference = {},
+): void {
+  const key = modelStorageKey(reference);
+  if (!key) return;
   try {
-    if (value) localStorage.setItem(STORAGE_KEY, value);
-    else localStorage.removeItem(STORAGE_KEY);
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
   } catch {
     // The control still works for this session when browser storage is unavailable.
   }
+}
+
+export function useModelReasoningEffort(
+  reference: ModelReference,
+  supportedEfforts: readonly ReasoningEffort[] | null,
+): readonly [ReasoningEffort | null, (value: ReasoningEffort | null) => void] {
+  const [selections, setSelections] = useState<Record<string, ReasoningEffort | null>>({});
+  const key = modelStorageKey(reference);
+  const selected = key && Object.prototype.hasOwnProperty.call(selections, key)
+    ? selections[key]
+    : readStoredReasoningEffort(reference);
+  const value = selected && supportedEfforts?.includes(selected) ? selected : null;
+
+  const select = (effort: ReasoningEffort | null) => {
+    if (!key) return;
+    const next = effort && supportedEfforts?.includes(effort) ? effort : null;
+    setSelections((previous) => ({ ...previous, [key]: next }));
+    storeReasoningEffort(next, reference);
+  };
+  return [value, select];
 }
 
 export function ReasoningEffortSelect({

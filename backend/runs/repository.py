@@ -94,11 +94,15 @@ class RunRepository:
             self._load_relations(record)
             return record
 
-    def ids_created_before(self, cutoff: datetime | None = None) -> list[str]:
+    def ids_created_before(
+        self, cutoff: datetime | None = None, *, standalone_only: bool = False,
+    ) -> list[str]:
         with self._sessions() as session:
             statement = select(AgentRunRecord.id)
             if cutoff is not None:
                 statement = statement.where(AgentRunRecord.created_at < cutoff)
+            if standalone_only:
+                statement = statement.where(AgentRunRecord.conversation_id.is_(None))
             return list(session.scalars(statement))
 
     def mark_running(self, run_id: str) -> None:

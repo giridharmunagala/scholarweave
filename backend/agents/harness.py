@@ -786,6 +786,9 @@ async def stream_model_turn(
                 "model_call_id": model_call_id,
                 "agent_id": agent.id,
                 "agent_name": agent.name,
+                "invocation_id": (
+                    context.agent_invocation[1] if context.agent_invocation is not None else None
+                ),
                 "model": agent.binding.model_name,
                 "context_scope": "compaction" if agent.id.endswith(":compaction") else "main",
                 "usage": usage.to_dict(),
@@ -852,6 +855,10 @@ class AgentRunner:
         generated: RunInputItems = []
         new_items: list[dict[str, Any]] = []
         usage = Usage()
+        self._context.agent_assignment = next(
+            (item_text(item) for item in reversed(history) if item.get("role") == "user"),
+            None,
+        )
         if self._hooks is not None:
             await self._hooks.on_agent_start(self._context, self._agent)
         turn_index = 0
@@ -1367,14 +1374,14 @@ class DelegatedEventSink:
         if event_type == "run.item" and _is_message_item(payload):
             return None
         return {
+            "delegation_depth": self._depth,
+            "parent_agent_name": self._parent_agent_name,
+            "delegate_agent_name": self._delegate_agent_name,
             **payload,
             "delegated": True,
             "context_scope": (
                 "compaction" if payload.get("context_scope") == "compaction" else "delegate"
             ),
-            "delegation_depth": self._depth,
-            "parent_agent_name": self._parent_agent_name,
-            "delegate_agent_name": self._delegate_agent_name,
         }
 
 
@@ -1395,6 +1402,8 @@ def delegated_context(
         return context
     return replace(
         context,
+        agent_assignment=None,
+        agent_invocation=None,
         event_sink=DelegatedEventSink(
             context.event_sink,
             parent_agent_name=parent_agent_name,
@@ -1443,14 +1452,15 @@ def delegation_tool(
         request = arguments.get("request") if isinstance(arguments, dict) else None
         if not isinstance(request, str) or not request.strip():
             return "Error: delegation requires a non-empty 'request' string."
+        context = delegated_context(
+            invocation.context,
+            parent_agent_name=invocation.agent_name,
+            delegate_agent_name=delegate.name,
+            depth=delegate_depth,
+        )
         runner = AgentRunner(
             delegate,
-            context=delegated_context(
-                invocation.context,
-                parent_agent_name=invocation.agent_name,
-                delegate_agent_name=delegate.name,
-                depth=delegate_depth,
-            ),
+            context=context,
             settings=settings,
             hooks=hooks,
             context_policy=context_policy,
@@ -1458,9 +1468,13 @@ def delegation_tool(
         )
         try:
             result = await runner.run(request, max_turns=max_turns)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            if on_error := getattr(hooks, "on_agent_error", None):
+                await on_error(context, delegate, exc)
             raise
         except MaxTurnsExceeded as exc:
+            if on_error := getattr(hooks, "on_agent_error", None):
+                await on_error(context, delegate, exc)
             partial = "\n".join(
                 str(item.get("content") or "")
                 for item in exc.run_data.new_items
@@ -1472,6 +1486,8 @@ def delegation_tool(
                 "unfinished scope, or continue directly."
             )
         except Exception as exc:
+            if on_error := getattr(hooks, "on_agent_error", None):
+                await on_error(context, delegate, exc)
             return (
                 f"The sub-agent stopped before completion: {type(exc).__name__}: {exc}. "
                 "Summarize the usable progress and delegate only the unfinished scope to a "

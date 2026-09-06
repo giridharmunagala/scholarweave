@@ -42,9 +42,102 @@ class FakeCompiled:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("reasoning_effort", [None, "high"])
+@pytest.mark.parametrize(("model", "declared", "expected"), [
+    ("qwen-27b", ("none", "high"), "none"),
+    ("qwen-27b", ("high",), None),
+    ("unknown-model", None, None),
+])
+async def test_main_agent_summary_call_uses_runtime_owned_model_and_reasoning(
+    test_settings, stub_provider, monkeypatch, model, declared, expected,
+):
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="runtime-summary.pdf", title="Runtime summary",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [
+        {"text": "The result is 42 units.", "citation": "p.1"},
+    ])
+    client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
+    binding = ModelBinding(
+        client=client, model_name=model, provider_kind="openai_compatible",
+        context_window_tokens=80000, reasoning_efforts=declared,
+    )
+    reference = ModelReferenceSpec(provider_profile_id="parent-provider", model=model)
+    resolved_references = []
+
+    def resolve(selected, **kwargs):
+        resolved_references.append({
+            "provider_profile_id": selected.provider_profile_id, "model": selected.model,
+        })
+        return binding
+
+    compiler = AgentCompiler(
+        SimpleNamespace(resolve_agent_model=resolve),
+        create_tool_catalog(PromptRegistry(test_settings.prompt_config_dir)), settings=test_settings,
+    )
+    monkeypatch.setattr(services.summaries, "_compiler", compiler)
+    original_responses = stub_provider.responses
+
+    def responses(payload):
+        offered = {tool["function"]["name"] for tool in payload.get("tools", [])}
+        if "summarize_research_paper" in offered:
+            stub_provider.call_tool = "summarize_research_paper"
+            stub_provider.tool_arguments = {"document_id": document.id, "mode": "reviewed"}
+        else:
+            stub_provider.call_tool = "save_paper_summary_version"
+            stub_provider.tool_arguments = {
+                "document_id": document.id,
+                "content": "# Summary\n\n" + "The extraction reports 42 units [p.1]. " * 7,
+                "review_summary": "Checked the result against the source and citation.",
+            }
+        return original_responses(payload)
+
+    monkeypatch.setattr(stub_provider, "responses", responses)
+    try:
+        compiled = compiler.compile(research_blueprint(reference.model_dump()))
+        parent = services.runs.create(
+            compiled, "Save a reviewed summary of this paper.", conversation_id=None,
+            reasoning_effort="high",
+        )
+        async with asyncio.timeout(20):
+            while parent.status not in {"completed", "failed", "cancelled"}:
+                await asyncio.sleep(0.05)
+                parent = services.runs.get(parent.id)
+        assert parent.status == "completed", parent.error
+        assert resolved_references == [reference.model_dump(), reference.model_dump()]
+        main_requests = []
+        summary_requests = []
+        for request in stub_provider.requests:
+            tools = {tool["function"]["name"]: tool["function"] for tool in request["tools"]}
+            if "summarize_research_paper" in tools:
+                main_requests.append(request)
+                schema = tools["summarize_research_paper"]["parameters"]
+                assert set(schema["properties"]) == {"document_id", "mode"}
+                assert request["reasoning_effort"] == "high"
+            else:
+                summary_requests.append(request)
+                if expected is None:
+                    assert "reasoning_effort" not in request
+                else:
+                    assert request["reasoning_effort"] == expected
+            assert request["model"] == model
+        assert len(main_requests) == len(summary_requests) == 2
+        versions = services.summaries.versions(document.id)
+        assert len(versions) == 1
+        assert versions[0]["model"]["provider_profile_id"] == reference.provider_profile_id
+        assert versions[0]["coverage_complete"] is True
+    finally:
+        await client.close()
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("declared", "expected"), [
+    (("none", "high"), "none"), (("high",), None), ((), None),
+])
 async def test_research_summary_tool_uses_serial_isolated_writer(
-    test_settings, stub_provider, reasoning_effort, monkeypatch,
+    test_settings, stub_provider, declared, expected, monkeypatch,
 ):
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
@@ -57,7 +150,7 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
     client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
     binding = ModelBinding(
         client=client, model_name="qwen-27b", provider_kind="openai_compatible",
-        context_window_tokens=80000,
+        context_window_tokens=80000, reasoning_efforts=declared,
     )
     compiler = AgentCompiler(
         SimpleNamespace(resolve_agent_model=lambda *args, **kwargs: binding),
@@ -87,7 +180,7 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
         async with asyncio.timeout(20):
             results = await asyncio.gather(*(
                 runtime.invoke("research.summary.run", {
-                    "document_id": document.id, "mode": mode, "reasoning_effort": reasoning_effort,
+                    "document_id": document.id, "mode": mode,
                 }, context) for mode in ("reviewed", "overview")
             ))
         runs = [services.runs.get(result["summary_run_id"]) for result in results]
@@ -112,7 +205,10 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
         assert all(item["context_scope"] == "delegate" and item["delegated"] for item in telemetry)
         assert not any(kind == "model.stream" for kind, _ in forwarded_events)
         for request in stub_provider.requests:
-            assert request["reasoning_effort"] == (reasoning_effort or "none")
+            if expected is None:
+                assert "reasoning_effort" not in request
+            else:
+                assert request["reasoning_effort"] == expected
             assert request["max_tokens"] == 20000
             assert "A private research instruction" not in str(request["messages"])
             offered = {tool["function"]["name"] for tool in request["tools"]}

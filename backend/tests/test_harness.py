@@ -27,6 +27,7 @@ from backend.agents.harness import (
     RunSettings,
     ToolCallAccumulator,
     current_tool_model_identity,
+    delegated_context,
     delegation_tool,
     request_parameters,
     run_agent,
@@ -1591,6 +1592,12 @@ async def test_parallel_delegations_do_not_contaminate_parent_snapshots_or_usage
         if event_type == "agent.started"
     }
     assert set(started) == {"Agent", "Worker A", "Worker B"}
+    assert started["Agent"]["assignment"] == "Delegate both tracks."
+    assert started["Worker A"]["assignment"] == "A"
+    assert started["Worker B"]["assignment"] == "B"
+    for event_type, payload in downstream.events:
+        if event_type in {"model.started", "model.completed", "model.telemetry", "tool.started"}:
+            assert payload["invocation_id"] == started[payload["agent_name"]]["invocation_id"]
     assert "delegated" not in started["Agent"]
     for name in ("Worker A", "Worker B"):
         assert started[name]["delegated"] is True
@@ -1667,3 +1674,64 @@ async def test_delegated_runs_keep_the_run_lease_and_namespaced_completion() -> 
     assert [payload["agent_name"] for payload in delegated_completions] == ["Worker"]
     assert delegated_completions[0]["output"] == "Sub-agent finding."
     assert delegated_completions[0]["delegation_depth"] == 1
+
+
+@pytest.mark.anyio
+async def test_same_named_workers_keep_their_own_invocation_identity() -> None:
+    sink = RecordingSink()
+    root = make_context(sink)
+    contexts = [
+        delegated_context(root, parent_agent_name="Owner", delegate_agent_name="Worker", depth=1)
+        for _ in range(2)
+    ]
+    worker = agent(FakeClient.scripted([]), name="Worker")
+    hooks = ScholarWeaveRunHooks()
+    for context in contexts:
+        await hooks.on_agent_start(context, worker)
+    ids = [payload["invocation_id"] for kind, payload in sink.events if kind == "agent.started"]
+    for context in contexts:
+        await hooks.on_llm_start(context, worker, "", [])
+        await hooks.on_agent_end(context, worker, "done")
+    assert len(set(ids)) == 2
+    assert [payload["invocation_id"] for kind, payload in sink.events if kind == "model.started"] == ids
+    assert [payload["invocation_id"] for kind, payload in sink.events if kind == "agent.completed"] == ids
+    assert "_active_agent_invocations" not in root.metadata
+
+
+@pytest.mark.anyio
+async def test_nested_delegation_preserves_immediate_owner_and_depth() -> None:
+    sink = RecordingSink()
+    first = delegated_context(
+        make_context(sink), parent_agent_name="Owner", delegate_agent_name="Worker", depth=1,
+    )
+    nested = delegated_context(
+        first, parent_agent_name="Worker", delegate_agent_name="Helper", depth=2,
+    )
+    await nested.emit("agent.started", {"agent_name": "Helper", "invocation_id": "helper"})
+    assert sink.events[-1][1]["parent_agent_name"] == "Worker"
+    assert sink.events[-1][1]["delegate_agent_name"] == "Helper"
+    assert sink.events[-1][1]["delegation_depth"] == 2
+
+
+@pytest.mark.anyio
+async def test_failed_delegate_finishes_its_invocation_without_failing_owner() -> None:
+    worker = agent(FakeClient.failing(RuntimeError("offline")), name="Worker", id="worker")
+    coordinator = agent(
+        FakeClient.scripted([
+            tool_call_chunks("ask_worker", '{"request":"Check evidence"}'),
+            text_chunks("Worker unavailable."),
+        ]),
+        tools=[_delegation(worker, "ask_worker")],
+    )
+    sink = RecordingSink()
+    await run_agent(
+        coordinator, "Delegate", context=make_context(sink),
+        settings=RunSettings(), hooks=ScholarWeaveRunHooks(),
+    )
+    started = next(payload for kind, payload in sink.events
+                   if kind == "agent.started" and payload["agent_name"] == "Worker")
+    failures = [payload for kind, payload in sink.events if kind == "agent.failed"]
+    assert len(failures) == 1
+    assert failures[0]["agent_name"] == "Worker"
+    assert failures[0]["invocation_id"] == started["invocation_id"]
+    assert failures[0]["delegated"] is True

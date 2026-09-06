@@ -59,6 +59,8 @@ class ScholarWeaveContext:
     event_sink: RuntimeEventSink | None = None
     receipts: list[ToolReceipt] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    agent_assignment: str | None = None
+    agent_invocation: tuple[str, str] | None = None
 
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
         if self.event_sink is not None:

@@ -4,7 +4,7 @@ import type { components } from '../../api/schema.generated';
 import { Link } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
+import { EmptyState, ErrorNotice, IconButton, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
 import { PaperSummaryPanel } from './PaperSummaryPanel';
 import { SummaryBatchPanel } from './SummaryBatchPanel';
 import '../library.css';
@@ -523,49 +523,33 @@ export default function PapersPage() {
                       {documents.filter((document) => folderId(document) === folder.id).length}
                     </small>
                   </button>
-                  <button
-                    type="button"
-                    className="button danger icon paper-folder-delete"
-                    aria-label={`Delete folder ${folder.name}`}
-                    title={`Delete ${folder.name}`}
+                  <IconButton
+                    icon="trash"
+                    tone="danger"
+                    rowAction
+                    size={13}
+                    label={`Delete folder ${folder.name}`}
                     disabled={operationBusy}
                     onClick={() => void deleteFolder(folder)}
-                  >
-                    <Icon name="trash" size={14} />
-                  </button>
+                  />
                 </div>
               ))}
             </nav>
             {visibleDocuments.map((document) => (
-              <div
-                className={selected?.id === document.id ? 'paper-row active' : 'paper-row'}
+              <button
+                type="button"
+                className={selected?.id === document.id ? 'paper-row paper-row-main active' : 'paper-row paper-row-main'}
+                aria-current={selected?.id === document.id ? 'true' : undefined}
                 key={document.id}
+                onClick={() => {
+                  void request<Document>(`/documents/${encodeURIComponent(document.id)}`)
+                    .then(setSelected)
+                    .catch(setError);
+                }}
               >
-                <button
-                  type="button"
-                  className="paper-row-main"
-                  onClick={() => {
-                    void request<Document>(`/documents/${encodeURIComponent(document.id)}`)
-                      .then(setSelected)
-                      .catch(setError);
-                  }}
-                >
-                  <div>
-                    <strong>{document.title}</strong>
-                    <small>{document.source_filename}</small>
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className="button danger icon paper-row-delete"
-                  aria-label={`Delete paper ${document.title}`}
-                  title={`Delete ${document.title}`}
-                  disabled={operationBusy || document.status === 'processing'}
-                  onClick={() => void deleteDocument(document)}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
-              </div>
+                <strong>{document.title}</strong>
+                <small>{document.source_filename}</small>
+              </button>
             ))}
             {!documents.length ? <p>Upload or download a PDF to start the research library.</p> : null}
             {documents.length && !visibleDocuments.length ? <p>No papers in this folder.</p> : null}
@@ -574,15 +558,8 @@ export default function PapersPage() {
         <Panel title={selected?.title ?? 'Document details'} className="paper-detail-panel">
           {selected ? (
             <div className="stack" aria-busy={ingesting}>
-              <div className="button-row">
+              <div className="button-row paper-detail-toolbar">
                 <StatusPill value={ingesting ? 'processing' : selected.status} />
-                <Link
-                  className="button small secondary"
-                  title="Open an editable draft in a new research chat"
-                  to={`/?research=${encodeURIComponent(`Discuss the paper "${selected.title}" (paper ID: ${selected.id}). Read its existing text, notes, and summary where available. Explain its main ideas, evidence, and limitations here in chat; do not create or overwrite a saved summary.`)}`}
-                >
-                  Discuss paper
-                </Link>
                 <label className="paper-folder-select">
                   <span>Folder</span>
                   <select
@@ -600,11 +577,20 @@ export default function PapersPage() {
                   </select>
                 </label>
                 {ingesting ? (
-                  <span className="button busy-label">
+                  <span className="busy-label">
                     <span className="button-spinner" aria-hidden="true" />
                     Ingesting and indexing…
                   </span>
                 ) : null}
+                <span className="row-spacer" />
+                <Link
+                  className="button small secondary"
+                  title="Open an editable draft in a new research chat"
+                  to={`/?research=${encodeURIComponent(`Discuss the paper "${selected.title}" (paper ID: ${selected.id}). Read its existing text, notes, and summary where available. Explain its main ideas, evidence, and limitations here in chat; do not create or overwrite a saved summary.`)}`}
+                >
+                  <Icon name="chat" size={13} />
+                  Discuss paper
+                </Link>
                 {ingesting ? (
                   <button
                     className="button danger small"
@@ -619,7 +605,8 @@ export default function PapersPage() {
                 <button
                   className="button danger small"
                   type="button"
-                  title="Delete paper"
+                  aria-label={`Delete paper ${selected.title}`}
+                  title="Delete this paper and everything generated from it"
                   disabled={operationBusy || selected.status === 'processing'}
                   onClick={() => void deleteDocument(selected)}
                 >
@@ -715,9 +702,8 @@ export default function PapersPage() {
                 />
               ) : null}
               {!ingesting && sourcePdf ? (
-                <div className="paper-view-switcher" role="group" aria-label="Paper view">
+                <div className="segmented paper-view-switcher" role="group" aria-label="Paper view">
                   <button
-                    className={`button small${viewerMode === 'pdf' ? '' : ' secondary'}`}
                     type="button"
                     aria-pressed={viewerMode === 'pdf'}
                     onClick={() => setViewerMode('pdf')}
@@ -725,7 +711,6 @@ export default function PapersPage() {
                     PDF
                   </button>
                   <button
-                    className={`button small${viewerMode === 'text' ? '' : ' secondary'}`}
                     type="button"
                     aria-pressed={viewerMode === 'text'}
                     disabled={!extractedText || busyAction === `text:${selected.id}`}

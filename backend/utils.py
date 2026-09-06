@@ -9,7 +9,7 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, overload
 
 from fastapi.encoders import jsonable_encoder
 
@@ -126,3 +126,19 @@ def merge_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+@overload
+def as_utc(value: datetime) -> datetime: ...
+
+
+@overload
+def as_utc(value: None) -> None: ...
+
+
+def as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)

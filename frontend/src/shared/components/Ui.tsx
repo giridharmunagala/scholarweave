@@ -2,6 +2,53 @@ import type { ReactNode } from 'react';
 import { Link } from '../../app/router';
 import { Icon, type IconName } from './Icons';
 
+/*
+ * The single icon-only control. Every row action, panel affordance and compact
+ * toolbar button goes through here so the label, hit target and focus ring are
+ * the same wherever you meet one. `rowAction` fades the button in on row hover
+ * or keyboard focus, which keeps long lists from reading as a wall of icons.
+ */
+export function IconButton({
+  icon,
+  label,
+  onClick,
+  tone = 'neutral',
+  rowAction = false,
+  disabled = false,
+  size = 14,
+  className = '',
+}: {
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+  tone?: 'neutral' | 'danger';
+  rowAction?: boolean;
+  disabled?: boolean;
+  size?: number;
+  className?: string;
+}) {
+  const classes = ['icon-button'];
+  if (tone === 'danger') classes.push('danger');
+  if (rowAction) classes.push('row-action');
+  if (className) classes.push(className);
+  return (
+    <button
+      type="button"
+      className={classes.join(' ')}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onClick();
+      }}
+    >
+      <Icon name={icon} size={size} />
+    </button>
+  );
+}
+
 export function PageHeader({
   eyebrow,
   title,

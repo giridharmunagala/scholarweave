@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from backend.runs.repository import RunLease, RunRepository
+from backend.utils import as_utc
 
 
 class SubscriberLagged:
@@ -168,6 +169,16 @@ class PersistedRunEventSink:
         self,
         events: list[tuple[str, dict[str, Any]]],
     ) -> None:
+        if any(kind in {"run.completed", "run.failed", "run.cancelled"} for kind, _ in events):
+            self._refresh_telemetry()
+            if self._telemetry.performance()["model_calls"]:
+                usage = self._repository.get_usage(self._run_id)
+                events = [
+                    (kind, {**payload, "usage": usage})
+                    if kind in {"run.completed", "run.failed", "run.cancelled"}
+                    else (kind, payload)
+                    for kind, payload in events
+                ]
         start_sequence = self._take_sequences(len(events))
         lease = self._lease() if self._lease is not None else None
         records = (
@@ -190,7 +201,7 @@ class PersistedRunEventSink:
                     "sequence": event.sequence,
                     "event_type": event.event_type,
                     "payload": event.payload_json,
-                    "created_at": event.created_at.isoformat(),
+                    "created_at": as_utc(event.created_at).isoformat(),
                 },
             )
         if any(kind == "model.telemetry" for kind, _ in events):
@@ -279,6 +290,8 @@ class ModelTelemetry:
         self._timed_output_tokens = 0.0
         self._prompt_seconds = 0.0
         self._generation_seconds = 0.0
+        self._prompt_timed_calls = 0
+        self._generation_timed_calls = 0
 
     def performance(self) -> dict[str, Any]:
         prompt_rate = (
@@ -303,10 +316,13 @@ class ModelTelemetry:
             "output_tokens_estimated": False,
             "usage_complete": self._usage_complete,
             "timing_source": "server",
+            "rate_units": "tokens/s",
+            "prompt_timed_calls": self._prompt_timed_calls,
+            "generation_timed_calls": self._generation_timed_calls,
             "timed_prompt_tokens": self._timed_prompt_tokens,
             "timed_output_tokens": self._timed_output_tokens,
-            "prompt_seconds": round(self._prompt_seconds, 6),
-            "generation_seconds": round(self._generation_seconds, 6),
+            "prompt_seconds": self._prompt_seconds,
+            "generation_seconds": self._generation_seconds,
             "prompt_tokens_per_second": round(prompt_rate, 3)
             if prompt_rate is not None
             else None,
@@ -339,13 +355,14 @@ class ModelTelemetry:
         prompt = _server_phase(timings, "prompt_n", "prompt_ms")
         generation = _server_phase(timings, "predicted_n", "predicted_ms")
         if prompt is not None:
+            self._prompt_timed_calls += 1
             self._timed_prompt_tokens += prompt[0]
             self._prompt_seconds += prompt[1]
         if generation is not None:
+            self._generation_timed_calls += 1
             self._timed_output_tokens += generation[0]
             self._generation_seconds += generation[1]
         return True
-
 
 class BufferedRunEventSink:
     """Streams model deltas from memory and persists one snapshot per model call."""

@@ -153,7 +153,24 @@ export default function WorkspacePage() {
             </div>
           </div>
         </Panel>
-        <Panel title={targetPath || 'Editor'}>
+        <Panel
+          title={targetPath ? (targetPath.split('/').pop() ?? targetPath) : 'Editor'}
+          description={targetPath || undefined}
+          actions={selected || newPath ? (
+            <>
+              <button className="button" type="button" onClick={() => void save()}>
+                <Icon name="save" size={14} />
+                Save
+              </button>
+              {selected ? (
+                <button className="button danger small" type="button" onClick={() => void deleteFile()}>
+                  <Icon name="trash" size={13} />
+                  Delete
+                </button>
+              ) : null}
+            </>
+          ) : undefined}
+        >
           {selected || newPath ? (
             <div className="stack">
               <div className="library-handoff">
@@ -163,6 +180,7 @@ export default function WorkspacePage() {
                     title="Open an editable draft in a new research chat"
                     to={`/?research=${encodeURIComponent(`Analyze the existing saved work at workspace path "${selected.path}". Read it, explain its key ideas, assess its evidence and open questions, and discuss it here in chat. Do not create another saved summary or overwrite existing work.`)}`}
                   >
+                    <Icon name="chat" size={13} />
                     Analyze saved work
                   </Link>
                 ) : (
@@ -196,17 +214,6 @@ export default function WorkspacePage() {
                   onChange={(event) => setTagsDraft(event.target.value)}
                 />
               </details>
-              <div className="button-row">
-                <button className="button" type="button" onClick={() => void save()}>
-                  <Icon name="save" size={15} />
-                  Save
-                </button>
-                {selected ? (
-                  <button className="button danger" type="button" onClick={() => void deleteFile()}>
-                    Delete
-                  </button>
-                ) : null}
-              </div>
             </div>
           ) : (
             <EmptyState
@@ -244,7 +251,7 @@ function WorkspaceFolder({
         <small>{countFiles(folder)}</small>
         {folder.path !== 'papers' ? (
           <button
-            className="folder-delete-button"
+            className="folder-delete-button icon-button danger row-action small"
             type="button"
             title={`Delete ${folder.displayName ?? folder.name}`}
             aria-label={`Delete folder ${folder.displayName ?? folder.name}`}

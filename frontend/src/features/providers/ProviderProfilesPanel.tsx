@@ -308,17 +308,18 @@ export function ProviderProfilesPanel({
               <input type="password" value={draft.api_key ?? ''} onChange={(event) => setDraft({ ...draft, api_key: event.target.value || null })} />
             </label>
           ) : null}
-          <p>{modelSwitchHelp}</p>
           <div><button className="button" type="button" disabled={busy === 'create'} onClick={() => void create()}>{busy === 'create' ? 'Creating…' : 'Create profile'}</button></div>
         </div>
       ) : null}
+      {/* Scheduling is a property of the runtime, not of any one profile, so it
+          is stated once here instead of repeated on every provider card. */}
+      <p className="notice info provider-lane-note">{modelSwitchHelp}</p>
       <div className="card-grid">
         {providers.map((provider) => {
           return (
             <article className="card stack" key={provider.id}>
               <div className="toolbar"><span className="eyebrow">{provider.kind}</span><StatusPill value={provider.state} /></div>
               <div><h2>{provider.name}</h2><code>{provider.base_url}</code></div>
-              <p>{modelSwitchHelp}</p>
               {provider.models.length ? (
                 <button
                   className="provider-model-catalog-trigger"

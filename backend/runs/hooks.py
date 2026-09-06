@@ -15,6 +15,8 @@ def active_agent_invocation_id(
     context: ScholarWeaveContext,
     agent_name: str,
 ) -> str | None:
+    if context.agent_invocation is not None and context.agent_invocation[0] == agent_name:
+        return context.agent_invocation[1]
     active = context.metadata.get(_ACTIVE_INVOCATIONS_KEY)
     if not isinstance(active, dict):
         return None
@@ -41,12 +43,16 @@ async def start_agent_invocation(
         active[agent_name] = invocations
     invocation_id = str(uuid.uuid4())
     invocations.append(invocation_id)
+    context.agent_invocation = (agent_name, invocation_id)
     payload: dict[str, Any] = {
         "agent_name": agent_name,
         "invocation_id": invocation_id,
     }
     if reason:
         payload["reason"] = reason
+    if context.agent_assignment:
+        payload["assignment"] = context.agent_assignment[:2000]
+        payload["assignment_truncated"] = len(context.agent_assignment) > 2000
     await context.emit("agent.started", payload)
     return invocation_id
 
@@ -62,11 +68,16 @@ async def finish_agent_invocation(
 ) -> str | None:
     active = context.metadata.get(_ACTIVE_INVOCATIONS_KEY)
     invocations = active.get(agent_name) if isinstance(active, dict) else None
-    invocation_id = invocations.pop() if isinstance(invocations, list) and invocations else None
+    invocation_id = active_agent_invocation_id(context, agent_name)
+    if isinstance(invocations, list) and invocation_id in invocations:
+        invocations.remove(invocation_id)
+    if context.agent_invocation == (agent_name, invocation_id):
+        context.agent_invocation = None
     if isinstance(active, dict) and isinstance(invocations, list) and not invocations:
         active.pop(agent_name, None)
     if isinstance(active, dict) and not active:
         context.metadata.pop(_ACTIVE_INVOCATIONS_KEY, None)
+        context.agent_invocation = None
     if not isinstance(invocation_id, str):
         invocation_id = str(uuid.uuid4())
 
@@ -102,6 +113,7 @@ async def finish_all_agent_invocations(
         if isinstance(invocation_id, str)
     ]
     context.metadata.pop(_ACTIVE_INVOCATIONS_KEY, None)
+    context.agent_invocation = None
     for agent_name, invocation_id in pending:
         payload: dict[str, Any] = {
             "agent_name": agent_name,
@@ -133,6 +145,13 @@ class ScholarWeaveRunHooks:
             output=to_jsonable(output),
         )
 
+    async def on_agent_error(
+        self, context: ScholarWeaveContext, agent: Any, error: BaseException,
+    ) -> None:
+        await finish_agent_invocation(
+            context, agent.name, "failed", error=f"{type(error).__name__}: {error}",
+        )
+
     async def on_llm_start(
         self,
         context: ScholarWeaveContext,
@@ -149,6 +168,7 @@ class ScholarWeaveRunHooks:
             "model.started",
             {
                 "agent_name": agent.name,
+                "invocation_id": active_agent_invocation_id(context, agent.name),
                 "input_item_count": len(input_items),
                 "has_system_prompt": bool(instructions),
                 "input_character_count": len(instructions or "") + len(serialized_input),
@@ -163,7 +183,11 @@ class ScholarWeaveRunHooks:
     ) -> None:
         await context.emit(
             "model.completed",
-            {"agent_name": agent.name, "usage": to_jsonable(usage)},
+            {
+                "agent_name": agent.name,
+                "invocation_id": active_agent_invocation_id(context, agent.name),
+                "usage": to_jsonable(usage),
+            },
         )
 
     async def on_tool_start(

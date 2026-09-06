@@ -1,9 +1,8 @@
 {
   "label": "Summarize paper",
-  "description": "Run a dedicated, isolated summary writer for one ready paper and wait for its saved version. Use only when the user requests a saved summary or explicit review requires a missing summary; discussing, explaining, or analyzing an existing summary never implies regeneration. Missing/incomplete summaries alone do not authorize writing, including in Deep Work. Use this writer rather than a general research worker. Jobs are serialized and default to reasoning disabled where supported. Wait for each receipt before starting the next paper. A partial or overview receipt does not satisfy explicit review; source reads and paper notes are separately required in review.",
+  "description": "Run a dedicated, isolated summary writer for one ready paper and wait for its saved version. Use only when the user requests a saved summary or explicit review requires a missing summary; discussing, explaining, or analyzing an existing summary never implies regeneration. Missing/incomplete summaries alone do not authorize writing, including in Deep Work. Use this writer rather than a general research worker. Jobs are serialized. The runtime selects the parent run's provider and model and disables summary reasoning where supported; these settings are not tool arguments. Wait for each receipt before starting the next paper. A partial or overview receipt does not satisfy explicit review; source reads and paper notes are separately required in review.",
   "parameter_descriptions": {
     "document_id": "The exact ID of one already ingested local paper.",
-    "mode": "reviewed for a citation-grounded full review; overview only when the user requests a quick, explicitly limited orientation.",
-    "reasoning_effort": "Null uses the dedicated writer's nonthinking default where supported. Set a supported explicit effort only when the user explicitly requests reasoning for summary writing; do not inherit the research agent's reasoning setting. If an explicit effort is rejected, report the incompatibility rather than silently retrying with a different effort."
+    "mode": "reviewed for a citation-grounded full review; overview only when the user requests a quick, explicitly limited orientation."
   }
 }

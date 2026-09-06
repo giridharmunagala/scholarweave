@@ -11,7 +11,7 @@ import {
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { ErrorNotice, Loading } from '../../shared/components/Ui';
+import { ErrorNotice, IconButton, Loading } from '../../shared/components/Ui';
 import {
   providersApi,
   type Provider,
@@ -33,11 +33,9 @@ import {
   resolveModelReference,
 } from './ChatModelPicker';
 import {
-  readStoredReasoningEffort,
   reasoningEffortsForModel,
   ReasoningEffortSelect,
-  storeReasoningEffort,
-  type ReasoningEffort,
+  useModelReasoningEffort,
 } from './ReasoningEffortSelect';
 import {
   applyChatStreamEvent,
@@ -61,6 +59,8 @@ import {
 } from './TurnTimeline';
 import './chat.css';
 import { useThrottledRates } from './useThrottledRates';
+import { buildSessionObservability } from './sessionObservability';
+import { SessionOverview, SessionStatusStrip } from './SessionMonitor';
 
 const SUGGESTIONS = [
   'Help me understand an existing paper summary, one concept at a time.',
@@ -69,6 +69,7 @@ const SUGGESTIONS = [
   'Investigate an open research question and discuss the findings with me.',
 ];
 const COMMON_CONTEXT_WINDOWS = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
+const OVERLAY_WIDTH = 1_100;
 const RESEARCH_MODES: { value: ResearchMode; label: string; description: string }[] = [
   {
     value: 'research',
@@ -110,7 +111,7 @@ function contextWindowLabel(tokens: number) {
 const LIST_WIDTH_KEY = 'scholarweave.chat.list-width';
 const ACTIVITY_WIDTH_KEY = 'scholarweave.chat.activity-width';
 const LIST_WIDTH = { value: 272, min: 200, max: 520 };
-const ACTIVITY_WIDTH = { value: 320, min: 260, max: 760 };
+const ACTIVITY_WIDTH = { value: 380, min: 300, max: 760 };
 
 type WidthBounds = { value: number; min: number; max: number };
 
@@ -211,9 +212,6 @@ export function ResearchChatPage() {
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
   const [modelReference, setModelReference] = useState<ModelReference>({});
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(
-    readStoredReasoningEffort,
-  );
   const [contextWindowTokens, setContextWindowTokens] = useState(32_768);
   const [webEnabled, setWebEnabled] = useState(true);
   const [deepWork, setDeepWork] = useState(false);
@@ -222,6 +220,7 @@ export function ResearchChatPage() {
   const [webSearchLimit, setWebSearchLimit] = useState(1);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [historyState, setHistoryState] = useState<'ready' | 'loading' | 'unavailable'>('ready');
   const [stream, setStream] = useState<ChatStreamState>(emptyChatStream);
   const [optimisticUser, setOptimisticUser] = useState<string | null>(null);
   const [steeringMessages, setSteeringMessages] = useState<
@@ -235,17 +234,20 @@ export function ResearchChatPage() {
   const [stopping, setStopping] = useState<'stop' | 'answer' | null>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(
-    () => typeof window === 'undefined' || window.innerWidth > 900,
+    () => typeof window === 'undefined' || window.innerWidth > OVERLAY_WIDTH,
   );
   const [activityOpen, setActivityOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
   const [listWidth, setListWidth] = useState(() => readStoredWidth(LIST_WIDTH_KEY, LIST_WIDTH));
   const [activityWidth, setActivityWidth] = useState(
     () => readStoredWidth(ACTIVITY_WIDTH_KEY, ACTIVITY_WIDTH),
   );
   const [resizing, setResizing] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const activityToggleRef = useRef<HTMLButtonElement>(null);
   const openRequestRef = useRef(0);
   const runLifecycleRef = useRef(0);
   const effectiveModelReference = useMemo(
@@ -256,7 +258,31 @@ export function ResearchChatPage() {
     () => reasoningEffortsForModel(providers, effectiveModelReference),
     [providers, effectiveModelReference.provider_profile_id, effectiveModelReference.model],
   );
+  const [reasoningEffort, selectReasoningEffort] =
+    useModelReasoningEffort(effectiveModelReference, supportedReasoningEfforts);
   const deepWorkLocked = current?.kind === 'deep_work';
+  const showSidebar = sidebarOpen && !focusMode;
+
+  const closeActivity = () => {
+    setActivityOpen(false);
+    activityToggleRef.current?.focus();
+  };
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey && event.shiftKey && event.code === 'KeyF') {
+        event.preventDefault();
+        setFocusMode((value) => !value);
+        setActivityOpen(false);
+        composerRef.current?.focus();
+      } else if (event.altKey && event.shiftKey && event.code === 'KeyA') {
+        event.preventDefault();
+        setActivityOpen((value) => !value);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   const refreshList = () => chatApi.list().then(setConversations);
   const open = async (
@@ -265,6 +291,7 @@ export function ResearchChatPage() {
     contextSettings: Settings | null = settings,
   ) => {
     const request = ++openRequestRef.current;
+    setHistoryState('loading');
     setRun(null);
     setRuns([]);
     setStream(emptyChatStream);
@@ -278,7 +305,11 @@ export function ResearchChatPage() {
       chatApi.runs(id),
     ]);
     if (request !== openRequestRef.current) return;
-    if (conversationResult.status === 'rejected') throw conversationResult.reason;
+    if (conversationResult.status === 'rejected') {
+      setHistoryState('unavailable');
+      throw conversationResult.reason;
+    }
+    setHistoryState(runsResult.status === 'fulfilled' ? 'ready' : 'unavailable');
     if (runsResult.status === 'rejected') setError(runsResult.reason);
     const conversation = conversationResult.value;
     const allRuns = runsResult.status === 'fulfilled' ? runsResult.value : [];
@@ -339,18 +370,6 @@ export function ResearchChatPage() {
     if (!loading && initialDraft) composerRef.current?.focus();
   }, [loading, initialDraft]);
 
-  useEffect(() => {
-    if (
-      reasoningEffort
-      && effectiveModelReference.provider_profile_id
-      && effectiveModelReference.model
-      && !supportedReasoningEfforts?.includes(reasoningEffort)
-    ) {
-      setReasoningEffort(null);
-      storeReasoningEffort(null);
-    }
-  }, [reasoningEffort, supportedReasoningEfforts]);
-
   useLayoutEffect(() => {
     const list = messageListRef.current;
     if (!list || !pinnedToBottom) return;
@@ -367,13 +386,35 @@ export function ResearchChatPage() {
     pinnedToBottom,
   ]);
 
-  // Auto-grow the composer up to a bounded height so long prompts stay visible.
-  useEffect(() => {
+  /*
+   * Auto-grow the composer up to a bounded height so long prompts stay visible.
+   * Width changes matter as much as content does — collapsing the chat list or
+   * resizing the window reflows the text — so the same measurement runs from a
+   * ResizeObserver instead of only when you type.
+   */
+  useLayoutEffect(() => {
     const textarea = composerRef.current;
     if (!textarea) return;
-    textarea.style.height = 'auto';
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
-  }, [content]);
+    let lastWidth = 0;
+    const fit = () => {
+      textarea.style.height = 'auto';
+      textarea.style.height = `${Math.min(textarea.scrollHeight, 240)}px`;
+    };
+    fit();
+    if (typeof ResizeObserver === 'undefined') return;
+    // Only width changes reflow the text; reacting to our own height change
+    // would loop forever.
+    const observer = new ResizeObserver(([entry]) => {
+      const width = entry.contentRect.width;
+      if (width === lastWidth) return;
+      lastWidth = width;
+      fit();
+    });
+    observer.observe(textarea);
+    return () => observer.disconnect();
+    // `loading` gates whether the composer is mounted at all, so the first
+    // measurement has to wait for it rather than only tracking the draft.
+  }, [content, loading, settings]);
 
   useEffect(() => {
     if (!run || stopping) return;
@@ -506,6 +547,7 @@ export function ResearchChatPage() {
     openRequestRef.current += 1;
     setRun(null);
     setRuns([]);
+    setHistoryState('ready');
     setStream(emptyChatStream);
     setOptimisticUser(null);
     setSteeringMessages([]);
@@ -549,11 +591,6 @@ export function ResearchChatPage() {
       setCurrent(null);
       resetThread();
     }
-  };
-
-  const selectReasoningEffort = (effort: ReasoningEffort | null) => {
-    setReasoningEffort(effort);
-    storeReasoningEffort(effort);
   };
 
   const stopRun = async (answerWithAvailableInformation: boolean) => {
@@ -740,9 +777,6 @@ export function ResearchChatPage() {
   const liveActivity = runActive
     ? describeLiveActivity(liveTimeline, { writing: Boolean(stream.assistant) })
     : null;
-  const activeDelegate = [...liveTimeline.steps]
-    .reverse()
-    .find((step) => step.kind === 'agent' && step.status === 'running');
   const compaction = compactionIndicator(runs, run, stream.events);
   const rawMetrics = useMemo(() => {
     const values = new Map<string, TurnMetrics>();
@@ -758,6 +792,21 @@ export function ResearchChatPage() {
   }, [runs, run, stream.events]);
   const metricsByRun = useThrottledRates(rawMetrics);
   const liveMetrics = run ? metricsByRun.get(run.id) ?? null : null;
+  const observedRuns = useMemo(() => {
+    const candidates = run ? mergeRun(runs, run) : runs;
+    return candidates.map((candidate) => {
+      if (candidate.id !== run?.id) return candidate;
+      const events = new Map(candidate.events.map((event) => [event.sequence, event]));
+      for (const event of stream.events) {
+        events.set(event.sequence, {
+          ...event,
+          created_at: event.created_at ?? events.get(event.sequence)?.created_at ?? '',
+        });
+      }
+      return { ...candidate, events: [...events.values()].sort((a, b) => a.sequence - b.sequence) };
+    });
+  }, [runs, run, stream.events]);
+  const sessionSummary = useMemo(() => buildSessionObservability(observedRuns), [observedRuns]);
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
@@ -780,15 +829,41 @@ export function ResearchChatPage() {
   };
 
   return (
-    <div className="chat-page">
+    <div
+      ref={pageRef}
+      className={`chat-page${focusMode ? ' focus-mode' : ''}`}
+      onKeyDown={(event) => {
+        if (event.key !== 'Escape') return;
+        const popover = event.currentTarget.querySelector<HTMLDetailsElement>('.composer-options[open]');
+        if (popover) {
+          popover.open = false;
+          popover.querySelector('summary')?.focus();
+        } else if (activityOpen) {
+          closeActivity();
+        } else if (showSidebar && window.innerWidth <= OVERLAY_WIDTH) {
+          setSidebarOpen(false);
+        }
+      }}
+    >
       {error ? <ErrorNotice error={error} /> : null}
       <div
-        className={`chat-layout${sidebarOpen ? '' : ' collapsed'}${activityOpen ? ' activity-open' : ''}${resizing ? ' resizing' : ''}`}
+        className={`chat-layout${showSidebar ? '' : ' collapsed'}${activityOpen ? ' activity-open' : ''}${resizing ? ' resizing' : ''}`}
         style={{
           '--chat-list-width': `${listWidth}px`,
           '--chat-activity-width': `${activityWidth}px`,
         } as CSSProperties}
       >
+        {showSidebar || activityOpen ? (
+          <button
+            type="button"
+            className="chat-pane-backdrop"
+            aria-label="Close side panels"
+            onClick={() => {
+              setSidebarOpen(false);
+              closeActivity();
+            }}
+          />
+        ) : null}
         <aside className="conversation-list" aria-label="Conversations">
           <div className="conversation-list-head">
             <button className="button block new-chat" type="button" onClick={create}>
@@ -815,8 +890,10 @@ export function ResearchChatPage() {
                 <button
                   type="button"
                   className="conversation-open"
+                  aria-current={current?.id === conversation.id ? 'page' : undefined}
                   onClick={() => {
                     void open(conversation.id).catch(setError);
+                    if (window.innerWidth <= OVERLAY_WIDTH) setSidebarOpen(false);
                   }}
                 >
                   <strong>{conversation.title}</strong>
@@ -828,16 +905,15 @@ export function ResearchChatPage() {
                   ) : null}
                   <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
                 </button>
-                <button
-                  type="button"
+                <IconButton
+                  icon="trash"
+                  tone="danger"
+                  rowAction
                   className="conversation-delete"
-                  title="Delete chat"
-                  aria-label={`Delete ${conversation.title}`}
+                  label={`Delete ${conversation.title}`}
                   disabled={current?.id === conversation.id && sending}
                   onClick={() => void remove(conversation.id)}
-                >
-                  <Icon name="trash" size={14} />
-                </button>
+                />
               </div>
             ))}
             {!filtered.length ? (
@@ -864,30 +940,27 @@ export function ResearchChatPage() {
             <button
               type="button"
               className="chat-list-toggle"
-              aria-label={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
-              aria-expanded={sidebarOpen}
-              title={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
-              onClick={() => setSidebarOpen((value) => !value)}
+              aria-label={showSidebar ? 'Hide chat list' : 'Show chat list'}
+              aria-expanded={showSidebar}
+              title={showSidebar ? 'Hide chat list' : 'Show chat list'}
+              onClick={() => {
+                setSidebarOpen(!showSidebar);
+                if (focusMode) setFocusMode(false);
+              }}
             >
               <Icon name="sidebar" size={16} />
             </button>
+            {!showSidebar ? (
+              <button type="button" className="chat-list-toggle" aria-label="Start new chat" title="New chat" onClick={create}>
+                <Icon name="plus" size={16} />
+              </button>
+            ) : null}
             <h1>{current?.title ?? (deepWork ? 'New deep work' : 'New research')}</h1>
             {deepWork ? (
               <span className="chat-mode-badge">
                 <Icon name="agents" size={12} />
                 Deep Work
               </span>
-            ) : null}
-            {activeDelegate?.kind === 'agent' ? (
-              <button
-                type="button"
-                className="delegate-status"
-                onClick={() => setActivityOpen(true)}
-                title="Open delegated worker activity"
-              >
-                <span className="spinner tiny" aria-hidden="true" />
-                {activeDelegate.name} running
-              </button>
             ) : null}
             {compaction ? (
               <span
@@ -905,16 +978,46 @@ export function ResearchChatPage() {
             ) : null}
             <button
               type="button"
+              className={`focus-toggle${focusMode ? ' active' : ''}`}
+              aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
+              aria-pressed={focusMode}
+              title="Focus mode (Alt+Shift+F)"
+              onClick={() => {
+                setFocusMode((value) => !value);
+                setActivityOpen(false);
+                composerRef.current?.focus();
+              }}
+            >
+              <Icon name="expand" size={15} />
+              <span>Focus</span>
+            </button>
+            <button
+              ref={activityToggleRef}
+              type="button"
               className={`activity-toggle${activityOpen ? ' active' : ''}`}
               aria-label={activityOpen ? 'Hide run activity' : 'Show run activity'}
               aria-expanded={activityOpen}
+              title="Session usage, workers, and full trace (Alt+Shift+A)"
               onClick={() => setActivityOpen((value) => !value)}
             >
-              <Icon name="tools" size={15} />
-              <span>Activity</span>
-              {activityCount ? <span className="activity-count">{activityCount}</span> : null}
+              <Icon name="runs" size={15} />
+              <span>Observe</span>
+              {activityCount ? <span className="count-badge">{activityCount}</span> : null}
             </button>
           </header>
+          {historyState === 'ready' ? (
+            <SessionStatusStrip summary={sessionSummary} />
+          ) : (
+            <div className="session-status-strip" role="status">
+              {historyState === 'loading' ? 'Loading session activity...' : 'Session metrics unavailable. History could not be loaded.'}
+              {historyState === 'unavailable' && current ? (
+                <button type="button" className="session-status-open" onClick={() => {
+                  setError(null);
+                  void open(current.id).catch(setError);
+                }}>Retry history</button>
+              ) : null}
+            </div>
+          )}
 
           <div className="chat-thread">
             <div
@@ -1025,10 +1128,20 @@ export function ResearchChatPage() {
                 <LiveActivityBar
                   key={run?.id ?? 'pending-run'}
                   activity={liveActivity}
+                  startedAt={run?.started_at ?? run?.created_at}
                   onOpenActivity={activityOpen ? undefined : () => setActivityOpen(true)}
                 />
               ) : null}
-              {run?.error ? <div className="notice error chat-run-error">{run.error}</div> : null}
+              {run?.error ? (
+                <div className="notice error chat-run-error" role="alert">
+                  <strong>This run needs attention.</strong>
+                  <span>Your conversation is preserved. Review the failure before continuing.</span>
+                  <details>
+                    <summary>Failure details</summary>
+                    <pre>{run.error}</pre>
+                  </details>
+                </div>
+              ) : null}
             </div>
 
             {!pinnedToBottom && hasTranscript ? (
@@ -1050,15 +1163,11 @@ export function ResearchChatPage() {
 
             <div className="composer">
               <div className="composer-inner">
-                <div className="composer-intent" role="status">
+                {sending || researchMode === 'review' ? <div className="composer-intent" role="status">
                   {sending
                     ? 'Keep guiding the work here. Your message applies before the next model call.'
-                    : researchMode === 'review'
-                      ? 'Review + save: each reviewed paper requires a cited summary and durable notes.'
-                      : deepWork
-                        ? 'Deep Work stays enabled for this chat. Discuss first, or give it a goal to carry out.'
-                        : 'Follow your question, not a fixed workflow. Saving is opt-in.'}
-                </div>
+                    : 'Review + save: each reviewed paper requires a cited summary and durable notes.'}
+                </div> : null}
                 {/* One control surface: what you type, what answers, and how you send it. */}
                 <div className="composer-box">
                   <textarea
@@ -1090,9 +1199,13 @@ export function ResearchChatPage() {
                         onChange={selectModel}
                       />
                       <details className="composer-options">
-                        <summary>
+                        <summary title={`Research options: ${RESEARCH_MODES.find((mode) => mode.value === researchMode)?.label}; ${webEnabled ? 'web enabled' : 'offline'}`}>
                           <Icon name="settings" size={13} />
-                          Advanced{fastAnswer ? ' · Fast web on' : ''}
+                          Options{deepWork ? ' · Deep work' : ''}{!webEnabled ? ' · Offline' : ''}
+                          {researchMode === 'review' ? ' · Review + save' : ''}
+                          {researchMode === 'learn' && !fastAnswer ? ' · Learn' : ''}
+                          {researchMode === 'understand' ? ' · Explain' : ''}
+                          {fastAnswer ? ' · Fast web' : ''}
                         </summary>
                         <div className="composer-options-popover">
                           <ReasoningEffortSelect
@@ -1166,70 +1279,68 @@ export function ResearchChatPage() {
                               ) : null}
                           </div>
                         ) : null}
-                      </div>
-                    </details>
-                    <button
-                      className={`composer-capability${webEnabled ? ' active' : ''}`}
-                      type="button"
-                      aria-label="Toggle web access"
-                      aria-pressed={webEnabled}
-                      title={webEnabled ? 'Web access enabled' : 'Web access disabled'}
-                      disabled={sending}
-                      onClick={() => {
-                        setWebEnabled((enabled) => {
-                          if (enabled) setFastAnswer(false);
-                          return !enabled;
-                        });
-                      }}
-                    >
-                      <Icon name="globe" size={13} />
-                      Web
-                    </button>
-                    <label className="research-mode-control">
-                      <span>Response</span>
-                      <select
-                        aria-label="Research mode"
-                        value={researchMode}
-                        disabled={sending}
-                        title={RESEARCH_MODES.find((mode) => mode.value === researchMode)?.description}
-                        onChange={(event) => {
-                          const selected = RESEARCH_MODES.find(
-                            (mode) => mode.value === event.target.value,
-                          );
-                          if (selected) {
-                            setResearchMode(selected.value);
-                            setFastAnswer(false);
-                          }
-                        }}
-                      >
-                        {RESEARCH_MODES.map((mode) => (
-                          <option key={mode.value} value={mode.value}>{mode.label}</option>
-                        ))}
-                      </select>
-                    </label>
-                    <button
-                      className={`composer-capability${deepWork ? ' active' : ''}`}
-                      type="button"
-                      aria-label="Toggle deep work"
-                      aria-pressed={deepWork}
-                      title={
-                        deepWorkLocked
-                          ? 'Deep Work is permanently enabled for this conversation'
-                          : 'Permanently upgrade this conversation to use a coordinator and focused worker'
-                      }
-                      disabled={sending || deepWorkLocked}
-                      onClick={() => {
-                        setDeepWork((enabled) => {
-                          if (!enabled) {
-                            setFastAnswer(false);
-                          }
-                          return !enabled;
-                        });
-                      }}
-                    >
-                      <Icon name="agents" size={13} />
-                      Deep work
-                    </button>
+                          <button
+                            className={`composer-capability${webEnabled ? ' active' : ''}`}
+                            type="button"
+                            aria-label="Toggle web access"
+                            aria-pressed={webEnabled}
+                            title={webEnabled ? 'Web access enabled' : 'Web access disabled'}
+                            disabled={sending}
+                            onClick={() => {
+                              setWebEnabled((enabled) => {
+                                if (enabled) setFastAnswer(false);
+                                return !enabled;
+                              });
+                            }}
+                          >
+                            <Icon name="globe" size={13} />
+                            Web
+                          </button>
+                          <label className="research-mode-control">
+                            <span>Response</span>
+                            <select
+                              aria-label="Research mode"
+                              value={researchMode}
+                              disabled={sending}
+                              title={RESEARCH_MODES.find((mode) => mode.value === researchMode)?.description}
+                              onChange={(event) => {
+                                const selected = RESEARCH_MODES.find(
+                                  (mode) => mode.value === event.target.value,
+                                );
+                                if (selected) {
+                                  setResearchMode(selected.value);
+                                  setFastAnswer(false);
+                                }
+                              }}
+                            >
+                              {RESEARCH_MODES.map((mode) => (
+                                <option key={mode.value} value={mode.value}>{mode.label}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <button
+                            className={`composer-capability${deepWork ? ' active' : ''}`}
+                            type="button"
+                            aria-label="Toggle deep work"
+                            aria-pressed={deepWork}
+                            title={
+                              deepWorkLocked
+                                ? 'Deep Work is permanently enabled for this conversation'
+                                : 'Permanently upgrade this conversation to use a coordinator and focused worker'
+                            }
+                            disabled={sending || deepWorkLocked}
+                            onClick={() => {
+                              setDeepWork((enabled) => {
+                                if (!enabled) setFastAnswer(false);
+                                return !enabled;
+                              });
+                            }}
+                          >
+                            <Icon name="agents" size={13} />
+                            Deep work
+                          </button>
+                        </div>
+                      </details>
                     </div>
                     {sending && run && ['pending', 'running'].includes(run.status) ? (
                       <>
@@ -1291,7 +1402,10 @@ export function ResearchChatPage() {
         <ActivitySidebar
           open={activityOpen}
           timelines={activityTimelines}
-          onClose={() => setActivityOpen(false)}
+          overview={historyState === 'ready'
+            ? <SessionOverview summary={sessionSummary} />
+            : <p className="session-observability-note">Session history is not available yet.</p>}
+          onClose={closeActivity}
           resizer={
             <PaneResizer
               side="left"

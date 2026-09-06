@@ -326,12 +326,8 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
             {
                 "document_id": {"type": "string", "minLength": 1},
                 "mode": {"type": "string", "enum": ["overview", "reviewed"]},
-                "reasoning_effort": {
-                    "type": ["string", "null"],
-                    "enum": [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"],
-                },
             },
-            required=["document_id", "mode", "reasoning_effort"],
+            required=["document_id", "mode"],
         ),
         True,
         "_summarize_research_paper",

@@ -19,6 +19,7 @@ from backend.runs.schemas import (
     run_response,
 )
 from backend.runs.service import RunService
+from backend.utils import as_utc
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -119,7 +120,7 @@ async def stream_events(
                     event.sequence,
                     event.event_type,
                     event.payload_json,
-                    event.created_at.isoformat(),
+                    as_utc(event.created_at).isoformat(),
                 )
             for event in await container.events.events_after(run_id, cursor):
                 sequence = int(event["sequence"])

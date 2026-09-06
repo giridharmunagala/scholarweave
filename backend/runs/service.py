@@ -609,7 +609,10 @@ class RunService:
 
     def prune_expired(self) -> int:
         cutoff = utcnow() - self._retention
-        return self._delete_history(self._repository.ids_created_before(cutoff))
+        # Conversation events are also the durable session-spend ledger.
+        return self._delete_history(
+            self._repository.ids_created_before(cutoff, standalone_only=True),
+        )
 
     def clear_history(self) -> int:
         return self._delete_history(self._repository.ids_created_before())

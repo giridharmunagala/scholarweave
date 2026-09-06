@@ -679,6 +679,9 @@ describe('chat transcript detail', () => {
     const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
     expect(options.open).toBe(false);
     expect(options.querySelector('[aria-label="Toggle fast answer"]')).not.toBeNull();
+    expect(options.querySelector('[aria-label="Toggle web access"]')).not.toBeNull();
+    expect(options.querySelector('[aria-label="Research mode"]')).not.toBeNull();
+    expect(options.querySelector('[aria-label="Toggle deep work"]')).not.toBeNull();
     await act(async () => options.querySelector('summary')!.click());
     expect(options.open).toBe(true);
     await act(async () => options.querySelector('summary')!.click());
@@ -689,6 +692,97 @@ describe('chat transcript detail', () => {
     await act(async () => performance.querySelector('summary')!.click());
     expect(performance.open).toBe(true);
     expect(text(performance.querySelector('.turn-metadata'))).toContain('Overall');
+  });
+
+  it('focuses the workspace without losing the draft or access to observability', async () => {
+    const draft = 'Compare the evidence without changing my notes.';
+    window.history.replaceState({}, '', `/?research=${encodeURIComponent(draft)}`);
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Enter focus mode"]')!.click();
+    });
+    expect(container.querySelector('.chat-layout')?.classList.contains('collapsed')).toBe(true);
+    expect(container.querySelector('[aria-label="Exit focus mode"]')?.getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('textarea')!.value).toBe(draft);
+    expect(container.querySelector('textarea')).toBe(document.activeElement);
+    expect(container.querySelector('[aria-label="Start new chat"]')).not.toBeNull();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Show run activity"]')!.click();
+    });
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(false);
+    expect(container.querySelector('[aria-label="Close activity"]')).toBe(document.activeElement);
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(true);
+    expect(container.querySelector('[aria-label="Show run activity"]')).toBe(document.activeElement);
+    expect(container.querySelector('textarea')!.value).toBe(draft);
+    expect(lastMessageRequest).toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyF', altKey: true, shiftKey: true }));
+    });
+    expect(container.querySelector('.focus-mode')).toBeNull();
+  });
+
+  it('supports observability shortcuts and dismisses options without clearing the draft', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyA', altKey: true, shiftKey: true }));
+    });
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(false);
+    expect(container.querySelector<HTMLDetailsElement>('.session-trace')!.open).toBe(false);
+    const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
+    await act(async () => {
+      options.querySelector('summary')!.click();
+      options.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(options.open).toBe(false);
+    expect(options.querySelector('summary')).toBe(document.activeElement);
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(false);
+  });
+
+  it('does not report zero spend when session history fails to load', async () => {
+    const previousFetch = vi.mocked(fetch).getMockImplementation()!;
+    vi.mocked(fetch).mockImplementation((input, init) => (
+      String(input).includes('/api/runs?conversation_id=')
+        ? Promise.reject(new Error('History is unavailable'))
+        : previousFetch(input, init)
+    ));
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    expect(text(container.querySelector('.session-status-strip'))).toContain('Session metrics unavailable');
+    expect(container.querySelector('.session-status-strip .meter')).toBeNull();
+    expect(text(container.querySelector('.activity-sidebar'))).not.toContain('Total tokens');
+    expect(text(container.querySelector('.session-status-strip'))).toContain('Retry history');
+  });
+
+  it('shows session totals across turns and replaces live usage rather than adding snapshots', async () => {
+    const perf = (input: number, output: number, calls = 1) => ({
+      input_tokens: input, output_tokens: output, usage_complete: true, model_calls: calls,
+      main_model_calls: calls, delegated_model_calls: 0, timing_source: 'server',
+      timed_prompt_tokens: input, prompt_seconds: input / 100, prompt_timed_calls: calls,
+      timed_output_tokens: output, generation_seconds: output / 10, generation_timed_calls: calls,
+    });
+    const first = server.startRun('First request');
+    first.status = 'completed';
+    first.usage = { performance: perf(100, 20) };
+    const second = server.startRun('Second request');
+    second.status = 'running';
+    second.usage = { performance: perf(300, 30) };
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    expect(text(container.querySelector('.session-status-strip .meter strong'))).toBe('450');
+    expect(text(container.querySelector('.session-status-strip'))).toContain('100 tok/s');
+    expect(text(container.querySelector('.session-status-strip'))).toContain('10 tok/s');
+    const update = { sequence: 1, event_type: 'usage.updated', payload: { performance: perf(500, 50, 2) } };
+    await act(async () => {
+      server.listeners.get(second.id)?.deliver(update);
+      server.listeners.get(second.id)?.deliver(update);
+    });
+    await flush(2);
+    expect(text(container.querySelector('.session-status-strip .meter strong'))).toBe('670');
   });
 
   it('keeps completed activity out of the transcript as the thread grows', async () => {
