@@ -41,6 +41,50 @@ class Runtime:
         return {"ok": True}
 
 
+@pytest.mark.anyio
+async def test_workspace_discovery_tools_are_bound_and_invoke_real_services(test_settings) -> None:
+    services = create_services(test_settings)
+    try:
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="discovery", tool_runtime=runtime)
+        catalog = create_tool_catalog()
+
+        async def invoke(catalog_id, arguments):
+            tool = catalog.build_function_tool(FunctionToolSpec(id="discovery", catalog_id=catalog_id))
+            return await tool.on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=catalog_id), json.dumps(arguments),
+            )
+
+        for blueprint in (research_blueprint(ModelReferenceSpec()), deep_work_blueprint(ModelReferenceSpec())):
+            bound = {tool.catalog_id for tool in blueprint.tools}
+            assert {"research.workspace.list", "research.workspace.index", "research.notes.search"} <= bound
+        first = services.workspace.create_note(name="First", content="quasar")
+        services.workspace.create_note(name="Second", content="quasar")
+        page = await invoke("research.workspace.list", {"collection": "notes", "limit": 1, "offset": 0})
+        second = await invoke("research.workspace.list", {
+            "collection": "notes", "limit": 1, "offset": page["next_offset"],
+        })
+        assert page["next_offset"] == 1 and second["next_offset"] is None
+        assert page["results"][0]["path"] != second["results"][0]["path"]
+        hits = await invoke("research.notes.search", {
+            "query": "quasar", "kinds": ["note"], "tags": [], "limit": 1, "offset": 1,
+        })
+        assert len(hits) == 1 and hits[0]["score"] > 0 and hits[0]["excerpt"]
+        assert await invoke("research.workspace.list", {
+            "collection": "papers", "limit": 1, "offset": 0,
+        }) == {"collection": "papers", "results": [], "next_offset": None}
+        assert (await invoke("research.workspace.index", {"action": "status"}))["indexed_files"] == 2
+        services.storage.write_workspace_file(first.path, "externalneedle")
+        await invoke("research.workspace.index", {"action": "refresh"})
+        hits = await invoke("research.notes.search", {
+            "query": "externalneedle", "kinds": [], "tags": [], "limit": 10, "offset": None,
+        })
+        assert hits[0]["path"] == first.path
+        assert (await invoke("research.notes.read", {"path": first.path}))["content"] == "externalneedle"
+    finally:
+        await services.close()
+
+
 def test_paper_provenance_prefers_task_local_identity_over_shared_metadata(monkeypatch) -> None:
     context = ScholarWeaveContext(
         run_id="provenance", tool_runtime=Runtime(),
@@ -1108,10 +1152,10 @@ async def test_startup_reconciles_existing_papers_into_workspace(
             f"paper:{document_id}",
             "notes",
         )
-        assert [item.path for item in services.workspace.search(query="Preserve this")] == [
+        assert {item.path for item in services.workspace.search(query="Preserve this")} == {
             notes_path,
             summary_path,
-        ]
+        }
     finally:
         await services.close()
 

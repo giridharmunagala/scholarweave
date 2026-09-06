@@ -13,6 +13,7 @@ from backend.agents.harness import FunctionTool, ToolInvocation
 from backend.prompting.registry import PromptRegistry
 from backend.tools.failures import recoverable_tool_invoker, tool_enabled_after_failures
 from backend.tools.policy import ToolInputError
+from backend.workspace.service import WORKSPACE_KINDS
 
 
 def _object_schema(
@@ -206,23 +207,43 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
         "_read_research_web_page",
     ),
     (
-        "research.notes.search",
-        "search_research_notes",
-        "Search durable research notes by content, type, or tags.",
+        "research.workspace.list",
+        "list_workspace",
+        "Browse local papers, notes, summaries, or files in bounded pages.",
         _object_schema(
             {
-                "query": {"type": ["string", "null"]},
+                "collection": {"type": "string", "enum": ["papers", "notes", "summaries", "files"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            required=["collection", "limit", "offset"],
+        ),
+        True,
+        "_list_workspace",
+    ),
+    (
+        "research.workspace.index",
+        "workspace_index",
+        "Inspect the workspace search index or refresh it after external file edits.",
+        _object_schema(
+            {"action": {"type": "string", "enum": ["status", "refresh"]}},
+            required=["action"],
+        ),
+        True,
+        "_workspace_index",
+    ),
+    (
+        "research.notes.search",
+        "search_research_notes",
+        "Search workspace content, titles, and tags with BM25-ranked lexical matches.",
+        _object_schema(
+            {
+                "query": {"type": ["string", "null"], "minLength": 1, "maxLength": 2000},
                 "kinds": {
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": [
-                            "note",
-                            "paper_summary",
-                            "paper_notes",
-                            "paper_file",
-                            "file",
-                        ],
+                        "enum": list(WORKSPACE_KINDS),
                     },
                 },
                 "tags": {
@@ -230,8 +251,9 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
                     "items": {"type": "string", "minLength": 1, "maxLength": 64},
                 },
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "offset": {"type": ["integer", "null"], "minimum": 0},
             },
-            required=["query", "kinds", "tags", "limit"],
+            required=["query", "kinds", "tags", "limit", "offset"],
         ),
         True,
         "_search_research_notes",

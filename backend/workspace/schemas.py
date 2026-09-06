@@ -7,7 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class WorkspaceSchema(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+
+WorkspaceKind = Literal["note", "paper_summary", "paper_notes", "paper_file", "file"]
 
 
 class WorkspaceFileResponse(WorkspaceSchema):
@@ -26,6 +29,17 @@ class WorkspaceFileResponse(WorkspaceSchema):
 
 class WorkspaceFileContentResponse(WorkspaceFileResponse):
     content: Any
+
+
+class WorkspaceSearchResponse(WorkspaceFileResponse):
+    score: float | None = None
+    excerpt: str | None = None
+
+
+class WorkspaceIndexResponse(WorkspaceSchema):
+    engine: Literal["sqlite-fts5-bm25"]
+    indexed_files: int
+    removed_files: int | None = None
 
 
 class WorkspaceFileWriteRequest(WorkspaceSchema):

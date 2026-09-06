@@ -1,0 +1,9 @@
+{
+  "label": "Browse workspace",
+  "description": "Discover existing local research before acquiring or recreating it. Return compact metadata, not full bodies. Papers lists the entire local paper library including unprepared PDFs. Notes includes standalone notes and canonical paper notes; summaries lists canonical summary.md files, which may still be templates. Files includes all supported workspace text files. Follow next_offset until null. Use returned document IDs with read_research_paper, paths with read_research_note, or search_research_notes for BM25 retrieval. Listing an artifact is not proof it is complete or source-backed.",
+  "parameter_descriptions": {
+    "collection": "Choose papers, notes, summaries, or files.",
+    "limit": "Maximum entries per page, from 1 to 50.",
+    "offset": "Zero for the first page; then use the returned next_offset."
+  }
+}

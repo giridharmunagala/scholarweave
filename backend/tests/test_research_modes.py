@@ -138,9 +138,24 @@ def test_overview_is_not_a_review_even_when_its_short_source_is_fully_covered():
 def test_explicit_modes_offer_local_paper_tools_without_web(mode):
     blueprint = research_blueprint({}, research_mode=mode, web_enabled=False)
     tools = set(blueprint.agents[0].tool_ids)
-    assert {"read-paper", "search-library", "read-note", "save-note"} <= tools
+    assert {
+        "read-paper", "search-library", "read-note", "save-note",
+        "list-workspace", "workspace-index",
+    } <= tools
     assert not {"search-sources", "acquire-source"} & tools
     assert f"Selected research mode: {mode}." in blueprint.agents[0].instructions
+
+
+def test_deep_work_blueprint_offers_local_workspace_discovery_to_both_agents():
+    blueprint = deep_work_blueprint({}, web_enabled=False)
+    tools = {tool.id: tool.catalog_id for tool in blueprint.tools}
+    assert tools["list-workspace"] == "research.workspace.list"
+    assert tools["workspace-index"] == "research.workspace.index"
+    for agent in blueprint.agents:
+        assert {"list-workspace", "workspace-index"} <= set(agent.tool_ids)
+        assert "list_workspace" in agent.instructions
+        assert "BM25" in agent.instructions
+        assert "only after external file edits" in agent.instructions
 
 
 @pytest.mark.parametrize("mode", ["learn", "understand", "review", "deep_work", "fast_answer"])
@@ -225,6 +240,95 @@ def test_product_runs_continue_across_epochs_without_repeating_writes(
             assert len(updates) == 1
             assert updates[0].result_json["complete"] is True
             assert updates[0].result_json["items"][0]["status"] == "completed"
+
+
+@pytest.mark.parametrize("path", ["agent", "deep-work"])
+def test_deep_work_accepts_model_chosen_discussion_and_clarification_without_plan(
+    test_settings, stub_provider, path,
+):
+    opening = "Before researching papers, explain how Deep Work creates a research plan."
+    stub_provider.tool_plans = [
+        (opening, "set_conversation_title", {"title": "Choosing a research approach"}),
+    ]
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            f"/api/{path}/conversations",
+            json={"model_reference": {
+                "provider_profile_id": profile_id, "model": "stub-model",
+            }},
+        ).json()
+        for message, answer in (
+            (opening, "We can discuss the scope before starting any research."),
+            ("I might study sparse methods.", "Which application should we focus on?"),
+        ):
+            stub_provider.reply = answer
+            response = client.post(
+                f"/api/{path}/conversations/{conversation['id']}/messages",
+                json={"content": message, "deep_work": True, "web_enabled": False},
+            )
+            assert response.status_code == 202, response.text
+            run = wait_for_run(client, response.json()["run"]["id"])
+            assert run["status"] == "completed", run["error"]
+            record = client.app.state.services.runs.get(run["id"])
+            assert len(record.epochs) == 1
+            assert not record.runtime_metadata_json.get("work_plan")
+            assert not record.runtime_metadata_json.get("paper_activity")
+            assert all(
+                attempt.catalog_id == "conversation.title.set"
+                for attempt in record.tool_attempts
+            )
+        assert len(stub_provider.requests) == 3
+        assert all(
+            request.get("tool_choice") in (None, "auto")
+            for request in stub_provider.requests
+        )
+        assert {"create_work_plan", "focused_research_worker"} <= set(
+            stub_provider.tools_offered
+        )
+
+
+@pytest.mark.parametrize("terminal_status", ["completed", "blocked"])
+def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
+    test_settings, stub_provider, terminal_status,
+):
+    goal = "Go ahead with the agreed investigation."
+    stub_provider.tool_plans = [
+        (goal, "create_work_plan", {"items": [{"id": "evidence", "title": "Check evidence"}]}),
+        (
+            "Continue with these open work items", "update_work_item",
+            {"id": "evidence", "status": terminal_status,
+             "summary": "Evidence checked." if terminal_status == "completed"
+             else "Required evidence is unavailable."},
+        ),
+    ]
+    stub_provider.reply = "Here is my answer."
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            "/api/deep-work/conversations",
+            json={"model_reference": {
+                "provider_profile_id": profile_id, "model": "stub-model",
+            }},
+        ).json()
+        response = client.post(
+            f"/api/deep-work/conversations/{conversation['id']}/messages",
+            json={"content": goal, "web_enabled": False},
+        )
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        record = client.app.state.services.runs.get(run["id"])
+        assert len(record.epochs) == 2
+        assert any(
+            event.payload_json.get("terminal_reason") == "work_pending"
+            for event in record.events
+        )
+        assert [attempt.catalog_id for attempt in record.tool_attempts] == [
+            "work.plan.create", "work.plan.update",
+        ]
+        assert record.tool_attempts[-1].result_json["items"][0]["status"] == terminal_status
+        assert len(stub_provider.requests) == 4
 
 
 @pytest.mark.parametrize(

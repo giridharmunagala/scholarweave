@@ -3,13 +3,20 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import column, delete, func, literal, select, table, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.workspace.models import WorkspaceEntry
 
-_SEARCH_TOKEN = re.compile(r"[\w-]+", re.UNICODE)
+_SEARCH_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+_FTS_INSERT = """
+    INSERT INTO workspace_entries_fts (path, name, display_name, content, tags)
+    SELECT path, name, COALESCE(display_name, ''), search_content,
+        COALESCE((SELECT group_concat(value, ' ') FROM json_each(tags_json)), '')
+    FROM workspace_entries
+"""
+_BM25 = "bm25(workspace_entries_fts, 0, 2, 5, 1, 2)"
 
 
 class WorkspaceRepository:
@@ -38,23 +45,21 @@ class WorkspaceRepository:
             ).scalar_one()
             if entry_count != search_count:
                 connection.exec_driver_sql("DELETE FROM workspace_entries_fts")
-                connection.exec_driver_sql(
-                    """
-                    INSERT INTO workspace_entries_fts
-                        (path, name, display_name, content, tags)
-                    SELECT
-                        path,
-                        name,
-                        COALESCE(display_name, ''),
-                        search_content,
-                        tags_text
-                    FROM workspace_entries
-                    """
-                )
+                connection.exec_driver_sql(_FTS_INSERT)
 
     def count(self) -> int:
         with self._session_factory() as session:
             return int(session.scalar(select(func.count()).select_from(WorkspaceEntry)) or 0)
+
+    def rebuild(self, entries: Sequence[WorkspaceEntry]) -> None:
+        """Replace both indexes atomically after all source files have been read."""
+        with self._session_factory() as session:
+            session.execute(delete(WorkspaceEntry))
+            session.add_all(entries)
+            session.flush()
+            session.execute(text("DELETE FROM workspace_entries_fts"))
+            session.execute(text(_FTS_INSERT))
+            session.commit()
 
     def upsert(self, entry: WorkspaceEntry) -> WorkspaceEntry:
         values = {
@@ -73,21 +78,8 @@ class WorkspaceRepository:
                 {"path": entry.path},
             )
             session.execute(
-                text(
-                    """
-                    INSERT INTO workspace_entries_fts
-                        (path, name, display_name, content, tags)
-                    VALUES
-                        (:path, :name, :display_name, :content, :tags)
-                    """
-                ),
-                {
-                    "path": entry.path,
-                    "name": entry.name,
-                    "display_name": entry.display_name or "",
-                    "content": entry.search_content,
-                    "tags": " ".join(entry.tags_json or []),
-                },
+                text(_FTS_INSERT + " WHERE path = :path"),
+                {"path": entry.path},
             )
             session.commit()
             stored = session.get(WorkspaceEntry, entry.path)
@@ -130,19 +122,23 @@ class WorkspaceRepository:
         tags: Sequence[str],
         limit: int,
         offset: int,
-    ) -> list[WorkspaceEntry]:
+    ) -> list[tuple[WorkspaceEntry, float | None, str | None]]:
         with self._session_factory() as session:
-            statement = select(WorkspaceEntry)
-            tokens = _SEARCH_TOKEN.findall(query or "")
+            tokens = list(dict.fromkeys(_SEARCH_TOKEN.findall(query or "")))
+            if query and not tokens:
+                return []
+            statement = select(WorkspaceEntry, literal(None), literal(None))
             if tokens:
-                match_query = " AND ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in tokens)
-                paths = (
-                    select(text("path"))
-                    .select_from(text("workspace_entries_fts"))
+                fts = table("workspace_entries_fts", column("path"))
+                statement = (
+                    select(
+                        WorkspaceEntry,
+                        text(f"-{_BM25}"),
+                        text("snippet(workspace_entries_fts, 3, '', '', ' ... ', 32)"),
+                    )
+                    .join(fts, WorkspaceEntry.path == fts.c.path)
                     .where(text("workspace_entries_fts MATCH :query"))
-                )
-                statement = statement.where(WorkspaceEntry.path.in_(paths)).params(
-                    query=match_query
+                    .params(query=" OR ".join(f'"{token}"' for token in tokens))
                 )
             if kinds:
                 statement = statement.where(WorkspaceEntry.kind.in_(kinds))
@@ -150,9 +146,11 @@ class WorkspaceRepository:
                 statement = statement.where(
                     func.instr(WorkspaceEntry.tags_text, f"\n{tag.casefold()}\n") > 0
                 )
-            statement = statement.order_by(WorkspaceEntry.modified_at.desc())
+            if tokens:
+                statement = statement.order_by(text(_BM25))
+            statement = statement.order_by(WorkspaceEntry.modified_at.desc(), WorkspaceEntry.path)
             statement = statement.offset(offset).limit(limit)
-            return list(session.scalars(statement))
+            return [(entry, score, excerpt) for entry, score, excerpt in session.execute(statement)]
 
     def delete_path(self, path: str) -> None:
         with self._session_factory() as session:

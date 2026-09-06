@@ -36,7 +36,7 @@ Choose the depth of work in the chat composer:
 - **Understand**: answer targeted paper questions with citations, without requiring a full summary.
 - **Review**: retain the full paper summary/notes completion checks.
 
-Deep Work keeps an explicit research plan. For a collection, keep an index, cited evidence,
+Deep Work keeps an explicit plan when research execution is requested. For a collection, keep an index, cited evidence,
 comparisons, and open questions in research notes rather than repeatedly loading every paper into
 the conversation.
 
@@ -48,10 +48,29 @@ Deep Work uses the same research tools plus three tracker operations:
 - `read_work_plan`
 - `update_work_item`
 
-The run loop feeds open items back to the model and continues across durable checkpoint epochs.
+The model first understands intent: discussion, brainstorming, and clarification do not force a plan.
+Once the user requests a sufficiently scoped research task, it creates the plan. No keyword triggers
+decide this. The run loop feeds open items back to the model and continues across durable checkpoint epochs.
 There is no default total turn, epoch, or elapsed-time ceiling. Completion still requires the work
 plan to be settled; cancellation and genuine provider/tool errors remain visible. A focused worker
 remains available for genuinely independent research tracks.
+
+### Find existing research
+
+Agents can browse papers, notes, summaries, and files with `list_workspace`, then use
+`search_research_notes` for BM25-ranked lexical search with excerpts and pagination.
+
+HTTP discovery is available at:
+
+- `GET /api/documents` for papers;
+- `GET /api/workspace/notes` and `GET /api/workspace/summaries` for saved artifacts;
+- `GET /api/workspace/search?query=paged%20attention&limit=10&offset=0` for workspace text.
+
+Search supports kind and tag filters and matches any query word; omit `query` to browse. It uses the
+existing persistent SQLite FTS5 inverted index, not an LLM or a second JSON index. Application writes
+keep it current. After editing files outside ScholarWeave, call `POST /api/workspace/index` or ask the
+agent to refresh with `workspace_index`. `GET /api/workspace/index` reports indexed file count.
+Workspace search does not search PDF source bodies; paper retrieval remains separate.
 
 ### Papers and OCR
 

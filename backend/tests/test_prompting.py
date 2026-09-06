@@ -33,13 +33,16 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
     )
 
 
-def test_main_agent_prompts_use_direct_persistence_tools(test_settings) -> None:
+def test_main_agent_prompts_use_notes_and_dedicated_summary_tools(test_settings) -> None:
     registry = PromptRegistry(test_settings.prompt_config_dir)
 
     for prompt_id in ("research", "deep-work-coordinator"):
         prompt = registry.render(prompt_id)
         assert "save_research_note" in prompt
-        assert "save_paper_summary_version" in prompt
+        assert "summarize_research_paper" in prompt
+        assert "list_workspace" in prompt
+        assert "workspace_index" in prompt
+        assert "BM25" in prompt
         assert "paper_summary_writer" not in prompt
         assert "research_note_writer" not in prompt
 

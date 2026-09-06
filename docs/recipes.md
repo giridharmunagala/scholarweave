@@ -23,8 +23,9 @@ Never hand-edit generated contracts.
 1. Add one six-field entry to `APPLICATION_TOOLS` in `backend/tools/catalog.py`.
 2. Add the named `(arguments, context)` handler to `ApplicationToolRuntime`.
 3. Add `backend/prompting/defaults/tools/<catalog-id>.json` with guidance for every parameter.
-4. Bind the catalog ID in the appropriate blueprint in `backend/conversations/autonomous.py`.
-5. Add a focused test in `backend/tests/test_agent_tools.py`.
+4. Classify read/mutation actions in `backend/tools/policy.py`; only safe reads are retried.
+5. Bind the catalog ID in the appropriate blueprint in `backend/conversations/turns.py`.
+6. Add a focused test in `backend/tests/test_agent_tools.py` and check packaged prompt guidance.
 
 Strict schemas must set `additionalProperties: false` and list every property in `required`.
 Represent optional values with a nullable type.
@@ -34,12 +35,29 @@ Represent optional values with a nullable type.
 - Main research prompt: `backend/prompting/defaults/prompts/research.md`
 - Deep Work coordinator: `backend/prompting/defaults/prompts/deep-work-coordinator.md`
 - Focused worker: `backend/prompting/defaults/prompts/deep-work-worker.md`
-- Blueprint/tool assignment and delegation: `backend/conversations/autonomous.py`
+- Blueprint/tool assignment and delegation: `backend/conversations/turns.py`
 - Model/tool loop, delegation, and policies: `backend/agents/harness.py`
 - Epoch continuation: `backend/runs/service.py`
 
 Use the local stub provider for behavior tests. Script real tool calls through it rather than
 mocking the compiler or the harness.
+
+Deep Work should answer discussion or clarify intent without a work plan. Let the model decide when
+the user has requested execution; never add keyword routing. Test both no-plan completion and
+continuation of an existing pending plan.
+
+## Change workspace discovery or search
+
+- `backend/workspace/router.py`: notes, canonical summaries, search and index endpoints.
+- `backend/workspace/service.py`: safe files, collection kinds, metadata-preserving refresh.
+- `backend/workspace/repository.py`: persistent FTS5 index and BM25 ordering.
+- `backend/tools/runtime.py`: `list_workspace`, `search_research_notes`, `workspace_index` handlers.
+
+Reuse `GET /api/documents` for the paper library and `/api/documents/{id}/summaries` for immutable
+versions. Do not duplicate them in a second catalog. Workspace text search is separate from cited
+PDF chunk retrieval. Normal writes/deletes update FTS transactionally; refresh reconciles external
+edits and deletions. Test relevance ordering, pagination, restart persistence, metadata preservation,
+and failed-refresh rollback in `test_storage.py`, then API and tool wiring tests.
 
 ## Add a delegated sub-agent
 

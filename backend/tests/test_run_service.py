@@ -9,6 +9,7 @@ import pytest
 
 from backend.agents.blueprint import AgentBlueprint, SessionPolicySpec
 from backend.agents.compiler import AgentCompiler
+from backend.agents.context import ScholarWeaveContext
 from backend.agents.harness import ModelBinding
 from backend.core.config import Settings
 from backend.core.errors import ConflictError, NotFoundError, ValidationError
@@ -23,6 +24,7 @@ from backend.runs.service import (
     _persisted_stream_text,
     _restore_pending_steering,
     _restore_work_plan,
+    _work_continuation,
 )
 from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import SteeringMessage
@@ -175,7 +177,7 @@ def test_replayed_retry_discards_only_the_owner_partial_assistant_suffix(delegat
     assert _persisted_stream_text(events) == ("Reasoning", "Final snapshot")
 
 
-@pytest.mark.parametrize("status", ["in_progress", "completed", "blocked"])
+@pytest.mark.parametrize("status", ["pending", "in_progress", "completed", "blocked"])
 def test_recovery_restores_latest_successful_work_plan_without_replaying_tools(status):
     pending = {"id": "research", "title": "Research", "status": "pending", "summary": ""}
     latest = {**pending, "status": status, "summary": "Durable findings."}
@@ -196,8 +198,41 @@ def test_recovery_restores_latest_successful_work_plan_without_replaying_tools(s
     metadata = {}
     _restore_work_plan(metadata, attempts)
     assert metadata["work_plan"] == [latest]
+    context = ScholarWeaveContext(
+        run_id="recovered", tool_runtime=ToolRuntime(),
+        metadata={**metadata, "autonomous_work": True},
+    )
+    assert (_work_continuation(context) is not None) is (
+        status in {"pending", "in_progress"}
+    )
     metadata["work_plan"][0]["summary"] = "New work"
     assert latest["summary"] == "Durable findings."
+
+
+@pytest.mark.parametrize("plan", [None, []])
+def test_deep_work_without_a_plan_can_finish_conversation(plan):
+    context = ScholarWeaveContext(
+        run_id="discussion", tool_runtime=ToolRuntime(),
+        metadata={"autonomous_work": True, "work_plan": plan},
+    )
+    assert _work_continuation(context) is None
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress", "completed", "blocked"])
+def test_deep_work_continues_only_unfinished_plan_items(status):
+    context = ScholarWeaveContext(
+        run_id="research", tool_runtime=ToolRuntime(),
+        metadata={
+            "autonomous_work": True,
+            "work_plan": [{"id": "evidence", "title": "Check evidence", "status": status}],
+        },
+    )
+    continuation = _work_continuation(context)
+    if status in {"pending", "in_progress"}:
+        assert continuation is not None
+        assert '"id":"evidence"' in continuation
+    else:
+        assert continuation is None
 
 
 def test_tool_failure_state_restores_by_logical_call_and_success_resets_it() -> None:

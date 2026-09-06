@@ -72,6 +72,43 @@ def test_public_api_is_research_only(test_settings) -> None:
     assert not any(path.startswith("/api/research-agents") for path in paths)
 
 
+def test_workspace_discovery_search_and_refresh_api(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        note = client.post("/api/workspace/files/notes", json={
+            "name": "Local discovery", "content": "spectroscopy", "tags": ["physics"],
+        })
+        assert note.status_code == 200, note.text
+        path = note.json()["path"]
+        paper = app.state.services.workspace.ensure_paper_folder("paper-1", "Paper")
+        notes = client.get("/api/workspace/notes").json()
+        assert {item["path"] for item in notes} == {path, paper["notes_path"]}
+        assert all("content" not in item for item in notes)
+        assert len(client.get("/api/workspace/notes", params={"limit": 1, "offset": 1}).json()) == 1
+        summaries = client.get("/api/workspace/summaries").json()
+        assert [item["path"] for item in summaries] == [paper["summary_path"]]
+        hits = client.get("/api/workspace/search", params={
+            "query": "spectroscopy", "tags": "PHYSICS", "kinds": "note",
+        })
+        assert hits.status_code == 200, hits.text
+        assert hits.json()[0]["path"] == path
+        assert hits.json()[0]["score"] > 0
+        assert "spectroscopy" in hits.json()[0]["excerpt"]
+        assert client.get("/api/workspace/search", params={"kinds": "paper_summary"}).json()[0]["score"] is None
+        for params in ({"limit": 101}, {"offset": -1}, {"kinds": "invalid"}, {"query": ""}):
+            assert client.get("/api/workspace/search", params=params).status_code == 422
+        assert client.get("/api/workspace/search", params={"query": " "}).status_code == 400
+        assert client.get("/api/workspace/index").json()["indexed_files"] == 3
+        app.state.services.storage.write_workspace_file(path, "externalchange")
+        refreshed = client.post("/api/workspace/index")
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["engine"] == "sqlite-fts5-bm25"
+        assert client.get("/api/workspace/search", params={"query": "externalchange"}).json()[0]["path"] == path
+        assert client.get("/api/workspace/files/content", params={"path": path}).json()["content"] == "externalchange"
+        assert client.delete("/api/workspace/files/content", params={"path": path}).status_code == 204
+        assert client.get("/api/workspace/search", params={"query": "externalchange"}).json() == []
+
+
 def test_conversation_history_does_not_require_its_model_to_be_available(
     test_settings,
 ) -> None:
@@ -225,8 +262,18 @@ def test_research_agent_uses_only_the_lean_tool_surface(
         stub_provider.tool_plans = [
             (
                 "Research saved notes",
+                "list_workspace",
+                {"collection": "notes", "limit": 10, "offset": 0},
+            ),
+            (
+                "Research saved notes",
+                "workspace_index",
+                {"action": "refresh"},
+            ),
+            (
+                "Research saved notes",
                 "search_research_notes",
-                {"query": None, "kinds": [], "tags": [], "limit": 10},
+                {"query": None, "kinds": [], "tags": [], "limit": 10, "offset": None},
             )
         ]
         conversation = client.post(
@@ -261,17 +308,21 @@ def test_research_agent_uses_only_the_lean_tool_surface(
             "acquire_research_source",
             "search_research_library",
             "organize_research_library",
+            "list_workspace",
+            "workspace_index",
             "read_research_paper",
             "read_research_web_page",
             "search_research_notes",
             "read_research_note",
             "save_research_note",
-            "read_paper_summary_batch",
-            "paper_summary_checkpoint",
-            "save_paper_summary_version",
+            "summarize_research_paper",
             "read_tool_result",
         }
         record = app.state.services.runs.get(run["id"])
+        assert {attempt.catalog_id for attempt in record.tool_attempts} >= {
+            "research.workspace.list", "research.workspace.index", "research.notes.search",
+        }
+        assert all(attempt.status == "completed" for attempt in record.tool_attempts)
         assert len(record.blueprint_json["tools"]) == len(RESEARCH_TOOL_IDS) + 1
         snapshot_response = client.get(f"/api/runs/{run['id']}/prompt-snapshot")
         assert snapshot_response.status_code == 200, snapshot_response.text
@@ -279,13 +330,7 @@ def test_research_agent_uses_only_the_lean_tool_surface(
         assert snapshot["run_id"] == run["id"]
         assert snapshot["prompt_revision"]
         assert snapshot["agents"][0]["effective_instructions"]
-        assert {tool["name"] for tool in snapshot["tools"]} == {
-            *stub_provider.tools_offered,
-            "paper_summary_checkpoint",
-            "read_paper_summary_batch",
-            "save_research_note",
-            "save_paper_summary_version",
-        }
+        assert {tool["name"] for tool in snapshot["tools"]} == set(stub_provider.tools_offered)
         assert record.blueprint_json["run"] == {
             "max_turns": None,
             "max_tool_concurrency": 4,

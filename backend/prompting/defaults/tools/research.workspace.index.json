@@ -1,0 +1,7 @@
+{
+  "label": "Workspace search index",
+  "description": "Inspect the persistent SQLite FTS5 BM25 index, or reconcile it with safe workspace files after external edits, additions, deletions, or stale results. Normal application writes and deletes already update the index: do not refresh before every search. Refresh reads all supported workspace text files, preserves existing tags and display names, removes deleted paths, and atomically replaces the index; it does not rewrite research files or invoke a model. Failure leaves the prior index intact. PDF source content uses separate paper retrieval.",
+  "parameter_descriptions": {
+    "action": "status returns the engine and indexed file count without scanning files. refresh rebuilds from disk and reports indexed and removed file counts."
+  }
+}

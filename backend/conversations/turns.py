@@ -25,6 +25,8 @@ RESEARCH_TOOL_IDS = (
     ("acquire-source", "research.sources.acquire"),
     ("search-library", "research.library.search"),
     ("organize-library", "research.library.organize"),
+    ("list-workspace", "research.workspace.list"),
+    ("workspace-index", "research.workspace.index"),
     ("read-paper", "research.paper.read"),
     ("read-web-page", "research.web.read"),
     ("search-notes", "research.notes.search"),
@@ -543,13 +545,13 @@ def deep_work_blueprint(
     return AgentBlueprint.model_validate(
         {
             "name": "ScholarWeave deep work",
-            "description": "Long-form research with bounded focused delegation.",
+            "description": "Intent-led conversation and research with bounded focused delegation.",
             "entry_agent_id": "coordinator",
             "agents": [
                 {
                     "id": "coordinator",
                     "name": "Deep Work Coordinator",
-                    "description": "Researches directly and delegates independent tracks when useful.",
+                    "description": "Clarifies intent, answers discussion, and executes research when requested.",
                     "instructions": prompts.render("deep-work-coordinator"),
                     "model": model,
                     "model_settings": {"parallel_tool_calls": True},

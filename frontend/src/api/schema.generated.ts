@@ -767,6 +767,87 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspace/index": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Index Status */
+        get: operations["index_status_api_workspace_index_get"];
+        put?: never;
+        /**
+         * Refresh Index
+         * @description Reconcile external edits/deletions and rebuild the persistent index, preserving metadata.
+         */
+        post: operations["refresh_index_api_workspace_index_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/notes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Notes
+         * @description List standalone and canonical paper notes without reading file bodies.
+         */
+        get: operations["list_notes_api_workspace_notes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Workspace
+         * @description BM25 lexical search (any query word), or filtered browsing with query omitted.
+         */
+        get: operations["search_workspace_api_workspace_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Summaries
+         * @description List canonical summaries; immutable versions remain under /documents/{id}/summaries.
+         */
+        get: operations["list_summaries_api_workspace_summaries_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1822,6 +1903,18 @@ export interface components {
             /** Tags */
             tags?: string[] | null;
         };
+        /** WorkspaceIndexResponse */
+        WorkspaceIndexResponse: {
+            /**
+             * Engine
+             * @constant
+             */
+            engine: "sqlite-fts5-bm25";
+            /** Indexed Files */
+            indexed_files: number;
+            /** Removed Files */
+            removed_files?: number | null;
+        };
         /** WorkspaceNoteCreateRequest */
         WorkspaceNoteCreateRequest: {
             /**
@@ -1833,6 +1926,38 @@ export interface components {
             name: string;
             /** Tags */
             tags?: string[];
+        };
+        /** WorkspaceSearchResponse */
+        WorkspaceSearchResponse: {
+            /** Excerpt */
+            excerpt?: string | null;
+            /** Kind */
+            kind: string;
+            /** Media Type */
+            media_type: string;
+            /**
+             * Modified At
+             * Format: date-time
+             */
+            modified_at: string;
+            /** Name */
+            name: string;
+            /** Note Id */
+            note_id?: string | null;
+            /** Note Name */
+            note_name?: string | null;
+            /** Paper Id */
+            paper_id?: string | null;
+            /** Paper Name */
+            paper_name?: string | null;
+            /** Path */
+            path: string;
+            /** Score */
+            score?: number | null;
+            /** Size Bytes */
+            size_bytes: number;
+            /** Tags */
+            tags: string[];
         };
     };
     responses: never;
@@ -3617,6 +3742,145 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkspaceFileContentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    index_status_api_workspace_index_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceIndexResponse"];
+                };
+            };
+        };
+    };
+    refresh_index_api_workspace_index_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceIndexResponse"];
+                };
+            };
+        };
+    };
+    list_notes_api_workspace_notes_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFileResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_workspace_api_workspace_search_get: {
+        parameters: {
+            query?: {
+                query?: string | null;
+                kinds?: ("note" | "paper_summary" | "paper_notes" | "paper_file" | "file")[];
+                tags?: string[];
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceSearchResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_summaries_api_workspace_summaries_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFileResponse"][];
                 };
             };
             /** @description Validation Error */

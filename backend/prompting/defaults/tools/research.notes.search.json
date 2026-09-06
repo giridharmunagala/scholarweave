@@ -1,10 +1,11 @@
 {
-  "label": "Search research notes",
-  "description": "Find user-authored durable notes and paper summaries by text, kind, or tags. Use this when prior workspace knowledge may answer or inform the request. Notes are secondary, potentially stale evidence: distinguish them from source-backed paper or web content and read a selected note before relying on details.",
+  "label": "Search workspace",
+  "description": "Find workspace Markdown, text, and JSON by content, filename, display title, or tags using persistent SQLite FTS5 BM25. Any query word may match; results are ranked by relevance with higher scores better and compact excerpts. Use kinds to narrow to notes or canonical summaries. Read the selected path with read_research_note before relying on details; excerpts and notes are not full-source evidence. Application writes update the index automatically. Use workspace_index action=refresh only after external edits, file additions/deletions, or suspected stale results. This does not search PDF source bodies; use read_research_paper action=search for those.",
   "parameter_descriptions": {
-    "query": "Text to search, or null when filtering only by kinds or tags.",
+    "query": "Plain lexical query (1 to 2000 characters), or JSON null to browse. Words are OR-matched; punctuation is not FTS syntax. No semantic or substring matching.",
     "kinds": "Workspace document kinds to include; use an empty list for all kinds.",
     "tags": "Tags that should constrain results; use an empty list for no tag filter.",
-    "limit": "Maximum number of compact matches, from 1 to 50."
+    "limit": "Maximum number of compact matches, from 1 to 50.",
+    "offset": "Zero-based result offset, or null for the first page. Add limit to continue until a page is shorter than limit."
   }
 }

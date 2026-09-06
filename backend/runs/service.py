@@ -1924,11 +1924,7 @@ def _work_continuation(context: ScholarWeaveContext) -> str | None:
         return None
     plan = context.metadata.get("work_plan")
     if not isinstance(plan, list) or not plan:
-        return (
-            "Autonomous work is not finished because no work plan exists. Call "
-            "create_work_plan now, complete each tracked item, and update every item "
-            "to completed or blocked before giving the final answer."
-        )
+        return None
     pending = [
         item
         for item in plan

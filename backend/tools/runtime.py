@@ -30,7 +30,7 @@ from backend.research.sources import SourceDownloadService, WebSourceUnavailable
 from backend.tools.catalog import APPLICATION_TOOL_HANDLERS
 from backend.tools.failures import classify_tool_error
 from backend.tools.policy import ToolInputError, operation_policy, retry_delay
-from backend.workspace.service import WorkspaceService
+from backend.workspace.service import WorkspaceDocument, WorkspaceService
 
 
 _WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
@@ -1719,7 +1719,7 @@ class ApplicationToolRuntime:
                 "kinds": arguments["kinds"],
                 "tags": arguments["tags"],
                 "limit": arguments["limit"],
-                "offset": 0,
+                "offset": arguments.get("offset") or 0,
             },
             context,
         )
@@ -2386,11 +2386,9 @@ class ApplicationToolRuntime:
     ) -> list[dict[str, Any]]:
         return [
             {
-                "path": document.path,
-                "name": document.note_name or document.paper_name or document.name,
-                "kind": document.kind,
-                "tags": list(document.tags),
-                "modified_at": document.modified_at.isoformat(),
+                **self._workspace_discovery_result(document),
+                "score": document.score,
+                "excerpt": document.excerpt,
             }
             for document in self._workspace.search(
                 query=arguments.get("query"),
@@ -2400,6 +2398,53 @@ class ApplicationToolRuntime:
                 offset=int(arguments["offset"]),
             )
         ]
+
+    def _list_workspace(
+        self, arguments: dict[str, Any], _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        collection = str(arguments["collection"])
+        limit, offset = int(arguments["limit"]), int(arguments["offset"])
+        if not 1 <= limit <= 50 or offset < 0:
+            raise ValueError("Workspace listing requires limit 1 to 50 and a nonnegative offset.")
+        if collection == "papers":
+            results = [
+                self._document_search_result(document)
+                for document in self._documents.list_documents()[offset:offset + limit + 1]
+            ]
+        else:
+            results = [
+                self._workspace_discovery_result(document)
+                for document in self._workspace.list_collection(
+                    collection, limit=limit + 1, offset=offset,
+                )
+            ]
+        return {
+            "collection": collection,
+            "results": results[:limit],
+            "next_offset": offset + limit if len(results) > limit else None,
+        }
+
+    def _workspace_index(
+        self, arguments: dict[str, Any], _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        action = arguments["action"]
+        if action == "status":
+            return self._workspace.index_status()
+        if action == "refresh":
+            return self._workspace.refresh_index()
+        raise ValueError("Workspace index action must be status or refresh.")
+
+    @staticmethod
+    def _workspace_discovery_result(document: WorkspaceDocument) -> dict[str, Any]:
+        return {
+            "path": document.path,
+            "name": document.note_name or document.paper_name or document.name,
+            "kind": document.kind,
+            "paper_id": document.paper_id,
+            "note_id": document.note_id,
+            "tags": list(document.tags),
+            "modified_at": document.modified_at.isoformat(),
+        }
 
     def _ensure_paper_workspace(
         self,

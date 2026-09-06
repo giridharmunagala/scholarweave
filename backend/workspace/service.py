@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from backend.utils import clean_filename
+from backend.utils import clean_filename, dumps_json
+from backend.core.errors import ValidationError
 from backend.persistence.files import SafeStorage
 from backend.workspace.models import WorkspaceEntry
 from backend.workspace.repository import WorkspaceRepository
@@ -16,6 +18,12 @@ _PAPER_INDEX_PATH = ".scholarweave/papers.json"
 _MAX_TAGS = 32
 _MAX_TAG_LENGTH = 64
 _MAX_PAPER_NAME_LENGTH = 300
+WORKSPACE_KINDS = ("note", "paper_summary", "paper_notes", "paper_file", "file")
+WORKSPACE_COLLECTIONS = {
+    "notes": ["note", "paper_notes"],
+    "summaries": ["paper_summary"],
+    "files": [],
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +41,8 @@ class WorkspaceDocument:
     kind: str = "file"
     content: Any | None = None
     sha256: str | None = None
+    score: float | None = None
+    excerpt: str | None = None
 
 
 class WorkspaceService:
@@ -42,6 +52,7 @@ class WorkspaceService:
         repository: WorkspaceRepository | None = None,
     ) -> None:
         self._storage = storage
+        self._index_lock = threading.RLock()
         if repository is None:
             from backend.persistence.database import create_session_factory
 
@@ -77,10 +88,14 @@ class WorkspaceService:
             raise ValueError("Workspace search limit must be between 1 and 100.")
         if offset < 0:
             raise ValueError("Workspace search offset cannot be negative.")
+        if query is not None and (not query.strip() or len(query) > 2000):
+            raise ValidationError("Workspace query must contain 1 to 2000 characters.")
+        if any(kind not in WORKSPACE_KINDS for kind in kinds or []):
+            raise ValidationError("Unknown workspace document kind.")
         normalized_tags = self._normalize_tags(tags or [])
         return [
-            self._document_from_entry(entry)
-            for entry in self._repository.search(
+            replace(self._document_from_entry(entry), score=score, excerpt=excerpt)
+            for entry, score, excerpt in self._repository.search(
                 query=query,
                 kinds=kinds or [],
                 tags=normalized_tags,
@@ -88,6 +103,26 @@ class WorkspaceService:
                 offset=offset,
             )
         ]
+
+    def list_collection(
+        self, collection: str, *, limit: int = 50, offset: int = 0,
+    ) -> list[WorkspaceDocument]:
+        if collection not in WORKSPACE_COLLECTIONS:
+            raise ValidationError("Unknown workspace collection.")
+        return self.search(kinds=WORKSPACE_COLLECTIONS[collection], limit=limit, offset=offset)
+
+    def index_status(self) -> dict[str, Any]:
+        return {"engine": "sqlite-fts5-bm25", "indexed_files": self._repository.count()}
+
+    def refresh_index(self) -> dict[str, Any]:
+        with self._index_lock:
+            existing = {entry.path: entry for entry in self._repository.list()}
+            entries = [
+                self._entry_from_file(path, existing=existing.get(path))[0]
+                for path in self._storage.list_workspace_files()
+            ]
+            self._repository.rebuild(entries)
+            return {**self.index_status(), "removed_files": len(existing.keys() - {e.path for e in entries})}
 
     def read_file(self, path: str) -> WorkspaceDocument:
         media_type, content = self._storage.read_workspace_file(path)
@@ -100,36 +135,19 @@ class WorkspaceService:
         *,
         tags: list[str] | None = None,
     ) -> WorkspaceDocument:
-        stored = self._storage.write_workspace_file(path, content)
-        existing = self._repository.get(stored.relative_path)
-        normalized_tags = self._normalize_tags(tags) if tags is not None else list(
-            existing.tags_json if existing is not None else []
-        )
-        document = self._index_file(
-            stored.relative_path,
-            tags=normalized_tags,
-            existing=existing,
-        )
-        return WorkspaceDocument(
-            path=document.path,
-            name=document.name,
-            media_type=document.media_type,
-            size_bytes=document.size_bytes,
-            modified_at=document.modified_at,
-            tags=document.tags,
-            paper_id=document.paper_id,
-            paper_name=document.paper_name,
-            note_id=document.note_id,
-            note_name=document.note_name,
-            kind=document.kind,
-            content=document.content,
-            sha256=stored.sha256,
-        )
+        normalized_tags = self._normalize_tags(tags) if tags is not None else None
+        with self._index_lock:
+            stored = self._storage.write_workspace_file(path, content)
+            document = self._index_file(
+                stored.relative_path, tags=normalized_tags,
+                existing=self._repository.get(stored.relative_path),
+            )
+            return replace(document, sha256=stored.sha256)
 
     def delete_file(self, path: str) -> None:
-        self._storage.delete_workspace_file(path)
-        normalized_path = Path(path).as_posix()
-        self._repository.delete_path(normalized_path)
+        with self._index_lock:
+            self._storage.delete_workspace_file(path)
+            self._repository.delete_path(Path(path).as_posix())
 
     def delete_folder(self, path: str) -> None:
         normalized_path = Path(path).as_posix().strip("/")
@@ -137,8 +155,9 @@ class WorkspaceService:
             raise ValueError("The workspace root cannot be deleted.")
         if normalized_path == "papers":
             raise ValueError("The top-level papers folder cannot be deleted.")
-        self._storage.delete_workspace_folder(normalized_path)
-        self._repository.delete_prefix(normalized_path)
+        with self._index_lock:
+            self._storage.delete_workspace_folder(normalized_path)
+            self._repository.delete_prefix(normalized_path)
 
     def replace_markdown(
         self,
@@ -176,11 +195,12 @@ class WorkspaceService:
         return self.write_file(path, f"{document.content}{separator}{content}")
 
     def set_tags(self, path: str, tags: list[str]) -> WorkspaceDocument:
-        info = self._storage.workspace_file_info(path)
-        normalized_path = info.relative_path
-        normalized_tags = self._normalize_tags(tags)
-        existing = self._repository.get(normalized_path)
-        return self._index_file(normalized_path, tags=normalized_tags, existing=existing)
+        with self._index_lock:
+            normalized_path = self._storage.workspace_file_info(path).relative_path
+            return self._index_file(
+                normalized_path, tags=self._normalize_tags(tags),
+                existing=self._repository.get(normalized_path),
+            )
 
     def create_note(
         self,
@@ -195,27 +215,16 @@ class WorkspaceService:
         body = f"# {note_name}\n"
         if content.strip():
             body += f"\n{content.strip()}\n"
-        document = self.write_file(path, body, tags=["note", *(tags or [])])
-        entry = self._repository.get(path)
-        assert entry is not None
-        entry.note_id = note_id
-        entry.note_name = note_name
-        entry.display_name = note_name
-        entry.kind = "note"
-        indexed = self._document_from_entry(self._repository.upsert(entry), content=body)
-        return WorkspaceDocument(
-            path=indexed.path,
-            name=indexed.name,
-            media_type=indexed.media_type,
-            size_bytes=indexed.size_bytes,
-            modified_at=indexed.modified_at,
-            tags=indexed.tags,
-            note_id=indexed.note_id,
-            note_name=indexed.note_name,
-            kind=indexed.kind,
-            content=indexed.content,
-            sha256=document.sha256,
-        )
+        with self._index_lock:
+            document = self.write_file(path, body, tags=["note", *(tags or [])])
+            entry = self._repository.get(path)
+            assert entry is not None
+            entry.note_id = note_id
+            entry.note_name = note_name
+            entry.display_name = note_name
+            entry.kind = "note"
+            indexed = self._document_from_entry(self._repository.upsert(entry), content=body)
+            return replace(indexed, sha256=document.sha256)
 
     def ensure_paper_folder(self, document_id: str, title: str) -> dict[str, Any]:
         safe_document_id = clean_filename(document_id)
@@ -271,18 +280,13 @@ class WorkspaceService:
     def set_paper_name(self, document_id: str, name: str) -> dict[str, str]:
         normalized_name = self._normalize_paper_name(name)
         folder = f"papers/{clean_filename(document_id)}"
-        for entry in self._repository.list_prefix(folder):
-            entry.paper_id = document_id
-            entry.paper_name = normalized_name
-            entry.display_name = normalized_name
-            entry.kind = (
-                "paper_summary"
-                if entry.path.endswith("/summary.md")
-                else "paper_notes"
-                if entry.path.endswith("/notes.md")
-                else "paper_file"
-            )
-            self._repository.upsert(entry)
+        with self._index_lock:
+            for entry in self._repository.list_prefix(folder):
+                entry.paper_id = document_id
+                entry.paper_name = normalized_name
+                entry.display_name = normalized_name
+                entry.kind = _kind_from_path(entry.path)
+                self._repository.upsert(entry)
         return {
             "document_id": document_id,
             "folder": folder,
@@ -316,15 +320,28 @@ class WorkspaceService:
         existing: WorkspaceEntry | None = None,
         paper_names: dict[str, str] | None = None,
     ) -> WorkspaceDocument:
+        with self._index_lock:
+            entry, content = self._entry_from_file(
+                path, tags=tags, existing=existing, paper_names=paper_names,
+            )
+            stored = self._repository.upsert(entry)
+            return self._document_from_entry(stored, content=content)
+
+    def _entry_from_file(
+        self, path: str, *, tags: list[str] | None = None,
+        existing: WorkspaceEntry | None = None,
+        paper_names: dict[str, str] | None = None,
+    ) -> tuple[WorkspaceEntry, Any]:
         info = self._storage.workspace_file_info(path)
         media_type, content = self._storage.read_workspace_file(info.relative_path)
-        searchable_content = content if isinstance(content, str) else ""
+        searchable_content = content if isinstance(content, str) else dumps_json(content)
         paper_id = _paper_id_from_path(info.relative_path)
         paper_name = (
             (paper_names or {}).get(paper_id)
             if paper_id is not None
             else None
         ) or (existing.paper_name if existing is not None else None)
+        normalized_tags = tags if tags is not None else list(existing.tags_json if existing else [])
         entry = WorkspaceEntry(
             path=info.relative_path,
             name=Path(info.relative_path).name,
@@ -333,22 +350,19 @@ class WorkspaceService:
                 if existing is not None
                 else paper_name
             ),
-            kind=existing.kind if existing is not None else _kind_from_path(info.relative_path),
+            kind=_kind_from_path(info.relative_path),
             media_type=media_type,
             size_bytes=info.size_bytes,
             modified_at=info.modified_at,
-            tags_json=tags if tags is not None else list(existing.tags_json if existing else []),
-            tags_text=_tags_text(tags if tags is not None else list(existing.tags_json if existing else [])),
+            tags_json=normalized_tags,
+            tags_text=_tags_text(normalized_tags),
             paper_id=paper_id,
             paper_name=paper_name,
             note_id=existing.note_id if existing is not None else None,
             note_name=existing.note_name if existing is not None else None,
             search_content=searchable_content,
         )
-        return self._document_from_entry(
-            self._repository.upsert(entry),
-            content=content,
-        )
+        return entry, content
 
     def _index_existing_files(self) -> None:
         tag_map = self._read_legacy_tag_map()
@@ -453,15 +467,6 @@ class WorkspaceService:
         return normalized
 
 
-def _media_type(path: str) -> str:
-    suffix = Path(path).suffix.lower()
-    if suffix == ".json":
-        return "application/json"
-    if suffix == ".md":
-        return "text/markdown"
-    return "text/plain"
-
-
 def _paper_id_from_path(path: str) -> str | None:
     parts = Path(path).parts
     if len(parts) >= 3 and parts[0] == "papers":
@@ -477,6 +482,8 @@ def _kind_from_path(path: str) -> str:
         if parts[-1] == "notes.md":
             return "paper_notes"
         return "paper_file"
+    if parts and parts[0] == "notes" and Path(path).suffix.lower() == ".md":
+        return "note"
     return "file"
 
 

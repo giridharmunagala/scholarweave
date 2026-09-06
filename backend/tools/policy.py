@@ -24,6 +24,7 @@ _LOCAL_READ = ToolOperationPolicy(True, False, 30.0)
 _NETWORK_READ = ToolOperationPolicy(True, False, 60.0)
 _WRITE = ToolOperationPolicy(False, True)
 _LOCAL_READS = {
+    "research.workspace.list",
     "research.library.search",
     "research.notes.search",
     "research.notes.read",
@@ -44,6 +45,8 @@ def operation_policy(
     if catalog_id in {"research.sources.search", "research.web.read"}:
         return _NETWORK_READ
     action = arguments.get("action")
+    if catalog_id == "research.workspace.index":
+        return _LOCAL_READ if action == "status" else _WRITE
     if catalog_id == "research.paper.read":
         return _LOCAL_READ if action in {"inspect", "pages", "chunks", "search"} else _WRITE
     if catalog_id == "research.summary.read":

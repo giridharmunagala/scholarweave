@@ -176,3 +176,128 @@ def test_generic_notes_use_server_generated_uuid_and_are_searchable(test_setting
     assert [item.path for item in workspace.search(kinds=["note"], tags=["INFERENCE"])] == [
         note.path
     ]
+
+
+def test_workspace_bm25_ranks_relevance_before_recency_and_returns_excerpts(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    best = workspace.create_note(name="Quasar spectroscopy", content="quasar spectra", tags=["Astro"])
+    workspace.write_file("notes/recent.md", "quasar " + "unrelated " * 300)
+    workspace.write_file("notes/other.md", "spectroscopy")
+
+    hits = workspace.search(query="quasar spectroscopy")
+
+    assert hits[0].path == best.path
+    assert len(hits) == 3  # Natural-language retrieval matches any word, not an exact phrase.
+    assert all(hit.score is not None and hit.score > 0 for hit in hits)
+    assert [hit.score for hit in hits] == sorted((hit.score for hit in hits), reverse=True)
+    assert "quasar" in hits[0].excerpt.lower()
+    assert len(hits[1].excerpt) < 400
+    assert workspace.search(query="quasar", tags=["astro"])[0].path == best.path
+    assert workspace.search(query="quasar spectroscopy", limit=1, offset=1)[0].path == hits[1].path
+    assert workspace.search(query="QUASAR QUASAR")[0].score == workspace.search(query="quasar")[0].score
+    assert workspace.search(query="qua") == []
+    assert workspace.search(query='""" ** ()') == []
+
+
+@pytest.mark.parametrize("word", ["Stra\u00dfe", "wei\u00df", "\ufb02ow", "caf\u00e9"])
+def test_workspace_search_uses_the_same_unicode_tokenizer_as_the_index(test_settings, word) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    workspace.write_file("notes/unicode.md", word)
+    workspace.write_file("notes/tagged.md", "Different content", tags=[word])
+    expected = {"notes/unicode.md", "notes/tagged.md"}
+    assert {hit.path for hit in workspace.search(query=word)} == expected
+    workspace.refresh_index()
+    assert {hit.path for hit in workspace.search(query=word)} == expected
+
+
+def test_workspace_discovery_does_not_scan_or_read_files(test_settings, monkeypatch) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    workspace.write_file("notes/indexed.md", "cachedneedle")
+
+    def unexpected_disk_read(*args):
+        pytest.fail("Discovery must query the persistent index, not scan workspace files.")
+
+    monkeypatch.setattr(storage, "list_workspace_files", unexpected_disk_read)
+    monkeypatch.setattr(storage, "read_workspace_file", unexpected_disk_read)
+    assert workspace.search(query="cachedneedle")[0].path == "notes/indexed.md"
+    assert workspace.list_collection("notes")[0].path == "notes/indexed.md"
+    assert workspace.index_status()["indexed_files"] == 1
+
+
+def test_workspace_collections_and_index_updates_survive_restart(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Attention", content="obsolete", tags=["keep"])
+    paper = workspace.ensure_paper_folder("paper-1", "Named paper")
+    workspace.write_file("notes/imported.md", "imported")
+    workspace.write_file("data.json", {"finding": "jsonneedle"})
+
+    assert {item.path for item in workspace.list_collection("notes")} == {
+        note.path, "notes/imported.md", paper["notes_path"],
+    }
+    assert [item.path for item in workspace.list_collection("summaries")] == [paper["summary_path"]]
+    assert workspace.search(query="jsonneedle")[0].path == "data.json"
+    workspace.write_file(note.path, "replacement")
+    assert workspace.search(query="obsolete") == []
+    assert workspace.search(query="replacement")[0].tags == ("note", "keep")
+    workspace = WorkspaceService(storage)
+    assert workspace.search(query="replacement")[0].note_name == "Attention"
+    workspace.delete_file(note.path)
+    workspace.delete_folder(paper["folder"])
+    assert workspace.search(query="replacement") == []
+    assert workspace.list_collection("summaries") == []
+
+
+def test_workspace_refresh_reconciles_external_edits_and_preserves_metadata(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Saved display name", content="beforeedit", tags=["keep"])
+    paper = workspace.ensure_paper_folder("paper-1", "Paper title")
+    storage.write_workspace_file(note.path, "afteredit")
+    storage.delete_workspace_file(paper["notes_path"])
+    storage.write_workspace_file("notes/external.md", "externalneedle")
+    storage.write_workspace_file(".scholarweave/private.json", {"hidden": "privateneedle"})
+    before = workspace.index_status()
+
+    result = workspace.refresh_index()
+
+    assert result == {**before, "removed_files": 1}
+    assert workspace.search(query="beforeedit") == []
+    hit = workspace.search(query="afteredit")[0]
+    assert (hit.note_id, hit.note_name, hit.tags) == (note.note_id, note.note_name, note.tags)
+    assert workspace.search(query="externalneedle")[0].kind == "note"
+    assert workspace.search(query="privateneedle") == []
+    assert workspace.list_collection("summaries")[0].paper_name == "Paper title"
+    assert WorkspaceService(storage).search(query="afteredit")[0].path == note.path
+    assert workspace.refresh_index()["removed_files"] == 0
+
+
+def test_failed_refresh_keeps_previous_search_index(test_settings, monkeypatch) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    workspace.write_file("notes/saved.md", "originalneedle")
+    storage.write_workspace_file("notes/saved.md", "changedneedle")
+    storage.write_workspace_file("notes/unreadable.md", "bad")
+    read = storage.read_workspace_file
+
+    def fail_one(path):
+        if path == "notes/unreadable.md":
+            raise StorageError("Cannot read source")
+        return read(path)
+
+    monkeypatch.setattr(storage, "read_workspace_file", fail_one)
+    with pytest.raises(StorageError, match="Cannot read"):
+        workspace.refresh_index()
+    assert workspace.search(query="originalneedle")[0].path == "notes/saved.md"
+    assert workspace.search(query="changedneedle") == []
+
+
+@pytest.mark.parametrize("arguments", [
+    {"query": " "}, {"query": "x" * 2001}, {"kinds": ["unknown"]},
+])
+def test_workspace_rejects_invalid_search_inputs(test_settings, arguments) -> None:
+    from backend.core.errors import ValidationError
+
+    with pytest.raises(ValidationError):
+        WorkspaceService(SafeStorage(test_settings)).search(**arguments)

@@ -130,6 +130,11 @@ flowchart TD
 It does not execute model turns. `RunService` supervises execution, and `AgentRunner` owns the
 model/tool loop.
 
+Deep Work enables execution but does not require it on every turn. The coordinator model judges
+intent from the conversation, clarifies material ambiguity, and can answer discussion without a
+plan. Once it creates a plan for requested research, pending/in-progress items enforce continuation
+across epochs and recovery. There is no keyword classifier or missing-plan completion gate.
+
 ## 4. Blueprint compilation
 
 Blueprints are provider-neutral, serializable workflow definitions. The exact blueprint is stored
@@ -546,6 +551,38 @@ erDiagram
 
 Folder assignment changes document metadata only; it does not move source PDFs or workspace files.
 All user-controlled paths pass through `SafeStorage` or `WorkspaceService`.
+
+### Workspace discovery
+
+| API (all under `/api`) | Purpose |
+| --- | --- |
+| `GET /documents` | Local paper library, including PDFs not yet prepared |
+| `GET /workspace/notes` | Standalone Markdown notes and canonical paper notes |
+| `GET /workspace/summaries` | Canonical summary files, including not-yet-filled templates |
+| `GET /workspace/files` | Existing complete safe-file listing |
+| `GET /workspace/search` | BM25-ranked text search or filtered browsing |
+| `GET /workspace/index` | Index engine and indexed-file count, without a disk scan |
+| `POST /workspace/index` | Reconcile external changes and atomically rebuild the index |
+
+Notes, summaries and search accept `limit` (1-100, default 50) and zero-based `offset`. Search accepts
+`query`, repeated `kinds`, and repeated `tags` (all supplied tags must match, case-insensitively).
+Omit the query to browse. Query words are OR-matched and safely quoted, not interpreted as FTS
+operators; punctuation-only queries return no matches. Results contain compact excerpts and positive
+BM25 scores (higher is better), ordered by relevance, then modification time and path. Display titles
+are weighted above content. This is lexical whole-token search, not embeddings or PDF source search.
+
+The existing SQLite FTS5 table is the durable inverted index; no duplicate JSON index is needed.
+Markdown, plain text, and JSON content plus file names, display titles, and tags are indexed.
+Application writes/deletes update it in the same repository transaction as metadata. Refresh reads
+safe files first, preserves existing names/IDs/tags, removes deleted paths, and replaces both tables
+in one transaction. A process-local lock serializes refresh with workspace mutations; read failures
+leave the previous index untouched. External editors are not watched: refresh explicitly after their
+changes. Search/list calls query SQLite rather than reopening or scanning the workspace.
+
+Agents share these services through `list_workspace` (bounded pages and `next_offset`),
+`search_research_notes` (BM25 with pagination), and `workspace_index` (status/refresh). Canonical
+summaries can be incomplete or stale: agents read selected artifacts and verify source citations.
+Immutable summary history remains at `/documents/{id}/summaries`, separate from canonical discovery.
 
 Paper content search uses SQLite FTS5 with transactional chunk-index triggers, not an embedding or
 model call. Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses honor explicit

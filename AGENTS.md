@@ -1,120 +1,91 @@
-# AGENTS.md
+# ScholarWeave coding guide
 
-ScholarWeave is a local-first LLM research workspace for one researcher on one local machine. There
-are no accounts, teams, sharing, permissions, or collaborative editing. Keep it focused on:
+Local-first research for **one researcher on one machine**: sourced chat, intent-led Deep Work,
+papers, notes, summaries, native PDF extraction and OCR. No accounts, teams, sharing, permissions,
+or collaboration. Prefer reusing local evidence over acquiring or generating duplicate artifacts.
 
-1. chat with DuckDuckGo, arXiv, Wikipedia, PDF/HTML acquisition, and workspace read/write tools;
-2. autonomous research driven by a small pending-work tracker;
-3. paper notes, summaries, native PDF extraction, and OCR.
+## Fast coding loop
 
-Read [docs/architecture.md](docs/architecture.md) for the runtime flow and
-[docs/recipes.md](docs/recipes.md) for common changes.
+1. Check `git status --short`; preserve existing edits. Choose the owning row below rather than
+   scanning the repository. Read [recipes](docs/recipes.md) for the change procedure and the relevant
+   section of [architecture](docs/architecture.md) when crossing a runtime boundary.
+2. Trace router -> service -> repository, or catalog -> handler -> blueprint. Search for existing
+   helpers and tests before adding files. Reproduce the behavior with the closest test.
+3. Make one coherent change. Keep prompts, tool schemas, handlers, policies and bindings aligned.
+4. Run the focused tests together, then the architecture guard. Regenerate contracts for API changes.
+   Check the final diff for accidental changes, generated drift, and unnecessary abstractions.
+5. Simplify touched code by removing duplication/dead helpers, not by compressing readable logic or
+   spreading one flow across more files. Do not bundle unrelated cleanup.
 
-## Non-negotiable rules
+## Where to start
 
-1. Keep `openapi-typescript==7.13.0` exactly pinned. The agent runtime is native: talk to every
-   provider through the official `openai` client and `/v1/chat/completions` only.
-2. Never hand-edit `frontend/openapi.json` or `frontend/src/api/schema.generated.ts`. After changing
-   a router or Pydantic API schema, run `cd frontend && npm run generate:api`.
-3. Routers call services, services call repositories, and repositories own database sessions.
-4. Construct services only in `backend/bootstrap.py`; access them in routers through
-   `Depends(services)`.
-5. Use `SafeStorage` or `WorkspaceService` for user-facing paths. Do not use bare file writes.
-6. Never commit `local_data/` or `workspace/`.
-7. A model-callable tool needs a catalog definition, a runtime handler, packaged JSON guidance, and
-   a blueprint binding.
-8. One Uvicorn worker only. The event broker, temporary page cache, and inference lock are
-   intentionally process-local.
+Paths below are relative to `backend/`.
 
-## Commands
-
-Run from the repository root on Windows:
-
-| Task | Command |
-| --- | --- |
-| Backend server | `.\.venv\Scripts\python.exe -m uvicorn backend.app:app --reload --port 8000` |
-| Backend tests | `.\.venv\Scripts\python.exe -m pytest` |
-| One backend file | `.\.venv\Scripts\python.exe -m pytest backend\tests\test_documents.py` |
-| Frontend tests | `cd frontend; npm test` |
-| Frontend typecheck/build | `cd frontend; npm run build` |
-| Regenerate API | `cd frontend; npm run generate:api` |
-| Check API drift | `cd frontend; npm run check:api` |
-
-Minimum validation:
-
-- Backend Python: closest test file plus `backend/tests/test_architecture.py`.
-- Router or Pydantic schema: regenerate and check the API contract.
-- Frontend: `npm test` and `npm run build`.
-
-## Backend map
-
-| Package | Owns | Start at |
+| Change | Entry points | Closest tests |
 | --- | --- | --- |
-| `core` | settings, health, shared errors, HTTP dependencies | `core/config.py`, `core/http.py` |
-| `persistence` | SQLite setup and safe files | `persistence/database.py` |
-| `providers` | provider profiles, model clients, inference scheduling and model-call logs | `providers/runtime.py` |
-| `agents` | native harness, blueprint compilation, run context and compaction | `agents/harness.py`, `agents/compiler.py` |
-| `tools` | fixed model tool surface and work-plan helpers | `tools/catalog.py`, `tools/runtime.py` |
-| `runs` | execution, events, SSE, recovery | `runs/service.py` |
-| `conversations` | chat records, session history and chat/deep-work blueprints | `conversations/service.py`, `conversations/autonomous.py` |
-| `research` | DuckDuckGo, arXiv, Wikipedia, and PDF/HTML acquisition | `research/search.py` |
-| `documents` | PDF ingestion, OCR, chunks, retrieval and versioned summaries | `documents/ingestion.py`, `documents/summaries.py` |
-| `workspace` | Markdown files and search | `workspace/service.py` |
-| `prompting` | packaged prompts and tool guidance | `prompting/registry.py` |
+| Chat / Deep Work intent and composition | `conversations/turns.py`, `prompting/defaults/prompts/` | `test_research_modes.py`, `test_api.py` |
+| Pending-plan continuation / recovery / SSE | `runs/service.py` (epoch/continuation sections), `runs/events.py` | `test_run_service.py`, `test_run_events.py` |
+| Model loop / delegation / context | `agents/harness.py`, `agents/compiler.py`, `agents/context_budget.py` | `test_harness.py`, `test_agent_compiler.py`, `test_context_budget.py` |
+| Agent tools | `tools/catalog.py`, `tools/runtime.py` (named handler), `tools/policy.py` | `test_agent_tools.py`, `test_tool_policy.py`, `test_prompting.py` |
+| Workspace discovery / BM25 / files | `workspace/router.py`, `workspace/service.py`, `workspace/repository.py` | `test_storage.py`, `test_api.py` |
+| Paper acquisition / web sources | `research/router.py`, `research/search.py`, `research/sources.py` | `test_research_search.py`, `test_source_downloads.py` |
+| PDF / OCR / retrieval / summaries | `documents/ingestion.py`, `documents/ocr.py`, `documents/summaries.py` | `test_documents.py`, `test_tesseract_ocr.py`, `test_summaries.py` |
+| Providers / inference / settings | `providers/runtime.py`, `providers/inference.py`, `core/settings_service.py` | `test_providers.py`, `test_inference_scheduler.py`, `test_context_settings.py` |
+| Storage / schema / wiring | `persistence/database.py`, `persistence/files.py`, `bootstrap.py` | `test_persistence_cutover.py`, `test_storage.py`, `test_architecture.py` |
 
-Do not create a new package unless it owns persistent data or a clearly independent runtime
-boundary. Prefer adding a small module to an existing package.
+Tests live in `backend/tests/`. Frontend features live in `frontend/src/features/`; use their
+colocated tests. Avoid reading all of the large tool runtime or run state machine.
 
-## Layering
+## Invariants
 
-```text
-router -> service -> repository -> SQLite
-                   -> other services
+- Native runtime: every provider uses the official `openai` client and `/v1/chat/completions` only.
+  Keep `openapi-typescript` exactly **7.13.0**.
+- Routers parse/shape HTTP; services orchestrate and raise semantic `core/errors.py` errors;
+  repositories own SQLAlchemy sessions/queries. ORM records and Pydantic wire models stay separate.
+- Construct services in `backend/bootstrap.py`; routers use `Depends(services)`.
+- User-facing paths go through `SafeStorage` or `WorkspaceService`. Never commit `local_data/` or
+  `workspace/`. Never write user files through bare paths.
+- A model tool needs a six-field `APPLICATION_TOOLS` entry, runtime handler, packaged JSON guidance,
+  operation policy, and binding in `conversations/turns.py`. Strict object schemas forbid extra keys
+  and require every property; optional values are nullable.
+- One Uvicorn worker, bound to `127.0.0.1`: no authentication; event broker, inference locks, caches,
+  and workspace mutation locks are process-local.
+- Existing database tables use explicit schema cutover, not Alembic. Read persistence code before
+  changing a table; `create_all()` is not a migration.
+- Named SSE events must also appear in `frontend/src/api/events.ts`.
+
+## Research behavior
+
+- Deep Work is a capability, not a command to execute on every turn. The **LLM** judges intent from
+  conversation context; no keyword triggers. Clarification/discussion can finish without a plan.
+  Once research is requested and scoped, create a small plan; pending/in-progress items keep the run
+  going. Completed/blocked items need an honest outcome. Do not bypass an active plan.
+- Delegation is explicit through `agent_tools`; workers see only the request, not the coordinator
+  transcript. Maximum depth: coordinator -> sub-agent -> nested helper.
+- Canonical paper `notes.md` and `summary.md` are workspace files; summary versions are immutable.
+  Named paper folders are metadata membership, never physical file moves.
+- Discovery: existing `GET /api/documents` lists papers; workspace endpoints list notes/summaries,
+  search, and inspect/refresh the index. Use the existing SQLite FTS5 inverted index with BM25, not a
+  second JSON index or model call. Application mutations index automatically; external edits require
+  explicit refresh. Workspace excerpts are leads, not PDF source evidence.
+- Behavior tests use the real local OpenAI-compatible stub provider, not a mocked harness.
+
+## Validation (PowerShell, repository root)
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest backend\tests\test_storage.py backend\tests\test_architecture.py
 ```
 
-- Routers parse HTTP input and shape responses.
-- Services own behavior and orchestration.
-- Repositories own SQLAlchemy sessions and queries.
-- ORM models and Pydantic wire schemas remain separate.
-- Services raise semantic errors from `backend/core/errors.py`, not `HTTPException`.
+Replace/add the closest test files from the table. For router/Pydantic changes, never hand-edit
+`frontend/openapi.json` or `frontend/src/api/schema.generated.ts`; regenerate and check:
 
-## Core flows
+```powershell
+$env:PATH = "$PWD\.venv\Scripts;$env:PATH"
+Set-Location frontend
+npm run generate:api
+npm run check:api
+```
 
-### Chat and Deep Work
-
-Conversation routes compile a blueprint, create a run, and start the native harness
-(`backend/agents/harness.py`). The harness streams one Chat Completions request per turn, executes
-tool calls, and emits named run events through the run context; those events are persisted and
-published over SSE. Deep Work adds `create_work_plan`, `read_work_plan`, and `update_work_item`; the
-run loop continues while an item is pending or in progress.
-
-Delegation is explicit: a blueprint `agent_tools` entry exposes one isolated sub-agent as a tool.
-The sub-agent sees only the request text, never the coordinator transcript. Delegation depth is
-capped at two levels (coordinator -> sub-agent -> nested helper); an agent at depth 2 cannot
-delegate.
-
-### Papers
-
-PDF acquisition stores the source, extracts native text, uses Tesseract when needed, optionally
-repairs poor OCR with a vision model, and writes Markdown, a manifest, and searchable chunks.
-Workspace `notes.md` and `summary.md` files are canonical; summary versions are immutable records.
-Named paper folders are additive records; membership lives in document metadata, so organizing a
-paper never moves its PDF or workspace files.
-
-### Agent tools
-
-`APPLICATION_TOOLS` in `backend/tools/catalog.py` is authoritative. Each tuple contains the
-catalog ID, model-visible name, fallback description, strict JSON schema, and runtime handler.
-Complete model guidance lives under `backend/prompting/defaults/tools/`.
-
-## Important constraints
-
-- `backend/tools/runtime.py` and `backend/runs/service.py` are large because they centralize,
-  respectively, all tool handlers and the single run state machine. Read their dispatch/epoch
-  sections rather than scanning top to bottom.
-- Events are a backend/frontend contract. Add new named events to
-  `frontend/src/api/events.ts`.
-- Existing databases use a schema cutover strategy, not Alembic migrations. Read the persistence
-  code before altering an existing table.
-- There is no authentication. Bind to `127.0.0.1`.
-- Tests use a real local OpenAI-compatible stub provider; prefer it over mocking the harness.
+Frontend changes also require `npm test` and `npm run build` from `frontend/`.
+Run the local backend with
+`.\.venv\Scripts\python.exe -m uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000`.
