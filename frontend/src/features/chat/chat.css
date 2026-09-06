@@ -28,6 +28,7 @@
 .chat-layout.collapsed .conversation-list {
   border-right-color: transparent;
   opacity: 0;
+  visibility: hidden;
   pointer-events: none;
 }
 /* A drag while resizing must not select transcript text or animate the columns. */
@@ -241,18 +242,20 @@
   align-items: center;
   justify-content: center;
   gap: .35rem;
-  width: 1.9rem;
+  width: auto;
   min-height: 1.9rem;
   margin-left: auto;
-  padding: 0;
+  padding: .25rem .5rem;
   border: 0;
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
+  font-size: var(--text-xs);
+  white-space: nowrap;
 }
 .activity-toggle:hover, .activity-toggle.active { background: var(--surface-2); color: var(--text); }
-.activity-toggle span {
+.activity-toggle .activity-count {
   position: absolute;
   top: -.25rem;
   right: -.35rem;
@@ -325,7 +328,7 @@
 .chat-welcome p { margin: 0; max-width: 46ch; color: var(--muted); font-size: var(--text-sm); }
 .suggestion-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-2);
   margin-top: var(--space-3);
 }
@@ -884,9 +887,32 @@
   max-width: var(--reading-max);
   margin: 0 auto;
 }
+.composer-intent {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  padding-inline: var(--space-1);
+}
+.research-disclosure {
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.research-disclosure > summary {
+  width: fit-content;
+  cursor: pointer;
+  padding: .3rem .4rem;
+  border-radius: var(--radius-sm);
+}
+.research-disclosure > summary:hover { color: var(--text); background: var(--surface-2); }
+.research-disclosure > summary:focus-visible { outline: 2px solid var(--accent); }
+.turn-performance[open] { flex: 1; }
+.turn-performance .turn-metadata { margin: .35rem .4rem; }
+.live-reasoning { margin-bottom: var(--space-2); }
 
 /* Typing, choosing a model, dictating and sending are one control, not four. */
 .composer-box {
+  position: relative;
   display: grid;
   gap: var(--space-1);
   padding: var(--space-2) var(--space-2) var(--space-1);
@@ -921,8 +947,16 @@
   color: var(--accent-strong);
   font-size: var(--text-xs);
 }
-.composer-bar { display: flex; align-items: center; gap: var(--space-1); }
-.composer-options { position: relative; }
+.composer-bar { display: flex; align-items: flex-end; gap: var(--space-2); }
+.composer-controls {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-1);
+}
+.composer-options { position: static; }
 .composer-options > summary {
   display: inline-flex;
   align-items: center;
@@ -942,9 +976,12 @@
   position: absolute;
   bottom: calc(100% + .45rem);
   left: 0;
+  right: 0;
   z-index: 15;
   display: grid;
-  min-width: 14rem;
+  min-width: 0;
+  max-height: min(24rem, 50vh);
+  overflow-y: auto;
   gap: var(--space-2);
   padding: var(--space-3);
   border: 1px solid var(--border);
@@ -954,12 +991,14 @@
 }
 .composer-options-popover .composer-reasoning,
 .composer-options-popover .composer-context { justify-content: space-between; }
+.composer-options-help { margin: 0; font-size: var(--text-xs); color: var(--muted); line-height: 1.5; }
 
 .chat-model-picker {
   display: flex;
+  flex: 1 1 150px;
   align-items: center;
   min-width: 0;
-  width: min(230px, 32%);
+  max-width: 210px;
 }
 .chat-model-picker-label {
   flex: none;
@@ -1051,8 +1090,10 @@
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--muted);
+  flex: none;
 }
+.research-mode-control > span { display: none; }
 
 .research-mode-control select {
   max-width: 165px;
@@ -1076,17 +1117,6 @@
   font-size: var(--text-xs);
   text-align: center;
 }
-
-/* The shortcut is a reminder for the hesitant, so it appears while you type. */
-.composer-hint {
-  margin: 0 var(--space-1) 0 auto;
-  color: var(--muted);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-  opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease);
-}
-.composer-box:focus-within .composer-hint { opacity: 1; }
 
 .composer-icon {
   display: grid;
@@ -1139,6 +1169,7 @@
 
 @media (max-width: 900px) {
   .chat-layout { position: relative; grid-template-columns: minmax(0, 1fr); }
+  .chat-layout.collapsed,
   .chat-layout.activity-open, .chat-layout.collapsed.activity-open {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1167,8 +1198,6 @@
 
 @media (max-width: 600px) {
   .chat-header, .message-list, .composer { padding-inline: var(--space-3); }
-  .chat-model-picker { width: min(190px, 48%); }
-  .composer-bar { flex-wrap: wrap; }
-  .composer-hint { display: none; }
+  .suggestion-grid { grid-template-columns: minmax(0, 1fr); }
   .source-images { grid-auto-columns: 88%; }
 }

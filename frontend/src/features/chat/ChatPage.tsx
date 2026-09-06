@@ -63,13 +63,18 @@ import './chat.css';
 import { useThrottledRates } from './useThrottledRates';
 
 const SUGGESTIONS = [
-  'Summarise the key findings across the papers in my library.',
+  'Help me understand an existing paper summary, one concept at a time.',
   'Compare the methods used in the two most recent papers I added.',
-  'What open research questions remain in this area?',
-  'Draft research notes with citations for my current topic.',
+  'Analyze the evidence, assumptions, and gaps in my research notes.',
+  'Investigate an open research question and discuss the findings with me.',
 ];
 const COMMON_CONTEXT_WINDOWS = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
 const RESEARCH_MODES: { value: ResearchMode; label: string; description: string }[] = [
+  {
+    value: 'research',
+    label: 'Follow my request',
+    description: 'Discuss, explain, compare, or investigate. Save summaries and notes only when requested.',
+  },
   {
     value: 'learn',
     label: 'Learn / ask',
@@ -77,12 +82,12 @@ const RESEARCH_MODES: { value: ResearchMode; label: string; description: string 
   },
   {
     value: 'understand',
-    label: 'Understand paper',
+    label: 'Explain in depth',
     description: 'Explain relevant passages and prerequisites with citations, without a full review.',
   },
   {
     value: 'review',
-    label: 'Review / research',
+    label: 'Review + save',
     description: 'Read paper evidence and require cited summaries plus durable paper notes.',
   },
 ];
@@ -197,6 +202,9 @@ function PaneResizer({
 }
 
 export function ResearchChatPage() {
+  const [initialDraft] = useState(
+    () => new URLSearchParams(window.location.search).get('research')?.trim() ?? '',
+  );
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -210,7 +218,7 @@ export function ResearchChatPage() {
   const [webEnabled, setWebEnabled] = useState(true);
   const [deepWork, setDeepWork] = useState(false);
   const [fastAnswer, setFastAnswer] = useState(false);
-  const [researchMode, setResearchMode] = useState<ResearchMode>('learn');
+  const [researchMode, setResearchMode] = useState<ResearchMode>('research');
   const [webSearchLimit, setWebSearchLimit] = useState(1);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -219,7 +227,7 @@ export function ResearchChatPage() {
   const [steeringMessages, setSteeringMessages] = useState<
     (Omit<SteeringMessage, 'status'> & { status: 'queued' | 'applied' })[]
   >([]);
-  const [content, setContent] = useState('');
+  const [content, setContent] = useState(initialDraft);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -278,7 +286,7 @@ export function ResearchChatPage() {
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
     setCurrent(conversation);
     setDeepWork(conversation.kind === 'deep_work');
-    setResearchMode(conversation.kind === 'deep_work' ? 'review' : 'learn');
+    setResearchMode('research');
     setFastAnswer(false);
     setModelReference(conversation.model_reference);
     setContextWindowTokens(
@@ -319,13 +327,17 @@ export function ResearchChatPage() {
             nextSettings.agent_context_window_tokens,
           ),
         );
-        if (items[0]) {
+        if (items[0] && !initialDraft) {
           await open(items[0].id, nextProviders, nextSettings);
         }
       })
       .catch(setError)
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!loading && initialDraft) composerRef.current?.focus();
+  }, [loading, initialDraft]);
 
   useEffect(() => {
     if (
@@ -342,6 +354,7 @@ export function ResearchChatPage() {
   useLayoutEffect(() => {
     const list = messageListRef.current;
     if (!list || !pinnedToBottom) return;
+    if (!current?.items.length && !optimisticUser && !stream.assistant) return;
     list.scrollTop = list.scrollHeight;
   }, [
     current?.id,
@@ -503,7 +516,7 @@ export function ResearchChatPage() {
 
   const create = () => {
     setCurrent(null);
-    setResearchMode('learn');
+    setResearchMode('research');
     setDeepWork(false);
     setFastAnswer(false);
     setModelReference(preferredModelReference);
@@ -655,7 +668,7 @@ export function ResearchChatPage() {
         !deepWork && fastAnswer,
         webSearchLimit,
         contextWindowTokens,
-        deepWork ? 'review' : researchMode,
+        researchMode,
       );
       if (request !== openRequestRef.current) return;
       setCurrent((active) => (
@@ -852,6 +865,7 @@ export function ResearchChatPage() {
               type="button"
               className="chat-list-toggle"
               aria-label={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
+              aria-expanded={sidebarOpen}
               title={sidebarOpen ? 'Hide chat list' : 'Show chat list'}
               onClick={() => setSidebarOpen((value) => !value)}
             >
@@ -897,7 +911,8 @@ export function ResearchChatPage() {
               onClick={() => setActivityOpen((value) => !value)}
             >
               <Icon name="tools" size={15} />
-              {activityCount ? <span>{activityCount}</span> : null}
+              <span>Activity</span>
+              {activityCount ? <span className="activity-count">{activityCount}</span> : null}
             </button>
           </header>
 
@@ -913,11 +928,11 @@ export function ResearchChatPage() {
             >
               {!hasTranscript ? (
                 <div className="chat-welcome">
-                  <h2>{deepWork ? 'What needs deeper research?' : 'What should we research?'}</h2>
+                  <h2>{deepWork ? 'Give your research a direction' : 'Think through your research'}</h2>
                   <p>
                     {deepWork
-                      ? 'Use focused workers for broad comparisons, literature reviews, and multi-source synthesis.'
-                      : 'Ask for evidence, comparisons, open questions, or written notes.'}
+                      ? 'Set a goal for unattended work, or discuss it first. You can steer the next step while it runs.'
+                      : 'Understand a paper, question a summary, or explore an idea. You decide what gets saved.'}
                   </p>
                   <div className="suggestion-grid">
                     {SUGGESTIONS.map((suggestion) => (
@@ -926,7 +941,10 @@ export function ResearchChatPage() {
                         className="suggestion"
                         key={suggestion}
                         disabled={sending}
-                        onClick={() => void send(suggestion)}
+                        onClick={() => {
+                          setContent(suggestion);
+                          composerRef.current?.focus();
+                        }}
                       >
                         {suggestion}
                       </button>
@@ -984,7 +1002,12 @@ export function ResearchChatPage() {
                   key={message.id}
                 />
               ))}
-              {streamingTimeline ? <TurnTimelineView timeline={streamingTimeline} /> : null}
+              {streamingTimeline ? (
+                <details className="research-disclosure live-reasoning">
+                  <summary>Live reasoning</summary>
+                  <TurnTimelineView timeline={streamingTimeline} />
+                </details>
+              ) : null}
               {stream.assistant ? (
                 <Message
                   role="assistant"
@@ -1027,65 +1050,122 @@ export function ResearchChatPage() {
 
             <div className="composer">
               <div className="composer-inner">
+                <div className="composer-intent" role="status">
+                  {sending
+                    ? 'Keep guiding the work here. Your message applies before the next model call.'
+                    : researchMode === 'review'
+                      ? 'Review + save: each reviewed paper requires a cited summary and durable notes.'
+                      : deepWork
+                        ? 'Deep Work stays enabled for this chat. Discuss first, or give it a goal to carry out.'
+                        : 'Follow your question, not a fixed workflow. Saving is opt-in.'}
+                </div>
                 {/* One control surface: what you type, what answers, and how you send it. */}
                 <div className="composer-box">
                   <textarea
                     ref={composerRef}
+                    aria-label={sending ? 'Guide ongoing research' : 'Research question'}
+                    title="Enter to send; Shift+Enter for a new line"
                     rows={1}
                     value={content}
                     onChange={(event) => setContent(event.target.value)}
                     onKeyDown={(event) => {
-                      if (event.key === 'Enter' && !event.shiftKey) {
+                      if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
                         event.preventDefault();
                         void send();
                       }
                     }}
                     placeholder={
                       sending
-                        ? 'Steer the next model call…'
-                        : 'Ask for a research outcome…'
+                        ? 'Add a constraint, change direction, or ask it to focus...'
+                        : 'Ask, explain, compare, analyze...'
                     }
                   />
                   <div className="composer-bar">
-                    <ChatModelPicker
-                      providers={providers}
-                      settings={settings}
-                      value={modelReference}
-                      disabled={sending}
-                      onChange={selectModel}
-                    />
-                    <details className="composer-options">
-                      <summary>
-                        <Icon name="settings" size={13} />
-                        Options
-                      </summary>
-                      <div className="composer-options-popover">
-                        <ReasoningEffortSelect
-                          value={reasoningEffort}
-                          supportedEfforts={supportedReasoningEfforts}
-                          disabled={sending}
-                          onChange={selectReasoningEffort}
-                        />
-                        <label
-                          className="composer-context"
-                          title="Context window used for chat history and automatic compaction"
-                        >
-                          <span>Context</span>
-                          <select
-                            aria-label="Context size"
-                            value={contextWindowTokens}
-                            onChange={(event) => setContextWindowTokens(Number(event.target.value))}
+                    <div className="composer-controls" role="group" aria-label="Research controls">
+                      <ChatModelPicker
+                        providers={providers}
+                        settings={settings}
+                        value={modelReference}
+                        disabled={sending}
+                        onChange={selectModel}
+                      />
+                      <details className="composer-options">
+                        <summary>
+                          <Icon name="settings" size={13} />
+                          Advanced{fastAnswer ? ' · Fast web on' : ''}
+                        </summary>
+                        <div className="composer-options-popover">
+                          <ReasoningEffortSelect
+                            value={reasoningEffort}
+                            supportedEfforts={supportedReasoningEfforts}
                             disabled={sending}
+                            onChange={selectReasoningEffort}
+                          />
+                          <label
+                            className="composer-context"
+                            title="Context window used for chat history and automatic compaction"
                           >
-                            {[...new Set([...COMMON_CONTEXT_WINDOWS, contextWindowTokens])]
-                              .sort((left, right) => left - right)
-                              .map((tokens) => (
-                                <option key={tokens} value={tokens}>
-                                  {contextWindowLabel(tokens)}
-                                </option>
-                              ))}
-                          </select>
-                        </label>
+                            <span>Context</span>
+                            <select
+                              aria-label="Context size"
+                              value={contextWindowTokens}
+                              onChange={(event) => setContextWindowTokens(Number(event.target.value))}
+                              disabled={sending}
+                            >
+                              {[...new Set([...COMMON_CONTEXT_WINDOWS, contextWindowTokens])]
+                                .sort((left, right) => left - right)
+                                .map((tokens) => (
+                                  <option key={tokens} value={tokens}>
+                                    {contextWindowLabel(tokens)}
+                                  </option>
+                                ))}
+                            </select>
+                          </label>
+                          <p className="composer-options-help">
+                            Larger context uses more memory and prompt-processing time. Start with your model's configured size.
+                          </p>
+                          {!deepWork ? (
+                            <div className={`fast-answer-control${fastAnswer ? ' active' : ''}`}>
+                              <button
+                                className="composer-capability"
+                                type="button"
+                                aria-label="Toggle fast answer"
+                                aria-pressed={fastAnswer}
+                                title="Web-only shortcut. Use Learn / ask for quick paper Q&A."
+                                disabled={sending}
+                                onClick={() => {
+                                  setFastAnswer((enabled) => {
+                                    if (!enabled) {
+                                      setWebEnabled(true);
+                                      setResearchMode('learn');
+                                    }
+                                    return !enabled;
+                                  });
+                                }}
+                              >
+                                <Icon name="bulb" size={13} />
+                                Fast web answer
+                              </button>
+                              {fastAnswer ? (
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={100}
+                                  step={1}
+                                  value={webSearchLimit}
+                                  aria-label="Fast answer web search limit"
+                                  title="Maximum web searches"
+                                  disabled={sending}
+                                  onChange={(event) => {
+                                    const value = Number.parseInt(event.target.value, 10);
+                                    if (Number.isFinite(value)) {
+                                      setWebSearchLimit(Math.min(100, Math.max(1, value)));
+                                    }
+                                  }}
+                                />
+                              ) : null}
+                          </div>
+                        ) : null}
                       </div>
                     </details>
                     <button
@@ -1106,11 +1186,11 @@ export function ResearchChatPage() {
                       Web
                     </button>
                     <label className="research-mode-control">
-                      <span>Mode</span>
+                      <span>Response</span>
                       <select
                         aria-label="Research mode"
-                        value={deepWork ? 'review' : researchMode}
-                        disabled={sending || deepWork}
+                        value={researchMode}
+                        disabled={sending}
                         title={RESEARCH_MODES.find((mode) => mode.value === researchMode)?.description}
                         onChange={(event) => {
                           const selected = RESEARCH_MODES.find(
@@ -1142,7 +1222,6 @@ export function ResearchChatPage() {
                         setDeepWork((enabled) => {
                           if (!enabled) {
                             setFastAnswer(false);
-                            setResearchMode('review');
                           }
                           return !enabled;
                         });
@@ -1151,52 +1230,7 @@ export function ResearchChatPage() {
                       <Icon name="agents" size={13} />
                       Deep work
                     </button>
-                    {!deepWork ? (
-                      <div className={`fast-answer-control${fastAnswer ? ' active' : ''}`}>
-                        <button
-                          className="composer-capability"
-                          type="button"
-                          aria-label="Toggle fast answer"
-                          aria-pressed={fastAnswer}
-                          title="Web-only shortcut. Use Learn / ask for quick paper Q&A."
-                          disabled={sending}
-                          onClick={() => {
-                            setFastAnswer((enabled) => {
-                              if (!enabled) {
-                                setWebEnabled(true);
-                                setDeepWork(false);
-                                setResearchMode('learn');
-                              }
-                              return !enabled;
-                            });
-                          }}
-                        >
-                          <Icon name="bulb" size={13} />
-                          Fast web answer
-                        </button>
-                        {fastAnswer ? (
-                          <input
-                            type="number"
-                            min={1}
-                            max={100}
-                            step={1}
-                            value={webSearchLimit}
-                            aria-label="Fast answer web search limit"
-                            title="Maximum web searches"
-                            disabled={sending}
-                            onChange={(event) => {
-                              const value = Number.parseInt(event.target.value, 10);
-                              if (Number.isFinite(value)) {
-                                setWebSearchLimit(Math.min(100, Math.max(1, value)));
-                              }
-                            }}
-                          />
-                        ) : null}
-                      </div>
-                    ) : null}
-                    <span className="composer-hint">
-                      <kbd>Enter</kbd> to send
-                    </span>
+                    </div>
                     {sending && run && ['pending', 'running'].includes(run.status) ? (
                       <>
                         <div className="composer-run-actions">
@@ -1795,15 +1829,18 @@ function TurnMetadata({ metrics }: { metrics: TurnMetrics }) {
     metrics.durationSeconds != null ? `${formatDuration(metrics.durationSeconds)} total` : null,
   ].filter((value): value is string => value !== null);
   return (
-    <div
-      className="turn-metadata"
-      title={'Overall run usage across MAIN, delegates, retries, and compaction; delegated usage is already included. '
-        + 'Speeds are server active-time weighted averages over timed tokens, not wall-clock rates. '
-        + (estimated ? 'Token counts prefixed with ~ are historical estimates.' : '')}
-      aria-label={`Turn metadata: ${details.join(', ')}`}
-    >
-      {details.map((detail) => <span key={detail}>{detail}</span>)}
-    </div>
+    <details className="research-disclosure turn-performance">
+      <summary>Performance</summary>
+      <div
+        className="turn-metadata"
+        title={'Overall run usage across MAIN, delegates, retries, and compaction; delegated usage is already included. '
+          + 'Speeds are server active-time weighted averages over timed tokens, not wall-clock rates. '
+          + (estimated ? 'Token counts prefixed with ~ are historical estimates.' : '')}
+        aria-label={`Turn metadata: ${details.join(', ')}`}
+      >
+        {details.map((detail) => <span key={detail}>{detail}</span>)}
+      </div>
+    </details>
   );
 }
 

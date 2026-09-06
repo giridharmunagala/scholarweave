@@ -135,6 +135,12 @@ intent from the conversation, clarifies material ambiguity, and can answer discu
 plan. Once it creates a plan for requested research, pending/in-progress items enforce continuation
 across epochs and recovery. There is no keyword classifier or missing-plan completion gate.
 
+Response style is independent of this execution capability. The default `research` style follows
+the requested outcome without requiring saved paper artifacts. `review` explicitly opts into a
+reviewed summary and durable notes; `learn` and `understand` retain their narrower evidence checks.
+The selected style is passed through Deep Work compilation and run metadata instead of being
+coerced to review.
+
 ## 4. Blueprint compilation
 
 Blueprints are provider-neutral, serializable workflow definitions. The exact blueprint is stored
@@ -334,6 +340,13 @@ child run.
 
 Events are the execution-to-UI contract, not merely logs.
 
+The default research surface prioritizes the answer and editable composer. Live reasoning and
+per-turn performance use collapsed disclosures; the activity panel remains reversible on the same
+page. Model context/reasoning controls and the fast-web shortcut sit under Advanced. Library
+handoffs carry only a draft prompt identifying a paper or workspace path in `/?research=...`;
+opening one starts no run and does not reopen an unrelated conversation. The shared Markdown
+viewer memoizes unchanged content to avoid reparsing historical answers on each stream update.
+
 ```mermaid
 flowchart LR
     Producers["Harness, hooks,<br/>tools, RunService"]
@@ -519,6 +532,11 @@ flowchart LR
     DB --> Workspace[Ensure notes.md<br/>and summary.md]
 ```
 
+PDF opening, lazy page-tree parsing, native page extraction, and Tesseract availability probes in
+the asynchronous OCR paths are offloaded through AnyIO's existing worker pool. Pages are still
+processed sequentially and callbacks remain on the event loop. This removes document-length event
+loop stalls without multiplying page-image memory, model concurrency, or application workers.
+
 The principal document entities are:
 
 ```mermaid
@@ -628,9 +646,12 @@ flowchart LR
 ```
 
 A model saying “done” is not sufficient when a completion policy applies. Review mode requires
-read/extraction, a complete cited summary, and durable notes. Learn/Understand modes permit targeted
-paper Q&A without those full-review side effects, but enforce citations against observed paper
-reads. Deep Work must also close or block every tracked work item.
+read/extraction, a complete cited summary, and durable notes. The default Research mode permits
+discussion of saved work and screening acquired candidates without forcing those artifacts; actual
+paper reads require a supplied citation in the answer. Learn/Understand modes permit targeted paper
+Q&A without full-review side effects, but enforce citations against observed paper reads.
+Deep Work must also close or block every tracked work item. Artifact intent outside explicit review
+is model-guided, not a keyword classifier or a hard write-permission gate.
 
 Tool retry policy is action-aware: paper preparation and summary coverage advancement are writes,
 even when exposed under a read tool. Pure reads use bounded retry deadlines with Retry-After and

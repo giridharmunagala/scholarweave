@@ -46,6 +46,12 @@ Deep Work should answer discussion or clarify intent without a work plan. Let th
 the user has requested execution; never add keyword routing. Test both no-plan completion and
 continuation of an existing pending plan.
 
+`research` is the default response style in both chat and Deep Work. Keep execution capability
+separate from per-turn response style: only explicit `review` requires saved paper summaries and
+notes. Test saved-summary discussion, candidate screening, requested writes, supplied citations,
+and steering as well as explicit review enforcement. Persisted older run snapshots retain their
+original completion policy; prompt changes apply to newly compiled turns.
+
 ## Change workspace discovery or search
 
 - `backend/workspace/router.py`: notes, canonical summaries, search and index endpoints.

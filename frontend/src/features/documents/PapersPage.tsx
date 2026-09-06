@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiUrl, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
+import { Link } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
@@ -575,6 +576,13 @@ export default function PapersPage() {
             <div className="stack" aria-busy={ingesting}>
               <div className="button-row">
                 <StatusPill value={ingesting ? 'processing' : selected.status} />
+                <Link
+                  className="button small secondary"
+                  title="Open an editable draft in a new research chat"
+                  to={`/?research=${encodeURIComponent(`Discuss the paper "${selected.title}" (paper ID: ${selected.id}). Read its existing text, notes, and summary where available. Explain its main ideas, evidence, and limitations here in chat; do not create or overwrite a saved summary.`)}`}
+                >
+                  Discuss paper
+                </Link>
                 <label className="paper-folder-select">
                   <span>Folder</span>
                   <select
@@ -591,8 +599,38 @@ export default function PapersPage() {
                     ))}
                   </select>
                 </label>
-                {!ingesting ? (
-                  <>
+                {ingesting ? (
+                  <span className="button busy-label">
+                    <span className="button-spinner" aria-hidden="true" />
+                    Ingesting and indexing…
+                  </span>
+                ) : null}
+                {ingesting ? (
+                  <button
+                    className="button danger small"
+                    type="button"
+                    disabled={busyAction === `stop:${selected.id}`}
+                    onClick={() => void stopIngestion(selected)}
+                  >
+                    <Icon name="stop" size={13} />
+                    {busyAction === `stop:${selected.id}` ? 'Stopping…' : 'Stop'}
+                  </button>
+                ) : null}
+                <button
+                  className="button danger small"
+                  type="button"
+                  title="Delete paper"
+                  disabled={operationBusy || selected.status === 'processing'}
+                  onClick={() => void deleteDocument(selected)}
+                >
+                  <Icon name="trash" size={13} />
+                  {busyAction === `delete:${selected.id}` ? 'Deleting…' : 'Delete'}
+                </button>
+              </div>
+              {!ingesting ? (
+                <details className="library-details" key={selected.id} open={selected.status !== 'ready'}>
+                  <summary>Extraction and indexing</summary>
+                  <div className="button-row">
                     <button
                       className={`button small${recommendedMode === 'embedded' ? '' : ' secondary'}`}
                       type="button"
@@ -620,54 +658,31 @@ export default function PapersPage() {
                       <Icon name="scan" size={13} />
                       {selected.status === 'ready' ? 'Re-run with OCR' : 'Run OCR'}
                     </button>
-                  </>
-                ) : (
-                  <span className="button busy-label">
-                    <span className="button-spinner" aria-hidden="true" />
-                    Ingesting and indexing…
-                  </span>
-                )}
-                {ingesting ? (
-                  <button
-                    className="button danger small"
-                    type="button"
-                    disabled={busyAction === `stop:${selected.id}`}
-                    onClick={() => void stopIngestion(selected)}
-                  >
-                    <Icon name="stop" size={13} />
-                    {busyAction === `stop:${selected.id}` ? 'Stopping…' : 'Stop'}
-                  </button>
-                ) : null}
-                <button
-                  className="button danger small"
-                  type="button"
-                  title="Delete paper"
-                  disabled={operationBusy || selected.status === 'processing'}
-                  onClick={() => void deleteDocument(selected)}
-                >
-                  <Icon name="trash" size={13} />
-                  {busyAction === `delete:${selected.id}` ? 'Deleting…' : 'Delete'}
-                </button>
-              </div>
-              {!ingesting ? (
-                <div className="ingestion-recommendation">
-                  {ingestionOptions ? (
-                    <>
-                      <strong>
-                        Suggested: {recommendedMode === 'embedded' ? 'Use embedded text' : 'Run OCR'}
-                      </strong>
-                      <span>
-                        Selectable text detected on {ingestionOptions.embedded_text_pages} of{' '}
-                        {ingestionOptions.total_pages} pages.
-                        {!ingestionOptions.ocr_available
-                          ? ` ${ingestionOptions.ocr_engine} OCR is currently unavailable.`
-                          : ''}
-                      </span>
-                    </>
-                  ) : (
-                    <span>Inspecting the PDF text layer…</span>
-                  )}
-                </div>
+                  </div>
+                  <div className="ingestion-recommendation">
+                    {ingestionOptions ? (
+                      <>
+                        <strong>
+                          Suggested: {recommendedMode === 'embedded' ? 'Use embedded text' : 'Run OCR'}
+                        </strong>
+                        <span>
+                          Selectable text detected on {ingestionOptions.embedded_text_pages} of{' '}
+                          {ingestionOptions.total_pages} pages.
+                          {!ingestionOptions.ocr_available
+                            ? ` ${ingestionOptions.ocr_engine} OCR is currently unavailable.`
+                            : ''}
+                        </span>
+                      </>
+                    ) : (
+                      <span>Inspecting the PDF text layer…</span>
+                    )}
+                  </div>
+                  <div className="card-meta">
+                    <span>{selected.page_count ?? '—'} pages</span>
+                    <span>{selected.chunks.length} chunks</span>
+                    <span>{selected.artifacts.length} artifacts</span>
+                  </div>
+                </details>
               ) : null}
               {ingesting ? (
                 <div className="notice info ingestion-progress" role="status" aria-live="polite">
@@ -693,14 +708,8 @@ export default function PapersPage() {
                 </div>
               ) : null}
               {!ingesting ? (
-                <div className="card-meta">
-                  <span>{selected.page_count ?? '—'} pages</span>
-                  <span>{selected.chunks.length} chunks</span>
-                  <span>{selected.artifacts.length} artifacts</span>
-                </div>
-              ) : null}
-              {!ingesting ? (
                 <PaperSummaryPanel
+                  key={`summary:${selected.id}`}
                   documentId={selected.id}
                   ready={selected.status === 'ready' && selected.chunks.length > 0}
                 />

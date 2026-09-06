@@ -944,9 +944,9 @@ export interface components {
             reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
             /**
              * Research Mode
-             * @description learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted preserves review behavior, or learn for legacy Fast Answer. Deep Work always requires review.
+             * @description research: follow the user's intent without automatic summaries or notes; learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted selects research, or learn for legacy Fast Answer. All modes are available per turn in Deep Work.
              */
-            research_mode?: ("learn" | "understand" | "review") | null;
+            research_mode?: ("research" | "learn" | "understand" | "review") | null;
             /**
              * Web Enabled
              * @default true

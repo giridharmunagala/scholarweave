@@ -30,11 +30,25 @@ The chat agent can:
 
 Large tool results are stored locally and can be read back in bounded slices.
 
-Choose the depth of work in the chat composer:
+Choose a response style in the chat composer:
 
-- **Learn**: explain concepts using the smallest sufficient evidence set.
-- **Understand**: answer targeted paper questions with citations, without requiring a full summary.
-- **Review**: retain the full paper summary/notes completion checks.
+- **Follow my request** (default): discuss, explain, compare, or investigate without automatically
+  creating saved summaries or notes. Ask explicitly when you want a durable artifact.
+- **Learn / ask**: explain concepts using the smallest sufficient evidence set.
+- **Explain in depth**: answer targeted paper questions with citations, without requiring a full summary.
+- **Review + save**: explicitly request the full paper summary/notes completion checks.
+
+These choices apply per turn, including in Deep Work. Deep Work enables unattended execution, not
+an automatic requirement to summarize every paper. The composer remains available during a run:
+send a direction or constraint for the next model call, stop, or request an answer from evidence
+already collected.
+
+The library's **Discuss paper**, **Analyze summary**, and **Analyze saved work** actions open
+editable drafts in a new chat. They do not send a message or start generation. Suggestions are
+editable drafts too. **Advanced** holds context, reasoning, and the fast-web shortcut; live
+reasoning, per-turn **Performance**, extraction controls, and summary provenance can be expanded
+and collapsed on the same page. **Activity** keeps the full run trace available without filling the
+conversation with diagnostics.
 
 Deep Work keeps an explicit plan when research execution is requested. For a collection, keep an index, cited evidence,
 comparisons, and open questions in research notes rather than repeatedly loading every paper into
@@ -101,18 +115,26 @@ Keep the main model resident for interactive work and occasional summaries. Swit
 model is useful only when an entire batch saves more than both model switches and any extra review.
 For example, two 20-second switches add approximately 40 seconds before any net benefit.
 
-In Settings, each provider has a **One model at a time** option. It defaults on for local
-providers and off for hosted providers:
-
-- Calls to the same model may run concurrently.
-- Calls to a different model wait until the provider's active responses finish, then proceed
-  automatically. Other providers remain independent.
-- Disable the option when a provider can serve different models concurrently.
+ScholarWeave uses one application-wide inference lane, even across different provider profiles.
+Interactive requests get priority between model responses; a waiting background request is admitted
+after three interactive calls to avoid starving unattended work. The provider's **One model at a
+time** setting does not increase this global capacity. A currently generating response is not
+preempted by a new chat request.
 
 Your server manages loading and hot swaps based on the requested model. ScholarWeave never silently
 substitutes a smaller model. `/v1/models` can advertise multiple available models; no manual
 confirmation is needed, including after restarting the application. Old residency protection
 settings no longer pause requests.
+
+Native PDF parsing/extraction and Tesseract availability checks run in the existing worker pool so
+they do not hold the API event loop for an entire document. Pages remain sequential to bound memory;
+this improves responsiveness, not GPU throughput. Unchanged Markdown answers are memoized so
+typing and streaming another turn do not repeatedly parse their tables, math, and citations.
+
+For a CPU-rich, VRAM-limited machine, keep one main model resident and use the server's actual
+per-request context capacity. Larger contexts consume more KV-cache memory and prompt-processing
+time; do not raise them simply because system RAM or CPU core count is high. No extra model
+parallelism, Uvicorn workers, or hardware-specific thread counts are enabled automatically.
 
 ### Long conversations and context
 

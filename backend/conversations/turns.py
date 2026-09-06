@@ -51,15 +51,13 @@ def _resolve_research_mode(
     deep_work: bool = False,
     fast_answer: bool = False,
 ) -> ResearchMode:
-    if research_mode not in {None, "learn", "understand", "review"}:
+    if research_mode not in {None, "research", "learn", "understand", "review"}:
         raise ValidationError("Unknown research mode.")
     if deep_work and fast_answer:
         raise ValidationError("Fast Answer is unavailable in a Deep Work conversation.")
-    if deep_work and research_mode not in {None, "review"}:
-        raise ValidationError("Deep Work requires review mode.")
     if fast_answer and research_mode not in {None, "learn"}:
         raise ValidationError("Fast Answer requires learn mode.")
-    return research_mode or ("learn" if fast_answer else "review")
+    return research_mode or ("learn" if fast_answer else "research")
 
 
 def _research_mode_metadata(research_mode: ResearchMode) -> dict[str, Any]:
@@ -183,6 +181,7 @@ class ConversationTurnService:
             deep_work_blueprint(
                 record.model_reference_json,
                 web_enabled=web_enabled,
+                research_mode=research_mode,
                 prompts=self._prompts,
                 first_turn=first_turn,
             )
@@ -212,6 +211,7 @@ class ConversationTurnService:
         conversation_id: str,
         *,
         web_enabled: bool = True,
+        research_mode: ResearchMode | None = None,
         message: str = "",
         context_window_tokens: int | None = None,
         first_turn: bool | None = None,
@@ -221,6 +221,7 @@ class ConversationTurnService:
             conversation_id,
             web_enabled=web_enabled,
             deep_work=True,
+            research_mode=research_mode,
             message=message,
             context_window_tokens=context_window_tokens,
             first_turn=first_turn,
@@ -292,7 +293,9 @@ class ConversationTurnService:
         fast_answer: bool = False,
         context_window_tokens: int | None = None,
     ):
-        _resolve_research_mode(research_mode, deep_work=True, fast_answer=fast_answer)
+        research_mode = _resolve_research_mode(
+            research_mode, deep_work=True, fast_answer=fast_answer,
+        )
         first_turn = not self.get_deep_work_conversation(
             conversation_id
         ).last_message_preview.strip()
@@ -302,13 +305,14 @@ class ConversationTurnService:
             compiled=self.compile_deep_work_conversation(
                 conversation_id,
                 web_enabled=web_enabled,
+                research_mode=research_mode,
                 message=message,
                 context_window_tokens=context_window_tokens,
                 first_turn=first_turn,
             ),
             reasoning_effort=reasoning_effort,
             runtime_metadata={
-                **_research_mode_metadata("review"),
+                **_research_mode_metadata(research_mode),
                 "autonomous_work": True,
                 "allow_conversation_title_update": first_turn,
             },
@@ -368,13 +372,14 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
     )
     if not activity:
         return
-    if (
-        context.metadata.get("research_mode") in {"learn", "understand"}
-        and not context.metadata.get("autonomous_work")
-    ):
+    if context.metadata.get("research_mode") == "research":
+        _validate_research_evidence(context, activity)
+        return
+    if context.metadata.get("research_mode") in {"learn", "understand"}:
         _validate_sourced_paper_answer(context, activity)
         return
 
+    # Old persisted runs without a mode retain their original review contract.
     actions_by_document: dict[str, list[str]] = {}
     titles: dict[str, str] = {}
     for item in activity:
@@ -422,6 +427,33 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
             "preparation, a reusable or newly generated cited summary, and durable notes before "
             "the run can complete.",
             issues=issues,
+        )
+
+
+def _validate_research_evidence(
+    context: ScholarWeaveContext,
+    activity: list[dict[str, Any]],
+) -> None:
+    # Acquisition and summary discussion are not commitments to review each paper.
+    reads = [item for item in activity if item.get("action") == "read"]
+    if not reads:
+        return
+    citations = {
+        citation
+        for item in reads
+        for citation in (
+            item["citations"] if isinstance(item.get("citations"), list) else []
+        )
+        if isinstance(citation, str) and citation.strip()
+    }
+    output = context.metadata.get("completion_output")
+    if not isinstance(output, str) or not any(
+        re.search(r"(?<!\w)" + re.escape(citation) + r"(?!\w)", output)
+        for citation in citations
+    ):
+        raise ValidationError(
+            "Paper evidence was read: preserve a supplied page or chunk citation in the answer "
+            "and distinguish supported findings from limitations. No summary or notes are required.",
         )
 
 
@@ -522,10 +554,12 @@ def deep_work_blueprint(
     model_reference: dict,
     *,
     web_enabled: bool = True,
+    research_mode: ResearchMode | None = None,
     prompts: PromptRegistry | None = None,
     first_turn: bool = False,
 ) -> AgentBlueprint:
     model = ModelReferenceSpec.model_validate(model_reference or {})
+    research_mode = _resolve_research_mode(research_mode, deep_work=True)
     prompts = _resolve_prompts(prompts)
     tools = [
         *_application_tools(web_enabled=web_enabled, first_turn=first_turn),
@@ -552,7 +586,10 @@ def deep_work_blueprint(
                     "id": "coordinator",
                     "name": "Deep Work Coordinator",
                     "description": "Clarifies intent, answers discussion, and executes research when requested.",
-                    "instructions": prompts.render("deep-work-coordinator"),
+                    "instructions": (
+                        f"{prompts.render('deep-work-coordinator')}\n\n"
+                        f"Selected research mode: {research_mode}."
+                    ),
                     "model": model,
                     "model_settings": {"parallel_tool_calls": True},
                     "tool_ids": coordinator_tool_ids,
@@ -561,7 +598,10 @@ def deep_work_blueprint(
                     "id": "worker",
                     "name": "Focused Research Worker",
                     "description": "Completes one bounded evidence-gathering track.",
-                    "instructions": prompts.render("deep-work-worker"),
+                    "instructions": (
+                        f"{prompts.render('deep-work-worker')}\n\n"
+                        f"Selected research mode: {research_mode}."
+                    ),
                     "model": model,
                     "model_settings": {"parallel_tool_calls": True},
                     "tool_ids": worker_tool_ids,

@@ -1813,7 +1813,8 @@ class ApplicationToolRuntime:
             )
             if not document_id:
                 raise ValueError("Paper notes require a document_id.")
-            self._require_paper_read(context, document_id)
+            if context.metadata.get("research_mode") != "research":
+                self._require_paper_read(context, document_id)
             paper = self._ensure_paper_workspace({"document_id": document_id}, context)
             path = str(paper["notes_path"])
             paper_document = self._documents.get_document(document_id)
@@ -2160,7 +2161,10 @@ class ApplicationToolRuntime:
         marker = f"<!-- scholarweave-paper-acquired:{document.id} -->"
         notes = self._workspace.read_file(str(paper["notes_path"]))
         notes_content = notes.content if isinstance(notes.content, str) else ""
-        if marker not in notes_content:
+        if (
+            context.metadata.get("research_mode") not in {"research", "learn", "understand"}
+            and marker not in notes_content
+        ):
             notes = self._workspace.append_markdown(
                 str(paper["notes_path"]),
                 (

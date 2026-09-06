@@ -412,6 +412,7 @@ describe('chat transcript detail', () => {
     deliverAppliedBeforeSteeringResponse = false;
     conversationDeleted = false;
     window.localStorage.clear();
+    window.history.replaceState({}, '', '/');
     installFetch();
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -561,11 +562,11 @@ describe('chat transcript detail', () => {
       web_enabled: true,
       deep_work: true,
       fast_answer: false,
-      research_mode: 'review',
+      research_mode: 'research',
     });
     expect(deepWork.disabled).toBe(true);
     const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    expect(mode.value).toBe('review');
+    expect(mode.value).toBe('research');
     expect(mode.disabled).toBe(true);
   });
 
@@ -573,9 +574,9 @@ describe('chat transcript detail', () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    expect(mode.value).toBe('learn');
+    expect(mode.value).toBe('research');
     expect(Array.from(mode.options, (option) => option.value)).toEqual([
-      'learn', 'understand', 'review',
+      'research', 'learn', 'understand', 'review',
     ]);
     await act(async () => {
       mode.value = 'review';
@@ -613,22 +614,81 @@ describe('chat transcript detail', () => {
     });
   });
 
-  it('starts a new chat in learn mode even after selecting deep work', async () => {
+  it('starts a new chat following intent even after selecting deep work', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[aria-label="Toggle deep work"]')!.click();
     });
     expect(container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!.value)
-      .toBe('review');
+      .toBe('research');
     await act(async () => {
       container.querySelector<HTMLButtonElement>('.new-chat')!.click();
     });
     const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    expect(mode.value).toBe('learn');
+    expect(mode.value).toBe('research');
     expect(mode.disabled).toBe(false);
     expect(container.querySelector('[aria-label="Toggle deep work"]')?.getAttribute('aria-pressed'))
       .toBe('false');
+  });
+
+  it('lets Deep Work explain without implicitly selecting review and saving artifacts', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Toggle deep work"]')!.click();
+    });
+    expect(mode.disabled).toBe(false);
+    await act(async () => {
+      mode.value = 'understand';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await send('Explain the assumptions in this summary. Do not write new files.');
+    expect(lastMessageRequest).toMatchObject({ research_mode: 'understand', deep_work: true });
+  });
+
+  it('opens library context as an editable draft without starting work or reopening the last chat', async () => {
+    const draft = 'Analyze the saved summary at papers/paper-1/summary.md without rewriting it.';
+    window.history.replaceState({}, '', `/?research=${encodeURIComponent(draft)}`);
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    expect(container.querySelector('textarea')!.value).toBe(draft);
+    expect(container.querySelector('textarea')).toBe(document.activeElement);
+    expect(text(container.querySelector('h1'))).toBe('New research');
+    expect(server.runs).toHaveLength(0);
+    expect(lastMessageRequest).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) =>
+      String(url).endsWith(`/api/agent/conversations/${CONVERSATION_ID}`),
+    )).toBe(false);
+  });
+
+  it('makes suggestions editable instead of immediately submitting a canned workflow', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const suggestion = container.querySelector<HTMLButtonElement>('.suggestion')!;
+    await act(async () => suggestion.click());
+    expect(container.querySelector('textarea')!.value).toBe(suggestion.textContent);
+    expect(container.querySelector('textarea')).toBe(document.activeElement);
+    expect(lastMessageRequest).toBeNull();
+  });
+
+  it('keeps advanced controls and performance collapsed and reopenable on the same page', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
+    expect(options.open).toBe(false);
+    expect(options.querySelector('[aria-label="Toggle fast answer"]')).not.toBeNull();
+    await act(async () => options.querySelector('summary')!.click());
+    expect(options.open).toBe(true);
+    await act(async () => options.querySelector('summary')!.click());
+    expect(options.open).toBe(false);
+    await runTurn(0);
+    const performance = container.querySelector<HTMLDetailsElement>('.turn-performance')!;
+    expect(performance.open).toBe(false);
+    await act(async () => performance.querySelector('summary')!.click());
+    expect(performance.open).toBe(true);
+    expect(text(performance.querySelector('.turn-metadata'))).toContain('Overall');
   });
 
   it('keeps completed activity out of the transcript as the thread grows', async () => {
@@ -1106,7 +1166,8 @@ describe('chat transcript detail', () => {
 
     const textarea = container.querySelector<HTMLTextAreaElement>('.composer-box textarea')!;
     expect(textarea.disabled).toBe(false);
-    expect(textarea.placeholder).toContain('Steer');
+    expect(textarea.getAttribute('aria-label')).toBe('Guide ongoing research');
+    expect(textarea.placeholder).toContain('change direction');
     expect(document.activeElement).toBe(textarea);
     const setter = Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement.prototype,

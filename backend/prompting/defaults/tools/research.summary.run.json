@@ -1,6 +1,6 @@
 {
   "label": "Summarize paper",
-  "description": "Run a dedicated, isolated summary writer for one ready paper and wait for its saved version. Use this for missing paper summaries instead of drafting through a general research worker. Summary jobs are serialized, use their own model-aware context, and default to reasoning disabled where supported. Wait for each receipt before starting the next paper. Reviewed summaries require complete source coverage; a partial or overview receipt does not satisfy a full review. Read source passages and save durable research notes separately.",
+  "description": "Run a dedicated, isolated summary writer for one ready paper and wait for its saved version. Use only when the user requests a saved summary or explicit review requires a missing summary; discussing, explaining, or analyzing an existing summary never implies regeneration. Missing/incomplete summaries alone do not authorize writing, including in Deep Work. Use this writer rather than a general research worker. Jobs are serialized and default to reasoning disabled where supported. Wait for each receipt before starting the next paper. A partial or overview receipt does not satisfy explicit review; source reads and paper notes are separately required in review.",
   "parameter_descriptions": {
     "document_id": "The exact ID of one already ingested local paper.",
     "mode": "reviewed for a citation-grounded full review; overview only when the user requests a quick, explicitly limited orientation.",

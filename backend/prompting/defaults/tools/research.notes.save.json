@@ -1,6 +1,6 @@
 {
   "label": "Save research note",
-  "description": "Create a durable note or append to or overwrite a known note or paper notes file. Retaining useful paper-specific findings is required in review and Deep Work; use paper_notes for that evidence. In learn and understand modes, saving is opt-in: write only when the user asks. Other notes likewise remain opt-in. Prefer append for additive observations; overwrite only when explicitly replacing the intended complete document. Never overwrite a paper summary through this tool.",
+  "description": "Create a durable note or append to or overwrite a known note or paper notes file. Paper findings are required only in explicit review; use paper_notes for that evidence. In research, learn, and understand modes, including Deep Work, write only when the user requests durable notes. In research, requested paper notes may record the user's questions or analysis of an existing summary without a new source read; attribute that context and never present it as independently verified paper evidence. Other notes likewise remain opt-in. Discussing existing notes or summaries does not authorize writes. Prefer append for additive observations; overwrite only when explicitly replacing the intended complete document. Never overwrite a paper summary through this tool.",
   "parameter_descriptions": {
     "target": "new_note, paper_notes, or an existing path.",
     "mode": "append to preserve existing content or overwrite to replace it.",

@@ -1,6 +1,7 @@
 import {
   Children,
   isValidElement,
+  memo,
   useEffect,
   useRef,
   useState,
@@ -49,7 +50,7 @@ const SAFE_HTML_SCHEMA = {
   },
 };
 
-export function MarkdownViewer({ content }: { content: string }) {
+export const MarkdownViewer = memo(function MarkdownViewer({ content }: { content: string }) {
   return (
     <article className="markdown-viewer">
       <ReactMarkdown
@@ -65,7 +66,7 @@ export function MarkdownViewer({ content }: { content: string }) {
       </ReactMarkdown>
     </article>
   );
-}
+});
 
 function normalizeModelMath(content: string): string {
   let fence: string | null = null;

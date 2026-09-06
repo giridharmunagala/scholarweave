@@ -233,6 +233,7 @@
             "anyOf": [
               {
                 "enum": [
+                  "research",
                   "learn",
                   "understand",
                   "review"
@@ -243,7 +244,7 @@
                 "type": "null"
               }
             ],
-            "description": "learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted preserves review behavior, or learn for legacy Fast Answer. Deep Work always requires review.",
+            "description": "research: follow the user's intent without automatic summaries or notes; learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted selects research, or learn for legacy Fast Answer. All modes are available per turn in Deep Work.",
             "title": "Research Mode"
           },
           "web_enabled": {

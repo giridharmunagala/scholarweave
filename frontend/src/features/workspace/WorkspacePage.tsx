@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
+import { Link } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel } from '../../shared/components/Ui';
@@ -30,6 +31,11 @@ export default function WorkspacePage() {
   const load = () => request<WorkspaceFile[]>('/workspace/files').then(setFiles);
   const fileTree = useMemo(() => buildFileTree(files), [files]);
   const targetPath = selected?.path ?? notePath(newPath);
+  const savedContent = selected
+    ? typeof selected.content === 'string' ? selected.content : JSON.stringify(selected.content, null, 2)
+    : '';
+  const hasUnsavedChanges = draft !== savedContent
+    || tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean).join(',') !== (selected?.tags ?? []).join(',');
   const resetEditor = () => {
     setSelected(null);
     setDraft('');
@@ -150,6 +156,24 @@ export default function WorkspacePage() {
         <Panel title={targetPath || 'Editor'}>
           {selected || newPath ? (
             <div className="stack">
+              <div className="library-handoff">
+                {selected && !hasUnsavedChanges ? (
+                  <Link
+                    className="button secondary small"
+                    title="Open an editable draft in a new research chat"
+                    to={`/?research=${encodeURIComponent(`Analyze the existing saved work at workspace path "${selected.path}". Read it, explain its key ideas, assess its evidence and open questions, and discuss it here in chat. Do not create another saved summary or overwrite existing work.`)}`}
+                  >
+                    Analyze saved work
+                  </Link>
+                ) : (
+                  <button className="button secondary small" type="button" disabled>Analyze saved work</button>
+                )}
+                <small className="muted">
+                  {selected && !hasUnsavedChanges
+                    ? 'Opens a draft you can edit before sending.'
+                    : 'Save your changes before discussing them in chat.'}
+                </small>
+              </div>
               {isMarkdown(selected?.media_type, selected?.path ?? newPath) ? (
                 <div className="segmented workspace-view-toggle" aria-label="File view">
                   <button type="button" aria-pressed={view === 'preview'} onClick={() => setView('preview')}>Preview</button>

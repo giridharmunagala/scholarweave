@@ -5,6 +5,16 @@
   align-items: start;
 }
 .paper-detail-panel { align-self: start; }
+.library-details {
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+  font-size: var(--text-sm);
+}
+.library-details > summary { cursor: pointer; color: var(--muted); }
+.library-details[open] > summary { margin-bottom: var(--space-3); }
+.library-details > .card-meta { margin-top: var(--space-3); }
+.library-handoff { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.summary-preview > .library-handoff { margin-top: var(--space-3); }
 
 .upload-button { position: relative; overflow: hidden; }
 .upload-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }

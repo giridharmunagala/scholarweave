@@ -79,9 +79,8 @@ class DocumentOCR:
         retain_page_images: bool,
         progress: ProgressCallback | None,
     ) -> list[dict[str, Any]]:
-        reader = PdfReader(str(pdf_path))
+        reader, total_pages = await anyio.to_thread.run_sync(self._open_pdf, pdf_path)
         pages: list[dict[str, Any]] = []
-        total_pages = len(reader.pages)
         started_at = time.monotonic()
         phase_label = "Extracting PDF text with OCR fallback"
         await report_progress(
@@ -94,15 +93,17 @@ class DocumentOCR:
             },
         )
         availability_checked = False
-        for index, page in enumerate(reader.pages, start=1):
-            embedded_text = (page.extract_text() or "").strip()
+        for index in range(1, total_pages + 1):
+            embedded_text = await anyio.to_thread.run_sync(
+                self._extract_native_text, reader, index - 1,
+            )
             text = embedded_text
             page_image = b""
             needs_ocr = force_ocr or len(text) < self.settings.pdf_min_text_chars
             if needs_ocr:
                 if not availability_checked:
                     availability_checked = True
-                    if not self.available():
+                    if not await anyio.to_thread.run_sync(self.available):
                         raise self._unavailable_error(index)
                 page_image = await anyio.to_thread.run_sync(
                     self.render_page_png,
@@ -153,8 +154,18 @@ class DocumentOCR:
 
         return pages
 
+    @staticmethod
+    def _open_pdf(pdf_path: Path) -> tuple[PdfReader, int]:
+        reader = PdfReader(str(pdf_path))
+        # Counting pages lazily parses the page tree, so keep it off the event loop too.
+        return reader, len(reader.pages)
+
+    @staticmethod
+    def _extract_native_text(reader: PdfReader, zero_based_page_index: int) -> str:
+        return (reader.pages[zero_based_page_index].extract_text() or "").strip()
+
     async def ocr_page(self, pdf_path: Path, zero_based_page_index: int) -> str:
-        if not self.available():
+        if not await anyio.to_thread.run_sync(self.available):
             return ""
         image_png = await anyio.to_thread.run_sync(
             self.render_page_png,

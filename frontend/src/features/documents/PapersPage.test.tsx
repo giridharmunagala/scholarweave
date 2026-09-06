@@ -18,6 +18,69 @@ function noContent() {
   return new Response(null, { status: 204 });
 }
 
+it('expands preparation for unready papers and isolates delayed summary results when switching papers', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const papers = ['ready', 'uploaded', 'failed'].map((status, index) => ({
+    id: `paper-${index}`, title: `Paper ${index}`, status, source_filename: `${index}.pdf`,
+    page_count: 1, metadata: {}, artifacts: [], chunks: [],
+  }));
+  const version = {
+    id: 'old-version', created_at: '2026-01-01T00:00:00Z', citation_count: 1,
+    prompt_revision: 'prompt', status: 'ready', path: 'papers/paper-0/summary.md',
+  };
+  let resolveOldSummary!: (response: Response) => void;
+  const oldSummary = new Promise<Response>((resolve) => { resolveOldSummary = resolve; });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/api/documents')) return respond(papers);
+    if (url.endsWith('/api/paper-folders') || url.endsWith('/api/providers')) return respond([]);
+    if (url.endsWith('/api/settings')) return respond({ default_model_references: {} });
+    if (url.endsWith('/summaries/old-version')) return oldSummary;
+    if (url.endsWith('/summaries')) return respond(url.includes('/paper-0/') ? [version] : []);
+    if (url.endsWith('/ingestion-options')) return respond({
+      total_pages: 1, embedded_text_pages: 1, embedded_text_ratio: 1,
+      recommended_mode: 'embedded', ocr_available: true, ocr_engine: 'tesseract',
+    });
+    const paper = papers.find((item) => url.endsWith(`/documents/${item.id}`));
+    if (paper) return respond(paper);
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const extraction = () => container.querySelector<HTMLDetailsElement>('.library-details')!;
+  const selectPaper = async (index: number) => {
+    await act(async () => container.querySelectorAll<HTMLButtonElement>('.paper-row-main')[index].click());
+  };
+  try {
+    await act(async () => root.render(<RouterProvider><PapersPage /></RouterProvider>));
+    expect(extraction().open).toBe(false);
+    const openVersion = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('1 citations'))!;
+    await act(async () => openVersion.click());
+    await selectPaper(1);
+    expect(extraction().open).toBe(true);
+    expect(extraction().textContent).toContain('Use embedded text');
+    await act(async () => extraction().querySelector('summary')!.click());
+    expect(extraction().open).toBe(false);
+    await act(async () => resolveOldSummary(respond({
+      version, content: 'Stale content from the previous paper.',
+    })));
+    expect(container.querySelector('.summary-preview')).toBeNull();
+    expect(container.textContent).not.toContain('Stale content from the previous paper.');
+    const handoff = container.querySelector<HTMLAnchorElement>('a[href^="/?research="]')!;
+    expect(new URL(handoff.href).searchParams.get('research')).toContain('paper ID: paper-1');
+    expect(container.querySelectorAll('a[href^="/?research="]')).toHaveLength(1);
+    await selectPaper(2);
+    expect(extraction().open).toBe(true);
+    await selectPaper(0);
+    expect(extraction().open).toBe(false);
+    expect(container.querySelector('.summary-preview')).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    vi.unstubAllGlobals();
+  }
+});
+
 describe('LibraryTabs', () => {
   it('makes both library destinations visible and identifies the current view', () => {
     const container = document.createElement('div');
@@ -111,7 +174,7 @@ describe('LibraryTabs', () => {
     const requests: Array<{ url: string; init?: RequestInit }> = [];
     const paper = {
       id: 'paper-1',
-      title: 'Delete Me',
+      title: 'Delete Me & Explain?',
       source_filename: 'delete-me.pdf',
       content_type: 'application/pdf',
       status: 'ready',
@@ -174,6 +237,21 @@ describe('LibraryTabs', () => {
       await Promise.resolve();
     });
 
+    const discussion = container.querySelector<HTMLAnchorElement>('a[href^="/?research="]')!;
+    expect(discussion.textContent).toContain('Discuss paper');
+    const prompt = new URL(discussion.href).searchParams.get('research')!;
+    expect(prompt).toContain(`"${paper.title}" (paper ID: paper-1)`);
+    expect(prompt).toContain('do not create or overwrite a saved summary');
+    const extraction = container.querySelector<HTMLDetailsElement>('.library-details')!;
+    expect(extraction.querySelector('summary')?.textContent).toBe('Extraction and indexing');
+    expect(extraction.open).toBe(false);
+    expect(extraction.textContent).toContain('Re-index embedded text');
+    expect(discussion.closest('details')).toBeNull();
+    await act(async () => extraction.querySelector('summary')!.click());
+    expect(extraction.open).toBe(true);
+    await act(async () => extraction.querySelector('summary')!.click());
+    expect(extraction.open).toBe(false);
+
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[aria-label="Delete folder Methods"]')!.click();
       await Promise.resolve();
@@ -187,7 +265,7 @@ describe('LibraryTabs', () => {
     expect(container.textContent).toContain('Delete Me');
 
     await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="Delete paper Delete Me"]')!.click();
+      container.querySelector<HTMLButtonElement>('[aria-label="Delete paper Delete Me & Explain?"]')!.click();
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
@@ -195,7 +273,7 @@ describe('LibraryTabs', () => {
     expect(requests.some(({ url, init }) =>
       url.endsWith('/api/documents/paper-1') && init?.method === 'DELETE'
     )).toBe(true);
-    expect(container.querySelector('[aria-label="Delete paper Delete Me"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Delete paper Delete Me & Explain?"]')).toBeNull();
 
     act(() => root.unmount());
     vi.unstubAllGlobals();
