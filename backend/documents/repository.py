@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from backend.core.config import Settings
 from backend.core.errors import ConflictError, NotFoundError
 from backend.core.errors import DocumentProcessingError
 from backend.utils import clean_filename, utcnow
-from backend.documents.models import Artifact, Document, DocumentChunk, PaperFolder
+from backend.documents.models import Artifact, Document, DocumentChunk, PaperEvidence, PaperFolder
 from backend.persistence.files import SafeStorage, StoredFile
 
 
@@ -227,6 +228,109 @@ class DocumentRepository:
         with self.session_factory() as session:
             return session.get(Document, document_id)
 
+    def get_artifacts(self, document_id: str) -> list[Artifact]:
+        with self.session_factory() as session:
+            return list(session.scalars(
+                select(Artifact).where(Artifact.document_id == document_id)
+                .order_by(Artifact.created_at.asc())
+            ))
+
+    def source_revision(self, document_id: str) -> dict[str, str]:
+        document = self.get(document_id)
+        if document is None:
+            raise NotFoundError("Paper was not found.")
+        hashes = {
+            artifact.kind: artifact.sha256 for artifact in self.get_artifacts(document_id)
+            if artifact.kind in {"source_pdf", "extracted_manifest", "extracted_markdown"}
+        }
+        hashes["chunks"] = (document.metadata_json or {}).get("extraction_chunk_hash", "")
+        source_hash = hashes.pop("source_pdf", "")
+        extraction_hash = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+        return {
+            "source_hash": source_hash,
+            "extraction_hash": extraction_hash,
+            "source_version": hashlib.sha256(f"{source_hash}:{extraction_hash}".encode()).hexdigest(),
+        }
+
+    def summary_source(self, document_id: str, max_chars: int) -> list[dict[str, Any]] | None:
+        with self.session_factory() as session:
+            count, characters = session.execute(
+                select(func.count(), func.coalesce(func.sum(func.length(DocumentChunk.text)), 0))
+                .where(DocumentChunk.document_id == document_id)
+            ).one()
+            if not count:
+                raise DocumentProcessingError("Paper must be ingested before it can be summarized.")
+            if characters + count * 150 > max_chars:
+                return None
+            return [
+                {"chunk_index": row.chunk_index, "citation": row.citation, "text": row.text}
+                for row in session.scalars(
+                    select(DocumentChunk).where(DocumentChunk.document_id == document_id)
+                    .order_by(DocumentChunk.chunk_index)
+                )
+            ]
+
+    def summary_excerpt(self, document_id: str, max_chars: int) -> dict[str, Any]:
+        with self.session_factory() as session:
+            count = int(session.scalar(
+                select(func.count()).select_from(DocumentChunk)
+                .where(DocumentChunk.document_id == document_id)
+            ) or 0)
+            if not count:
+                raise DocumentProcessingError("Paper must be ingested before it can be summarized.")
+            rows = session.scalars(
+                select(DocumentChunk).where(DocumentChunk.document_id == document_id)
+                .order_by(DocumentChunk.chunk_index).limit(64)
+            )
+            chunks: list[dict[str, Any]] = []
+            remaining = max_chars
+            for row in rows:
+                item = {"chunk_index": row.chunk_index, "citation": row.citation,
+                        "text": row.text, "text_complete": True}
+                size = len(json.dumps(item, ensure_ascii=False))
+                if size > remaining:
+                    if chunks:
+                        break
+                    lo, hi = 0, len(row.text)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        item.update(text=row.text[:mid], text_complete=False)
+                        if len(json.dumps(item, ensure_ascii=False)) <= remaining:
+                            lo = mid
+                        else:
+                            hi = mid - 1
+                    if not lo:
+                        raise DocumentProcessingError("Paper metadata exceeds the overview context budget.")
+                    item.update(text=row.text[:lo], text_complete=False)
+                    chunks.append(item)
+                    break
+                chunks.append(item)
+                remaining -= size
+            last = chunks[-1]
+            complete = len(chunks) == count and last["text_complete"]
+            return {
+                "chunks": chunks, "complete": complete,
+                "next_start": None if complete else last["chunk_index"] + int(last["text_complete"]),
+                "next_offset": 0 if last["text_complete"] else len(last["text"]),
+            }
+
+    def summary_evidence(self, document_id: str, source_version: str) -> dict[str, Any] | None:
+        with self.session_factory() as session:
+            row = session.get(PaperEvidence, (document_id, source_version))
+            return row.content_json if row is not None else None
+
+    def save_summary_evidence(self, document_id: str, evidence: dict[str, Any]) -> None:
+        with self.session_factory() as session:
+            statement = sqlite_insert(PaperEvidence).values(
+                document_id=document_id, source_version=evidence["source_version"],
+                content_json=evidence, created_at=utcnow(), updated_at=utcnow(),
+            )
+            session.execute(statement.on_conflict_do_update(
+                index_elements=[PaperEvidence.document_id, PaperEvidence.source_version],
+                set_={"content_json": evidence, "updated_at": utcnow()},
+            ))
+            session.commit()
+
     def get_details(
         self,
         document_id: str,
@@ -405,6 +509,7 @@ class DocumentRepository:
         for artifact in artifacts:
             self._delete_artifact_file(artifact)
         with self.session_factory() as session:
+            session.execute(delete(PaperEvidence).where(PaperEvidence.document_id == document_id))
             session.execute(
                 delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
             )

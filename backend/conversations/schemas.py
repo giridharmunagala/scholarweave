@@ -12,6 +12,8 @@ from backend.agents.blueprint import (
 )
 from backend.runs.schemas import RunResponse
 
+ResearchMode = Literal["learn", "understand", "review"]
+
 
 class ConversationSchema(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -54,6 +56,15 @@ class ConversationMessageRequest(ConversationSchema):
         description="Permanently enable Deep Work for this conversation.",
     )
     fast_answer: bool = False
+    research_mode: ResearchMode | None = Field(
+        default=None,
+        description=(
+            "learn: narrow sourced Q&A; understand: explain a paper and prerequisites; "
+            "review: require cited summaries and durable paper notes. "
+            "Omitted preserves review behavior, or learn for legacy Fast Answer. "
+            "Deep Work always requires review."
+        ),
+    )
     web_search_limit: int = Field(default=1, ge=1, le=100)
     context_window_tokens: int | None = Field(default=None, ge=4_096, le=2_000_000)
 
@@ -61,6 +72,10 @@ class ConversationMessageRequest(ConversationSchema):
     def validate_modes(self) -> "ConversationMessageRequest":
         if self.deep_work and self.fast_answer:
             raise ValueError("Fast Answer and Deep Work cannot be enabled together.")
+        if self.deep_work and self.research_mode not in {None, "review"}:
+            raise ValueError("Deep Work requires review mode.")
+        if self.fast_answer and self.research_mode not in {None, "learn"}:
+            raise ValueError("Fast Answer requires learn mode.")
         return self
 
 

@@ -419,7 +419,9 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     autonomous = autonomous_blueprint({})
     autonomous_catalog_ids = {tool.catalog_id for tool in autonomous.tools}
     assert autonomous_catalog_ids == expected
-    assert autonomous.agents[0].instructions == default_prompt_registry().render("research")
+    assert autonomous.agents[0].instructions == (
+        default_prompt_registry().render("research") + "\n\nSelected research mode: review."
+    )
     assert {agent.id for agent in autonomous.agents} == {"researcher"}
     assert {"save-note", "save-summary"}.issubset(autonomous.agents[0].tool_ids)
     assert autonomous.run.max_turns == 16

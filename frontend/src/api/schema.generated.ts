@@ -211,6 +211,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/documents/summary-batches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start Summary Batch */
+        post: operations["start_summary_batch_api_documents_summary_batches_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/documents/{document_id}": {
         parameters: {
             query?: never;
@@ -436,6 +453,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/providers/inference/residency": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Residency Status */
+        get: operations["residency_status_api_providers_inference_residency_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/providers/{profile_id}": {
         parameters: {
             query?: never;
@@ -466,6 +500,57 @@ export interface paths {
         get: operations["discover_models_api_providers__profile_id__models_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/{profile_id}/residency": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Configure Residency */
+        put: operations["configure_residency_api_providers__profile_id__residency_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/{profile_id}/residency/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm Residency */
+        post: operations["confirm_residency_api_providers__profile_id__residency_confirm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/providers/{profile_id}/residency/drain": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Drain Residency */
+        post: operations["drain_residency_api_providers__profile_id__residency_drain_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -845,6 +930,11 @@ export interface components {
             /** Reasoning Effort */
             reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
             /**
+             * Research Mode
+             * @description learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted preserves review behavior, or learn for legacy Fast Answer. Deep Work always requires review.
+             */
+            research_mode?: ("learn" | "understand" | "review") | null;
+            /**
              * Web Enabled
              * @default true
              */
@@ -991,6 +1081,20 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** InferenceQueueEntry */
+        InferenceQueueEntry: {
+            /** Blocked By Residency */
+            blocked_by_residency: boolean;
+            /** Model */
+            model: string | null;
+            /**
+             * Priority
+             * @enum {string}
+             */
+            priority: "interactive" | "background";
+            /** Profile Id */
+            profile_id: string | null;
+        };
         /** IngestionOptionsResponse */
         IngestionOptionsResponse: {
             /** Embedded Text Pages */
@@ -1060,11 +1164,51 @@ export interface components {
              */
             updated_at: string;
         };
+        /** PaperSummaryBatchRequest */
+        PaperSummaryBatchRequest: {
+            /** Document Ids */
+            document_ids: string[];
+            /**
+             * Mode
+             * @default reviewed
+             * @enum {string}
+             */
+            mode: "overview" | "reviewed";
+            model_reference?: components["schemas"]["ModelReferenceSpec"];
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
+        };
+        /** PaperSummaryBatchResponse */
+        PaperSummaryBatchResponse: {
+            /** Runs */
+            runs: components["schemas"]["PaperSummaryRunResponse"][];
+        };
         /** PaperSummaryContentResponse */
         PaperSummaryContentResponse: {
             /** Content */
             content: string;
             version: components["schemas"]["PaperSummaryVersionResponse"];
+        };
+        /** PaperSummaryCoverageResponse */
+        PaperSummaryCoverageResponse: {
+            /**
+             * Checkpointed Batches
+             * @default 0
+             */
+            checkpointed_batches: number;
+            /** Exact Spans Path */
+            exact_spans_path?: string | null;
+            /** Kind */
+            kind?: ("pages" | "chunks") | null;
+        };
+        /** PaperSummaryModelResponse */
+        PaperSummaryModelResponse: {
+            /** Model */
+            model: string;
+            /** Provider Kind */
+            provider_kind?: string | null;
+            /** Provider Profile Id */
+            provider_profile_id?: string | null;
         };
         /** PaperSummaryPromotionResponse */
         PaperSummaryPromotionResponse: {
@@ -1076,20 +1220,37 @@ export interface components {
         };
         /** PaperSummaryRunRequest */
         PaperSummaryRunRequest: {
+            /**
+             * Mode
+             * @default reviewed
+             * @enum {string}
+             */
+            mode: "overview" | "reviewed";
             model_reference?: components["schemas"]["ModelReferenceSpec"];
             /** Reasoning Effort */
             reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
         };
         /** PaperSummaryRunResponse */
         PaperSummaryRunResponse: {
+            /** Document Id */
+            document_id?: string | null;
             /** Prompt Revision */
             prompt_revision: string;
             run: components["schemas"]["RunResponse"];
         };
         /** PaperSummaryVersionResponse */
         PaperSummaryVersionResponse: {
+            /** Canonical Path */
+            canonical_path?: string | null;
+            /** Canonical Updated */
+            canonical_updated?: boolean | null;
             /** Citation Count */
             citation_count: number;
+            /** Content Hash */
+            content_hash?: string | null;
+            coverage?: components["schemas"]["PaperSummaryCoverageResponse"] | null;
+            /** Coverage Complete */
+            coverage_complete?: boolean | null;
             /**
              * Created At
              * Format: date-time
@@ -1097,16 +1258,37 @@ export interface components {
             created_at: string;
             /** Document Id */
             document_id: string;
+            /** Evidence Path */
+            evidence_path?: string | null;
+            /** Extraction Hash */
+            extraction_hash?: string | null;
             /** Id */
             id: string;
+            /** Mode */
+            mode?: ("overview" | "reviewed") | null;
+            /** Model */
+            model?: components["schemas"]["PaperSummaryModelResponse"] | string | null;
+            /**
+             * Next Offset
+             * @default 0
+             */
+            next_offset: number;
+            /** Next Start */
+            next_start?: number | null;
             /** Path */
             path: string;
             /** Prompt Revision */
             prompt_revision: string | null;
+            /** Review Complete */
+            review_complete?: boolean | null;
             /** Review Summary */
             review_summary: string;
             /** Run Id */
             run_id: string;
+            /** Source Hash */
+            source_hash?: string | null;
+            /** Source Version */
+            source_version?: string | null;
             /** Status */
             status: string;
         };
@@ -1270,6 +1452,53 @@ export interface components {
              */
             title: string;
         };
+        /** ResidencyConfigure */
+        ResidencyConfigure: {
+            /** Enabled */
+            enabled: boolean;
+        };
+        /** ResidencyConfirm */
+        ResidencyConfirm: {
+            /**
+             * Externally Loaded
+             * @constant
+             */
+            externally_loaded: true;
+            /** Model */
+            model: string;
+            /**
+             * Session Mode
+             * @default interactive
+             * @enum {string}
+             */
+            session_mode: "interactive" | "batch";
+        };
+        /** ResidencyResponse */
+        ResidencyResponse: {
+            /** Active Requests */
+            active_requests: number;
+            /** Background Queued */
+            background_queued: number;
+            /** Confirmed */
+            confirmed: boolean;
+            /** Enabled */
+            enabled: boolean;
+            /** Interactive Queued */
+            interactive_queued: number;
+            /** Paused */
+            paused: boolean;
+            /** Profile Id */
+            profile_id: string | null;
+            /** Queue */
+            queue: components["schemas"]["InferenceQueueEntry"][];
+            /** Resident Model */
+            resident_model: string | null;
+            /**
+             * Session Mode
+             * @enum {string}
+             */
+            session_mode: "interactive" | "batch";
+        };
         /** RunEpochResponse */
         RunEpochResponse: {
             /** Epoch Index */
@@ -1395,6 +1624,10 @@ export interface components {
             agent_context_compaction_target_tokens: number;
             /** Agent Context High Water Ratio */
             agent_context_high_water_ratio: number;
+            /** Agent Context Model Summary Enabled */
+            agent_context_model_summary_enabled: boolean;
+            /** Agent Context Response Reserve Tokens */
+            agent_context_response_reserve_tokens: number;
             /** Agent Context Window Tokens */
             agent_context_window_tokens: number;
             /** Agent Epoch Max Turns */
@@ -1403,6 +1636,8 @@ export interface components {
             agent_max_epochs: number;
             /** Agent Run Timeout Seconds */
             agent_run_timeout_seconds: number;
+            /** Agent Working Context Tokens */
+            agent_working_context_tokens: number;
             /** Artifacts Dir */
             artifacts_dir: string;
             /** Data Dir */
@@ -1452,6 +1687,10 @@ export interface components {
             agent_context_compaction_target_tokens?: number | null;
             /** Agent Context High Water Ratio */
             agent_context_high_water_ratio?: number | null;
+            /** Agent Context Model Summary Enabled */
+            agent_context_model_summary_enabled?: boolean | null;
+            /** Agent Context Response Reserve Tokens */
+            agent_context_response_reserve_tokens?: number | null;
             /** Agent Context Window Tokens */
             agent_context_window_tokens?: number | null;
             /** Agent Epoch Max Turns */
@@ -1460,6 +1699,8 @@ export interface components {
             agent_max_epochs?: number | null;
             /** Agent Run Timeout Seconds */
             agent_run_timeout_seconds?: number | null;
+            /** Agent Working Context Tokens */
+            agent_working_context_tokens?: number | null;
             /** Default Model References */
             default_model_references?: {
                 [key: string]: components["schemas"]["ModelReferenceSpec"];
@@ -2160,6 +2401,39 @@ export interface operations {
             };
         };
     };
+    start_summary_batch_api_documents_summary_batches_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperSummaryBatchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperSummaryBatchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_document_api_documents__document_id__get: {
         parameters: {
             query?: never;
@@ -2677,6 +2951,26 @@ export interface operations {
             };
         };
     };
+    residency_status_api_providers_inference_residency_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResidencyResponse"];
+                };
+            };
+        };
+    };
     get_provider_api_providers__profile_id__get: {
         parameters: {
             query?: never;
@@ -2792,6 +3086,107 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderModelsResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    configure_residency_api_providers__profile_id__residency_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResidencyConfigure"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResidencyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    confirm_residency_api_providers__profile_id__residency_confirm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResidencyConfirm"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResidencyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    drain_residency_api_providers__profile_id__residency_drain_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResidencyResponse"];
                 };
             };
             /** @description Validation Error */

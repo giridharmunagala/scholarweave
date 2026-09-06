@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+from time import perf_counter
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,6 +33,7 @@ class LLMCallLogger:
         request: Any,
         response: Any = None,
         error: BaseException | None = None,
+        timing: dict[str, float | bool | None] | None = None,
     ) -> None:
         entry: dict[str, Any] = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -44,6 +46,8 @@ class LLMCallLogger:
             entry["error"] = {"type": type(error).__name__, "message": str(error)}
         else:
             entry["response"] = _redact(response)
+        if timing is not None:
+            entry["timing"] = timing
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, self.path.open("a", encoding="utf-8") as log_file:
             log_file.write(json.dumps(entry, ensure_ascii=True, default=str) + "\n")
@@ -63,15 +67,27 @@ class LoggingTransport(httpx.AsyncBaseTransport):
 
         request_body = _decode_body(request.content)
         model = request_body.get("model") if isinstance(request_body, dict) else None
+        started = perf_counter()
+        queue_wait = request.extensions.get("scholarweave_queue_wait_seconds")
+        queue_wait_seconds = float(queue_wait) if queue_wait is not None else None
+        timings: dict[str, float | bool | None] = {
+            "queue_wait_seconds": queue_wait_seconds,
+            "response_headers_seconds": None,
+            "first_byte_seconds": None,
+            "response_complete": False,
+        }
         try:
             response = await self._transport.handle_async_request(request)
+            timings["response_headers_seconds"] = perf_counter() - started
             if response.is_closed:
+                timings["response_complete"] = True
                 self._logger.write(
                     provider=self._provider,
                     model=str(model) if model else None,
                     operation=request.url.path,
                     request=request_body,
                     response=_decode_response_body(response.content),
+                    timing=_completed_timings(timings, started, queue_wait_seconds),
                 )
                 return response
             response.stream = _LoggingStream(
@@ -81,15 +97,19 @@ class LoggingTransport(httpx.AsyncBaseTransport):
                 model=str(model) if model else None,
                 operation=request.url.path,
                 request_body=request_body,
+                started=started,
+                timings=timings,
+                queue_wait_seconds=queue_wait_seconds,
             )
             return response
-        except Exception as exc:
+        except BaseException as exc:
             self._logger.write(
                 provider=self._provider,
                 model=str(model) if model else None,
                 operation=request.url.path,
                 request=request_body,
                 error=exc,
+                timing=_completed_timings(timings, started, queue_wait_seconds),
             )
             raise
 
@@ -109,6 +129,9 @@ class _LoggingStream(httpx.AsyncByteStream):
         model: str | None,
         operation: str,
         request_body: Any,
+        started: float,
+        timings: dict[str, float | bool | None],
+        queue_wait_seconds: float | None,
     ) -> None:
         self._stream = stream
         self._logger = logger
@@ -118,20 +141,30 @@ class _LoggingStream(httpx.AsyncByteStream):
         self._request_body = request_body
         self._chunks: list[bytes] = []
         self._logged = False
+        self._started = started
+        self._timings = timings
+        self._queue_wait_seconds = queue_wait_seconds
 
     async def __aiter__(self):
         try:
             async for chunk in self._stream:
+                # A body byte may be an SSE heartbeat or metadata, not a model token.
+                if chunk and self._timings["first_byte_seconds"] is None:
+                    self._timings["first_byte_seconds"] = perf_counter() - self._started
                 self._chunks.append(chunk)
                 yield chunk
-        except Exception as exc:
+        except BaseException as exc:
             self._log(error=exc)
             raise
         else:
+            self._timings["response_complete"] = True
             self._log()
 
     async def aclose(self) -> None:
-        await self._stream.aclose()
+        try:
+            await self._stream.aclose()
+        finally:
+            self._log()
 
     def _log(self, error: BaseException | None = None) -> None:
         if self._logged:
@@ -144,7 +177,18 @@ class _LoggingStream(httpx.AsyncByteStream):
             request=self._request_body,
             response=_decode_response_body(b"".join(self._chunks)),
             error=error,
+            timing=_completed_timings(self._timings, self._started, self._queue_wait_seconds),
         )
+
+
+def _completed_timings(
+    timings: dict[str, float | bool | None], started: float, queue_wait_seconds: float | None,
+) -> dict[str, float | bool | None]:
+    duration = perf_counter() - started
+    return {
+        **timings, "duration_seconds": duration,
+        "total_duration_seconds": (queue_wait_seconds or 0.0) + duration,
+    }
 
 
 class LockedTransport(httpx.AsyncBaseTransport):
@@ -173,16 +217,29 @@ class ScheduledTransport(httpx.AsyncBaseTransport):
         self,
         transport: httpx.AsyncBaseTransport,
         scheduler: InferenceScheduler,
+        profile_id: str | None = None,
     ) -> None:
         self._transport = transport
         self._scheduler = scheduler
+        self._profile_id = profile_id
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if not _is_llm_endpoint(request.url.path):
             return await self._transport.handle_async_request(request)
 
-        lease = self._scheduler.request()
+        body = _decode_body(request.content)
+        model = body.get("model") if isinstance(body, dict) else None
+        endpoint = next(suffix for suffix in ("/chat/completions", "/embeddings", "/responses")
+                        if request.url.path.endswith(suffix))
+        server_url = str(request.url.copy_with(
+            path=request.url.path.removesuffix(endpoint), query=None, fragment=None,
+        )).rstrip("/")
+        lease = self._scheduler.request(
+            profile_id=self._profile_id, model=model, server_url=server_url,
+        )
+        queued = perf_counter()
         await lease.__aenter__()
+        request.extensions["scholarweave_queue_wait_seconds"] = perf_counter() - queued
         try:
             response = await self._transport.handle_async_request(request)
         except BaseException:
@@ -202,15 +259,19 @@ class _ScheduledStream(httpx.AsyncByteStream):
     def __init__(self, stream: httpx.AsyncByteStream, lease: Any) -> None:
         self._stream = stream
         self._lease = lease
+        self._closed = False
 
     async def __aiter__(self):
         try:
             async for chunk in self._stream:
                 yield chunk
         finally:
-            await self._lease.release()
+            await self.aclose()
 
     async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         try:
             await self._stream.aclose()
         finally:
@@ -226,6 +287,7 @@ def logged_http_client(
     provider: str,
     request_lock: anyio.Lock | None = None,
     inference_scheduler: InferenceScheduler | None = None,
+    profile_id: str | None = None,
 ) -> httpx.AsyncClient:
     transport: httpx.AsyncBaseTransport = LoggingTransport(
         LLMCallLogger(settings.llm_log_path),
@@ -234,7 +296,7 @@ def logged_http_client(
     if request_lock is not None:
         transport = LockedTransport(transport, request_lock)
     if inference_scheduler is not None:
-        transport = ScheduledTransport(transport, inference_scheduler)
+        transport = ScheduledTransport(transport, inference_scheduler, profile_id)
     return httpx.AsyncClient(
         transport=transport,
         timeout=settings.request_timeout_seconds,

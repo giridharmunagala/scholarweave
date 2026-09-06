@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from sqlalchemy.orm import Session, sessionmaker
@@ -40,7 +41,11 @@ from backend.tools.catalog import create_tool_catalog
 from backend.tools.runtime import ApplicationToolRuntime
 from backend.workspace.service import WorkspaceService
 from backend.workspace.repository import WorkspaceRepository
-from backend.documents.summaries import PaperSummaryService
+from backend.documents.summaries import (
+    PAPER_SUMMARY_COMPLETION_POLICY_ID,
+    PaperSummaryService,
+    validate_paper_summary_completion,
+)
 
 
 @dataclass(slots=True)
@@ -190,6 +195,9 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         inference_scheduler=inference_scheduler,
         completion_validators={
             PAPER_WORK_COMPLETION_POLICY_ID: validate_paper_work_completion,
+            PAPER_SUMMARY_COMPLETION_POLICY_ID: partial(
+                validate_paper_summary_completion, workspace=workspace
+            ),
         },
     )
     conversation_turns = ConversationTurnService(

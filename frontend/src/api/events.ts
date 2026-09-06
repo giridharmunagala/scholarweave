@@ -35,6 +35,8 @@ export const RUN_EVENT_TYPES = [
   'tool.attempt.failed',
   'tool.result.stored',
   'usage.updated',
+  'context.sized',
+  'context.prepared',
   'context.compaction_started',
   'context.compacted',
   'context.compaction_failed',

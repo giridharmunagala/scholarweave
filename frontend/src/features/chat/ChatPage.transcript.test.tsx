@@ -528,6 +528,7 @@ describe('chat transcript detail', () => {
       web_enabled: true,
       deep_work: false,
       fast_answer: true,
+      research_mode: 'learn',
       web_search_limit: 4,
       context_window_tokens: 131072,
     });
@@ -558,8 +559,74 @@ describe('chat transcript detail', () => {
       web_enabled: true,
       deep_work: true,
       fast_answer: false,
+      research_mode: 'review',
     });
     expect(deepWork.disabled).toBe(true);
+    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
+    expect(mode.value).toBe('review');
+    expect(mode.disabled).toBe(true);
+  });
+
+  it('switches from reviewed research to offline sourced paper Q&A without fast-web restrictions', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
+    expect(mode.value).toBe('learn');
+    expect(Array.from(mode.options, (option) => option.value)).toEqual([
+      'learn', 'understand', 'review',
+    ]);
+    await act(async () => {
+      mode.value = 'review';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(mode.title).toContain('require cited summaries plus durable paper notes');
+    await act(async () => {
+      mode.value = 'learn';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+      container.querySelector<HTMLButtonElement>('[aria-label="Toggle web access"]')!.click();
+    });
+    await send('What does equation 2 mean?');
+    expect(lastMessageRequest).toMatchObject({
+      research_mode: 'learn',
+      fast_answer: false,
+      web_enabled: false,
+      deep_work: false,
+    });
+  });
+
+  it('selects understanding a paper without requiring a full review', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
+    await act(async () => {
+      mode.value = 'understand';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    await send('Explain the assumptions and prerequisites');
+    expect(lastMessageRequest).toMatchObject({
+      research_mode: 'understand',
+      fast_answer: false,
+      deep_work: false,
+    });
+  });
+
+  it('starts a new chat in learn mode even after selecting deep work', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Toggle deep work"]')!.click();
+    });
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!.value)
+      .toBe('review');
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('.new-chat')!.click();
+    });
+    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
+    expect(mode.value).toBe('learn');
+    expect(mode.disabled).toBe(false);
+    expect(container.querySelector('[aria-label="Toggle deep work"]')?.getAttribute('aria-pressed'))
+      .toBe('false');
   });
 
   it('keeps completed activity out of the transcript as the thread grows', async () => {
@@ -593,6 +660,64 @@ describe('chat transcript detail', () => {
     expect(container.querySelectorAll('.activity-sidebar .turn-timeline')).toHaveLength(TURNS.length);
     expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
     expect(text(container.querySelectorAll('.turn-timeline')[0])).toContain('Searched');
+  });
+
+  it('shows estimated request budget in the existing context pill and prioritizes compaction', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    const source = server.listeners.get('run-1');
+    await act(async () => {
+      source?.deliver({
+        sequence: 1,
+        event_type: 'context.prepared',
+        payload: {
+          agent_name: 'Researcher',
+          estimated_input_tokens: 5600,
+          input_budget_tokens: 12000,
+          tool_schema_tokens: 3400,
+          response_headroom_tokens: 2048,
+        },
+      });
+    });
+    await flush(2);
+    const indicator = () => container.querySelector('.compaction-indicator');
+    expect(text(indicator())).toContain('Context ~5,600 / 12,000');
+    expect(indicator()?.getAttribute('title')).toContain('Tool schemas: ~3,400');
+    expect(indicator()?.getAttribute('title')).toContain('Response headroom: 2,048');
+    await act(async () => {
+      source?.deliver({
+        sequence: 2, event_type: 'context.compaction_started',
+        payload: { estimated_tokens_before: 9000 },
+      });
+    });
+    await flush(2);
+    expect(text(indicator())).toContain('Compacting context');
+    await act(async () => {
+      source?.deliver({
+        sequence: 3, event_type: 'context.compacted',
+        payload: { estimated_tokens_before: 9000, estimated_tokens_after: 6000 },
+      });
+      source?.deliver({
+        sequence: 4, event_type: 'context.prepared',
+        payload: { estimated_input_tokens: 6000, input_budget_tokens: 12000 },
+      });
+    });
+    await flush(2);
+    expect(text(indicator())).toContain('Context compacted · ~6,000 / 12,000');
+  });
+
+  it('ignores incomplete context-size telemetry instead of showing NaN', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    await act(async () => {
+      server.listeners.get('run-1')?.deliver({
+        sequence: 1, event_type: 'context.prepared', payload: { estimated_input_tokens: 'bad' },
+      });
+    });
+    await flush(2);
+    expect(container.querySelector('.compaction-indicator')).toBeNull();
   });
 
   it('shows live reasoning in the transcript then moves it to activity', async () => {

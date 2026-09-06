@@ -12,6 +12,8 @@ describe('run event subscription', () => {
         'run.cancelled',
         'run.policy.rejected',
         'context.compacted',
+        'context.sized',
+        'context.prepared',
       ]),
     );
     expect(RUN_EVENT_TYPES).not.toEqual(

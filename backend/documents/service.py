@@ -105,6 +105,24 @@ class DocumentService:
     def get_document(self, document_id: str) -> Document | None:
         return self.repository.get(document_id)
 
+    def get_document_artifacts(self, document_id: str) -> list[Artifact]:
+        return self.repository.get_artifacts(document_id)
+
+    def source_revision(self, document_id: str) -> dict[str, str]:
+        return self.repository.source_revision(document_id)
+
+    def summary_source(self, document_id: str, max_chars: int) -> list[dict[str, Any]] | None:
+        return self.repository.summary_source(document_id, max_chars)
+
+    def summary_excerpt(self, document_id: str, max_chars: int) -> dict[str, Any]:
+        return self.repository.summary_excerpt(document_id, max_chars)
+
+    def summary_evidence(self, document_id: str, source_version: str) -> dict[str, Any] | None:
+        return self.repository.summary_evidence(document_id, source_version)
+
+    def save_summary_evidence(self, document_id: str, evidence: dict[str, Any]) -> None:
+        self.repository.save_summary_evidence(document_id, evidence)
+
     def get_document_details(
         self,
         document_id: str,

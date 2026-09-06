@@ -105,3 +105,11 @@ class DocumentChunk(Base, TimestampMixin):
     metadata_json: Mapped[Any] = mapped_column(JSONText, default=dict)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
+
+
+class PaperEvidence(Base, TimestampMixin):
+    __tablename__ = "paper_evidence"
+
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id"), primary_key=True)
+    source_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    content_json: Mapped[Any] = mapped_column(JSONText, default=dict)

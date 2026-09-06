@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../../shared/components/Icons';
 import { Panel, StatusPill } from '../../shared/components/Ui';
+import { ResidencyPanel } from './ResidencyPanel';
 import {
   REASONING_EFFORTS,
   type ReasoningEffort,
@@ -303,6 +304,7 @@ export function ProviderProfilesPanel({
           <div><button className="button" type="button" disabled={busy === 'create'} onClick={() => void create()}>{busy === 'create' ? 'Creating…' : 'Create profile'}</button></div>
         </div>
       ) : null}
+      <ResidencyPanel providers={providers} />
       <div className="card-grid">
         {providers.map((provider) => {
           return (

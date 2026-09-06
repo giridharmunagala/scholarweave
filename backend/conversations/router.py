@@ -78,6 +78,7 @@ async def send_research_message(
         web_enabled=payload.web_enabled,
         deep_work=payload.deep_work,
         fast_answer=payload.fast_answer,
+        research_mode=payload.research_mode,
         web_search_limit=payload.web_search_limit,
         context_window_tokens=payload.context_window_tokens,
     )
@@ -140,6 +141,8 @@ async def send_deep_work_message(
         payload.content,
         reasoning_effort=payload.reasoning_effort,
         web_enabled=payload.web_enabled,
+        research_mode=payload.research_mode,
+        fast_answer=payload.fast_answer,
         context_window_tokens=payload.context_window_tokens,
     )
     return ConversationMessageResponse(

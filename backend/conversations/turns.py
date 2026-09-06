@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import re
 from typing import Any
 
 from backend.agents.blueprint import (
@@ -11,6 +12,7 @@ from backend.agents.blueprint import (
 )
 from backend.agents.compiler import AgentCompiler
 from backend.conversations.service import ConversationService
+from backend.conversations.schemas import ResearchMode
 from backend.core.errors import ValidationError
 from backend.runs.service import RunService
 from backend.prompting.registry import PromptRegistry, default_prompt_registry
@@ -41,6 +43,31 @@ WORK_PLAN_TOOL_IDS = (
 AUTONOMOUS_TOOL_IDS = RESEARCH_TOOL_IDS
 EXTERNAL_TOOL_IDS = {"search-sources", "acquire-source"}
 FAST_ANSWER_TOOL_IDS = {"search-sources", "acquire-source", "read-web-page"}
+
+
+def _resolve_research_mode(
+    research_mode: ResearchMode | None,
+    *,
+    deep_work: bool = False,
+    fast_answer: bool = False,
+) -> ResearchMode:
+    if research_mode not in {None, "learn", "understand", "review"}:
+        raise ValidationError("Unknown research mode.")
+    if deep_work and fast_answer:
+        raise ValidationError("Fast Answer is unavailable in a Deep Work conversation.")
+    if deep_work and research_mode not in {None, "review"}:
+        raise ValidationError("Deep Work requires review mode.")
+    if fast_answer and research_mode not in {None, "learn"}:
+        raise ValidationError("Fast Answer requires learn mode.")
+    return research_mode or ("learn" if fast_answer else "review")
+
+
+def _research_mode_metadata(research_mode: ResearchMode) -> dict[str, Any]:
+    return {
+        "research_mode": research_mode,
+        "paper_require_summary": research_mode == "review",
+        "paper_require_notes": research_mode == "review",
+    }
 
 
 def _resolve_prompts(prompts: PromptRegistry | None) -> PromptRegistry:
@@ -124,6 +151,7 @@ class ConversationTurnService:
         web_enabled: bool = True,
         deep_work: bool = False,
         fast_answer: bool = False,
+        research_mode: ResearchMode | None = None,
         web_search_limit: int = 1,
         message: str = "",
         context_window_tokens: int | None = None,
@@ -131,8 +159,9 @@ class ConversationTurnService:
     ):
         record = self.get_conversation(conversation_id)
         deep_work = deep_work or record.kind == "deep_work"
-        if deep_work and fast_answer:
-            raise ValidationError("Fast Answer is unavailable in a Deep Work conversation.")
+        research_mode = _resolve_research_mode(
+            research_mode, deep_work=deep_work, fast_answer=fast_answer,
+        )
         first_turn = (
             not record.last_message_preview.strip()
             if first_turn is None
@@ -150,6 +179,7 @@ class ConversationTurnService:
                 record.model_reference_json,
                 web_enabled=web_enabled,
                 fast_answer=fast_answer,
+                research_mode=research_mode,
                 web_search_limit=web_search_limit,
                 prompts=self._prompts,
                 first_turn=first_turn,
@@ -196,29 +226,36 @@ class ConversationTurnService:
         web_enabled: bool = True,
         deep_work: bool = False,
         fast_answer: bool = False,
+        research_mode: ResearchMode | None = None,
         web_search_limit: int = 1,
         context_window_tokens: int | None = None,
     ):
         record = self.get_conversation(conversation_id)
         first_turn = not record.last_message_preview.strip()
         deep_work = deep_work or record.kind == "deep_work"
+        research_mode = _resolve_research_mode(
+            research_mode, deep_work=deep_work, fast_answer=fast_answer,
+        )
+        compiled = self.compile_conversation(
+            conversation_id,
+            web_enabled=web_enabled,
+            deep_work=deep_work,
+            fast_answer=fast_answer,
+            research_mode=research_mode,
+            web_search_limit=web_search_limit,
+            message=message,
+            context_window_tokens=context_window_tokens,
+            first_turn=first_turn,
+        )
         if deep_work and record.kind == "autonomous":
             self._conversations.promote_to_deep_work(conversation_id)
         return self._start_message(
             conversation_id,
             message,
-            compiled=self.compile_conversation(
-                conversation_id,
-                web_enabled=web_enabled,
-                deep_work=deep_work,
-                fast_answer=fast_answer,
-                web_search_limit=web_search_limit,
-                message=message,
-                context_window_tokens=context_window_tokens,
-                first_turn=first_turn,
-            ),
+            compiled=compiled,
             reasoning_effort=reasoning_effort,
             runtime_metadata={
+                **_research_mode_metadata(research_mode),
                 **({"autonomous_work": True} if deep_work else {}),
                 **(
                     {
@@ -239,8 +276,11 @@ class ConversationTurnService:
         *,
         reasoning_effort: ReasoningEffort | None = None,
         web_enabled: bool = True,
+        research_mode: ResearchMode | None = None,
+        fast_answer: bool = False,
         context_window_tokens: int | None = None,
     ):
+        _resolve_research_mode(research_mode, deep_work=True, fast_answer=fast_answer)
         first_turn = not self.get_deep_work_conversation(
             conversation_id
         ).last_message_preview.strip()
@@ -256,6 +296,7 @@ class ConversationTurnService:
             ),
             reasoning_effort=reasoning_effort,
             runtime_metadata={
+                **_research_mode_metadata("review"),
                 "autonomous_work": True,
                 "allow_conversation_title_update": first_turn,
             },
@@ -313,14 +354,24 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
     )
     if not activity:
         return
+    if (
+        context.metadata.get("research_mode") in {"learn", "understand"}
+        and not context.metadata.get("autonomous_work")
+    ):
+        _validate_sourced_paper_answer(context, activity)
+        return
 
     actions_by_document: dict[str, list[str]] = {}
     titles: dict[str, str] = {}
     for item in activity:
         document_id = str(item["document_id"])
-        actions_by_document.setdefault(document_id, []).append(
-            str(item.get("action") or "")
-        )
+        action = str(item.get("action") or "")
+        if action == "summary_saved" and (
+            item.get("coverage_complete") is False
+            or item.get("review_complete") is False
+        ):
+            action = "summary_partial"
+        actions_by_document.setdefault(document_id, []).append(action)
         titles[document_id] = str(item.get("title") or document_id)
 
     issues: list[str] = []
@@ -360,21 +411,67 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
         )
 
 
+def _validate_sourced_paper_answer(
+    context: ScholarWeaveContext,
+    activity: list[dict[str, Any]],
+) -> None:
+    documents: dict[str, list[dict[str, Any]]] = {}
+    for item in activity:
+        documents.setdefault(str(item["document_id"]), []).append(item)
+    output = context.metadata.get("completion_output")
+    issues: list[str] = []
+    for document_id, items in documents.items():
+        reads = [item for item in items if item.get("action") == "read"]
+        title = str(items[-1].get("title") or document_id)
+        if not reads:
+            issues.append(f"{title} ({document_id}): read relevant paper passages")
+            continue
+        citations = {
+            citation
+            for item in reads
+            for citation in (
+                item["citations"] if isinstance(item.get("citations"), list) else []
+            )
+            if isinstance(citation, str) and citation.strip()
+        }
+        if not citations:
+            issues.append(
+                f"{title} ({document_id}): obtain page or chunk citations from a source read"
+            )
+        elif not isinstance(output, str) or not any(
+            re.search(r"(?<!\w)" + re.escape(citation) + r"(?!\w)", output)
+            for citation in citations
+        ):
+            issues.append(
+                f"{title} ({document_id}): cite a supplied page or chunk in the final answer"
+            )
+    if issues:
+        raise ValidationError(
+            "Paper Q&A requires source reading and a cited answer, not a full summary or notes.",
+            issues=issues,
+        )
+
+
 def research_blueprint(
     model_reference: dict,
     *,
     web_enabled: bool = True,
     fast_answer: bool = False,
+    research_mode: ResearchMode | None = None,
     web_search_limit: int = 1,
     prompts: PromptRegistry | None = None,
     first_turn: bool = False,
 ) -> AgentBlueprint:
     model = ModelReferenceSpec.model_validate(model_reference or {})
+    research_mode = _resolve_research_mode(research_mode, fast_answer=fast_answer)
     if fast_answer and not web_enabled:
         raise ValueError("Fast-answer mode requires web access.")
     prompts = _resolve_prompts(prompts)
     tools = _application_tools(web_enabled=web_enabled, first_turn=first_turn)
-    instructions = prompts.render("research")
+    instructions = (
+        f"{prompts.render('research')}\n\n"
+        f"Selected research mode: {research_mode}."
+    )
     if fast_answer:
         allowed_tool_ids = {
             *FAST_ANSWER_TOOL_IDS,

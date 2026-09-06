@@ -7,6 +7,7 @@ import pytest
 
 from backend.providers.logging import ScheduledTransport
 from backend.providers.inference import InferenceScheduler
+from backend.core.errors import ConflictError
 
 
 @pytest.mark.anyio
@@ -151,3 +152,136 @@ async def test_opt_in_parallel_group_runs_up_to_its_limit_inside_exclusive_lane(
         await asyncio.gather(*(inference_call() for _ in range(9)))
 
     assert maximum_active == 4
+
+
+@pytest.mark.anyio
+async def test_priority_is_fifo_with_bounded_background_fairness() -> None:
+    scheduler = InferenceScheduler()
+    order = []
+    lease = scheduler.request(priority="background")
+    await lease.__aenter__()
+
+    async def run(name, priority):
+        async with scheduler.request(priority=priority):
+            order.append(name)
+
+    tasks = [asyncio.create_task(run("background", "background"))]
+    tasks += [asyncio.create_task(run(f"chat-{n}", "interactive")) for n in range(5)]
+    await asyncio.sleep(0)
+    await lease.release()
+    await asyncio.gather(*tasks)
+    assert order == ["chat-0", "chat-1", "chat-2", "background", "chat-3", "chat-4"]
+
+
+@pytest.mark.anyio
+async def test_residency_waits_for_explicit_drained_confirmation_and_cancellation() -> None:
+    scheduler = InferenceScheduler()
+    scheduler.restore("local", "main")
+    assert not scheduler.confirmed
+    await scheduler.confirm("local", "main", "interactive")
+    lease = scheduler.request(profile_id="local", model="main")
+    await lease.__aenter__()
+    order = []
+
+    async def run(model):
+        async with scheduler.request(profile_id="local", model=model):
+            order.append(model)
+
+    wrong = asyncio.create_task(run("small"))
+    cancelled = asyncio.create_task(run("other"))
+    await asyncio.sleep(0)
+    assert scheduler.snapshot()["queue"][0]["blocked_by_residency"]
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    assert len(scheduler.snapshot()["queue"]) == 1
+    with pytest.raises(ConflictError):
+        await scheduler.confirm("local", "small", "batch")
+    drain = asyncio.create_task(scheduler.begin_switch("local"))
+    await asyncio.sleep(0)
+    assert not drain.done()
+    assert scheduler.paused
+    await lease.release()
+    await drain
+    assert not wrong.done()
+    await scheduler.confirm("local", "small", "batch")
+    await asyncio.wait_for(wrong, 1)
+    assert order == ["small"]
+
+
+@pytest.mark.anyio
+async def test_wrong_model_does_not_block_resident_or_reach_transport() -> None:
+    scheduler = InferenceScheduler()
+    scheduler.restore("local", None)
+    await scheduler.confirm("local", "main", "interactive")
+    calls = []
+
+    async def provider(request):
+        calls.append(request.content)
+        return httpx.Response(200, json={"ok": True})
+
+    transport = ScheduledTransport(httpx.MockTransport(provider), scheduler, "local")
+    async with httpx.AsyncClient(transport=transport, base_url="http://local/v1") as client:
+        wrong = asyncio.create_task(client.post("/chat/completions", json={"model": "small"}))
+        await asyncio.sleep(0)
+        await asyncio.wait_for(client.post("/chat/completions", json={"model": "main"}), 1)
+        assert len(calls) == 1
+        wrong.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await wrong
+    assert scheduler.snapshot()["queue"] == []
+
+
+@pytest.mark.anyio
+async def test_cancelled_drain_stays_paused_and_single_gpu_ignores_parallel_hint() -> None:
+    scheduler = InferenceScheduler()
+    scheduler.restore("local", None)
+    await scheduler.confirm("local", "main", "batch")
+    lease = scheduler.request(profile_id="local", model="main")
+    await lease.__aenter__()
+    drain = asyncio.create_task(scheduler.begin_switch("local"))
+    await asyncio.sleep(0)
+    drain.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await drain
+    await lease.release()
+    assert scheduler.paused and not scheduler.confirmed
+    await scheduler.confirm("local", "main", "batch")
+    maximum = active = 0
+
+    async def run():
+        nonlocal active, maximum
+        async with scheduler.parallel("batch", 4):
+            async with scheduler.request(profile_id="local", model="main"):
+                active += 1
+                maximum = max(active, maximum)
+                await asyncio.sleep(0)
+                active -= 1
+
+    await asyncio.gather(*(run() for _ in range(4)))
+    assert maximum == 1
+
+
+@pytest.mark.anyio
+async def test_stream_is_closed_before_cancelled_request_releases_lane() -> None:
+    scheduler = InferenceScheduler()
+    closed = False
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"chunk"
+            raise asyncio.CancelledError
+
+        async def aclose(self):
+            nonlocal closed
+            assert scheduler.snapshot()["active_requests"] == 1
+            closed = True
+
+    transport = ScheduledTransport(
+        httpx.MockTransport(lambda request: httpx.Response(200, stream=Stream())), scheduler,
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.post("http://local/v1/chat/completions", json={"model": "main"})
+    assert closed
+    assert scheduler.snapshot()["active_requests"] == 0

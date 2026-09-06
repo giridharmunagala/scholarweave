@@ -1,10 +1,12 @@
 {
   "label": "Read research paper",
-  "description": "Inspect, prepare, or read a bounded cited slice of one local paper. Inspect before broad reading, prepare only when extraction is incomplete, and use pages or chunks to retrieve evidence with stable citations. Keep reads targeted and use the returned next_page or next_start for later slices instead of overlapping or requesting the same content repeatedly.",
+  "description": "Inspect, prepare, search, or read bounded cited evidence from one local paper. Prefer search for a specific claim, method, number or section; it uses the local SQLite full-text index without a model or embeddings call. Hits contain matching excerpts; expand with action=chunks, start=chunk_index and offset=match_offset. Search hits are targeted evidence, not full-paper coverage. Prepare only if extraction is incomplete. Page/chunk outputs fit a character budget: follow both next_page/next_start and next_offset exactly, including continuation within a long item. Do not reread an overlapping range or fetch a giant result reference.",
   "parameter_descriptions": {
     "document_id": "The exact local paper document ID returned by search_research_library; do not use an arXiv ID, title, path, or the string \"null\".",
-    "action": "inspect for structure/status, prepare for extraction, pages for page slices, or chunks for indexed chunks.",
+    "action": "inspect for structure/status, prepare for extraction, search for ranked local content matches, pages for cited page slices, or chunks for indexed chunks.",
     "start": "For pages, the 1-based page number (0 also means the first page); for chunks, the zero-based chunk offset. Use JSON null for inspect or prepare.",
-    "limit": "Number of pages or chunks to return, from 1 to 10."
+    "limit": "Maximum pages, chunks, or search hits, from 1 to 10; fewer may fit the output budget.",
+    "query": "Specific search terms for action=search. Use null for other actions.",
+    "offset": "Character offset within the first page/chunk, from the preceding next_offset. Use null or 0 for a new range and for inspect, prepare, or search."
   }
 }

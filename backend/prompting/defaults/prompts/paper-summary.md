@@ -1,27 +1,22 @@
-Create a technically precise, self-contained summary of the one supplied paper. Work independently
-from the calling agent and use the same model selected for that agent. For a fresh job, do not read
-the empty run-scoped checkpoint before starting. After an interruption or recovery, read the
-checkpoint from offset 0 and reuse its existing content. If a ScholarWeave context-compaction
-checkpoint appears during the job, reread this paper-summary checkpoint before continuing. Inspect
-the paper. If its extracted text is unreadable, prepare it once.
+Create a technically precise, self-contained summary of the supplied paper, in this single model job.
+If the instruction already contains the complete short-paper extraction, draft directly from it:
+do not inspect or reread; the final save checkpoints that evidence and its full coverage.
+Otherwise inspect once. Prepare only if extraction is unreadable. Inspection reports reusable
+source-versioned evidence: read it in bounded slices when available, then resume its exact cursor.
+An empty checkpoint needs no read. Do not blindly repeat prior source reads after compaction.
 
-Read the paper in at most five batches with `read_paper_summary_batch`. Never issue batch reads in
-parallel. The runtime permits exactly one outstanding batch and rejects another batch until the
-current batch has been durably checkpointed. The first pages call returns up to 10 pages. Follow the
-returned `next_start`; later calls include the prior batch's final page plus up to 10 new pages, so
-the overlap preserves section continuity. Stop after the fifth batch even when the paper is longer.
-If page reads are unavailable, use the same one-chunk-overlap pattern for at most five batches.
-After each batch, immediately append a compact structured evidence record of roughly 250-500 words.
-Include the covered page/chunk range, argument and mechanisms, material findings, exact numbers and
-comparison conditions, citations, limitations, unresolved questions, and what remains unread. Do
-not copy raw paper text or draft final prose into the checkpoint. Once the checkpoint append succeeds and reports the verified checkpoint path, the next model turn
-removes that batch's raw paper, retained-result output, checkpoint-read output, and appended content
-from context, leaving only a compact checkpoint path and coverage receipt. For papers of 50 pages or fewer, continue until
-`has_more` is false; for longer papers, treat the first 50 pages as sufficient and do not read the
-remainder. Follow a truncated result's `result_ref` with `read_tool_result` until that summary batch
-is understood before checkpointing it.
+Use adaptive character-budgeted batches with `read_paper_summary_batch`, always serially.
+There is no arbitrary page or batch cap. Follow both `next_start` and `next_offset` exactly;
+a long page/chunk can span calls. Do not overlap ranges or skip their remaining characters.
+After each batch, immediately append compact structured evidence, usually 100-300 words:
+claims, mechanisms, exact numbers and comparison conditions, citations, limitations, unresolved
+questions, and unread coverage. Preserve cross-boundary questions for the next batch rather than
+rereading an overlap. Do not copy raw text into checkpoints. A verified checkpoint makes prior raw
+text discardable; it is durable evidence, not merely a run artifact or a replacement for user notes.
+Continue until `has_more` is false. If the actual run/turn budget is low, reserve time to save an
+explicitly partial summary that states unread coverage; never claim the first 50 pages suffice.
 
-The final checkpoint append returns `final_checkpoint`; draft directly from that field without a
+The final checkpoint append returns `final_checkpoint` when it fits; draft from that field without a
 separate checkpoint read. Only reread the checkpoint in bounded slices when resuming or when
 `final_checkpoint` is unavailable. Synthesize from that durable evidence record within this single
 agent job. Preserve exact numbers, units, comparison conditions, and page or chunk citations. Every
@@ -41,5 +36,5 @@ Before saving, self-review the complete draft for contribution fidelity, method 
 assumptions, experimental coverage, numerical accuracy, citation support, limitations, uncertainty,
 and unsupported extrapolation. Correct every defect you find. Call `save_paper_summary_version`
 exactly once with the final Markdown and a concise `review_summary` describing the checks performed
-and any remaining evidence limits. Do not delegate any portion of the summary. The checkpoint is
-temporary run state, not a user-facing summary or category-wise partial summary.
+and any remaining evidence limits. Do not delegate or run parallel model workers. Evidence records
+remain reusable across runs only for the same source/extraction version; they never overwrite notes.

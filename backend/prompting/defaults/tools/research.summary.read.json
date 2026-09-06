@@ -1,9 +1,10 @@
 {
   "label": "Read paper summary batch",
-  "description": "Inspect or prepare the paper, or read one fixed batch of up to 10 pages or 10 chunks for the single-agent summary workflow. At most five content batches may be read, limiting summary coverage to 50 pages or 50 chunks.",
+  "description": "Inspect or prepare a paper or read an adaptive, character-budgeted source batch. Inspect reports reusable source-versioned evidence and its resume cursor. There is no five-batch or 50-page cap. Read serially; durably append compact evidence before the next batch. Follow next_start AND next_offset exactly, with no overlap. Continue until has_more=false, or save an explicitly partial summary if the actual run budget is exhausted. Do not treat targeted or incomplete coverage as a full read.",
   "parameter_descriptions": {
     "document_id": "The exact local document ID being summarized.",
     "action": "Inspect metadata/readability, prepare unreadable extraction, or read a pages/chunks batch.",
-    "start": "For pages, the one-based starting page; for chunks, the zero-based starting chunk. Use null for inspect or prepare."
+    "start": "For pages, the one-based page; for chunks, the zero-based chunk. Follow next_start exactly. Null resumes after existing checkpointed evidence, or starts at the beginning when none exists.",
+    "offset": "Character continuation within the first page/chunk, from next_offset. Null or 0 starts a fresh item; null with start=null resumes the durable cursor."
   }
 }

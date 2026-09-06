@@ -91,3 +91,33 @@ class ProviderVerifyResponse(ProviderSchema):
     reachable: bool
     tool_calling: bool
     detail: str
+
+
+class ResidencyConfigure(ProviderSchema):
+    enabled: bool
+
+
+class ResidencyConfirm(ProviderSchema):
+    model: str = Field(min_length=1, max_length=255)
+    externally_loaded: Literal[True]
+    session_mode: Literal["interactive", "batch"] = "interactive"
+
+
+class InferenceQueueEntry(ProviderSchema):
+    profile_id: str | None
+    model: str | None
+    priority: Literal["interactive", "background"]
+    blocked_by_residency: bool
+
+
+class ResidencyResponse(ProviderSchema):
+    profile_id: str | None
+    enabled: bool
+    resident_model: str | None
+    confirmed: bool
+    paused: bool
+    active_requests: int
+    session_mode: Literal["interactive", "batch"]
+    queue: list[InferenceQueueEntry]
+    interactive_queued: int
+    background_queued: int

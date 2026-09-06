@@ -1,9 +1,9 @@
 {
   "label": "Save paper summary version",
-  "description": "Save one completed, self-reviewed, citation-grounded single-paper summary as a new immutable version and update the paper's canonical summary.md. Use this exactly once after reading the paper and checking evidence, whether the summary came from chat or the dedicated paper-summary workflow.",
+  "description": "Save a citation-grounded summary as an immutable version. Complete review status requires contiguous full source coverage; otherwise the reviewed-mode version is explicitly partial. Overview-mode versions remain separate and never replace canonical summary.md. Use once after evidence review, reserving a save turn even when the budget cannot cover the whole paper. A final outstanding batch can be checkpointed by this save. Identical replay returns the original version; different content cannot overwrite it. Reviewed mode updates canonical summary.md only if it has not changed since the dedicated job began. User notes are never modified.",
   "parameter_descriptions": {
     "document_id": "The exact local document ID being summarized.",
-    "content": "The complete final summary Markdown with valid paper page or chunk citations.",
+    "content": "The reviewed summary Markdown with page/chunk citations; explicitly state unread coverage and limits when partial.",
     "review_summary": "A concise record of the reviewer checks completed and any remaining evidence limitations."
   }
 }

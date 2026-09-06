@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import hashlib
+import threading
 import re
 import uuid
 from datetime import datetime, timezone
@@ -18,6 +20,7 @@ from backend.documents import DocumentService
 from backend.documents.formatting import manifest_pages
 from backend.documents.retrieval import RetrievalService
 from backend.agents.context import ScholarWeaveContext, ToolReceipt
+from backend.agents.harness import current_tool_model_identity
 from backend.runs.repository import LeaseOwnershipError, RunRepository
 from backend.utils import to_jsonable
 from backend.persistence.files import SafeStorage
@@ -26,6 +29,7 @@ from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService, WebSourceUnavailable
 from backend.tools.catalog import APPLICATION_TOOL_HANDLERS
 from backend.tools.failures import classify_tool_error
+from backend.tools.policy import ToolInputError, operation_policy, retry_delay
 from backend.workspace.service import WorkspaceService
 
 
@@ -43,6 +47,19 @@ _PAPER_CITATION_PATTERN = re.compile(
 
 def _paper_summary_citations(content: str) -> set[str]:
     return {match.group(0) for match in _PAPER_CITATION_PATTERN.finditer(content)}
+
+
+def _paper_model_provenance(context: ScholarWeaveContext) -> dict[str, Any] | None:
+    task_model = current_tool_model_identity()
+    dedicated = context.metadata.get("paper_summary_model")
+    if task_model is not None:
+        if isinstance(dedicated, dict) and all(
+            dedicated.get(key) == task_model.get(key) for key in ("model", "provider_kind")
+        ):
+            return {**dedicated, **task_model}
+        return dict(task_model)
+    model = dedicated or context.metadata.get("active_model")
+    return dict(model) if isinstance(model, dict) else None
 
 
 def _nullable_tool_string(
@@ -270,6 +287,8 @@ class ApplicationToolRuntime:
         self._prompts = prompts
         self._runs = run_repository
         self._paper_summary_lock = asyncio.Lock()
+        self._summary_save_lock = threading.RLock()
+        self._mutation_lock = asyncio.Lock()
 
     async def invoke(
         self,
@@ -289,11 +308,18 @@ class ApplicationToolRuntime:
             if self._runs is not None and self._runs.exists(context.run_id)
             else None
         )
-        safe_retry = _is_safe_read(catalog_id)
-        attempts = self._settings.tool_read_retry_attempts if safe_retry else 1
+        policy = operation_policy(catalog_id, arguments)
+        attempts = self._settings.tool_read_retry_attempts if policy.safe_retry else 1
+        loop = asyncio.get_running_loop()
+        timeout = self._settings.tool_call_timeout_seconds
+        if policy.timeout_seconds is not None:
+            timeout = min(timeout, policy.timeout_seconds)
+        deadline = loop.time() + timeout
         provider_call_id = tool_call_id
         call_id = f"invoke-{uuid.uuid4()}"
         for attempt_number in range(1, attempts + 1):
+            if loop.time() >= deadline:
+                raise TimeoutError("The tool operation deadline was exhausted.")
             if journal is not None and journal.cancel_requested(context.run_id):
                 raise asyncio.CancelledError
             lease_getter = getattr(context.event_sink, "current_lease", None)
@@ -334,22 +360,26 @@ class ApplicationToolRuntime:
                     "attempt": attempt_number,
                 },
             )
+            dispatched = False
+            mutation_locked = False
             try:
-                if inspect.iscoroutinefunction(handler):
-                    result = await asyncio.wait_for(
-                        handler(arguments, context),
-                        timeout=self._settings.tool_call_timeout_seconds,
-                    )
-                else:
-                    result = await asyncio.wait_for(
-                        asyncio.to_thread(handler, arguments, context),
-                        timeout=self._settings.tool_call_timeout_seconds,
-                    )
-                    if inspect.isawaitable(result):
-                        result = await asyncio.wait_for(
-                            result,
-                            timeout=self._settings.tool_call_timeout_seconds,
+                try:
+                    if policy.mutating:
+                        await asyncio.wait_for(
+                            self._mutation_lock.acquire(),
+                            timeout=max(0.0, deadline - loop.time()),
                         )
+                        mutation_locked = True
+                    if loop.time() >= deadline:
+                        raise TimeoutError("The tool operation deadline was exhausted before dispatch.")
+                    dispatched = True
+                    result = await self._dispatch_tool_handler(
+                        handler, arguments, context,
+                        deadline=deadline, mutating=policy.mutating,
+                    )
+                finally:
+                    if mutation_locked:
+                        self._mutation_lock.release()
                 if journal is not None:
                     max_tokens = (
                         6_000
@@ -391,26 +421,32 @@ class ApplicationToolRuntime:
 
             except asyncio.CancelledError:
                 if attempt is not None:
-                    status = "cancelled" if safe_retry else "unknown_outcome"
+                    unknown = policy.mutating and dispatched
+                    status = "unknown_outcome" if unknown else "cancelled"
                     self._finish_tool_attempt(
                         journal,
                         context,
                         attempt.id,
                         status=status,
                         failure_category=(
-                            "cancelled" if safe_retry else "cancelled_after_dispatch"
+                            "cancelled_after_dispatch" if unknown else "cancelled"
                         ),
                         error=(
                             None
-                            if safe_retry
+                            if not unknown
                             else "Cancellation occurred after a write was dispatched."
                         ),
                     )
                 raise
             except Exception as error:
                 category, transient = classify_tool_error(error)
-                retryable = safe_retry and transient and attempt_number < attempts
-                status = "failed" if safe_retry else "unknown_outcome"
+                delay = retry_delay(error, attempt_number) if policy.safe_retry and transient else 0.0
+                retryable = (
+                    policy.safe_retry and transient and attempt_number < attempts
+                    and delay < deadline - loop.time()
+                )
+                unknown = policy.mutating and dispatched and not isinstance(error, ToolInputError)
+                status = "unknown_outcome" if unknown else "failed"
                 if attempt is not None:
                     self._finish_tool_attempt(
                         journal,
@@ -434,10 +470,54 @@ class ApplicationToolRuntime:
                     },
                 )
                 if retryable:
-                    await asyncio.sleep(0.25 * attempt_number)
+                    await asyncio.sleep(delay)
                     continue
                 raise
         raise RuntimeError("Tool invocation ended without a result.")
+
+    @staticmethod
+    async def _dispatch_tool_handler(
+        handler: Any,
+        arguments: dict[str, Any],
+        context: ScholarWeaveContext,
+        *,
+        deadline: float,
+        mutating: bool,
+    ) -> Any:
+        loop = asyncio.get_running_loop()
+        if inspect.iscoroutinefunction(handler):
+            return await asyncio.wait_for(
+                handler(arguments, context), timeout=max(0.0, deadline - loop.time()),
+            )
+        worker = asyncio.create_task(asyncio.to_thread(handler, arguments, context))
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(worker) if mutating else worker,
+                timeout=max(0.0, deadline - loop.time()),
+            )
+        except (TimeoutError, asyncio.CancelledError):
+            if mutating:
+                # Cancellation cannot stop a Python thread. Keep the mutation lock until
+                # the dispatched write finishes, even under repeated run cancellation.
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        continue
+                    except Exception:
+                        break
+                if not worker.cancelled() and worker.exception() is None:
+                    late_result = worker.result()
+                    if inspect.iscoroutine(late_result):
+                        late_result.close()
+                    elif isinstance(late_result, asyncio.Future):
+                        late_result.cancel()
+            raise
+        if inspect.isawaitable(result):
+            return await asyncio.wait_for(
+                result, timeout=max(0.0, deadline - loop.time()),
+            )
+        return result
 
     @staticmethod
     def _finish_tool_attempt(
@@ -502,20 +582,62 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
+        with self._summary_save_lock:
+            return self._save_paper_summary_version_locked(arguments, context)
+
+    def _save_paper_summary_version_locked(
+        self, arguments: dict[str, Any], context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
         document_id = str(arguments["document_id"]).strip()
         content = str(arguments["content"]).strip()
         review_summary = str(arguments["review_summary"]).strip()
+        mode = context.metadata.get("paper_summary_mode", "reviewed")
+        citations = _paper_summary_citations(content)
+        if mode == "overview" and not citations:
+            raise ToolInputError(
+                "Include at least one source citation in brackets, such as [p.1] or [chunk 0], "
+                "using a page or chunk supplied in the paper evidence."
+            )
         document = self._documents.get_document(document_id)
         if document is None:
             raise ValueError("Paper was not found.")
         self._require_paper_read(context, document_id)
-        citations = _paper_summary_citations(content)
+        state = self._paper_summary_state(context, document_id)
+        if state.get("pending_checkpoint"):
+            self._append_summary_evidence(context, document_id, content)
+        evidence = self._load_summary_evidence(state)
+        complete = bool(evidence.get("complete"))
+        reviewed = complete and mode == "reviewed"
+        if not complete:
+            content = (
+                "> Partial summary: full source coverage was not completed. "
+                "Unread material may change these conclusions.\n\n" + content
+            )
         paper = self._workspace.ensure_paper_folder(document.id, document.title)
         revision = self._prompts.revision if self._prompts is not None else None
         created_at = datetime.now(timezone.utc).isoformat()
         version_id = context.run_id
         path = f"{paper['folder']}/summaries/{version_id}.md"
         metadata_path = f"{paper['folder']}/summaries/{version_id}.json"
+        try:
+            previous = self._workspace.read_file(path)
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            if previous.content != content + "\n":
+                raise ValueError("This run already saved a different immutable summary version.")
+            try:
+                existing_metadata = self._workspace.read_file(metadata_path).content
+            except FileNotFoundError:
+                existing_metadata = None
+            if isinstance(existing_metadata, dict):
+                self._record_paper_activity(
+                    context, document, "summary_saved",
+                    path=existing_metadata.get("canonical_path"), version_path=path,
+                    coverage_complete=existing_metadata.get("coverage_complete", False),
+                    review_complete=existing_metadata.get("review_complete", existing_metadata.get("coverage_complete", False)),
+                )
+                return existing_metadata
         metadata = {
             "id": version_id,
             "document_id": document_id,
@@ -525,32 +647,60 @@ class ApplicationToolRuntime:
             "prompt_revision": revision,
             "review_summary": review_summary,
             "citation_count": len(citations),
-            "status": "reviewed",
+            "status": "overview" if mode == "overview" else ("reviewed" if complete else "partial"),
+            "mode": mode,
+            "review_complete": reviewed,
+            "coverage_complete": complete,
+            "coverage": {
+                "kind": evidence.get("action"),
+                "checkpointed_batches": sum(bool(record.get("coverage")) for record in evidence["records"]),
+                "exact_spans_path": state["checkpoint_path"],
+            },
+            "next_start": evidence.get("next_start"),
+            "next_offset": evidence.get("next_offset", 0),
+            "evidence_path": state["checkpoint_path"],
+            "model": _paper_model_provenance(context),
+            "content_hash": hashlib.sha256((content + "\n").encode()).hexdigest(),
+            **{key: state[key] for key in ("source_hash", "extraction_hash", "source_version")},
         }
         saved = self._workspace.write_file(
             path,
             content + "\n",
             tags=["paper", f"paper:{document_id}", "summary-version"],
         )
-        canonical = self._workspace.write_file(
-            str(paper["summary_path"]),
-            content + "\n",
-            tags=["paper", f"paper:{document_id}", "summary"],
-        )
+        canonical = self._workspace.read_file(str(paper["summary_path"]))
+        original_hash = context.metadata.get("paper_summary_canonical_hash")
+        canonical_updated = mode != "overview" and (original_hash is None or (
+            hashlib.sha256(str(canonical.content).encode()).hexdigest() == original_hash
+        ))
+        if canonical_updated:
+            canonical = self._workspace.write_file(
+                str(paper["summary_path"]), content + "\n",
+                tags=["paper", f"paper:{document_id}", "summary"],
+            )
         metadata["canonical_path"] = canonical.path
+        metadata["canonical_updated"] = canonical_updated
         self._workspace.write_file(
             metadata_path,
             metadata,
             tags=["paper", f"paper:{document_id}", "summary-version-metadata"],
         )
+        if canonical_updated:
+            self._workspace.write_file(
+                f"{paper['folder']}/summary.provenance.json", metadata,
+                tags=["paper", f"paper:{document_id}", "summary-provenance"],
+            )
         self._append_workspace_receipt(context, saved, "Created")
-        self._append_workspace_receipt(context, canonical, "Updated")
+        if canonical_updated:
+            self._append_workspace_receipt(context, canonical, "Updated")
         self._record_paper_activity(
             context,
             document,
             "summary_saved",
             path=canonical.path,
             version_path=saved.path,
+            coverage_complete=complete,
+            review_complete=reviewed,
         )
         return metadata
 
@@ -563,56 +713,30 @@ class ApplicationToolRuntime:
         document = self._documents.get_document(document_id)
         if document is None:
             raise ValueError("Paper was not found.")
-        relative_path = (
-            f"runs/{context.run_id}/paper-summary/{document.id}/checkpoint.md"
-        )
         action = str(arguments["action"])
         async with self._paper_summary_lock:
-            try:
-                checkpoint = self._storage.read_text(
-                    self._settings.artifacts_dir,
-                    relative_path,
-                    allowed_suffixes={".md"},
-                )
-            except FileNotFoundError:
-                checkpoint = ""
-
+            state = self._paper_summary_state(context, document_id)
+            relative_path = state["checkpoint_path"]
             if action == "append":
                 self._require_paper_read(context, document_id)
                 content = _nullable_tool_string(arguments.get("content"), "content")
                 if content is None:
                     raise ValueError("content is required when appending a summary checkpoint.")
-                separator = "\n\n" if checkpoint else ""
-                updated = checkpoint.rstrip() + separator + content.strip() + "\n"
-                saved = self._storage.write_text(
-                    self._settings.artifacts_dir,
-                    relative_path,
-                    updated,
-                )
-                persisted = self._storage.read_text(
-                    self._settings.artifacts_dir,
-                    saved.relative_path,
-                    allowed_suffixes={".md"},
-                )
-                if persisted != updated:
-                    raise RuntimeError("Paper summary checkpoint verification failed.")
-                state = self._paper_summary_state(context, document_id)
-                pending = state.pop("pending_checkpoint", None)
-                state["checkpoint_path"] = saved.relative_path
-                state["checkpoint_size_characters"] = len(persisted)
-                final_checkpoint = (
-                    persisted
-                    if isinstance(pending, dict)
-                    and (
-                        not pending.get("has_more")
-                        or int(pending.get("batch") or 0) >= 5
-                    )
-                    else None
-                )
+                pending = state.get("pending_checkpoint")
+                evidence = self._append_summary_evidence(context, document_id, content)
+                checkpoint = self._evidence_text(evidence)
+                final_checkpoint = checkpoint if (
+                    evidence.get("complete") and
+                    len(json.dumps(checkpoint)) < self._settings.tool_result_max_tokens * 4 - 1500
+                ) else None
                 return {
-                    "status": "appended",
-                    "checkpoint_path": saved.relative_path,
-                    "size_characters": len(persisted),
+                    "status": "reconciled" if state.get("last_append_reconciled") else "appended",
+                    "document_id": document_id,
+                    "batch_id": state.get("last_record_id"),
+                    "source_version": state["source_version"],
+                    "existing_evidence_retained": bool(state.get("last_append_reconciled")),
+                    "checkpoint_path": relative_path,
+                    "size_characters": len(checkpoint),
                     "checkpointed_batch": (
                         pending.get("batch") if isinstance(pending, dict) else None
                     ),
@@ -625,22 +749,35 @@ class ApplicationToolRuntime:
                     "next_start": (
                         pending.get("next_start") if isinstance(pending, dict) else None
                     ),
+                    "next_offset": evidence.get("next_offset", 0),
+                    "complete": bool(evidence.get("complete")),
                     "final_checkpoint": final_checkpoint,
                     "instruction": (
                         "The checkpoint write was verified. Draft directly from final_checkpoint "
                         "without rereading it."
                         if final_checkpoint is not None
                         else "The checkpoint write was verified. The previous raw batch is now "
-                        "discardable; read the next overlapping batch if more paper content remains."
+                        "discardable; follow next_start and next_offset while more content remains. "
+                        "If the run budget is low, save an explicitly partial summary."
                     ),
                 }
 
             if action == "read":
+                evidence = self._load_summary_evidence(state)
+                checkpoint = self._evidence_text(evidence)
                 offset = int(arguments.get("offset") or 0)
-                limit = int(arguments.get("limit") or 8000)
+                limit = min(int(arguments.get("limit") or 8000), max(
+                    256, self._settings.tool_result_max_tokens * 2,
+                ))
                 content = checkpoint[offset : offset + limit]
+                if content.strip():
+                    self._record_paper_activity(
+                        context, document, "read", evidence_reused=True,
+                        citations=sorted(citation.strip("[]") for citation in _paper_summary_citations(content)),
+                    )
                 return {
                     "status": "available" if checkpoint else "empty",
+                    "document_id": document_id,
                     "checkpoint_path": relative_path,
                     "offset": offset,
                     "content": content,
@@ -651,9 +788,137 @@ class ApplicationToolRuntime:
                         else None
                     ),
                     "size_characters": len(checkpoint),
+                    "source_version": state["source_version"],
+                    "complete": bool(evidence.get("complete")),
+                    "resume_action": evidence.get("action", "pages"),
+                    "resume_start": evidence.get("next_start"),
+                    "resume_offset": evidence.get("next_offset", 0),
                 }
 
         raise ValueError(f"Unknown paper summary checkpoint action '{action}'.")
+
+    def _load_summary_evidence(self, state: dict[str, Any]) -> dict[str, Any]:
+        durable = self._documents.summary_evidence(state["document_id"], state["source_version"])
+        try:
+            content = self._workspace.read_file(state["checkpoint_path"]).content
+        except FileNotFoundError:
+            content = None
+        if durable is not None:
+            if content != durable:
+                self._workspace.write_file(
+                    state["checkpoint_path"], durable,
+                    tags=["paper-evidence", f"paper:{state['document_id']}"],
+                )
+                if self._workspace.read_file(state["checkpoint_path"]).content != durable:
+                    raise RuntimeError("Paper evidence checkpoint repair verification failed.")
+            return durable
+        if content is None:
+            return {"records": [], "complete": False}
+        if not isinstance(content, dict) or content.get("source_version") != state["source_version"]:
+            raise ValueError("Paper evidence source version is invalid.")
+        return content
+
+    @staticmethod
+    def _evidence_text(evidence: dict[str, Any]) -> str:
+        return "\n\n".join(str(record["content"]).strip() for record in evidence["records"]) + (
+            "\n" if evidence["records"] else ""
+        )
+
+    @staticmethod
+    def _summary_coverage_progress(records: list[dict[str, Any]], action: str) -> dict[str, Any]:
+        spans: dict[int, list[dict[str, Any]]] = {}
+        source_ends: list[tuple[int, int]] = []
+        for record in records:
+            coverage = record.get("coverage")
+            if not isinstance(coverage, dict) or coverage.get("kind") != action:
+                continue
+            for span in coverage.get("spans", []):
+                spans.setdefault(int(span["index"]), []).append(span)
+            if record.get("source_end") is not None:
+                source_ends.append((int(record["source_end"][0]), int(record["source_end"][1])))
+        index = 1 if action == "pages" else 0
+        first_index = index
+        offset = 0
+        while index in spans:
+            item_complete = False
+            for span in sorted(spans[index], key=lambda item: (item["offset"], item["end_offset"])):
+                if int(span["offset"]) > offset:
+                    break
+                offset = max(offset, int(span["end_offset"]))
+                item_complete = item_complete or bool(span["complete"])
+            if not item_complete:
+                break
+            index += 1
+            offset = 0
+        complete = bool(source_ends) and (index, offset) >= max(source_ends)
+        return {
+            "action": action,
+            "contiguous": index > first_index or offset > 0,
+            "next_start": None if complete else index,
+            "next_offset": 0 if complete else offset,
+            "complete": complete,
+        }
+
+    def _append_summary_evidence(
+        self, context: ScholarWeaveContext, document_id: str, content: str,
+    ) -> dict[str, Any]:
+        with self._summary_save_lock:
+            state = self._paper_summary_state(context, document_id)
+            evidence = self._load_summary_evidence(state)
+            pending = state.get("pending_checkpoint")
+            record_id = (
+                pending["id"] if isinstance(pending, dict)
+                else next(
+                    (r["id"] for r in evidence["records"] if r["content"] == content.strip()),
+                    hashlib.sha256(content.strip().encode()).hexdigest(),
+                )
+            )
+            existing = next((r for r in evidence["records"] if r["id"] == record_id), None)
+            state["last_append_reconciled"] = existing is not None and existing["content"] != content.strip()
+            if existing is None:
+                record = {
+                    "id": record_id, "content": content.strip(),
+                    "coverage": pending.get("coverage") if isinstance(pending, dict) else None,
+                    "run_id": context.run_id,
+                    "prompt_revision": self._prompts.revision if self._prompts else None,
+                    "model": _paper_model_provenance(context),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+                if isinstance(pending, dict) and not pending["has_more"]:
+                    spans = pending["coverage"].get("spans", [])
+                    if spans:
+                        last = max(spans, key=lambda span: (span["index"], span["end_offset"]))
+                        record["source_end"] = [
+                            int(last["index"]) + (1 if last["complete"] else 0),
+                            0 if last["complete"] else int(last["end_offset"]),
+                        ]
+                evidence["records"].append(record)
+                evidence.update({key: state[key] for key in (
+                    "source_version", "source_hash", "extraction_hash",
+                )})
+                if isinstance(pending, dict):
+                    if not evidence.get("complete"):
+                        progress = self._summary_coverage_progress(
+                            evidence["records"], pending["action"],
+                        )
+                        traversal = evidence.get("action")
+                        if not progress["complete"] and traversal in {"pages", "chunks"} and traversal != pending["action"]:
+                            progress = self._summary_coverage_progress(evidence["records"], traversal)
+                        evidence.update(progress)
+                # SQLite is authoritative; the guarded workspace mirror can be repaired
+                # after a crash between commit and file write without losing earlier evidence.
+                self._documents.save_summary_evidence(document_id, evidence)
+                self._workspace.write_file(
+                    state["checkpoint_path"], evidence,
+                    tags=["paper-evidence", f"paper:{document_id}"],
+                )
+                if self._workspace.read_file(state["checkpoint_path"]).content != evidence:
+                    raise RuntimeError("Paper evidence checkpoint verification failed.")
+            state.pop("pending_checkpoint", None)
+            state["checkpoint_size_characters"] = len(self._evidence_text(evidence))
+            state["complete"] = bool(evidence.get("complete"))
+            state["last_record_id"] = record_id
+            return evidence
 
     async def bound_tool_result(
         self,
@@ -968,6 +1233,27 @@ class ApplicationToolRuntime:
             if inspection["readable"]:
                 return inspection
             return await self._ingest_paper({"document_id": document_id}, context)
+        if action == "search":
+            query = _nullable_tool_string(arguments.get("query"), "query")
+            if not query:
+                raise ValueError("query is required for paper content search.")
+            document = self._documents.get_document(document_id)
+            if document is None:
+                raise ValueError("Paper was not found.")
+            hits = self._retrieval.keyword_search(
+                query, document_id=document_id, top_k=int(arguments.get("limit") or 5),
+            )
+            bounded, _, _ = self._bounded_source_items(hits, offset=0)
+            if bounded:
+                self._record_paper_activity(
+                    context, document, "read",
+                    citations=sorted({str(item["citation"]) for item in bounded if item.get("citation")}),
+                )
+            return {
+                "document_id": document_id, "query": query, "matches": bounded,
+                "coverage": "targeted search, not a complete paper read",
+                "instruction": "Use chunk_index and match_offset with action=chunks to expand a hit.",
+            }
         start = arguments.get("start")
         limit = int(arguments["limit"])
         if action == "pages":
@@ -976,6 +1262,8 @@ class ApplicationToolRuntime:
                     "document_id": document_id,
                     "start_page": max(1, int(start or 1)),
                     "limit": limit,
+                    "offset": arguments.get("offset"),
+                    "_max_output_chars": arguments.get("_max_output_chars"),
                 },
                 context,
             )
@@ -985,6 +1273,8 @@ class ApplicationToolRuntime:
                     "document_id": document_id,
                     "start": max(0, int(start or 0)),
                     "limit": limit,
+                    "offset": arguments.get("offset"),
+                    "_max_output_chars": arguments.get("_max_output_chars"),
                 },
                 context,
             )
@@ -997,59 +1287,93 @@ class ApplicationToolRuntime:
     ) -> Any:
         action = str(arguments["action"])
         document_id = str(arguments["document_id"]).strip()
-        batch_counts = context.metadata.setdefault("_paper_summary_read_batches", {})
-        if not isinstance(batch_counts, dict):
-            batch_counts = {}
-            context.metadata["_paper_summary_read_batches"] = batch_counts
-        completed = int(batch_counts.get(document_id, 0))
         delegated = {
             "document_id": arguments["document_id"],
             "action": action,
             "start": arguments.get("start"),
-            "limit": 10 if completed == 0 or action in {"inspect", "prepare"} else 11,
+            "offset": arguments.get("offset"),
+            "limit": 64,
+            "_max_output_chars": max(256, self._settings.tool_result_max_tokens * 4 // 3),
         }
         if action in {"inspect", "prepare"}:
-            return await self._read_research_paper(delegated, context)
+            result = await self._read_research_paper(delegated, context)
+            state = self._paper_summary_state(context, document_id)
+            evidence = self._load_summary_evidence(state)
+            return {
+                **result,
+                "evidence_available": bool(evidence["records"]),
+                "checkpoint_path": state["checkpoint_path"],
+                "complete": bool(evidence.get("complete")),
+                "resume_action": evidence.get("action", "pages"),
+                "resume_start": evidence.get("next_start"),
+                "resume_offset": evidence.get("next_offset", 0),
+            }
 
         async with self._paper_summary_lock:
             state = self._paper_summary_state(context, document_id)
             pending = state.get("pending_checkpoint")
             if isinstance(pending, dict):
+                # A replay of the same read may occur after recovery before its checkpoint.
+                if (
+                    action == pending.get("action")
+                    and arguments.get("start") == pending.get("requested_start")
+                    and int(arguments.get("offset") or 0) == pending.get("offset", 0)
+                ):
+                    result = await self._read_research_paper(
+                        {**delegated, "start": pending["start"], "offset": pending["offset"]},
+                        context,
+                    )
+                    return {**result, **pending, "batch_id": pending["id"], "checkpoint_required": True}
                 raise ValueError(
                     "The previous paper-summary batch must be appended to "
                     f"{pending['checkpoint_path']} before another batch can be read."
                 )
-            if completed >= 5:
-                raise ValueError(
-                    "Paper summary reading is capped at five overlapping page or chunk batches."
-                )
+            evidence = self._load_summary_evidence(state)
+            if delegated["start"] is None:
+                if evidence.get("complete"):
+                    return {
+                        "complete": True, "evidence_available": True, "has_more": False,
+                        "checkpoint_path": state["checkpoint_path"],
+                        "instruction": "Read the existing evidence checkpoint and synthesize; do not reread the paper.",
+                    }
+                delegated["start"] = evidence.get("next_start") or (1 if action == "pages" else 0)
+                delegated["offset"] = evidence.get("next_offset", 0)
+            delegated["start"] = max(1 if action == "pages" else 0, int(delegated["start"]))
             result = await self._read_research_paper(delegated, context)
-            completed += 1
-            batch_counts[document_id] = completed
+            completed = int(state.get("batches_read", 0)) + 1
+            state["batches_read"] = completed
             if isinstance(result, dict):
                 coverage = self._paper_summary_coverage(action, delegated, result)
                 next_start = self._paper_summary_next_start(action, result)
-                checkpoint_path = (
-                    f"runs/{context.run_id}/paper-summary/{document_id}/checkpoint.md"
-                )
+                checkpoint_path = state["checkpoint_path"]
                 state["pending_checkpoint"] = {
+                    "id": hashlib.sha256(json.dumps(
+                        [state["source_version"], coverage], sort_keys=True,
+                    ).encode()).hexdigest(),
                     "batch": completed,
+                    "action": action,
+                    "requested_start": arguments.get("start"),
+                    "start": int(delegated["start"]),
+                    "offset": int(delegated.get("offset") or 0),
                     "coverage": coverage,
                     "has_more": bool(result.get("has_more")),
                     "next_start": next_start,
+                    "next_offset": int(result.get("next_offset") or 0),
                     "checkpoint_path": checkpoint_path,
                 }
                 return {
                     **result,
                     "next_start": next_start,
                     "summary_batch": completed,
-                    "summary_batches_remaining": 5 - completed,
+                    "batch_id": state["pending_checkpoint"]["id"],
+                    "source_version": state["source_version"],
                     "checkpoint_required": True,
                     "checkpoint_path": checkpoint_path,
                     "coverage": coverage,
                     "instruction": (
-                        "You must append your understanding of this batch to the checkpoint "
-                        "before any next paper-summary batch. Parallel batch reads are rejected."
+                        "Append compact cited evidence before the next batch; follow exact next_start "
+                        "and next_offset. No fixed page cap. If the run budget is exhausted, save "
+                        "an explicitly partial summary with unread coverage; never claim completeness."
                     ),
                 }
             return result
@@ -1057,17 +1381,12 @@ class ApplicationToolRuntime:
     @staticmethod
     def _paper_summary_next_start(action: str, result: dict[str, Any]) -> int | None:
         next_start = result.get("next_page", result.get("next_start"))
-        if next_start is None:
+        if not result.get("has_more") or next_start is None:
             return None
-        value = int(next_start)
-        if action == "pages":
-            return max(1, value - 1)
-        if action == "chunks":
-            return max(0, value - 1)
-        return value
+        return int(next_start)
 
-    @staticmethod
     def _paper_summary_state(
+        self,
         context: ScholarWeaveContext,
         document_id: str,
     ) -> dict[str, Any]:
@@ -1079,6 +1398,25 @@ class ApplicationToolRuntime:
         if not isinstance(state, dict):
             state = {}
             states[document_id] = state
+        revision = self._documents.source_revision(document_id)
+        if state.get("source_version") != revision["source_version"]:
+            stale_revision = state.get("source_version") is not None
+            state.clear()
+            state.update(revision)
+            state["document_id"] = document_id
+            state["checkpoint_path"] = (
+                f"papers/{document_id}/evidence/{revision['source_version']}/index.json"
+            )
+            if stale_revision:
+                activity = context.metadata.get("paper_activity", [])
+                context.metadata["paper_activity"] = [
+                    item for item in activity if not (
+                        isinstance(item, dict) and item.get("document_id") == document_id
+                        and item.get("action") in {"read", "summary_saved", "summary_reused"}
+                    )
+                ]
+                raise ValueError("Paper extraction changed; read the new source again before saving its evidence.")
+        state.setdefault("document_id", document_id)
         return state
 
     @staticmethod
@@ -1098,6 +1436,12 @@ class ApplicationToolRuntime:
                 "kind": "pages",
                 "start": min(numbers) if numbers else int(arguments.get("start") or 1),
                 "end": max(numbers) if numbers else None,
+                "spans": [
+                    {"index": int(page["page_number"]), "offset": int(page.get("offset") or 0),
+                     "end_offset": int(page.get("offset") or 0) + len(str(page.get("text") or "")),
+                     "complete": bool(page.get("text_complete", True))}
+                    for page in pages or []
+                ],
             }
         chunks = result.get("chunks")
         indexes = [
@@ -1109,6 +1453,12 @@ class ApplicationToolRuntime:
             "kind": "chunks",
             "start": min(indexes) if indexes else int(arguments.get("start") or 0),
             "end": max(indexes) if indexes else None,
+            "spans": [
+                {"index": int(chunk["chunk_index"]), "offset": int(chunk.get("offset") or 0),
+                 "end_offset": int(chunk.get("offset") or 0) + len(str(chunk.get("text") or "")),
+                 "complete": bool(chunk.get("text_complete", True))}
+                for chunk in chunks or []
+            ],
         }
 
     async def _read_research_web_page(
@@ -1177,16 +1527,33 @@ class ApplicationToolRuntime:
         )
         document_id = paper_tag.removeprefix("paper:") if paper_tag else None
         document = self._documents.get_document(document_id) if document_id else None
-        reusable = len(content.strip()) >= 200
+        reusable = len(content.strip()) >= 200 and not content.startswith("> Partial summary:")
+        reason = "Canonical summary contains substantive content." if reusable else (
+            "Canonical summary is empty, still a template, partial, or lacks substantive content."
+        )
+        if document is not None:
+            try:
+                provenance = self._workspace.read_file(
+                    f"papers/{document_id}/summary.provenance.json"
+                ).content
+            except FileNotFoundError:
+                provenance = None
+            if isinstance(provenance, dict) and provenance.get("content_hash") == hashlib.sha256(content.encode()).hexdigest():
+                current = self._documents.source_revision(document.id)
+                if provenance.get("source_version") != current["source_version"]:
+                    reusable = False
+                    reason = "Paper source or extraction changed since this generated summary."
+                elif not provenance.get("coverage_complete"):
+                    reusable = False
+                    reason = "The generated summary has incomplete source coverage."
+                elif provenance.get("review_complete") is False:
+                    reusable = False
+                    reason = "This overview has not undergone a complete paper review."
         result["summary_check"] = {
             "status": "reusable" if reusable else "incomplete",
             "document_id": document_id,
             "needs_regeneration": not reusable,
-            "reason": (
-                "Canonical summary contains substantive content."
-                if reusable
-                else "Canonical summary is empty, still a template, or lacks substantive content."
-            ),
+            "reason": reason,
         }
         if reusable and document is not None:
             self._record_paper_activity(
@@ -1322,10 +1689,11 @@ class ApplicationToolRuntime:
         _context: ScholarWeaveContext,
     ) -> dict[str, Any]:
         document_id = str(arguments["document_id"])
-        details = self._documents.get_document_details(document_id)
-        if details is None:
+        document = self._documents.get_document(document_id)
+        if document is None:
             raise ValueError("Paper was not found.")
-        document, artifacts, chunks = details
+        artifacts = self._documents.get_document_artifacts(document_id)
+        chunk_count, chunk_chars = self._retrieval.chunk_stats(document_id)
         source = next(
             (artifact for artifact in artifacts if artifact.kind == "source_pdf"),
             None,
@@ -1341,11 +1709,10 @@ class ApplicationToolRuntime:
         )
         content = manifest.get("content", {}) if isinstance(manifest, dict) else {}
         sections = manifest.get("sections", []) if isinstance(manifest, dict) else []
-        chunk_chars = sum(len(chunk.text) for chunk in chunks)
         readable = (
             document.status == "ready"
             and manifest_artifact is not None
-            and bool(chunks)
+            and bool(chunk_count)
             and bool(content.get("char_count") or chunk_chars)
         )
         return {
@@ -1358,7 +1725,7 @@ class ApplicationToolRuntime:
             "readable": readable,
             "content": {
                 "char_count": int(content.get("char_count") or chunk_chars),
-                "chunk_count": len(chunks),
+                "chunk_count": chunk_count,
                 "nonempty_page_count": content.get("nonempty_page_count"),
             },
             "sections": sections,
@@ -1388,15 +1755,16 @@ class ApplicationToolRuntime:
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
         document_id = str(arguments["document_id"])
-        details = self._documents.get_document_details(document_id)
-        if details is None:
+        document = self._documents.get_document(document_id)
+        if document is None:
             raise ValueError("Paper was not found.")
-        document, artifacts, chunks = details
+        artifacts = self._documents.get_document_artifacts(document_id)
+        chunk_count, _ = self._retrieval.chunk_stats(document_id)
         manifest_artifact = next(
             (artifact for artifact in artifacts if artifact.kind == "extracted_manifest"),
             None,
         )
-        if document.status != "ready" or manifest_artifact is None or not chunks:
+        if document.status != "ready" or manifest_artifact is None or not chunk_count:
             raise ValueError(
                 "Paper has no readable extracted content. Inspect and ingest it before reading."
             )
@@ -1406,7 +1774,18 @@ class ApplicationToolRuntime:
         available = [
             page for page in pages if int(page.get("page") or 0) >= start_page
         ]
-        selected = available[:limit]
+        candidates = [
+            {
+                "page_number": int(page["page"]),
+                "citation": str(page.get("citation") or f"p.{int(page['page'])}"),
+                "text": str(page.get("text") or ""),
+            }
+            for page in available[:limit]
+        ]
+        selected, complete, next_offset = self._bounded_source_items(
+            candidates, offset=int(arguments.get("offset") or 0),
+            max_chars=arguments.get("_max_output_chars"),
+        )
         if not selected:
             return {
                 "document_id": document_id,
@@ -1417,22 +1796,21 @@ class ApplicationToolRuntime:
                 "pages": [],
                 "warning": "The requested page is beyond the end of this paper.",
             }
-        self._record_paper_activity(context, document, "read")
-        next_page = int(selected[-1]["page"]) + 1
+        if any(item["text"].strip() for item in selected):
+            self._record_paper_activity(
+                context, document, "read",
+                citations=sorted({str(item["citation"]) for item in selected if item["text"].strip()}),
+            )
+        next_page = int(selected[-1]["page_number"]) + (0 if next_offset else 1)
+        has_more = complete < len(available) or bool(next_offset)
         return {
             "document_id": document_id,
             "title": document.title,
             "page_count": len(pages),
-            "has_more": len(available) > len(selected),
-            "next_page": next_page,
-            "pages": [
-                {
-                    "page_number": int(page["page"]),
-                    "citation": str(page.get("citation") or f"p.{int(page['page'])}"),
-                    "text": str(page.get("text") or ""),
-                }
-                for page in selected
-            ],
+            "has_more": has_more,
+            "next_page": next_page if has_more else None,
+            "next_offset": next_offset,
+            "pages": selected,
         }
 
     def _read_document_chunks(
@@ -1446,45 +1824,89 @@ class ApplicationToolRuntime:
         document = self._documents.get_document(document_id)
         if document is None:
             raise ValueError("Paper was not found.")
-        chunks = self._retrieval.fetch_document_chunks(document_id)
-        if document.status != "ready" or not chunks:
+        chunk_count, _ = self._retrieval.chunk_stats(document_id)
+        if document.status != "ready" or not chunk_count:
             raise ValueError(
                 "Paper has no readable extracted content. Inspect and ingest it before reading."
             )
-        selected = chunks[start : start + limit]
+        chunks = self._retrieval.fetch_document_chunks(document_id, start=start, limit=limit)
+        candidates = [
+            {
+                "chunk_id": chunk.id, "chunk_index": chunk.chunk_index,
+                "section_title": chunk.section_title, "citation": chunk.citation,
+                "page_start": chunk.page_start, "page_end": chunk.page_end, "text": chunk.text,
+            }
+            for chunk in chunks
+        ]
+        selected, complete, next_offset = self._bounded_source_items(
+            candidates, offset=int(arguments.get("offset") or 0),
+            max_chars=arguments.get("_max_output_chars"),
+        )
         if not selected:
             return {
                 "document_id": document_id,
                 "title": document.title,
-                "chunk_count": len(chunks),
+                "chunk_count": chunk_count,
                 "start": start,
                 "has_more": False,
                 "next_start": None,
                 "chunks": [],
                 "warning": "The requested chunk is beyond the end of this paper.",
             }
-        self._record_paper_activity(context, document, "read")
-        next_start = start + len(selected)
+        if any(item["text"].strip() for item in selected):
+            self._record_paper_activity(
+                context, document, "read",
+                citations=sorted({str(item["citation"]) for item in selected if item["text"].strip()}),
+            )
+        next_start = start + complete
+        has_more = next_start < chunk_count
         return {
             "document_id": document_id,
             "title": document.title,
-            "chunk_count": len(chunks),
+            "chunk_count": chunk_count,
             "start": start,
-            "has_more": next_start < len(chunks),
-            "next_start": next_start,
-            "chunks": [
-                {
-                    "chunk_id": chunk.id,
-                    "chunk_index": chunk.chunk_index,
-                    "section_title": chunk.section_title,
-                    "citation": chunk.citation,
-                    "page_start": chunk.page_start,
-                    "page_end": chunk.page_end,
-                    "text": chunk.text,
-                }
-                for chunk in selected
-            ],
+            "has_more": has_more,
+            "next_start": next_start if has_more else None,
+            "next_offset": next_offset,
+            "chunks": selected,
         }
+
+    def _bounded_source_items(
+        self, items: list[dict[str, Any]], *, offset: int, max_chars: int | None = None,
+    ) -> tuple[list[dict[str, Any]], int, int]:
+        total_budget = self._settings.tool_result_max_tokens * 4
+        budget = max_chars or (total_budget - min(3000, total_budget // 2))
+        selected: list[dict[str, Any]] = []
+        complete = 0
+        next_offset = 0
+        for index, item in enumerate(items):
+            start = max(0, offset) if index == 0 else 0
+            text = str(item.get("text") or "")
+            if start > len(text):
+                raise ValueError("offset is beyond this source item's text.")
+            result = {**item, "offset": start, "text": text[start:], "text_complete": True}
+            size = len(json.dumps(result, ensure_ascii=False))
+            if size > budget:
+                if selected:
+                    break
+                lo, hi = 0, len(text) - start
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    result.update(text=text[start:start + mid], text_complete=False)
+                    if len(json.dumps(result, ensure_ascii=False)) <= budget:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                if lo == 0:
+                    raise ValueError("Source metadata exceeds the output budget.")
+                result.update(text=text[start:start + lo], text_complete=False)
+                next_offset = start + lo
+                selected.append(result)
+                break
+            selected.append(result)
+            budget -= size
+            complete += 1
+        return selected, complete, next_offset
 
     def _keyword_search(
         self,
@@ -1797,6 +2219,8 @@ class ApplicationToolRuntime:
             "title": document.title,
             **details,
         }
+        if action == "read":
+            entry["source_version"] = self._documents.source_revision(document.id)["source_version"]
         if entry not in activity:
             activity.append(entry)
             if self._runs is not None and self._runs.exists(context.run_id):
@@ -1805,22 +2229,24 @@ class ApplicationToolRuntime:
                     _persistable_tool_metadata(context.metadata),
                 )
 
-    @staticmethod
     def _require_paper_read(
+        self,
         context: ScholarWeaveContext,
         document_id: str,
     ) -> None:
         activity = context.metadata.get("paper_activity")
+        source_version = self._documents.source_revision(document_id)["source_version"]
         if isinstance(activity, list) and any(
             isinstance(item, dict)
             and item.get("document_id") == document_id
             and item.get("action") == "read"
+            and item.get("source_version") == source_version
             for item in activity
         ):
             return
         raise ValueError(
             "Paper summaries and notes can only be saved after extracted pages or chunks "
-            "have been read in the active run."
+            "from the current source version have been read in the active run."
         )
 
     @staticmethod
@@ -1851,19 +2277,3 @@ class ApplicationToolRuntime:
 def _active_epoch_id(context: ScholarWeaveContext) -> str | None:
     value = context.metadata.get("active_epoch_id")
     return value if isinstance(value, str) else None
-
-
-_SAFE_READ_PREFIXES = (
-    "research.sources.search",
-    "research.library.search",
-    "research.paper.read",
-    "research.web.read",
-    "research.notes.search",
-    "research.notes.read",
-    "tool.results.read",
-    "work.plan.read",
-)
-
-
-def _is_safe_read(catalog_id: str) -> bool:
-    return any(catalog_id.startswith(prefix) for prefix in _SAFE_READ_PREFIXES)

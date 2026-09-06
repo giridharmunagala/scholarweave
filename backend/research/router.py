@@ -22,6 +22,8 @@ from backend.research.schemas import (
     PaperFolderCreateRequest,
     PaperFolderResponse,
     PaperSummaryContentResponse,
+    PaperSummaryBatchRequest,
+    PaperSummaryBatchResponse,
     PaperSummaryPromotionResponse,
     PaperSummaryRunRequest,
     PaperSummaryRunResponse,
@@ -54,11 +56,38 @@ def start_summary(
         document_id,
         model_reference=payload.model_reference,
         reasoning_effort=payload.reasoning_effort,
+        mode=payload.mode,
     )
     return PaperSummaryRunResponse(
         run=run_response(container.runs.get(run.id)),
         prompt_revision=revision,
+        document_id=document_id,
     )
+
+
+@router.post(
+    "/documents/summary-batches",
+    response_model=PaperSummaryBatchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def start_summary_batch(
+    payload: PaperSummaryBatchRequest,
+    container=Depends(services),
+) -> PaperSummaryBatchResponse:
+    results = container.summaries.start_batch(
+        payload.document_ids,
+        model_reference=payload.model_reference,
+        reasoning_effort=payload.reasoning_effort,
+        mode=payload.mode,
+    )
+    return PaperSummaryBatchResponse(runs=[
+        PaperSummaryRunResponse(
+            run=run_response(container.runs.get(run.id)),
+            prompt_revision=revision,
+            document_id=document_id,
+        )
+        for document_id, (run, revision) in zip(payload.document_ids, results, strict=True)
+    ])
 
 
 @summary_router.get(

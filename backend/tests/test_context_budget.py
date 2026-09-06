@@ -10,8 +10,11 @@ from backend.agents.context_budget import (
     CHECKPOINT_MESSAGE_PREFIX,
     ContextBudgetPolicy,
     _adaptive_target_tokens,
+    _replace_checkpointed_paper_reads,
 )
-from backend.agents.harness import AgentDefinition, ModelBinding, ModelSettings
+from backend.agents.harness import (
+    AgentDefinition, FunctionTool, ModelBinding, ModelSettings, RunPolicyViolation,
+)
 from backend.conversations.steering import (
     SteeringInbox,
     SteeringMessage,
@@ -139,12 +142,12 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def test_compaction_target_scales_with_model_context_window() -> None:
+def test_compaction_target_is_a_ceiling_independent_of_model_window() -> None:
     fallback_target = _adaptive_target_tokens(22_937, 8_192)
     large_model_target = _adaptive_target_tokens(91_750, 8_192)
 
-    assert fallback_target > 8_192
-    assert large_model_target > fallback_target
+    assert fallback_target == 8_192
+    assert large_model_target == fallback_target
 
 
 @pytest.mark.anyio
@@ -334,6 +337,10 @@ async def test_recovered_steering_already_in_session_is_not_replayed_twice(
     )
 
     assert prepared.items.count(message.input_item()) == 1
+    replayed = await prepare(
+        settings, agent(), list(prepared.working_items), context, turn_index=2
+    )
+    assert replayed.items.count(message.input_item()) == 1
 
 
 @pytest.mark.anyio
@@ -348,6 +355,7 @@ async def test_high_water_compaction_replaces_raw_history_with_checkpoint(
         agent_context_compaction_target_tokens=1_024,
         tool_result_max_tokens=16_000,
     )
+    settings = settings.model_copy(update={"agent_context_model_summary_enabled": True})
     sink = Sink()
     context = ScholarWeaveContext(
         run_id="run-1",
@@ -407,7 +415,7 @@ async def test_high_water_compaction_replaces_raw_history_with_checkpoint(
     )
 
     serialized = json.dumps(compacted.items)
-    assert "Prior reasoning Prior reasoning" not in serialized
+    assert "Prior reasoning " * 1000 not in serialized
     assert original_user_message in compacted.items
     assert "artifact-1" in serialized
     assert "The research objective remains active" in serialized
@@ -446,6 +454,7 @@ async def test_compaction_falls_back_when_the_summarizer_fails(tmp_path) -> None
         agent_context_compaction_target_tokens=1_024,
         tool_result_max_tokens=16_000,
     )
+    settings = settings.model_copy(update={"agent_context_model_summary_enabled": True})
     sink = Sink()
     context = ScholarWeaveContext(
         run_id="run-1",
@@ -497,7 +506,8 @@ async def test_compacted_history_is_adopted_as_the_working_set(tmp_path) -> None
     working = [*first.working_items, {"role": "assistant", "content": "New turn."}]
     second = await budget.prepare(definition, working, "", context, turn_index=2)
 
-    assert "Prior reasoning Prior reasoning" not in json.dumps(second.items)
+    assert len(json.dumps(second.items)) < len(json.dumps(initial_input)) // 2
+    assert not any(item.get("content") == initial_input[1]["content"] for item in second.items)
     assert {"role": "assistant", "content": "New turn."} in second.items
     assert len(context.metadata["context_checkpoints"]) == 1
     assert first.items[0]["content"].startswith(CHECKPOINT_MESSAGE_PREFIX)
@@ -581,6 +591,7 @@ async def test_stored_checkpoint_includes_model_summary(tmp_path) -> None:
         agent_context_compaction_target_tokens=1_024,
         tool_result_max_tokens=16_000,
     )
+    settings = settings.model_copy(update={"agent_context_model_summary_enabled": True})
     runtime = CheckpointRuntime()
     context = ScholarWeaveContext(run_id="run-1", tool_runtime=runtime)
 
@@ -627,6 +638,324 @@ async def test_oversized_tool_outputs_are_bounded_before_the_model_sees_them(
     assert runtime.bounded == [("custom_large_tool", "large " * 2_000)]
     assert prepared.items[0]["call_id"] == "call-1"
     assert json.loads(prepared.items[0]["output"])["result_ref"] == "retained-result"
+
+
+@pytest.mark.anyio
+async def test_task_budget_is_independent_of_large_model_and_compaction_is_local(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        agent_context_window_tokens=128_000,
+        agent_context_model_summary_enabled=False,
+    )
+    definition = agent()
+    sink = Sink()
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime(), event_sink=sink)
+    original = {"role": "user", "content": "NEVER drop this exact constraint."}
+    result = await prepare(
+        settings, definition,
+        [original, {"role": "assistant", "content": "Old analysis. " * 10000}], context,
+    )
+    assert original in result.items
+    assert not definition.binding.client.requests
+    assert "Bounded excerpts" in context.metadata["context_checkpoints"][0]["summary_limitations"]
+    metrics = [payload for name, payload in sink.events if name == "context.prepared"][-1]
+    assert metrics["working_context_tokens"] == settings.agent_working_context_tokens
+    assert metrics["compacted"] is True
+    assert metrics["estimated_input_tokens"] <= settings.agent_working_context_tokens
+    assert metrics["estimated_input_tokens"] + metrics["response_headroom_tokens"] <= 128_000
+    assert metrics["request_overhead_tokens"] > 0
+    assert result.response_max_tokens == 2_048
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("oversized", ["user", "instructions", "tools", "response"])
+async def test_impossible_context_fails_before_any_provider_call(tmp_path, oversized) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    definition = agent()
+    items = [{"role": "user", "content": "Exact constraint"}]
+    instructions = ""
+    if oversized == "user":
+        items[0]["content"] = "原文 constraint " * 20000
+    elif oversized == "instructions":
+        instructions = "System instruction " * 20000
+    elif oversized == "tools":
+        async def invoke(*args):
+            return None
+        definition.tools = [FunctionTool(
+            "large_tool", "Tool guidance " * 20000,
+            {"type": "object", "properties": {}}, invoke,
+        )]
+    else:
+        definition.model_settings = ModelSettings(max_tokens=40000)
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    with pytest.raises(RunPolicyViolation) as failure:
+        await prepare(settings, definition, items, context, instructions=instructions)
+    assert failure.value.policy == "working_context"
+    assert not definition.binding.client.requests
+
+
+@pytest.mark.anyio
+async def test_compaction_preserves_checkpoint_looking_user_text_and_developer_constraints(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    protected = [
+        {"role": "user", "content": CHECKPOINT_MESSAGE_PREFIX + "\nThis is actual user text."},
+        {"role": "developer", "content": "Do not alter this exact developer instruction."},
+    ]
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    budget = policy(settings)
+    first = await budget.prepare(
+        agent(), [*protected, {"role": "assistant", "content": "Older work. " * 10000}],
+        "", context, turn_index=0,
+    )
+    second = await budget.prepare(
+        agent(), [*first.working_items, {"role": "assistant", "content": "More work. " * 10000}],
+        "", context, turn_index=1,
+    )
+    for item in protected:
+        assert second.items.count(item) == 1
+
+
+@pytest.mark.anyio
+async def test_large_queued_steering_cannot_bypass_context_budget(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    definition = agent()
+    session = Session()
+    inbox = SteeringInbox()
+    inbox.bind_session(session)
+    text = "Preserve this exact steering instruction. " * 10000
+    message = inbox.queue(text)
+    context = ScholarWeaveContext(
+        run_id="run-1", tool_runtime=Runtime(), metadata={"_steering_inbox": inbox}
+    )
+    with pytest.raises(RunPolicyViolation):
+        await prepare(settings, definition, [{"role": "user", "content": "Research."}], context)
+    assert session.items == [message.session_item()]
+    assert not definition.binding.client.requests
+
+
+@pytest.mark.anyio
+async def test_immutable_constraints_may_exceed_soft_target_but_not_hard_budget(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    item = {"role": "user", "content": "Keep this exact constraint. " * 1300}
+    result = await prepare(settings, agent(), [item], context)
+    assert result.items == [item]
+
+
+@pytest.mark.anyio
+async def test_superseded_internal_epoch_prompts_do_not_accumulate_as_user_constraints(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    user = {"role": "user", "content": "Real original user constraint."}
+    old = {
+        "role": "user", "content": "Obsolete plan state. " * 10000,
+        "_scholarweave_internal_continuation": True,
+    }
+    current = {
+        "role": "user", "content": "Current next action.",
+        "_scholarweave_internal_continuation": True,
+    }
+    result = await prepare(settings, agent(), [user, old, current], context)
+    assert user in result.items
+    assert old not in result.working_items
+    assert current in result.working_items
+
+
+@pytest.mark.anyio
+async def test_structured_compaction_keeps_json_tool_references_across_recompaction(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        agent_context_model_summary_enabled=False,
+    )
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    definition = agent()
+    items = [
+        {"role": "user", "content": "Research."},
+        {"type": "function_call", "name": "read", "call_id": "read-1", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "read-1",
+         "output": json.dumps({"result_ref": "evidence-ref", "citation": "https://example.com/paper"})},
+        {"role": "assistant", "content": "Old analysis. " * 10000},
+    ]
+    first = await prepare(settings, definition, items, context)
+    second = await prepare(
+        settings, definition,
+        [*first.working_items, {"role": "assistant", "content": "New analysis. " * 10000}],
+        context,
+    )
+    assert "evidence-ref" in json.dumps(second.items)
+    assert "https://example.com/paper" in json.dumps(second.items)
+    assert not definition.binding.client.requests
+
+
+def _pending_paper_batch(document_id: str, batch: int, content: str) -> list[dict[str, Any]]:
+    call_id = f"{document_id}-{batch}"
+    return [
+        {"type": "function_call", "name": "read_paper_summary_batch", "call_id": call_id,
+         "arguments": json.dumps({"document_id": document_id, "action": "pages", "start": batch})},
+        {"type": "function_call_output", "call_id": call_id,
+         "output": {"checkpoint_required": True, "summary_batch": batch,
+                    "checkpoint_path": f"{document_id}/evidence/index.json", "content": content}},
+    ]
+
+
+@pytest.mark.parametrize("status", ["appended", "reconciled"])
+@pytest.mark.parametrize(
+    ("read_batch_id", "append_batch_id", "ordinal", "should_replace"),
+    [
+        ("source-a", "source-a", 1, True),
+        ("source-a", "source-b", 1, False),
+        ("source-a", None, 1, False),
+        (None, "source-a", 1, True),
+        (None, None, 1, True),
+        ("source-a", "source-a", 2, True),
+    ],
+)
+def test_paper_checkpoint_replacement_prefers_verified_batch_identity(
+    status, read_batch_id, append_batch_id, ordinal, should_replace,
+) -> None:
+    read = _pending_paper_batch("paper-1", 1, "Exact raw source")
+    if read_batch_id is not None:
+        read[1]["output"]["batch_id"] = read_batch_id
+    append_result = {
+        "status": status,
+        "document_id": "paper-1",
+        "checkpointed_batch": ordinal,
+        "checkpoint_path": "paper-1/evidence/index.json",
+    }
+    if append_batch_id is not None:
+        append_result["batch_id"] = append_batch_id
+    append = [
+        {"type": "function_call", "name": "paper_summary_checkpoint", "call_id": "append",
+         "arguments": '{"document_id":"paper-1","action":"append","content":"Verified evidence"}'},
+        {"type": "function_call_output", "call_id": "append", "output": append_result},
+    ]
+    result = _replace_checkpointed_paper_reads([*read, *append])
+    if should_replace:
+        assert result[1]["output"]["status"] == "replaced_by_summary_checkpoint"
+        assert result[1]["output"]["batch_id"] == append_batch_id
+    else:
+        assert result[1] == read[1]
+
+
+def test_paper_checkpoint_replacement_is_scoped_to_verified_document_and_batch() -> None:
+    first = _pending_paper_batch("paper-1", 1, "checkpointed raw")
+    second = _pending_paper_batch("paper-1", 2, "uncheckpointed raw")
+    unrelated = _pending_paper_batch("paper-2", 1, "other paper raw")
+    generic = [
+        {"type": "function_call", "name": "read_tool_result", "call_id": "generic", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "generic", "output": "unrelated result"},
+    ]
+    append = [
+        {"type": "function_call", "name": "paper_summary_checkpoint", "call_id": "append",
+         "arguments": '{"document_id":"paper-1","action":"append","content":"Verified evidence"}'},
+        {"type": "function_call_output", "call_id": "append",
+         "output": {"status": "appended", "checkpointed_batch": 1,
+                    "checkpoint_path": "paper-1/evidence/index.json",
+                    "next_start": 2, "next_offset": 640, "complete": False}},
+    ]
+    result = _replace_checkpointed_paper_reads([*first, *second, *unrelated, *generic, *append])
+    assert result[1]["output"]["status"] == "replaced_by_summary_checkpoint"
+    assert result[1]["output"]["next_start"] == 2
+    assert result[1]["output"]["next_offset"] == 640
+    assert result[1]["output"]["complete"] is False
+    assert result[2:8] == [*second, *unrelated, *generic]
+    first[1]["output"]["coverage"] = {"start": 1, "end": 1}
+    append[-1]["output"]["coverage"] = {"start": 2, "end": 2}
+    assert _replace_checkpointed_paper_reads([*first, *append])[1] == first[1]
+    append[-1]["output"]["status"] = "failed"
+    unchanged = [*first, *append]
+    assert _replace_checkpointed_paper_reads(unchanged) == unchanged
+
+
+@pytest.mark.anyio
+async def test_compaction_preserves_pending_paper_batch_verbatim_until_durable_append(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    runtime = Runtime()
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=runtime)
+    batch = _pending_paper_batch("paper-1", 1, "Exact uncheckpointed source text. " * 80)
+    items = [*batch, {"role": "assistant", "content": "Old analysis. " * 10000}]
+    result = await prepare(settings, agent(), items, context)
+    assert all(item in result.items for item in batch)
+    assert not runtime.bounded
+    oversized = _pending_paper_batch("paper-1", 2, "Uncheckpointed text. " * 10000)
+    with pytest.raises(RunPolicyViolation):
+        await prepare(settings, agent(), oversized, context)
+    assert not runtime.bounded
+
+
+@pytest.mark.anyio
+async def test_optional_compaction_model_call_has_background_priority(tmp_path) -> None:
+    from backend.providers.inference import _priority, inference_priority
+
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        agent_context_model_summary_enabled=True,
+    )
+    client = summarizing_client()
+    original_create = client.chat.completions.create
+    observed = []
+
+    async def create(**parameters):
+        observed.append(_priority.get())
+        return await original_create(**parameters)
+
+    client.chat.completions.create = create
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    with inference_priority("interactive"):
+        await prepare(
+            settings, agent(client=client),
+            [{"role": "assistant", "content": "Older analysis. " * 10000}], context,
+        )
+        assert _priority.get() == "interactive"
+    assert observed == ["background"]
+
+
+@pytest.mark.anyio
+async def test_model_compaction_retains_specific_understanding_across_later_compaction(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace")
+    assert settings.agent_context_model_summary_enabled is True
+    finding = "Accuracy was 91% on 120 samples [p.2]; independent replication is still unverified."
+    summaries = iter([finding, "New work progressed; continue using prior findings."])
+
+    async def create(**parameters):
+        client.requests.append(parameters)
+        return _Completion(next(summaries))
+
+    client = FakeClient(create)
+    definition = agent(client=client)
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    original = [
+        {"role": "user", "content": "Keep the exact evaluation result and its caveat."},
+        {"role": "assistant", "content": "Background detail. " * 1900 + finding},
+    ]
+    first = await prepare(settings, definition, original, context)
+    assert finding in client.requests[0]["messages"][-1]["content"]
+    assert not context.metadata["context_checkpoints"][0].get("summary_input_truncated")
+    second = await prepare(
+        settings, definition,
+        [*first.working_items, {"role": "assistant", "content": "New background detail. " * 1600}],
+        context,
+    )
+    assert finding in client.requests[1]["messages"][-1]["content"]
+    assert finding in json.dumps(second.items)
+
+
+@pytest.mark.anyio
+async def test_model_summary_explicitly_marks_sampled_history_as_partial(tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        agent_context_window_tokens=4096, agent_context_compaction_target_tokens=1024,
+    )
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=Runtime())
+    result = await prepare(
+        settings, agent(),
+        [{"role": "assistant", "content": "Long history. " * 10000}], context,
+    )
+    checkpoint = context.metadata["context_checkpoints"][0]
+    assert checkpoint["summary_input_truncated"] is True
+    assert any("bounded history sample" in caveat for caveat in checkpoint["caveats"])
+    retained = json.loads(result.items[0]["content"].split("\n\n")[-1])
+    assert retained["summary_input_truncated"] is True
 
 
 @pytest.mark.anyio

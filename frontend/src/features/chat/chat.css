@@ -1045,6 +1045,24 @@
   color: var(--accent-strong);
 }
 .composer-capability:disabled { cursor: not-allowed; opacity: .5; }
+
+.research-mode-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.research-mode-control select {
+  max-width: 165px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
 .fast-answer-control { display: inline-flex; align-items: center; }
 .fast-answer-control input {
   width: 2.8rem;

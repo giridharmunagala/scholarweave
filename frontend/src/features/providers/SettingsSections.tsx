@@ -186,6 +186,45 @@ export function RuntimePanel({
           </div>
           <div className="field-row setting-nested">
             <label className="field">
+              Working context budget (tokens)
+              <input
+                type="number"
+                min={2048}
+                max={500000}
+                value={settings.agent_working_context_tokens}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_working_context_tokens: Number(event.target.value) })
+                }
+              />
+              <small>Preferred maximum input, including instructions and tool schemas; bounded by the model window.</small>
+            </label>
+            <label className="field">
+              Response reserve (tokens)
+              <input
+                type="number"
+                min={256}
+                max={128000}
+                value={settings.agent_context_response_reserve_tokens}
+                onChange={(event) =>
+                  onChange({ ...settings, agent_context_response_reserve_tokens: Number(event.target.value) })
+                }
+              />
+              <small>Capacity kept available for the model response, not additional input context.</small>
+            </label>
+          </div>
+          <div className="setting-row">
+            <div className="setting-label">
+              <strong>Summarize older conversation with the model</strong>
+              <small>Retains understanding; disabling uses deterministic excerpts with less detail.</small>
+            </div>
+            <Toggle
+              checked={settings.agent_context_model_summary_enabled}
+              label="Summarize older conversation with the model"
+              onChange={(checked) => onChange({ ...settings, agent_context_model_summary_enabled: checked })}
+            />
+          </div>
+          <div className="field-row setting-nested">
+            <label className="field">
               Context window fallback
               <input
                 type="number"
@@ -222,6 +261,7 @@ export function RuntimePanel({
                   })
                 }
               />
+              <small>Desired input size after compaction, clamped to the working budget and model window; not a floor.</small>
             </label>
           </div>
           <div className="field-row setting-nested">

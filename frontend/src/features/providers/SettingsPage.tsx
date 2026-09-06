@@ -72,6 +72,9 @@ export default function SettingsPage() {
       const next = await providersApi.updateSettings({
         default_model_references: settings.default_model_references,
         agent_context_window_tokens: settings.agent_context_window_tokens,
+        agent_working_context_tokens: settings.agent_working_context_tokens,
+        agent_context_response_reserve_tokens: settings.agent_context_response_reserve_tokens,
+        agent_context_model_summary_enabled: settings.agent_context_model_summary_enabled,
         agent_context_high_water_ratio: settings.agent_context_high_water_ratio,
         agent_context_compaction_target_tokens: settings.agent_context_compaction_target_tokens,
         tool_result_max_tokens: settings.tool_result_max_tokens,

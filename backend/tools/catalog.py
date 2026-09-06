@@ -5,11 +5,14 @@ import inspect
 import json
 from typing import Any
 
+from jsonschema import Draft202012Validator, ValidationError as JsonSchemaValidationError
+
 from backend.agents.blueprint import FunctionToolSpec
 from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.agents.harness import FunctionTool, ToolInvocation
 from backend.prompting.registry import PromptRegistry
 from backend.tools.failures import recoverable_tool_invoker, tool_enabled_after_failures
+from backend.tools.policy import ToolInputError
 
 
 def _object_schema(
@@ -174,12 +177,14 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
                 "document_id": {"type": "string", "minLength": 1},
                 "action": {
                     "type": "string",
-                    "enum": ["inspect", "prepare", "pages", "chunks"],
+                    "enum": ["inspect", "prepare", "pages", "chunks", "search"],
                 },
                 "start": {"type": ["integer", "null"], "minimum": 0},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                "query": {"type": ["string", "null"], "maxLength": 2000},
+                "offset": {"type": ["integer", "null"], "minimum": 0},
             },
-            required=["document_id", "action", "start", "limit"],
+            required=["document_id", "action", "start", "limit", "query", "offset"],
         ),
         True,
         "_read_research_paper",
@@ -294,7 +299,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.summary.read",
         "read_paper_summary_batch",
-        "Inspect or prepare one paper, or read the next summary batch with one-page overlap.",
+        "Inspect or prepare one paper, or read the next character-budgeted summary batch.",
         _object_schema(
             {
                 "document_id": {"type": "string", "minLength": 1},
@@ -303,8 +308,9 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
                     "enum": ["inspect", "prepare", "pages", "chunks"],
                 },
                 "start": {"type": ["integer", "null"], "minimum": 0},
+                "offset": {"type": ["integer", "null"], "minimum": 0},
             },
-            required=["document_id", "action", "start"],
+            required=["document_id", "action", "start", "offset"],
         ),
         True,
         "_read_paper_summary_batch",
@@ -312,7 +318,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.summary.checkpoint",
         "paper_summary_checkpoint",
-        "Append evidence to or read the temporary checkpoint for this paper-summary run.",
+        "Append evidence to or read a durable, source-versioned paper evidence checkpoint.",
         _object_schema(
             {
                 "document_id": {"type": "string", "minLength": 1},
@@ -333,7 +339,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.summary.save",
         "save_paper_summary_version",
-        "Save one reviewed paper summary as an immutable version and update the canonical summary.",
+        "Save an immutable paper summary with explicit coverage; reviewed mode may update the canonical summary.",
         _object_schema(
             {
                 "document_id": {"type": "string", "minLength": 1},
@@ -424,9 +430,27 @@ def _factory(
     parameters_schema: dict[str, Any],
     strict_json_schema: bool,
 ):
+    validator = Draft202012Validator(parameters_schema)
+
     def build(spec: FunctionToolSpec) -> FunctionTool:
         async def invoke(invocation: ToolInvocation, raw_arguments: str) -> Any:
-            arguments = json.loads(raw_arguments or "{}")
+            try:
+                arguments = json.loads(raw_arguments or "{}")
+            except json.JSONDecodeError as error:
+                raise ToolInputError("Invalid tool arguments: supply a valid JSON object.") from error
+            try:
+                validator.validate(arguments)
+            except JsonSchemaValidationError as error:
+                location = ".".join(str(part) for part in error.absolute_path)[:100] or "arguments"
+                if error.validator == "required" and isinstance(error.instance, dict):
+                    missing = next(name for name in error.validator_value if name not in error.instance)
+                    detail = f"missing required field {missing!r}; use null only when its schema allows it"
+                elif error.validator == "additionalProperties":
+                    detail = "unexpected properties; use only the declared fields"
+                else:
+                    expected = json.dumps(error.validator_value, ensure_ascii=False)[:160]
+                    detail = f"expected {error.validator} {expected}"
+                raise ToolInputError(f"Invalid tool arguments at {location}: {detail}.") from error
             invoker = invocation.context.tool_runtime.invoke
             if "tool_call_id" in inspect.signature(invoker).parameters:
                 return await invoker(

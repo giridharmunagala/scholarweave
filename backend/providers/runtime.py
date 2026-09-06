@@ -18,6 +18,7 @@ from sqlalchemy import select
 from backend.core.config import Settings
 from backend.providers.logging import LLMCallLogger, logged_http_client
 from backend.providers.models import ProviderProfile as ProviderProfileRecord
+from backend.providers.repository import ProviderRepository
 from backend.providers.ollama import OllamaClient, OllamaError
 from backend.providers.schemas import ProviderModel as ProviderModelEntry
 from backend.providers.types import (
@@ -82,6 +83,14 @@ class ModelRuntime:
         self.ollama = ollama
         self.inference_scheduler = inference_scheduler
         self.llm_logger = LLMCallLogger(settings.llm_log_path)
+        for profile in ProviderRepository(session_factory).list():
+            residency = (profile.config_json or {}).get("residency", {})
+            if residency.get("enabled"):
+                self.inference_scheduler.restore(
+                    profile.id, residency.get("resident_model"),
+                    "batch" if residency.get("session_mode") == "batch" else "interactive",
+                    server_url=profile.base_url,
+                )
 
     def profiles(self, *, include_archived: bool = False) -> list[ProviderProfileRecord]:
         with self.session_factory() as session:
@@ -183,6 +192,7 @@ class ModelRuntime:
                 if resolved.local_inference
                 else None
             ),
+            profile_id=resolved.profile_id,
         )
         if resolved.kind == "ollama":
             return AsyncOpenAI(

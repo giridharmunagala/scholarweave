@@ -11,6 +11,7 @@ export type StopAndAnswerResponse = components['schemas']['StopAndAnswerResponse
 export type SteeringMessage = components['schemas']['SteeringMessageResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
 type ConversationMessageRequest = components['schemas']['ConversationMessageRequest'];
+export type ResearchMode = NonNullable<ConversationMessageRequest['research_mode']>;
 
 function conversationApi(basePath: string) {
   return {
@@ -31,6 +32,7 @@ function conversationApi(basePath: string) {
     fastAnswer = false,
     webSearchLimit = 1,
     contextWindowTokens?: number,
+    researchMode?: ResearchMode,
   ) =>
     request<components['schemas']['ConversationMessageResponse']>(
       `${basePath}/${encodeURIComponent(id)}/messages`,
@@ -42,7 +44,8 @@ function conversationApi(basePath: string) {
         fast_answer: fastAnswer,
         web_search_limit: webSearchLimit,
         context_window_tokens: contextWindowTokens,
-      }),
+        research_mode: researchMode,
+      } satisfies ConversationMessageRequest),
     ),
   remove: (id: string) =>
     request<void>(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),

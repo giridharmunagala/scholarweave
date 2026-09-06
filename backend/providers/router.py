@@ -15,6 +15,9 @@ from backend.providers.schemas import (
     ProviderUpdate,
     ProviderVerifyRequest,
     ProviderVerifyResponse,
+    ResidencyConfigure,
+    ResidencyConfirm,
+    ResidencyResponse,
 )
 from backend.providers.service import ProviderService
 
@@ -23,6 +26,34 @@ router = APIRouter(prefix="/providers", tags=["providers"])
 
 def provider_service(container=Depends(services)) -> ProviderService:
     return container.providers
+
+
+@router.get("/inference/residency", response_model=ResidencyResponse)
+async def residency_status(service: ProviderService = Depends(provider_service)) -> ResidencyResponse:
+    return service.residency()
+
+
+@router.put("/{profile_id}/residency", response_model=ResidencyResponse)
+async def configure_residency(
+    profile_id: str, payload: ResidencyConfigure,
+    service: ProviderService = Depends(provider_service),
+) -> ResidencyResponse:
+    return await service.configure_residency(profile_id, payload.enabled)
+
+
+@router.post("/{profile_id}/residency/drain", response_model=ResidencyResponse)
+async def drain_residency(
+    profile_id: str, service: ProviderService = Depends(provider_service),
+) -> ResidencyResponse:
+    return await service.begin_residency_switch(profile_id)
+
+
+@router.post("/{profile_id}/residency/confirm", response_model=ResidencyResponse)
+async def confirm_residency(
+    profile_id: str, payload: ResidencyConfirm,
+    service: ProviderService = Depends(provider_service),
+) -> ResidencyResponse:
+    return await service.confirm_residency(profile_id, payload)
 
 
 @router.get("", response_model=list[ProviderResponse])

@@ -24,12 +24,14 @@ import json
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
+from contextvars import ContextVar
 from typing import Any, Literal, Protocol
 
 from jsonschema import Draft202012Validator, ValidationError as JsonSchemaValidationError
 from openai import AsyncOpenAI, OpenAIError
 
 from backend.agents.context import ScholarWeaveContext
+from backend.runs.repository import LeaseOwnershipError
 from backend.utils import to_jsonable
 
 MessageRole = Literal["user", "assistant", "system", "developer", "tool"]
@@ -37,6 +39,15 @@ ConversationItem = dict[str, Any]
 RunInputItems = list[ConversationItem]
 RunInput = str | RunInputItems
 MAX_DELEGATION_DEPTH = 2
+_tool_model_identity: ContextVar[dict[str, str] | None] = ContextVar(
+    "scholarweave_tool_model_identity", default=None
+)
+
+
+def current_tool_model_identity() -> dict[str, str] | None:
+    """Return task-local provenance, including when parallel delegates share metadata."""
+    identity = _tool_model_identity.get()
+    return dict(identity) if identity is not None else None
 
 
 class HarnessError(RuntimeError):
@@ -252,6 +263,7 @@ class PreparedInput:
     items: RunInputItems
     instructions: str
     working_items: RunInputItems | None = None
+    response_max_tokens: int | None = None
 
 
 class ContextPolicy(Protocol):
@@ -292,7 +304,7 @@ class Usage:
 
 @dataclass(slots=True)
 class RunResult:
-    """The terminal state of one harness run."""
+    """Audit output plus the last bounded request and its uncovered generated tail."""
 
     input: RunInput
     new_items: list[dict[str, Any]]
@@ -300,9 +312,16 @@ class RunResult:
     final_output: Any
     last_agent_name: str
     usage: Usage
+    working_items: RunInputItems | None = None
+    working_snapshot_items: RunInputItems | None = None
+    working_snapshot_generated_count: int = 0
 
     def to_input_list(self) -> RunInputItems:
-        return [*normalize_run_input(self.input), *self.generated_items]
+        return (
+            list(self.working_items)
+            if self.working_items is not None
+            else [*normalize_run_input(self.input), *self.generated_items]
+        )
 
 
 def message_item(role: MessageRole, content: str) -> ConversationItem:
@@ -692,13 +711,26 @@ async def stream_model_turn(
                     )
                 for raw_call in delta.get("tool_calls") or []:
                     calls.add(raw_call)
+                    arguments = (raw_call.get("function") or {}).get("arguments")
+                    if isinstance(arguments, str) and arguments:
+                        await context.emit(
+                            "model.stream",
+                            {"raw_type": "response.function_call_arguments.delta", "delta": arguments},
+                        )
     finally:
         close = getattr(stream, "close", None)
         if close is not None:
             outcome = close()
             if asyncio.iscoroutine(outcome):
                 await outcome
-    await context.emit("model.stream", {"raw_type": "response.completed"})
+    await context.emit(
+        "model.stream",
+        {
+            "raw_type": "response.completed",
+            "finish_reason": finish_reason,
+            "output_tokens": usage.output_tokens,
+        },
+    )
     return ModelTurn(
         text="".join(text_parts),
         reasoning="".join(reasoning_parts),
@@ -727,6 +759,8 @@ class AgentRunner:
         self._hooks = hooks
         self._context_policy = context_policy
         self._depth = depth
+        self._working_snapshot: RunInputItems | None = None
+        self._snapshot_generated_count = 0
 
     async def run(self, input_value: RunInput, *, max_turns: int) -> RunResult:
         history = normalize_run_input(input_value)
@@ -740,6 +774,7 @@ class AgentRunner:
         if self._hooks is not None:
             await self._hooks.on_agent_start(self._context, self._agent)
         for turn_index in range(max_turns):
+            self._snapshot_generated_count = len(generated)
             turn = await self._model_turn(working, turn_index, usage)
             if turn.reasoning:
                 item = reasoning_item(turn.reasoning, self._agent.binding.model_name)
@@ -778,6 +813,9 @@ class AgentRunner:
                     final_output=output,
                     last_agent_name=self._agent.name,
                     usage=usage,
+                    working_items=list(working),
+                    working_snapshot_items=self._working_snapshot,
+                    working_snapshot_generated_count=self._snapshot_generated_count,
                 )
             call_items, output_items, projected_items = await self._execute_tool_calls(
                 turn.tool_calls
@@ -798,6 +836,9 @@ class AgentRunner:
                     final_output=output,
                     last_agent_name=self._agent.name,
                     usage=usage,
+                    working_items=list(working),
+                    working_snapshot_items=self._working_snapshot,
+                    working_snapshot_generated_count=self._snapshot_generated_count,
                 )
         raise MaxTurnsExceeded(
             f"Agent '{self._agent.name}' exceeded its {max_turns}-turn budget.",
@@ -808,6 +849,9 @@ class AgentRunner:
                 final_output=None,
                 last_agent_name=self._agent.name,
                 usage=usage,
+                working_items=list(working),
+                working_snapshot_items=self._working_snapshot,
+                working_snapshot_generated_count=self._snapshot_generated_count,
             ),
         )
 
@@ -840,6 +884,7 @@ class AgentRunner:
         usage: Usage,
     ) -> ModelTurn:
         instructions = self._agent.instructions
+        request_agent = self._agent
         prepared: RunInputItems = working
         if self._context_policy is not None:
             outcome = await self._context_policy.prepare(
@@ -853,7 +898,15 @@ class AgentRunner:
             instructions = outcome.instructions
             if outcome.working_items is not None:
                 working[:] = outcome.working_items
+            if outcome.response_max_tokens is not None:
+                request_agent = replace(
+                    self._agent,
+                    model_settings=replace(
+                        self._agent.model_settings, max_tokens=outcome.response_max_tokens
+                    ),
+                )
         tools = self._agent.enabled_tools(self._context)
+        self._working_snapshot = list(working)
         messages = to_chat_messages(
             prepared,
             instructions,
@@ -868,7 +921,7 @@ class AgentRunner:
                 prepared,
             )
         try:
-            turn = await stream_model_turn(self._agent, messages, tools, self._context)
+            turn = await stream_model_turn(request_agent, messages, tools, self._context)
         except OpenAIError as exc:
             raise ModelBehaviorError(
                 f"The provider request failed: {type(exc).__name__}: {exc}"
@@ -879,6 +932,24 @@ class AgentRunner:
                 self._context,
                 self._agent,
                 turn.usage.to_dict(),
+            )
+        if turn.finish_reason == "length":
+            raise ModelBehaviorError(
+                "Model response was truncated (finish_reason=length; "
+                f"output_tokens={turn.usage.output_tokens}; "
+                f"max_tokens={request_agent.model_settings.max_tokens}). "
+                "No tool calls from this turn were executed. Increase the configured "
+                "response budget or select a supported lower reasoning effort."
+            )
+        if turn.finish_reason == "content_filter":
+            raise ModelBehaviorError(
+                "The provider filtered the model response (finish_reason=content_filter)."
+            )
+        if not turn.tool_calls and not turn.text.strip():
+            raise ModelBehaviorError(
+                "The model returned no answer text or tool calls "
+                f"(finish_reason={turn.finish_reason}; output_tokens={turn.usage.output_tokens}). "
+                "Reasoning alone is not a completed answer."
             )
         return turn
 
@@ -937,7 +1008,15 @@ class AgentRunner:
 
         results: dict[str, Any] = {}
         if runnable:
-            outcomes = await asyncio.gather(*(run_one(call) for call in runnable))
+            tasks = [asyncio.create_task(run_one(call)) for call in runnable]
+            try:
+                outcomes = await asyncio.gather(*tasks)
+            except BaseException:
+                # A lost lease or cancelled run must not leave sibling writes alive.
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
             for call, outcome in zip(runnable, outcomes):
                 results[call.id] = outcome
         for call in rejected:
@@ -988,28 +1067,30 @@ class AgentRunner:
             tool_name=call.name,
             agent_name=self._agent.name,
         )
-        if self._hooks is not None:
-            await self._hooks.on_tool_start(
-                self._context,
-                self._agent,
-                call.name,
-                call.id,
-            )
+        identity = {
+            "model": self._agent.binding.model_name,
+            "provider_kind": self._agent.binding.provider_kind,
+        }
+        self._context.metadata["active_model"] = identity
+        token = _tool_model_identity.set(identity)
         try:
-            result = await tool.on_invoke_tool(invocation, call.arguments or "{}")
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            result = f"Error: {type(exc).__name__}: {exc}"
-        if self._hooks is not None:
-            await self._hooks.on_tool_end(
-                self._context,
-                self._agent,
-                call.name,
-                call.id,
-                result,
-            )
-        return result
+            if self._hooks is not None:
+                await self._hooks.on_tool_start(
+                    self._context, self._agent, call.name, call.id,
+                )
+            try:
+                result = await tool.on_invoke_tool(invocation, call.arguments or "{}")
+            except (asyncio.CancelledError, LeaseOwnershipError, RunPolicyViolation):
+                raise
+            except Exception as exc:
+                result = f"Error: {type(exc).__name__}: {exc}"
+            if self._hooks is not None:
+                await self._hooks.on_tool_end(
+                    self._context, self._agent, call.name, call.id, result,
+                )
+            return result
+        finally:
+            _tool_model_identity.reset(token)
 
     def _final_output(self, text: str) -> Any:
         self._enforce_output_policy(text)

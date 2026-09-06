@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.agents.blueprint import ModelReferenceSpec, ReasoningEffort
 from backend.runs.schemas import RunResponse
@@ -16,11 +16,48 @@ class ResearchSchema(BaseModel):
 class PaperSummaryRunRequest(ResearchSchema):
     model_reference: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
     reasoning_effort: ReasoningEffort | None = None
+    mode: Literal["overview", "reviewed"] = "reviewed"
+
+
+class PaperSummaryBatchRequest(PaperSummaryRunRequest):
+    document_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1, max_length=50)
+
+    @field_validator("document_ids")
+    @classmethod
+    def distinct_documents(cls, value: list[str]) -> list[str]:
+        if any(not item.strip() or item != item.strip() for item in value):
+            raise ValueError("Paper IDs must be nonempty and have no surrounding whitespace.")
+        if len(value) != len(set(value)):
+            raise ValueError("Each paper may appear only once in a summary batch.")
+        return value
+
+    @model_validator(mode="after")
+    def explicit_model(self) -> "PaperSummaryBatchRequest":
+        if not self.model_reference.provider_profile_id or not self.model_reference.model:
+            raise ValueError("Select an explicit provider and model for the whole batch.")
+        return self
 
 
 class PaperSummaryRunResponse(ResearchSchema):
     run: RunResponse
     prompt_revision: str
+    document_id: str | None = None
+
+
+class PaperSummaryBatchResponse(ResearchSchema):
+    runs: list[PaperSummaryRunResponse]
+
+
+class PaperSummaryCoverageResponse(ResearchSchema):
+    kind: Literal["pages", "chunks"] | None = None
+    checkpointed_batches: int = 0
+    exact_spans_path: str | None = None
+
+
+class PaperSummaryModelResponse(ResearchSchema):
+    model: str
+    provider_kind: str | None = None
+    provider_profile_id: str | None = None
 
 
 class PaperSummaryVersionResponse(ResearchSchema):
@@ -33,6 +70,20 @@ class PaperSummaryVersionResponse(ResearchSchema):
     review_summary: str
     citation_count: int
     status: str
+    mode: Literal["overview", "reviewed"] | None = None
+    review_complete: bool | None = None
+    coverage_complete: bool | None = None
+    coverage: PaperSummaryCoverageResponse | None = None
+    next_start: int | None = None
+    next_offset: int = 0
+    evidence_path: str | None = None
+    model: PaperSummaryModelResponse | str | None = None
+    content_hash: str | None = None
+    source_hash: str | None = None
+    extraction_hash: str | None = None
+    source_version: str | None = None
+    canonical_path: str | None = None
+    canonical_updated: bool | None = None
 
 
 class PaperSummaryContentResponse(ResearchSchema):

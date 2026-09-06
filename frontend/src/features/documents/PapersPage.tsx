@@ -5,6 +5,7 @@ import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
 import { PaperSummaryPanel } from './PaperSummaryPanel';
+import { SummaryBatchPanel } from './SummaryBatchPanel';
 import '../library.css';
 
 type Document = components['schemas']['DocumentResponse'];
@@ -81,6 +82,7 @@ export default function PapersPage() {
   const [viewerMode, setViewerMode] = useState<'pdf' | 'text'>('pdf');
   const [retrievedText, setRetrievedText] = useState<string | null>(null);
   const [showImport, setShowImport] = useState(false);
+  const [showSummaryBatch, setShowSummaryBatch] = useState(false);
   const ingestionRequest = useRef<AbortController | null>(null);
   const textRequestId = useRef(0);
 
@@ -397,6 +399,14 @@ export default function PapersPage() {
             <button
               className="button secondary"
               type="button"
+              aria-expanded={showSummaryBatch}
+              onClick={() => setShowSummaryBatch((value) => !value)}
+            >
+              Summarize a collection
+            </button>
+            <button
+              className="button secondary"
+              type="button"
               aria-expanded={importOpen}
               onClick={() => setShowImport((value) => !value)}
             >
@@ -418,6 +428,7 @@ export default function PapersPage() {
       />
       <LibraryTabs active="papers" />
       {error ? <ErrorNotice error={error} /> : null}
+      {showSummaryBatch ? <SummaryBatchPanel papers={visibleDocuments} /> : null}
       {importOpen ? (
       <div className="paper-import">
         <Panel

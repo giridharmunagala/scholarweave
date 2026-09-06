@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import threading
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import httpx
 
 from backend.agents.blueprint import FunctionToolSpec, ModelReferenceSpec
 from backend.conversations.turns import (
@@ -18,9 +21,10 @@ from backend.bootstrap import create_services
 from backend.documents.models import Document
 from backend.research.sources import WebSourceUnavailable
 from backend.agents.context import ScholarWeaveContext
-from backend.tools.catalog import APPLICATION_TOOLS, create_tool_catalog
+from backend.tools.catalog import APPLICATION_TOOLS, _factory, create_tool_catalog
 from backend.tools.runtime import (
     ApplicationToolRuntime,
+    _paper_model_provenance,
     create_work_plan,
     update_work_item,
     work_plan,
@@ -34,6 +38,254 @@ class Runtime:
     async def invoke(self, catalog_id, arguments, context):
         self.calls.append((catalog_id, arguments, context.run_id))
         return {"ok": True}
+
+
+def test_paper_provenance_prefers_task_local_identity_over_shared_metadata(monkeypatch) -> None:
+    context = ScholarWeaveContext(
+        run_id="provenance", tool_runtime=Runtime(),
+        metadata={"active_model": {"model": "racing-coordinator"}},
+    )
+    monkeypatch.setattr(
+        "backend.tools.runtime.current_tool_model_identity",
+        lambda: {"model": "actual-delegate", "provider_kind": "openai_compatible"},
+    )
+    assert _paper_model_provenance(context) == {"model": "actual-delegate", "provider_kind": "openai_compatible"}
+    context.metadata["paper_summary_model"] = {"model": "dedicated-summary"}
+    assert _paper_model_provenance(context) == {"model": "actual-delegate", "provider_kind": "openai_compatible"}
+    context.metadata["paper_summary_model"] = {
+        "model": "actual-delegate", "provider_kind": "openai_compatible", "provider_profile_id": "profile",
+    }
+    assert _paper_model_provenance(context) == context.metadata["paper_summary_model"]
+    context.metadata.pop("paper_summary_model")
+    monkeypatch.setattr("backend.tools.runtime.current_tool_model_identity", lambda: None)
+    assert _paper_model_provenance(context) == {"model": "racing-coordinator"}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("raw", [
+    "{", "[]", "null", '{"title":null}', '{"title":5}',
+    '{"title":"ok","unexpected":true}', '{"title":""}',
+    json.dumps({"title": "x" * 1000}),
+])
+async def test_catalog_rejects_invalid_arguments_before_any_mutation(raw) -> None:
+    runtime = Runtime()
+    tool = create_tool_catalog().build_function_tool(
+        FunctionToolSpec(id="title", catalog_id="conversation.title.set"),
+    )
+    context = ScholarWeaveContext(run_id="validation", tool_runtime=runtime)
+    with pytest.raises(RuntimeError) as error:
+        await tool.on_invoke_tool(SimpleNamespace(context=context, tool_call_id="invalid"), raw)
+    payload = json.loads(str(error.value))
+    assert payload["category"] == "invalid_input"
+    assert payload["unknown_outcome"] is False
+    assert payload["retryable"] is False
+    assert len(payload["message"]) < 350
+    assert runtime.calls == []
+
+
+@pytest.mark.anyio
+async def test_catalog_validates_nullable_fields_and_nested_required_properties() -> None:
+    runtime = Runtime()
+    context = ScholarWeaveContext(run_id="validation", tool_runtime=runtime)
+    invocation = SimpleNamespace(context=context, tool_call_id="nullable")
+    catalog = create_tool_catalog()
+    paper = catalog.build_function_tool(FunctionToolSpec(id="read", catalog_id="research.paper.read"))
+    arguments = {"document_id": "paper", "action": "inspect", "start": None, "limit": 1, "query": None, "offset": None}
+    assert await paper.on_invoke_tool(invocation, json.dumps(arguments)) == {"ok": True}
+    assert runtime.calls[-1][1] == arguments
+    plan = catalog.build_function_tool(FunctionToolSpec(id="plan", catalog_id="work.plan.create"))
+    with pytest.raises(RuntimeError) as error:
+        await plan.on_invoke_tool(invocation, '{"items":[{"title":"missing id"}]}')
+    assert "items.0" in json.loads(str(error.value))["message"]
+    assert len(runtime.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("strict", [False, True])
+async def test_catalog_validator_preserves_schema_optional_properties(strict) -> None:
+    runtime = Runtime()
+    context = ScholarWeaveContext(run_id="optional", tool_runtime=runtime)
+    schema = {
+        "type": "object",
+        "properties": {"required": {"type": "string"}, "optional": {"type": ["string", "null"]}},
+        "required": ["required"], "additionalProperties": False,
+    }
+    tool = _factory("test.optional", "optional", "Optional input", schema, strict)(
+        FunctionToolSpec(id="optional", catalog_id="test.optional"),
+    )
+    for arguments in ({"required": "yes"}, {"required": "yes", "optional": None}):
+        assert await tool.on_invoke_tool(
+            SimpleNamespace(context=context, tool_call_id="optional"), json.dumps(arguments),
+        ) == {"ok": True}
+    assert len(runtime.calls) == 2
+
+
+@pytest.mark.anyio
+async def test_tool_retry_deadline_includes_attempts_and_retry_after(test_settings, monkeypatch) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext(run_id="deadline", tool_runtime=runtime)
+    test_settings.tool_call_timeout_seconds = 0.08
+    test_settings.tool_read_retry_attempts = 4
+    calls = 0
+
+    async def rate_limited(arguments, context):
+        nonlocal calls
+        calls += 1
+        response = httpx.Response(
+            429, headers={"Retry-After": "10"},
+            request=httpx.Request("GET", "http://localhost/source"),
+        )
+        raise httpx.HTTPStatusError("rate limited", request=response.request, response=response)
+
+    monkeypatch.setattr(runtime, "_read_research_paper", rate_limited)
+    try:
+        with pytest.raises(httpx.HTTPStatusError):
+            await runtime.invoke("research.paper.read", {"action": "pages"}, context)
+        assert calls == 1
+
+        async def slow_read(arguments, context):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.05)
+            raise httpx.ReadTimeout("slow source")
+
+        monkeypatch.setattr(runtime, "_read_research_paper", slow_read)
+        monkeypatch.setattr("backend.tools.runtime.retry_delay", lambda *args: 0)
+        calls = 0
+        with pytest.raises(TimeoutError):
+            await runtime.invoke("research.paper.read", {"action": "pages"}, context)
+        assert calls == 2
+
+        calls = 0
+        with pytest.raises(httpx.ReadTimeout):
+            await runtime.invoke("research.paper.read", {"action": "prepare"}, context)
+        assert calls == 1
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
+async def test_dispatched_write_is_joined_before_mutation_lock_released(test_settings, monkeypatch, interrupt) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext(run_id="joined-write", tool_runtime=runtime)
+    entered = threading.Event()
+    release = threading.Event()
+    completed: list[str] = []
+
+    def write(arguments, context):
+        if arguments["name"] == "first":
+            entered.set()
+            assert release.wait(timeout=2)
+        completed.append(arguments["name"])
+        return {"saved": arguments["name"]}
+
+    monkeypatch.setattr(runtime, "_save_research_note", write)
+    test_settings.tool_call_timeout_seconds = 0.03 if interrupt == "timeout" else 1
+    first = asyncio.create_task(runtime.invoke("research.notes.save", {"name": "first"}, context))
+    second = None
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        if interrupt == "cancel":
+            first.cancel()
+        await asyncio.sleep(0.05)
+        assert not first.done()
+        assert runtime._mutation_lock.locked()
+        test_settings.tool_call_timeout_seconds = 1
+        second = asyncio.create_task(runtime.invoke("research.notes.save", {"name": "second"}, context))
+        await asyncio.sleep(0)
+        assert completed == []
+        release.set()
+        with pytest.raises(asyncio.CancelledError if interrupt == "cancel" else TimeoutError):
+            await first
+        assert await second == {"saved": "second"}
+        assert completed == ["first", "second"]
+        assert not runtime._mutation_lock.locked()
+    finally:
+        release.set()
+        await asyncio.gather(first, *( [second] if second is not None else []), return_exceptions=True)
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_budgeted_paper_reads_search_and_resumable_evidence(test_settings) -> None:
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="bounded.pdf", title="Bounded",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=2, metadata={})
+    texts = ['Needle exact result 42. ' + '\\ " \n猫' * 3500, "The final conclusion."]
+    services.retrieval.replace_document_chunks(
+        document.id, [{"text": text, "citation": f"p.{index + 1}"} for index, text in enumerate(texts)],
+    )
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext(
+        run_id="budgeted", tool_runtime=runtime,
+        metadata={"paper_summary_model": {"model": "local-test"}},
+    )
+    try:
+        hit = await runtime._read_research_paper(
+            {"document_id": document.id, "action": "search", "query": "needle", "limit": 3},
+            context,
+        )
+        assert hit["matches"][0]["citation"] == "p.1"
+        assert hit["matches"][0]["chunk_index"] == 0
+        assert context.metadata["paper_activity"][-1]["citations"] == ["p.1"]
+        assert len(json.dumps(hit, ensure_ascii=False)) <= test_settings.tool_result_max_tokens * 4
+        reconstructed = ["", ""]
+        cursor, offset = 0, 0
+        batches = 0
+        while True:
+            batch = await runtime._read_paper_summary_batch(
+                {"document_id": document.id, "action": "chunks", "start": cursor, "offset": offset},
+                context,
+            )
+            assert len(json.dumps(batch, ensure_ascii=False)) <= test_settings.tool_result_max_tokens * 4
+            assert not (await runtime.bound_tool_result("research.summary.read", batch, context)).get("result_ref")
+            for chunk in batch["chunks"]:
+                reconstructed[chunk["chunk_index"]] += chunk["text"]
+            evidence = f"Batch {batches}: exact finding 42 and continuation [p.1]."
+            appended = await runtime._paper_summary_checkpoint(
+                {"document_id": document.id, "action": "append", "content": evidence}, context,
+            )
+            assert appended["document_id"] == document.id
+            assert appended["batch_id"] == batch["batch_id"]
+            # Retry after the verified write must not duplicate evidence.
+            await runtime._paper_summary_checkpoint(
+                {"document_id": document.id, "action": "append", "content": evidence}, context,
+            )
+            batches += 1
+            if not batch["has_more"]:
+                break
+            cursor, offset = batch["next_start"], batch["next_offset"]
+            context = ScholarWeaveContext(run_id=f"resumed-{batches}", tool_runtime=runtime)
+            resumed = await runtime._paper_summary_checkpoint(
+                {"document_id": document.id, "action": "read"}, context,
+            )
+            assert (resumed["resume_start"], resumed["resume_offset"]) == (cursor, offset)
+        assert reconstructed == texts
+        assert batches > 5
+        assert appended["complete"] is True
+        index = services.workspace.read_file(appended["checkpoint_path"]).content
+        assert len(index["records"]) == batches
+        assert index["records"][0]["model"] == {"model": "local-test"}
+        assert index["source_hash"] and index["extraction_hash"]
+        old_path = appended["checkpoint_path"]
+        services.retrieval.replace_document_chunks(document.id, [{"text": "Different extraction"}])
+        with pytest.raises(ValueError, match="extraction changed"):
+            await runtime._paper_summary_checkpoint(
+                {"document_id": document.id, "action": "read"}, context,
+            )
+        changed = await runtime._paper_summary_checkpoint(
+            {"document_id": document.id, "action": "read"}, context,
+        )
+        assert changed["status"] == "empty"
+        assert changed["checkpoint_path"] != old_path
+        assert services.workspace.read_file(old_path).content["complete"] is True
+    finally:
+        await services.close()
 
 
 @pytest.fixture
@@ -565,6 +817,8 @@ async def test_paper_summary_updates_canonical_summary_only_through_save_tool(
         filename="durable-summary.pdf",
         title="Durable summary",
     )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [{"text": "Complete source evidence."}])
     runtime = services.runs._tool_runtime
     context = ScholarWeaveContext(
         run_id="summary-run",
@@ -580,6 +834,9 @@ async def test_paper_summary_updates_canonical_summary_only_through_save_tool(
         },
     )
     try:
+        await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "chunks", "start": 0}, context,
+        )
         saved = await runtime.invoke(
             "research.summary.save",
             {
@@ -625,7 +882,7 @@ async def test_paper_summary_updates_canonical_summary_only_through_save_tool(
 
 
 @pytest.mark.anyio
-async def test_paper_summary_checkpoint_survives_context_and_is_run_scoped(
+async def test_paper_summary_checkpoint_survives_run_cleanup_and_is_idempotent(
     test_settings,
 ) -> None:
     services = create_services(test_settings)
@@ -647,6 +904,7 @@ async def test_paper_summary_checkpoint_survives_context_and_is_run_scoped(
             ]
         },
     )
+    context.metadata["paper_activity"][0]["source_version"] = services.documents.source_revision(document.id)["source_version"]
     first_entry = "Pages 1-3: contribution evidence [p.1]. " * 10
     second_entry = "Pages 4-6: evaluation evidence [p.5]. " * 10
     try:
@@ -683,7 +941,7 @@ async def test_paper_summary_checkpoint_survives_context_and_is_run_scoped(
             },
             context,
         )
-        checkpoint_path = test_settings.artifacts_dir / first["checkpoint_path"]
+        checkpoint_path = test_settings.workspace_dir / first["checkpoint_path"]
         assert checkpoint_path.is_file()
         assert page["status"] == "available"
         assert page["has_more"] is True
@@ -691,18 +949,35 @@ async def test_paper_summary_checkpoint_survives_context_and_is_run_scoped(
         assert first_entry[:80] in page["content"]
 
         services.documents.delete_run_artifacts(context.run_id)
-        assert not checkpoint_path.exists()
+        assert checkpoint_path.exists()
+        resumed = ScholarWeaveContext(
+            run_id="next-summary-run", tool_runtime=services.runs._tool_runtime,
+        )
+        reused = await services.runs._tool_runtime._paper_summary_checkpoint(
+            {"document_id": document.id, "action": "read", "offset": 0, "limit": 8000},
+            resumed,
+        )
+        assert first_entry.strip() in reused["content"]
+        await services.runs._tool_runtime._paper_summary_checkpoint(
+            {"document_id": document.id, "action": "append", "content": first_entry},
+            resumed,
+        )
+        records = services.workspace.read_file(first["checkpoint_path"]).content["records"]
+        assert len(records) == 2
     finally:
         await services.close()
 
 
 @pytest.mark.anyio
-async def test_paper_summary_reader_caps_five_overlapping_page_batches(
+async def test_paper_summary_reader_continues_after_five_without_overlap(
     test_settings,
     monkeypatch,
 ) -> None:
     services = create_services(test_settings)
     runtime = services.runs._tool_runtime
+    with services.session_factory() as session:
+        session.add(Document(id="paper-1", title="Paper", source_filename="paper.pdf", content_type="application/pdf", status="ready"))
+        session.commit()
     delegated_calls: list[dict[str, Any]] = []
 
     async def read_batch(arguments, _context):
@@ -719,7 +994,7 @@ async def test_paper_summary_reader_caps_five_overlapping_page_batches(
     context = ScholarWeaveContext(run_id="bounded-summary-run", tool_runtime=runtime)
     try:
         results = []
-        starts = [1, 10, 20, 30, 40]
+        starts = [1, 65, 129, 193, 257, 321]
         for start in starts:
             results.append(
                 await runtime._read_paper_summary_batch(
@@ -735,22 +1010,13 @@ async def test_paper_summary_reader_caps_five_overlapping_page_batches(
                 "pending_checkpoint",
                 None,
             )
-        with pytest.raises(ValueError, match="capped at five"):
-            await runtime._read_paper_summary_batch(
-                {
-                    "document_id": "paper-1",
-                    "action": "pages",
-                    "start": 51,
-                },
-                context,
-            )
     finally:
         await services.close()
 
-    assert [result["summary_batch"] for result in results] == [1, 2, 3, 4, 5]
-    assert [call["limit"] for call in delegated_calls] == [10, 11, 11, 11, 11]
-    assert [result["next_start"] for result in results] == [10, 20, 30, 40, 50]
-    assert len(delegated_calls) == 5
+    assert [result["summary_batch"] for result in results] == [1, 2, 3, 4, 5, 6]
+    assert [call["limit"] for call in delegated_calls] == [64] * 6
+    assert [result["next_start"] for result in results] == [65, 129, 193, 257, 321, 385]
+    assert len(delegated_calls) == 6
 
 
 @pytest.mark.anyio
@@ -760,6 +1026,9 @@ async def test_paper_summary_reader_requires_checkpoint_before_next_batch(
 ) -> None:
     services = create_services(test_settings)
     runtime = services.runs._tool_runtime
+    with services.session_factory() as session:
+        session.add(Document(id="paper-1", title="Paper", source_filename="paper.pdf", content_type="application/pdf", status="ready"))
+        session.commit()
 
     async def read_batch(arguments, _context):
         start = int(arguments["start"])
@@ -792,9 +1061,11 @@ async def test_paper_summary_reader_requires_checkpoint_before_next_batch(
         await services.close()
 
     assert first["checkpoint_required"] is True
-    assert first["coverage"] == {"kind": "pages", "start": 1, "end": 10}
-    assert first["next_start"] == 10
-    assert first["checkpoint_path"].endswith("/paper-summary/paper-1/checkpoint.md")
+    assert first["coverage"]["start"] == 1
+    assert first["coverage"]["end"] == 10
+    assert len(first["coverage"]["spans"]) == 10
+    assert first["next_start"] == 11
+    assert first["checkpoint_path"].startswith("papers/paper-1/evidence/")
 
 
 @pytest.mark.anyio
@@ -860,6 +1131,9 @@ async def test_parallel_paper_summary_batch_reads_leave_one_pending_batch(
 ) -> None:
     services = create_services(test_settings)
     runtime = services.runs._tool_runtime
+    with services.session_factory() as session:
+        session.add(Document(id="paper-1", title="Paper", source_filename="paper.pdf", content_type="application/pdf", status="ready"))
+        session.commit()
 
     async def read_batch(arguments, _context):
         await asyncio.sleep(0)

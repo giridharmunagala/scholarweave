@@ -25,7 +25,7 @@ from backend.runs.service import (
 from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import SteeringMessage
 from backend.conversations.steering import steering_message_id
-from backend.tests.harness_support import FakeClient, stub_binding
+from backend.tests.harness_support import FakeClient, stub_binding, text_chunks
 from backend.tools.catalog import create_tool_catalog
 from backend.tools.failures import (
     record_tool_success,
@@ -180,6 +180,253 @@ def test_tool_failure_state_restores_by_logical_call_and_success_resets_it() -> 
 
 
 @pytest.mark.anyio
+async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history(
+    tmp_path, stub_provider,
+) -> None:
+    from backend.persistence.files import SafeStorage
+
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+        agent_context_window_tokens=128_000,
+        agent_context_model_summary_enabled=False,
+    )
+    settings.ensure_directories()
+    storage = SafeStorage(settings)
+
+    class CheckpointRuntime(ToolRuntime):
+        def store_context_checkpoint(self, checkpoint, context):
+            stored = storage.write_json(
+                settings.artifacts_dir, f"runs/{context.run_id}/checkpoint.json", checkpoint
+            )
+            return {"result_ref": stored.relative_path}
+
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog(), settings=settings).compile(
+        AgentBlueprint.model_validate({
+            "name": "Researcher", "entry_agent_id": "researcher",
+            "agents": [{"id": "researcher", "name": "Researcher", "instructions": "Answer."}],
+        })
+    )
+    repository = RunRepository(create_session_factory(settings))
+    database = tmp_path / "sessions.sqlite3"
+    factory = ConversationSessionFactory(database)
+    session = factory.get("conversation-1", compiled.blueprint.session)
+    original = [
+        {"role": "user", "content": "Preserve exact requirement — no uploads."},
+        {"role": "assistant", "content": "Old raw evidence " * 10000},
+        {"type": "function_call", "call_id": "source", "name": "read_source", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "source", "output": {
+            "result_ref": "runs/expired-source-run/source.json",
+            "citation": "https://example.com/study#p2",
+            "text": "Measured accuracy was 91% [p.2].",
+        }},
+    ]
+    await session.add_items(original)
+    service = RunService(
+        repository, factory, CheckpointRuntime(), EventBroker(), settings=settings,
+        delete_run_artifacts=lambda run_id: storage.delete_stored_tree(
+            settings.artifacts_dir, f"runs/{run_id}"
+        ),
+    )
+    first = await service.run_now(compiled, "First follow-up.", conversation_id="conversation-1")
+    assert first.status == "completed", first.error
+    assert any(event.event_type == "context.compacted" for event in first.events)
+    assert original[1] in await session.get_items()
+    assert original[1] not in await session.get_working_items()
+    checkpoint_path = settings.artifacts_dir / "runs" / first.id / "checkpoint.json"
+    assert checkpoint_path.exists()
+    assert service.clear_history() == 1
+    assert not checkpoint_path.exists()
+    assert "Measured accuracy was 91%" in json.dumps(await session.get_working_items())
+    await service.close()
+    await factory.close()
+
+    reopened = ConversationSessionFactory(database)
+    service = RunService(repository, reopened, ToolRuntime(), EventBroker(), settings=settings)
+    second = await service.run_now(compiled, "Second follow-up.", conversation_id="conversation-1")
+    assert second.status == "completed", second.error
+    assert not any(event.event_type == "context.compacted" for event in second.events)
+    assert len(stub_provider.requests) == 2
+    assert original[0] in stub_provider.requests[-1]["messages"]
+    assert original[1] not in stub_provider.requests[-1]["messages"]
+    assert "Measured accuracy was 91%" in json.dumps(stub_provider.requests[-1]["messages"])
+    assert "references and checkpoint artifacts may expire" in str(
+        stub_provider.requests[-1]["messages"]
+    )
+    assert stub_provider.requests[-1]["max_tokens"] == 2048
+    assert original[1] in await reopened.get("conversation-1", compiled.blueprint.session).get_items()
+    await service.close()
+    await reopened.close()
+    await binding.client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("cancel_before_wait", [False, True])
+async def test_summary_batch_waits_without_claim_and_cancelled_middle_preserves_order(
+    tmp_path, stub_provider, cancel_before_wait,
+) -> None:
+    service, repository, compiled, runtime = _summary_batch_environment(tmp_path, stub_provider)
+    first = service.create(
+        compiled, "first-paper", conversation_id=None,
+        runtime_metadata={"paper_summary_document_id": "first-paper"},
+    )
+    second = service.create(
+        compiled, "second-paper", conversation_id=None,
+        runtime_metadata={"paper_summary_document_id": "second-paper",
+                          "summary_batch_previous_run_id": first.id},
+    )
+    third = service.create(
+        compiled, "third-paper", conversation_id=None,
+        runtime_metadata={"paper_summary_document_id": "third-paper",
+                          "summary_batch_previous_run_id": second.id},
+    )
+    first_task, third_task = service._tasks[first.id], service._tasks[third.id]
+    if not cancel_before_wait:
+        await asyncio.wait_for(runtime.started.wait(), timeout=2)
+        await asyncio.sleep(0.05)
+        assert second.id not in service._active_leases
+        assert third.id not in service._active_leases
+        assert repository.get(second.id).epochs == []
+    assert (await service.cancel(second.id)).status == "cancelled"
+    await asyncio.wait_for(runtime.started.wait(), timeout=2)
+    interactive = await service.run_now(compiled, "interactive-chat")
+    assert interactive.status == "completed", interactive.error
+    assert len(stub_provider.requests) == 2
+    assert repository.get(third.id).epochs == []
+    runtime.release.set()
+    await asyncio.wait_for(asyncio.gather(first_task, third_task), timeout=5)
+    assert repository.get(first.id).status == "completed"
+    assert repository.get(third.id).status == "completed"
+    prompts = [str(request["messages"]) for request in stub_provider.requests]
+    assert max(index for index, text in enumerate(prompts) if "first-paper" in text) < next(
+        index for index, text in enumerate(prompts) if "third-paper" in text
+    )
+    assert not any("second-paper" in text for text in prompts)
+    await service.close()
+    await compiled.entry_agent.binding.client.close()
+
+
+@pytest.mark.anyio
+async def test_summary_batch_dependency_survives_restart_without_holding_recovery_claim(
+    tmp_path, stub_provider,
+) -> None:
+    service, repository, compiled, runtime = _summary_batch_environment(tmp_path, stub_provider)
+    first = repository.create(
+        conversation_id=None, agent_name=compiled.blueprint.name, input_value="first-paper",
+        blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
+        runtime_metadata={"paper_summary_document_id": "first-paper"},
+    )
+    second = repository.create(
+        conversation_id=None, agent_name=compiled.blueprint.name, input_value="second-paper",
+        blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
+        runtime_metadata={"paper_summary_document_id": "second-paper",
+                          "summary_batch_previous_run_id": first.id},
+    )
+    await service.recover_incomplete(AgentCompiler(
+        Resolver(compiled.entry_agent.binding), create_tool_catalog(), settings=service._settings
+    ))
+    first_task, second_task = service._tasks[first.id], service._tasks[second.id]
+    await asyncio.wait_for(runtime.started.wait(), timeout=2)
+    for _ in range(100):
+        if second.id not in service._active_leases:
+            break
+        await asyncio.sleep(0.01)
+    assert second.id not in service._active_leases
+    assert repository.get(second.id).epochs == []
+    assert len(stub_provider.requests) == 1
+    runtime.release.set()
+    await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=5)
+    assert repository.get(first.id).status == "completed"
+    assert repository.get(second.id).status == "completed"
+    assert len(stub_provider.requests) == 3
+    await service.close()
+    await compiled.entry_agent.binding.client.close()
+
+
+def _summary_batch_environment(tmp_path, stub_provider):
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    stub_provider.tool_plans = [(
+        "first-paper", "search_research_library",
+        {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
+    )]
+    binding = stub_binding(stub_provider)
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog(), settings=settings).compile(
+        AgentBlueprint.model_validate({
+            "name": "Summary", "entry_agent_id": "summary",
+            "agents": [{"id": "summary", "name": "Summary", "instructions": "Answer.",
+                        "tool_ids": ["papers"]}],
+            "tools": [{"id": "papers", "kind": "function", "catalog_id": "research.library.search"}],
+        })
+    )
+
+    class Runtime(ToolRuntime):
+        def __init__(self):
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def invoke(self, catalog_id, arguments, context):
+            self.started.set()
+            await self.release.wait()
+            return {"evidence": "Retained findings."}
+
+    runtime = Runtime()
+    repository = RunRepository(create_session_factory(settings))
+    service = RunService(
+        repository, ConversationSessionFactory(settings.database_path),
+        runtime, EventBroker(), settings=settings,
+    )
+    return service, repository, compiled, runtime
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("metadata, expected", [
+    ({}, "interactive"),
+    ({"autonomous_work": True, "work_plan": [{"id": "done", "status": "completed"}]}, "background"),
+    ({"paper_summary_document_id": "paper-1"}, "background"),
+])
+async def test_run_priority_is_inherited_by_actual_model_requests(tmp_path, stub_provider, metadata, expected) -> None:
+    from backend.providers.inference import _priority
+
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.ensure_directories()
+    binding = stub_binding(stub_provider)
+    original_create = binding.client.chat.completions.create
+    observed = []
+
+    async def create(**parameters):
+        observed.append(_priority.get())
+        return await original_create(**parameters)
+
+    binding.client.chat.completions.create = create
+    compiled = AgentCompiler(Resolver(binding), create_tool_catalog(), settings=settings).compile(
+        AgentBlueprint.model_validate({
+            "name": "Researcher", "entry_agent_id": "researcher",
+            "agents": [{"id": "researcher", "name": "Researcher", "instructions": "Answer."}],
+        })
+    )
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        ConversationSessionFactory(settings.database_path), ToolRuntime(), EventBroker(), settings=settings,
+    )
+    run = service.create(compiled, "Answer.", conversation_id=None, runtime_metadata=metadata)
+    await asyncio.wait_for(service._tasks[run.id], timeout=5)
+    assert service.get(run.id).status == "completed"
+    assert observed == [expected]
+    assert _priority.get() == "interactive"
+    await service.close()
+    await binding.client.close()
+
+
+@pytest.mark.anyio
 async def test_run_service_persists_sdk_items_events_and_usage(
     tmp_path,
     stub_provider,
@@ -188,7 +435,8 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     stub_provider.tool_arguments = {
         "query": None,
         "document_id": None,
-        "limit": 10,
+        "ignore_document_ids": None,
+        "limit": 3,
     }
     binding = stub_binding(stub_provider)
     catalog = create_tool_catalog()
@@ -251,7 +499,7 @@ async def test_run_service_persists_sdk_items_events_and_usage(
     assert tool_runtime.calls == [
         (
             "research.library.search",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         )
     ]
     lifecycle = [
@@ -368,15 +616,23 @@ async def test_validation_completion_rejection_starts_corrective_epoch(
         )
     )
     validation_attempts = 0
+    validation_metadata = []
 
     def require_notes(_context) -> None:
         nonlocal validation_attempts
         validation_attempts += 1
+        validation_metadata.append(_context.metadata)
+        assert _context.metadata["research_mode"] == "understand"
+        assert _context.metadata["paper_require_summary"] is False
+        assert _context.metadata["paper_require_notes"] is False
         if validation_attempts == 1:
+            assert _context.metadata["completion_output"] == "Stub answer."
+            stub_provider.reply = "Corrected answer with citation [p.1]."
             raise ValidationError(
                 "Paper work is incomplete.",
                 issues=["Paper: populate notes.md through save_research_note"],
             )
+        assert _context.metadata["completion_output"] == "Corrected answer with citation [p.1]."
 
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -392,17 +648,31 @@ async def test_validation_completion_rejection_starts_corrective_epoch(
         settings=settings,
     )
 
-    run = await service.run_now(
+    run = service.create(
         replace(
             compiled,
             completion_validator=require_notes,
             completion_policy_id="paper-work-v1",
         ),
         "Summarize the paper.",
+        conversation_id=None,
+        runtime_metadata={
+            "research_mode": "understand",
+            "paper_require_summary": False,
+            "paper_require_notes": False,
+        },
     )
+    await asyncio.wait_for(service._tasks[run.id], timeout=5)
+    run = service.get(run.id)
 
     assert run.status == "completed", run.error
     assert validation_attempts == 2
+    assert all("completion_output" not in metadata for metadata in validation_metadata)
+    assert run.runtime_metadata_json == {
+        "research_mode": "understand",
+        "paper_require_summary": False,
+        "paper_require_notes": False,
+    }
     assert len(stub_provider.requests) == 2
     assert "populate notes.md through save_research_note" in str(
         stub_provider.requests[1]["messages"]
@@ -443,6 +713,9 @@ async def test_terminal_model_call_continues_with_queued_steering(
         workspace_dir=tmp_path / "workspace",
         database_path=tmp_path / "metadata.sqlite3",
     )
+    compiled = AgentCompiler(
+        Resolver(binding), create_tool_catalog(), settings=settings
+    ).compile(compiled.blueprint)
     settings.ensure_directories()
     service = RunService(
         RunRepository(create_session_factory(settings)),
@@ -486,6 +759,30 @@ async def test_terminal_model_call_continues_with_queued_steering(
         event.payload_json["message_id"] == steering.id for event in steering_events
     )
     assert completed.epochs[0].terminal_reason == "steering_continuation"
+    task = service._tasks.get(pending.id)
+    if task is not None:
+        await task
+    await service.close()
+    reopened_sessions = ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3")
+    reopened = RunService(
+        RunRepository(create_session_factory(settings)),
+        reopened_sessions, ToolRuntime(), EventBroker(), settings=settings,
+    )
+    stub_provider.stream_delay_seconds = 0
+    resumed = await reopened.run_now(
+        compiled, "Continue after restarting the application.", conversation_id="conversation-1"
+    )
+    assert resumed.status == "completed", resumed.error
+    messages = stub_provider.requests[-1]["messages"]
+    assert sum(message.get("content") == steering.content for message in messages) == 1, messages
+    audit = await reopened_sessions.get("conversation-1", compiled.blueprint.session).get_items()
+    assert sum(steering_message_id(item) == steering.id for item in audit) == 1
+    metrics = [
+        event.payload_json for event in resumed.events if event.event_type == "context.prepared"
+    ]
+    assert metrics[-1]["estimated_input_tokens"] <= metrics[-1]["input_budget_tokens"]
+    await reopened.close()
+    await reopened_sessions.close()
     await binding.client.close()
 
 
@@ -592,15 +889,15 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
         (
             "Gather evidence",
             "search_research_library",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
         (
             "retained-result",
             "read_tool_result",
             {
                 "result_ref": "retained-result",
-                "start": 0,
-                "max_characters": 2_048,
+                "offset": 0,
+                "limit": 2_048,
             },
         ),
     ]
@@ -654,14 +951,14 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
     assert tool_runtime.calls == [
         (
             "research.library.search",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
         (
             "tool.results.read",
             {
                 "result_ref": "retained-result",
-                "start": 0,
-                "max_characters": 2_048,
+                "offset": 0,
+                "limit": 2_048,
             },
         ),
     ]
@@ -680,8 +977,14 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
 
 
 @pytest.mark.anyio
-async def test_run_failure_settles_active_agent_invocation(tmp_path) -> None:
+@pytest.mark.parametrize("failure_kind", ["connection", "empty", "length"])
+async def test_run_failure_settles_active_agent_invocation(tmp_path, failure_kind) -> None:
     binding = failing_binding()
+    if failure_kind != "connection":
+        chunks = text_chunks("")
+        if failure_kind == "length":
+            chunks[-1]["choices"][0]["finish_reason"] = "length"
+        binding = replace(binding, client=FakeClient.scripted([chunks]))
     compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
         AgentBlueprint.model_validate(
             {
@@ -714,6 +1017,12 @@ async def test_run_failure_settles_active_agent_invocation(tmp_path) -> None:
     run = await service.run_now(compiled, "Fail.")
 
     assert run.status == "failed"
+    assert not any(
+        event.event_type in {"run.completed", "agent.completed"} for event in run.events
+    )
+    if failure_kind != "connection":
+        assert "ModelBehaviorError" in run.error
+        assert len(binding.client.requests) == 1
     lifecycle = [
         event
         for event in run.events
@@ -1100,7 +1409,7 @@ async def test_repeated_information_failures_disable_only_the_failing_tool(
 
 
 @pytest.mark.anyio
-async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
+async def test_repeated_acquisition_failures_pause_source_without_disabling_acquire(
     tmp_path,
     stub_provider,
 ) -> None:
@@ -1110,11 +1419,17 @@ async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
             "acquire_research_source",
             {
                 "kind": "paper",
-                "url": f"https://example.com/unavailable-{index}.pdf",
+                "url": "https://example.com/unavailable.pdf",
                 "title": None,
             },
         )
-        for index in range(3)
+        for _ in range(4)
+    ] + [
+        (
+            "Find one unavailable paper",
+            "acquire_research_source",
+            {"kind": "paper", "url": "https://example.com/different.pdf", "title": None},
+        )
     ]
     binding = stub_binding(stub_provider)
     compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(
@@ -1164,18 +1479,24 @@ async def test_repeated_acquisition_failures_disable_acquire_without_retrying(
         run = await service.run_now(compiled, "Find one unavailable paper.")
 
         assert run.status == "completed"
-        assert runtime.calls == 3
+        assert runtime.calls == 4
         outputs = [
             item.item_json["output"]
             for item in run.items
             if item.item_type == "tool_call_output_item"
         ]
-        assert "acquire_research_source tool is now disabled" in outputs[-1]
+        assert len(outputs) == 5
+        assert '"unknown_outcome": true' in outputs[0]
+        assert '"retryable": false' in outputs[0]
+        assert "Do not retry this write" in outputs[0]
+        assert "This source is paused" in outputs[2]
+        assert "This source is paused" in outputs[3]
+        assert "This source is paused" not in outputs[4]
         offered_tools = {
             tool["function"]["name"]
             for tool in stub_provider.requests[-1].get("tools", [])
         }
-        assert "acquire_research_source" not in offered_tools
+        assert "acquire_research_source" in offered_tools
         assert "search_research_library" in offered_tools
     finally:
         await service.close()
@@ -1244,7 +1565,8 @@ async def test_cancel_immediately_propagates_to_active_tool(
     stub_provider.tool_arguments = {
         "query": None,
         "document_id": None,
-        "limit": 10,
+        "ignore_document_ids": None,
+        "limit": 3,
     }
     binding = stub_binding(stub_provider)
     compiled = AgentCompiler(Resolver(binding), create_tool_catalog()).compile(

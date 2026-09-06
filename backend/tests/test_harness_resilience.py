@@ -99,12 +99,12 @@ async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provide
         (
             "multi epoch",
             "search_research_library",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
         (
             "multi epoch",
             "search_research_library",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
     ]
     model = stub_binding(stub_provider, local_inference=True)
@@ -778,7 +778,7 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
         agent_name=compiled.blueprint.name,
         input_value="Summarize the paper",
         blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
-        context_window_tokens=777,
+        context_window_tokens=7_777,
         runtime_metadata=metadata,
         completion_policy_id="paper-work-v1",
     )
@@ -813,7 +813,7 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
         await asyncio.sleep(0.01)
 
     assert recovered.status == "completed", recovered.error
-    assert recovered.context_window_tokens == 777
+    assert recovered.context_window_tokens == 7_777
     assert recovered.completion_policy_id == "paper-work-v1"
     assert recovered.runtime_metadata_json == metadata
     assert validated
@@ -1004,17 +1004,17 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
         (
             "bounded goal",
             "search_research_library",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
         (
             "bounded goal",
             "search_research_library",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
         (
             "bounded goal",
             "search_research_library",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         ),
     ]
     model = stub_binding(stub_provider, local_inference=True)
@@ -1113,7 +1113,7 @@ async def test_tool_results_are_bounded_and_attempts_are_journaled(
         )
         result = await services.runs._tool_runtime.invoke(
             "research.library.search",
-            {"query": None, "document_id": None, "limit": 10},
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
             context,
             tool_call_id="call-1",
         )

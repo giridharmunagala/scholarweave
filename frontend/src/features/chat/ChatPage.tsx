@@ -23,6 +23,7 @@ import {
   type ConversationDetail,
   type ModelReference,
   type PromptSnapshot,
+  type ResearchMode,
   type Run,
   type SteeringMessage,
 } from './api';
@@ -67,6 +68,23 @@ const SUGGESTIONS = [
   'Draft research notes with citations for my current topic.',
 ];
 const COMMON_CONTEXT_WINDOWS = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
+const RESEARCH_MODES: { value: ResearchMode; label: string; description: string }[] = [
+  {
+    value: 'learn',
+    label: 'Learn / ask',
+    description: 'Narrow sourced Q&A from papers, notes, or the web. No mandatory full summary or notes.',
+  },
+  {
+    value: 'understand',
+    label: 'Understand paper',
+    description: 'Explain relevant passages and prerequisites with citations, without a full review.',
+  },
+  {
+    value: 'review',
+    label: 'Review / research',
+    description: 'Read paper evidence and require cited summaries plus durable paper notes.',
+  },
+];
 
 function configuredContextWindow(
   providers: Provider[],
@@ -191,6 +209,7 @@ export function ResearchChatPage() {
   const [webEnabled, setWebEnabled] = useState(true);
   const [deepWork, setDeepWork] = useState(false);
   const [fastAnswer, setFastAnswer] = useState(false);
+  const [researchMode, setResearchMode] = useState<ResearchMode>('learn');
   const [webSearchLimit, setWebSearchLimit] = useState(1);
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
@@ -258,6 +277,8 @@ export function ResearchChatPage() {
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
     setCurrent(conversation);
     setDeepWork(conversation.kind === 'deep_work');
+    setResearchMode(conversation.kind === 'deep_work' ? 'review' : 'learn');
+    setFastAnswer(false);
     setModelReference(conversation.model_reference);
     setContextWindowTokens(
       configuredContextWindow(
@@ -481,6 +502,9 @@ export function ResearchChatPage() {
 
   const create = () => {
     setCurrent(null);
+    setResearchMode('learn');
+    setDeepWork(false);
+    setFastAnswer(false);
     setModelReference(preferredModelReference);
     setContextWindowTokens(
       configuredContextWindow(
@@ -630,6 +654,7 @@ export function ResearchChatPage() {
         !deepWork && fastAnswer,
         webSearchLimit,
         contextWindowTokens,
+        deepWork ? 'review' : researchMode,
       );
       if (request !== openRequestRef.current) return;
       setCurrent((active) => (
@@ -1062,6 +1087,28 @@ export function ResearchChatPage() {
                       <Icon name="globe" size={13} />
                       Web
                     </button>
+                    <label className="research-mode-control">
+                      <span>Mode</span>
+                      <select
+                        aria-label="Research mode"
+                        value={deepWork ? 'review' : researchMode}
+                        disabled={sending || deepWork}
+                        title={RESEARCH_MODES.find((mode) => mode.value === researchMode)?.description}
+                        onChange={(event) => {
+                          const selected = RESEARCH_MODES.find(
+                            (mode) => mode.value === event.target.value,
+                          );
+                          if (selected) {
+                            setResearchMode(selected.value);
+                            setFastAnswer(false);
+                          }
+                        }}
+                      >
+                        {RESEARCH_MODES.map((mode) => (
+                          <option key={mode.value} value={mode.value}>{mode.label}</option>
+                        ))}
+                      </select>
+                    </label>
                     <button
                       className={`composer-capability${deepWork ? ' active' : ''}`}
                       type="button"
@@ -1075,7 +1122,10 @@ export function ResearchChatPage() {
                       disabled={sending || deepWorkLocked}
                       onClick={() => {
                         setDeepWork((enabled) => {
-                          if (!enabled) setFastAnswer(false);
+                          if (!enabled) {
+                            setFastAnswer(false);
+                            setResearchMode('review');
+                          }
                           return !enabled;
                         });
                       }}
@@ -1090,20 +1140,21 @@ export function ResearchChatPage() {
                           type="button"
                           aria-label="Toggle fast answer"
                           aria-pressed={fastAnswer}
-                          title="Search only this many times, download result pages, then answer"
+                          title="Web-only shortcut. Use Learn / ask for quick paper Q&A."
                           disabled={sending}
                           onClick={() => {
                             setFastAnswer((enabled) => {
                               if (!enabled) {
                                 setWebEnabled(true);
                                 setDeepWork(false);
+                                setResearchMode('learn');
                               }
                               return !enabled;
                             });
                           }}
                         >
                           <Icon name="bulb" size={13} />
-                          Fast answer
+                          Fast web answer
                         </button>
                         {fastAnswer ? (
                           <input
@@ -1223,7 +1274,7 @@ function compactionIndicator(
   activeRun: Run | null,
   liveEvents: RunStreamEvent[],
 ): CompactionIndicator | null {
-  const compactions = runs.flatMap((candidate) => {
+  const contextEvents = runs.flatMap((candidate) => {
     let events: RunStreamEvent[] = candidate.events;
     if (candidate.id === activeRun?.id) {
       const bySequence = new Map<number, RunStreamEvent>(
@@ -1232,11 +1283,26 @@ function compactionIndicator(
       for (const event of liveEvents) bySequence.set(event.sequence, event);
       events = [...bySequence.values()];
     }
-    return events
-      .filter((event) => event.event_type.startsWith('context.compact'))
+    return [...events]
+      .sort((left, right) => left.sequence - right.sequence)
+      .filter((event) => (
+        event.event_type.startsWith('context.compact')
+        || event.event_type === 'context.prepared'
+        || event.event_type === 'context.sized'
+      ))
       .map((event) => ({ runId: candidate.id, event }));
   });
-  if (!compactions.length) return null;
+  const compactions = contextEvents.filter(({ event }) => (
+    event.event_type.startsWith('context.compact')
+  ));
+  const sizingEvent = [...contextEvents].reverse().find(({ event }) => (
+    (event.event_type === 'context.prepared' || event.event_type === 'context.sized')
+    && contextSizing(event) !== null
+  ))?.event;
+  const sizing = sizingEvent ? contextSizing(sizingEvent) : null;
+  if (!compactions.length) {
+    return sizing ? { state: 'complete', label: `Context ${sizing.label}`, title: sizing.title } : null;
+  }
 
   const completed = compactions.filter(({ event }) => event.event_type === 'context.compacted');
   const latest = compactions[compactions.length - 1];
@@ -1259,10 +1325,34 @@ function compactionIndicator(
     };
   }
   const lastCompleted = completed[completed.length - 1]?.event ?? latest.event;
+  const label = completed.length > 1 ? `Context compacted x${completed.length}` : 'Context compacted';
   return {
     state: 'complete',
-    label: completed.length > 1 ? `Context compacted x${completed.length}` : 'Context compacted',
-    title: compactionTitle(lastCompleted),
+    label: sizing ? `${label} · ${sizing.label}` : label,
+    title: sizing
+      ? `${compactionTitle(lastCompleted)} ${sizing.title}`
+      : compactionTitle(lastCompleted),
+  };
+}
+
+function contextSizing(event: RunStreamEvent): { label: string; title: string } | null {
+  const estimated = event.payload.estimated_input_tokens;
+  const budget = event.payload.input_budget_tokens;
+  if (
+    typeof estimated !== 'number' || !Number.isFinite(estimated) || estimated < 0
+    || typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0
+  ) return null;
+  const label = `~${estimated.toLocaleString()} / ${budget.toLocaleString()}`;
+  const reserve = event.payload.response_headroom_tokens;
+  const schemas = event.payload.tool_schema_tokens;
+  const agent = typeof event.payload.agent_name === 'string' ? `${event.payload.agent_name}: ` : '';
+  return {
+    label,
+    title: `${agent}Estimated input ${estimated.toLocaleString()} of ${budget.toLocaleString()} tokens, including tool schemas.`
+      + (typeof schemas === 'number' && Number.isFinite(schemas)
+        ? ` Tool schemas: ~${schemas.toLocaleString()} tokens.` : '')
+      + (typeof reserve === 'number' && Number.isFinite(reserve)
+        ? ` Response headroom: ${reserve.toLocaleString()} tokens.` : ''),
   };
 }
 

@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import hashlib
+import json
 from typing import Any
+
+import httpx
+from openai import APIConnectionError, APITimeoutError
 
 from backend.agents.context import ScholarWeaveContext
 from backend.agents.harness import ToolInvocation
+from backend.core.errors import NotFoundError, ValidationError
+from backend.runs.repository import LeaseOwnershipError
+from backend.tools.policy import ToolInputError, operation_policy
 
 _FAILURES_KEY = "_recoverable_tool_failures"
 _INFORMATION_FAILURE_COUNTS_KEY = "_consecutive_information_failure_counts"
@@ -31,10 +39,28 @@ def recoverable_tool_invoker(
         raw_arguments: str,
     ) -> Any:
         try:
+            parsed = json.loads(raw_arguments or "{}")
+        except json.JSONDecodeError:
+            parsed = {}
+        arguments = parsed if isinstance(parsed, dict) else {}
+        scope = _failure_scope(catalog_id, arguments) if catalog_id else None
+        disabled = invocation.context.metadata.get(_DISABLED_INFORMATION_TOOLS_KEY)
+        if scope and scope != catalog_id and isinstance(disabled, list) and scope in disabled:
+            raise RuntimeError(
+                "This source is paused after three consecutive failures. Use a different "
+                "document, URL, or path; the tool remains available for other sources."
+            )
+        try:
             result = await invoke(invocation, raw_arguments)
+        except LeaseOwnershipError:
+            raise
         except Exception as exc:
-            category, retryable = classify_tool_error(exc)
-            unknown_outcome = bool(catalog_id and not _safe_read(catalog_id))
+            category, transient = classify_tool_error(exc)
+            policy = operation_policy(catalog_id or "", arguments)
+            retryable = policy.safe_retry and transient
+            unknown_outcome = policy.mutating and not isinstance(
+                exc, (ToolInputError, json.JSONDecodeError)
+            )
             failure = _record_failure(
                 invocation.context,
                 invocation.tool_call_id or tool_name,
@@ -43,13 +69,19 @@ def recoverable_tool_invoker(
                 category=category,
                 retryable=retryable,
                 unknown_outcome=unknown_outcome,
+                scope=scope,
             )
             if failure.get("failure_limit_reached"):
                 guidance = (
-                    f"The {tool_name} tool is now disabled after three consecutive failures. "
-                    "Continue with the remaining tools or a different source. Answer from the "
-                    "available evidence only if no remaining tool can fill the gap, and state "
-                    "what could not be verified."
+                    "This source is paused after three consecutive failures. The tool remains "
+                    "available for a different document, URL, or path."
+                    if scope != catalog_id
+                    else (
+                        f"The {tool_name} tool is now disabled after three consecutive failures. "
+                        "Continue with the remaining tools or a different source. Answer from the "
+                        "available evidence only if no remaining tool can fill the gap, and state "
+                        "what could not be verified."
+                    )
                 )
             elif unknown_outcome:
                 guidance = (
@@ -62,10 +94,15 @@ def recoverable_tool_invoker(
                     "the request or try a different tool or source that is still available, "
                     "then continue."
                 )
-            raise RuntimeError(
-                f"{category}: {type(exc).__name__}: {exc}. {guidance}"
-            ) from exc
-        record_tool_success(invocation.context, catalog_id)
+            raise RuntimeError(json.dumps({
+                "status": "error",
+                "category": category,
+                "retryable": retryable,
+                "unknown_outcome": unknown_outcome,
+                "message": str(exc),
+                "next_action": guidance,
+            }, ensure_ascii=False)) from exc
+        record_tool_success(invocation.context, catalog_id, scope=scope)
         return result
 
     return invoke_and_record
@@ -93,6 +130,7 @@ def _record_failure(
     category: str = "tool_error",
     retryable: bool = False,
     unknown_outcome: bool = False,
+    scope: str | None = None,
 ) -> dict[str, Any]:
     failures = context.metadata.setdefault(_FAILURES_KEY, {})
     if not isinstance(failures, dict):
@@ -100,16 +138,18 @@ def _record_failure(
         context.metadata[_FAILURES_KEY] = failures
     consecutive_information_failures = 0
     failure_limit_reached = False
-    if catalog_id and is_failure_limited_tool(catalog_id):
+    count_failure = category != "invalid_input"
+    if catalog_id and is_failure_limited_tool(catalog_id) and count_failure:
+        key = scope or catalog_id
         counts = context.metadata.setdefault(_INFORMATION_FAILURE_COUNTS_KEY, {})
         if not isinstance(counts, dict):
             counts = {}
             context.metadata[_INFORMATION_FAILURE_COUNTS_KEY] = counts
-        current = counts.get(catalog_id, 0)
+        current = counts.get(key, 0)
         consecutive_information_failures = (
             current + 1 if isinstance(current, int) and not isinstance(current, bool) else 1
         )
-        counts[catalog_id] = consecutive_information_failures
+        counts[key] = consecutive_information_failures
         failure_limit_reached = (
             consecutive_information_failures >= MAX_CONSECUTIVE_INFORMATION_FAILURES
         )
@@ -118,8 +158,8 @@ def _record_failure(
             if not isinstance(disabled, list):
                 disabled = []
                 context.metadata[_DISABLED_INFORMATION_TOOLS_KEY] = disabled
-            if catalog_id not in disabled:
-                disabled.append(catalog_id)
+            if key not in disabled:
+                disabled.append(key)
     failure = {
         "error_type": type(error).__name__,
         "error": str(error) or type(error).__name__,
@@ -132,6 +172,13 @@ def _record_failure(
             failure_limit_reached=failure_limit_reached,
         ),
     }
+    if scope and scope != catalog_id:
+        failure["failure_scope"] = scope
+        if failure_limit_reached:
+            failure["display_message"] = (
+                "This source was paused after three consecutive failures. "
+                "The tool is still available for other sources."
+            )
     if catalog_id and is_failure_limited_tool(catalog_id):
         failure.update(
             {
@@ -176,6 +223,8 @@ def _display_message(
         "invalid_input": (
             "The tool could not use this request. The agent will correct it before trying again."
         ),
+        "not_found": "This source is unavailable. Select another source or prepare the missing paper.",
+        "access_denied": "The source could not be accessed. Check its location or local permissions.",
     }.get(
         category,
         "The tool could not complete this request. The agent will try another available approach.",
@@ -184,43 +233,51 @@ def _display_message(
 
 def classify_tool_error(error: Exception) -> tuple[str, bool]:
     status_code = getattr(error, "status_code", None)
+    if status_code is None and isinstance(error, httpx.HTTPStatusError):
+        status_code = error.response.status_code
     message = str(error).casefold()
-    if isinstance(error, TimeoutError):
+    if isinstance(error, (TimeoutError, httpx.TimeoutException, APITimeoutError)):
         return "timeout", True
+    if isinstance(error, (FileNotFoundError, NotFoundError)) or status_code == 404:
+        return "not_found", False
+    if isinstance(error, PermissionError) or status_code in {401, 403}:
+        return "access_denied", False
     if status_code == 429 or "rate limit" in message:
         return "rate_limited", True
     if (isinstance(status_code, int) and status_code >= 500) or any(
         marker in message for marker in ("http 500", "http 502", "http 503", "http 504")
     ):
         return "upstream_unavailable", True
-    if isinstance(error, (ConnectionError, OSError)):
+    if isinstance(error, (ConnectionError, httpx.TransportError, APIConnectionError)):
         return "transport", True
-    if isinstance(error, (ValueError, TypeError, KeyError)):
+    if isinstance(error, (ValueError, TypeError, KeyError, ValidationError)) or status_code in {400, 422}:
         return "invalid_input", False
     return "tool_error", False
 
 
-def _safe_read(catalog_id: str) -> bool:
-    return catalog_id == "webpage.download" or any(
-        token in catalog_id
-        for token in (
-            ".list",
-            ".read",
-            ".search",
-            ".inspect",
-            "retrieval.",
-            "tools.search",
-            "agents.get",
-            "agents.validate",
-        )
-    )
+def _failure_scope(catalog_id: str, arguments: dict[str, Any]) -> str:
+    target = {
+        key: arguments[key]
+        for key in ("document_id", "url", "path", "source_id", "result_ref")
+        if isinstance(arguments.get(key), str) and arguments[key]
+    }
+    if not target:
+        return catalog_id
+    digest = hashlib.sha256(json.dumps(target, sort_keys=True).encode()).hexdigest()[:24]
+    return f"{catalog_id}::{digest}"
 
 
 def is_information_tool(catalog_id: str) -> bool:
-    return (
-        catalog_id != "webpage.download" and _safe_read(catalog_id)
-    ) or catalog_id in {
-        "documents.download",
+    return catalog_id in {
+        "research.sources.search",
+        "research.library.search",
+        "research.paper.read",
+        "research.summary.read",
+        "research.web.read",
+        "research.notes.search",
+        "research.notes.read",
+        "tool.results.read",
+        "work.plan.read",
     }
 
 
@@ -241,17 +298,20 @@ def tool_enabled_after_failures(
 def record_tool_success(
     context: ScholarWeaveContext,
     catalog_id: str | None,
+    *,
+    scope: str | None = None,
 ) -> None:
     if not catalog_id or not is_failure_limited_tool(catalog_id):
         return
+    key = scope or catalog_id
     counts = context.metadata.get(_INFORMATION_FAILURE_COUNTS_KEY)
     if isinstance(counts, dict):
-        counts.pop(catalog_id, None)
+        counts.pop(key, None)
         if not counts:
             context.metadata.pop(_INFORMATION_FAILURE_COUNTS_KEY, None)
     disabled = context.metadata.get(_DISABLED_INFORMATION_TOOLS_KEY)
-    if isinstance(disabled, list) and catalog_id in disabled:
-        disabled[:] = [item for item in disabled if item != catalog_id]
+    if isinstance(disabled, list) and key in disabled:
+        disabled[:] = [item for item in disabled if item != key]
         if not disabled:
             context.metadata.pop(_DISABLED_INFORMATION_TOOLS_KEY, None)
 
@@ -260,21 +320,24 @@ def restore_tool_failure_state_from_attempts(
     metadata: dict[str, Any],
     attempts: list[Any],
 ) -> None:
-    final_attempts: dict[tuple[str, str], tuple[int, str]] = {}
+    final_attempts: dict[tuple[str, str], tuple[int, str, str | None]] = {}
     for index, attempt in enumerate(attempts):
         catalog_id = getattr(attempt, "catalog_id", None)
         if not isinstance(catalog_id, str) or not is_failure_limited_tool(catalog_id):
             continue
         call_id = getattr(attempt, "tool_call_id", None)
         call_key = str(call_id) if call_id else f"attempt-{index}"
-        final_attempts[(catalog_id, call_key)] = (
+        arguments = getattr(attempt, "arguments_json", {})
+        scope = _failure_scope(catalog_id, arguments if isinstance(arguments, dict) else {})
+        final_attempts[(scope, call_key)] = (
             index,
             str(getattr(attempt, "status", "")),
+            getattr(attempt, "failure_category", None),
         )
 
     counts: dict[str, int] = {}
     disabled: list[str] = []
-    for (catalog_id, _call_id), (_index, status) in sorted(
+    for (catalog_id, _call_id), (_index, status, category) in sorted(
         final_attempts.items(),
         key=lambda item: item[1][0],
     ):
@@ -283,7 +346,7 @@ def restore_tool_failure_state_from_attempts(
             if catalog_id in disabled:
                 disabled.remove(catalog_id)
             continue
-        if status not in {"failed", "unknown_outcome"}:
+        if status not in {"failed", "unknown_outcome"} or category == "invalid_input":
             continue
         counts[catalog_id] = counts.get(catalog_id, 0) + 1
         if (

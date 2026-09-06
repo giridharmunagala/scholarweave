@@ -426,7 +426,22 @@ flowchart TD
 ```
 
 Compaction occurs only between complete model/tool rounds. The compacted list becomes the runner's
-new working context, while generated items remain available for durable history.
+new working context, while generated items remain available for durable history. A separate durable
+session working snapshot and cursor allow subsequent turns to read the snapshot plus new items
+instead of recompacting the original transcript. Snapshot recovery and rollback preserve
+conversation ordering and steering.
+
+The working-input budget is independent of model context-window capacity. Request accounting
+includes instructions and tool schemas, reserves model output capacity, and reports estimates
+through `context.prepared` (the UI also accepts older `context.sized` events). It uses conservative
+estimates, not a claim of exact provider tokenization.
+Unfit irreducible instructions fail explicitly rather than being silently truncated. Source reads
+are bounded before entering history; durable paper evidence makes superseded raw reads evictable.
+
+Model-assisted compaction is enabled by default. The deterministic-only setting avoids its model
+call but retains excerpts rather than a semantic summary, so it has a different information-loss
+tradeoff. Neither writing a cache file nor provider KV caching reduces active context unless the
+request itself replaces or omits the original text.
 
 ## 12. Research data pipeline
 
@@ -479,6 +494,20 @@ erDiagram
 Folder assignment changes document metadata only; it does not move source PDFs or workspace files.
 All user-controlled paths pass through `SafeStorage` or `WorkspaceService`.
 
+Paper content search uses SQLite FTS5 with transactional chunk-index triggers, not an embedding or
+model call. Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses have a serialized
+character budget and explicit item/character continuation cursors, including oversized single pages.
+
+Summary jobs use one serial model worker. Short extractions fitting the context allowance are
+included directly; longer papers use adaptive read/checkpoint batches with no fixed page cap.
+The `paper_evidence` table retains source/extraction-versioned evidence independently of runs, with
+a guarded `papers/<id>/evidence/<source-version>/index.json` workspace mirror. SQLite commits precede
+mirror verification and raw-context eviction; interrupted mirrors are repaired from SQLite.
+Records retain exact spans and model/prompt provenance. Only contiguous full coverage is marked
+complete; otherwise saved summaries explicitly report partial coverage. Immutable summary versions
+are replay-safe, and a late job does not replace a canonical summary changed since that job started.
+Evidence never overwrites user notes; source changes invalidate generated summary/evidence reuse.
+
 ## 13. Deterministic safety and completion controls
 
 ```mermaid
@@ -493,9 +522,21 @@ flowchart LR
     Completion --> Outcome{May run complete?}
 ```
 
-A model saying “done” is not sufficient when a completion policy applies. Paper-based work must
-show the required read/extraction, cited summary, and durable notes activity. Deep Work must also
-close or block every tracked work item.
+A model saying “done” is not sufficient when a completion policy applies. Review mode requires
+read/extraction, a complete cited summary, and durable notes. Learn/Understand modes permit targeted
+paper Q&A without those full-review side effects, but enforce citations against observed paper
+reads. Deep Work must also close or block every tracked work item.
+
+Tool retry policy is action-aware: paper preparation and summary coverage advancement are writes,
+even when exposed under a read tool. Pure reads use bounded retry deadlines with Retry-After and
+jitter. Unknown write outcomes are reconciled, not blindly retried. Source-specific repeated
+failures pause that source rather than disabling access to unrelated papers or URLs.
+
+Local model residency is opt-in per provider. The scheduler never changes weights: it gates
+requests by their bound provider/model, drains before external switching, and requires explicit
+single-model readiness confirmation. Interactive/background priorities apply between requests,
+not by preempting an in-flight generation. Provider residency configuration is added to existing
+databases without a schema-generation cutover or deletion of research history.
 
 ## 14. Extension map
 

@@ -30,6 +30,16 @@ The chat agent can:
 
 Large tool results are stored locally and can be read back in bounded slices.
 
+Choose the depth of work in the chat composer:
+
+- **Learn**: explain concepts using the smallest sufficient evidence set.
+- **Understand**: answer targeted paper questions with citations, without requiring a full summary.
+- **Review**: retain the full paper summary/notes completion checks.
+
+Deep Work keeps an explicit research plan. For a collection, keep an index, cited evidence,
+comparisons, and open questions in research notes rather than repeatedly loading every paper into
+the conversation.
+
 ### Deep Work
 
 Deep Work uses the same research tools plus three tracker operations:
@@ -57,6 +67,41 @@ reviewed summary also creates an immutable summary version. Papers can be groupe
 folder assignment changes document metadata only and never moves the source PDF or workspace files.
 Deleting a folder returns its papers to the default Papers group. Deleting a paper removes its
 managed PDF, extracted artifacts, summaries, and notes.
+
+Paper summaries offer a quick, explicitly partial overview and a coverage-aware reviewed summary.
+Quick overviews disable reasoning when the selected model is known to support `none`, unless an
+explicit effort is requested. Reviewed summaries and ordinary chat retain their reasoning defaults.
+**Summarize a collection** queues selected prepared papers on one explicitly selected model.
+Generated evidence is keyed to the source/extraction version and survives run-history cleanup.
+User-authored notes remain separate.
+
+### One GPU and a manually switched llama server
+
+Keep the main model resident for interactive work and occasional summaries. Switching to a smaller
+model is useful only when an entire batch saves more than both model switches and any extra review.
+For example, two 20-second switches add approximately 40 seconds before any net benefit.
+
+For a local provider, enable residency protection in Settings:
+
+1. Drain inference before unloading the resident model.
+2. Load the chosen model using your llama server's own controls.
+3. Confirm that model in ScholarWeave; confirmation checks `/v1/models`.
+4. Queue the summary batch with that explicit provider/model.
+5. Drain and confirm the main model again when ready to return.
+
+ScholarWeave does not load or unload weights, guess a server-control API, automatically swap models,
+or silently run a main-model request on a smaller model. Requests for another model wait visibly.
+Confirmation requires a server advertising exactly the selected resident model; confirmation is
+required again after an application restart. The scheduler gives interactive requests priority at
+request boundaries while still allowing background work to progress.
+
+Settings also expose a working-input budget, output reserve, and compaction target. Working memory
+is separate from the full transcript: conversation checkpoints are reused across turns instead of
+replaying the entire tool history. Model-assisted compaction is enabled by default to retain
+understanding; disabling it uses deterministic excerpts and may retain less detail.
+The output budget includes a reasoning model's thinking tokens. If generation exhausts that
+budget before producing an answer, increase the response reserve or select a lower supported
+reasoning effort; a truncated response is not a completed research outcome.
 
 ## Setup
 
@@ -97,6 +142,17 @@ npm run build
 npm run generate:api
 npm run check:api
 ```
+
+To inspect model-call latency without printing prompt or response contents:
+
+```bash
+.venv/bin/python scripts/report_model_performance.py local_data/llm_calls.jsonl
+```
+
+The report includes call counts, token usage, queue time, request duration, and first-body-byte
+latency where recorded. First body bytes may be SSE metadata or heartbeats, not generated tokens.
+Missing measurements are reported as unknown. Compare identical tasks and cache conditions before
+claiming a speedup; a smaller model or an additional worker is not automatically faster.
 
 One dependency pin is deliberate and must not drift as a side effect:
 

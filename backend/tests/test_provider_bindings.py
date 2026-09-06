@@ -211,6 +211,7 @@ async def test_only_local_provider_clients_use_inference_scheduler(
         _provider,
         request_lock=None,
         inference_scheduler=None,
+        profile_id=None,
     ):
         observed.append(inference_scheduler)
         return httpx.AsyncClient(transport=httpx.MockTransport(lambda _request: None))

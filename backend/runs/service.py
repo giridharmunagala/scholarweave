@@ -31,7 +31,7 @@ from backend.conversations.steering import (
 from backend.core.config import Settings
 from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.prompting.registry import PromptRegistry
-from backend.providers.inference import InferenceScheduler
+from backend.providers.inference import InferenceScheduler, inference_priority
 from backend.providers.reasoning import ReasoningEffort
 from backend.runs.events import (
     BufferedRunEventSink,
@@ -58,7 +58,7 @@ STOP_AND_ANSWER_PROMPT = (
 STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION = "scholarweave:internal:stop-and-answer"
 
 
-class RunLeaseLost(RuntimeError):
+class RunLeaseLost(LeaseOwnershipError):
     pass
 
 
@@ -479,6 +479,14 @@ class RunService:
         current = self._repository.get(run_id)
         lease = self._active_leases.get(run_id)
         if (
+            current.status == "pending"
+            and lease is None
+            and isinstance(current.runtime_metadata_json, dict)
+            and current.runtime_metadata_json.get("summary_batch_previous_run_id")
+        ):
+            await self._settle_waiting_summary(run_id)
+            current = self._repository.get(run_id)
+        if (
             current.status in {"pending", "running"}
             and lease is not None
             and self._repository.cancel_owned(lease)
@@ -810,7 +818,11 @@ class RunService:
                 token=lease.token,
             )
         )
-        await asyncio.shield(task)
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(task)
+            raise
 
     async def _validate_preclaimed_deadline(
         self,
@@ -846,6 +858,26 @@ class RunService:
         preclaimed: bool = False,
         lease_deadline: LeaseDeadline | None = None,
     ) -> None:
+        record_metadata = self._repository.get(run_id).runtime_metadata_json
+        if isinstance(record_metadata, dict) and record_metadata.get("summary_batch_previous_run_id"):
+            # Recovery may preclaim all queued records. Release that claim before
+            # waiting; queue time must consume neither leases nor execution budget.
+            if preclaimed and lease_deadline is not None:
+                try:
+                    await self._release_claim(lease_deadline.lease)
+                finally:
+                    self._active_leases.pop(run_id, None)
+                preclaimed = False
+                lease_deadline = None
+            try:
+                await self._wait_for_summary_predecessor(run_id)
+            except asyncio.CancelledError:
+                if self._repository.cancel_requested(run_id):
+                    await self._settle_waiting_summary(run_id)
+                raise
+            except Exception as exc:
+                await self._settle_waiting_summary(run_id, error=f"{type(exc).__name__}: {exc}")
+                return
         deadline = (
             asyncio.get_running_loop().time() + self._settings.agent_run_timeout_seconds
         )
@@ -860,6 +892,68 @@ class RunService:
             preclaimed=preclaimed,
             lease_deadline=lease_deadline,
         )
+
+    def _pending_summary_predecessor(self, run_id: str) -> str | None:
+        record = self._repository.get(run_id)
+        seen = {run_id}
+        pending = None
+        while isinstance(record.runtime_metadata_json, dict):
+            previous_id = record.runtime_metadata_json.get("summary_batch_previous_run_id")
+            if not previous_id:
+                break
+            if not isinstance(previous_id, str) or previous_id in seen:
+                raise RuntimeError("Invalid or cyclic summary batch dependency.")
+            seen.add(previous_id)
+            try:
+                record = self._repository.get(previous_id)
+            except NotFoundError:
+                # Pruned terminal history is no longer a dependency.
+                break
+            if pending is None and record.status in {"pending", "running"}:
+                pending = previous_id
+        return pending
+
+    async def _wait_for_summary_predecessor(self, run_id: str) -> None:
+        while True:
+            if self._repository.cancel_requested(run_id):
+                raise asyncio.CancelledError
+            previous_id = self._pending_summary_predecessor(run_id)
+            if previous_id is None:
+                return
+            previous_task = self._tasks.get(previous_id)
+            if previous_task is None or previous_task.done():
+                await asyncio.sleep(0.1)
+                continue
+            try:
+                await asyncio.shield(previous_task)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:
+                # The terminal database state, not the predecessor task outcome,
+                # determines readiness. Cancelled intermediate jobs retain ancestry.
+                pass
+
+    async def _settle_waiting_summary(self, run_id: str, *, error: str | None = None) -> None:
+        deadline = await self._acquire_claim(run_id)
+        if deadline is None:
+            return
+        lease = deadline.lease
+        self._active_leases[run_id] = lease
+        try:
+            sink = self._event_sink(run_id)
+            if error is None:
+                if self._repository.cancel_owned(lease):
+                    await sink.emit("run.cancelled", {"reason": "user_requested"})
+            else:
+                await self._fail_or_cancel_owned(run_id, error, sink, {"error": error})
+            self._log_terminal_run(run_id)
+            await self._cleanup_standalone_session_if_terminal(run_id)
+        finally:
+            await self._release_claim(lease)
+            if self._active_leases.get(run_id) == lease:
+                self._active_leases.pop(run_id, None)
 
     async def _execute_run(
         self,
@@ -1147,19 +1241,31 @@ class RunService:
                         if deferred_steering:
                             await emit_steering_applied(context, deferred_steering)
                             deferred_steering = []
-                        epoch_items = await _resolved_epoch_input(session, epoch_input)
+                        epoch_items = await _resolved_epoch_input(
+                            session, epoch_input, internal=not first_epoch
+                        )
+                        context.metadata["_working_base_cursor"] = await session.checkpoint()
                         if session_checkpoint is None:
                             session_checkpoint = await session.checkpoint()
                         try:
-                            handle = run_streamed(
-                                compiled.entry_agent,
-                                epoch_items,
-                                context=context,
-                                settings=compiled.run_settings,
-                                max_turns=epoch_turn_limit,
-                                hooks=hooks,
-                                context_policy=compiled.context_policy,
+                            priority = (
+                                "background"
+                                if context.metadata.get("autonomous_work")
+                                or context.metadata.get("paper_summary_document_id")
+                                else "interactive"
                             )
+                            # run_streamed creates a task; its descendants inherit
+                            # this request priority without holding a model lease.
+                            with inference_priority(priority):
+                                handle = run_streamed(
+                                    compiled.entry_agent,
+                                    epoch_items,
+                                    context=context,
+                                    settings=compiled.run_settings,
+                                    max_turns=epoch_turn_limit,
+                                    hooks=hooks,
+                                    context_policy=compiled.context_policy,
+                                )
                             self._active_runs[run_id] = handle
                             try:
                                 result = await handle
@@ -1170,7 +1276,7 @@ class RunService:
                             usage["performance"] = stream_sink.performance()
                             usage["model_turns"] = epoch_turn_limit
                             self._persist_items(run_id, exc.run_data.new_items)
-                            await session.add_items(exc.run_data.generated_items)
+                            await _commit_epoch_context(session, exc.run_data, context)
                             self._repository.finish_epoch_owned(
                                 self._owned_lease(run_id),
                                 epoch.id,
@@ -1237,7 +1343,7 @@ class RunService:
                         )
                         if pending_steering:
                             self._persist_items(run_id, result.new_items)
-                            await session.add_items(result.generated_items)
+                            await _commit_epoch_context(session, result, context)
                             aggregate_usage = self._finish_epoch(
                                 run_id,
                                 epoch,
@@ -1263,7 +1369,7 @@ class RunService:
                         work_continuation = _work_continuation(context)
                         if work_continuation is not None:
                             self._persist_items(run_id, result.new_items)
-                            await session.add_items(result.generated_items)
+                            await _commit_epoch_context(session, result, context)
                             aggregate_usage = self._finish_epoch(
                                 run_id,
                                 epoch,
@@ -1284,13 +1390,19 @@ class RunService:
                             first_epoch = False
                             active_epoch_id = None
                             continue
-                        completion_repair = _completion_repair_instruction(
-                            compiled,
-                            context,
+                        context.metadata["completion_output"] = _completion_output_text(
+                            result.final_output
                         )
+                        try:
+                            completion_repair = _completion_repair_instruction(
+                                compiled,
+                                context,
+                            )
+                        finally:
+                            context.metadata.pop("completion_output", None)
                         if completion_repair is not None:
                             self._persist_items(run_id, result.new_items)
-                            await session.add_items(result.generated_items)
+                            await _commit_epoch_context(session, result, context)
                             aggregate_usage = self._finish_epoch(
                                 run_id,
                                 epoch,
@@ -1504,7 +1616,7 @@ class RunService:
         completion_validated: bool = False,
     ) -> None:
         self._persist_items(run_id, result.new_items)
-        await session.add_items(result.generated_items)
+        await _commit_epoch_context(session, result, context)
 
         if self._repository.get(run_id).cancel_requested:
             await ScholarWeaveRunHooks().supersede_active(context, "run_cancelled")
@@ -1518,10 +1630,15 @@ class RunService:
         )
         if compiled.completion_validator is not None and not completion_validated:
             try:
+                context.metadata["completion_output"] = _completion_output_text(
+                    result.final_output
+                )
                 compiled.completion_validator(context)
             except Exception:
                 await session.rollback_to(session_checkpoint)
                 raise
+            finally:
+                context.metadata.pop("completion_output", None)
         internal_prompt = context.metadata.get("internal_session_prompt")
         if isinstance(internal_prompt, str):
             await _remove_internal_session_prompt(session, internal_prompt)
@@ -1551,16 +1668,48 @@ class RunService:
 async def _resolved_epoch_input(
     session: Any,
     epoch_input: RunInput,
+    *,
+    internal: bool = False,
 ) -> list[ConversationItem]:
     """Build one epoch's model input from durable history plus the new items."""
-    history = await session.get_items()
+    read_working = getattr(session, "get_working_items", session.get_items)
+    history = await read_working()
     if isinstance(epoch_input, str):
         new_items: list[ConversationItem] = [{"role": "user", "content": epoch_input}]
+        if internal:
+            new_items[0]["_scholarweave_internal_continuation"] = True
     else:
         new_items = [dict(item) for item in epoch_input if isinstance(item, dict)]
     if new_items:
         await session.add_items(new_items)
     return [*history, *new_items]
+
+
+async def _commit_epoch_context(
+    session: Any, result: RunResult, context: ScholarWeaveContext
+) -> None:
+    commit = getattr(session, "commit_working_items", None)
+    if not callable(commit):
+        await session.add_items(result.generated_items)
+        return
+    working = result.working_snapshot_items
+    covered = result.working_snapshot_generated_count
+    if working is None:
+        working = result.working_items
+        covered = len(result.generated_items)
+    internal_prompt = context.metadata.get("internal_session_prompt")
+    if working is not None and context.metadata.get("internal_session_prompt_removed"):
+        working = [
+            item for item in working
+            if not (item.get("role") == "user" and item.get("content") == internal_prompt)
+        ]
+    await commit(
+        result.generated_items,
+        working,
+        base_cursor=int(context.metadata.get("_working_base_cursor", 0)),
+        commit_id=str(context.metadata.get("active_epoch_id") or context.run_id),
+        covered_item_count=covered,
+    )
 
 
 def _standalone_session_id(run_id: str) -> str:
@@ -1768,6 +1917,9 @@ def _persistable_runtime_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         "active_epoch_id",
         "epoch_index",
         "goal_state",
+        "completion_output",
+        "active_model",
+        "_working_base_cursor",
     }
     return {key: value for key, value in metadata.items() if key not in ephemeral_keys}
 
@@ -1839,6 +1991,10 @@ def _epoch_model_turns(usage: dict[str, Any], limit: int) -> int:
     if isinstance(requests, int) and not isinstance(requests, bool):
         return max(0, min(limit, requests))
     return limit
+
+
+def _completion_output_text(output: Any) -> str:
+    return output if isinstance(output, str) else json.dumps(to_jsonable(output), ensure_ascii=False)
 
 
 def _completion_repair_instruction(

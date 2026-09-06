@@ -1,9 +1,9 @@
 """Deterministic context compaction for the native agent harness.
 
-Compaction runs before a model call once the prepared request crosses the
-configured high-water mark (a ratio of the model's context window).  Because the
-harness only re-enters this code after a tool-call round, compaction naturally
-happens at tool-call boundaries and never mid-response.
+The task input cap is independent of the model window, includes tool schemas, and
+leaves explicit response capacity. Compaction uses structured checkpoints;
+an optional model summary is bounded separately. Because the harness only re-enters
+this code after a tool-call round, compaction never splits an active response.
 
 The policy also bounds oversized tool results, replaces superseded paper-summary
 batch reads with their checkpoint receipt, and appends queued steering messages.
@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import math
 import uuid
+from copy import deepcopy
 from typing import Any
 
 from openai import OpenAIError
@@ -24,9 +25,12 @@ from backend.agents.harness import (
     HarnessError,
     ModelBehaviorError,
     PreparedInput,
+    RunPolicyViolation,
     RunInputItems,
     request_parameters,
     serialized_characters,
+    to_chat_messages,
+    tool_payload,
 )
 from backend.conversations.steering import (
     SteeringInbox,
@@ -35,6 +39,7 @@ from backend.conversations.steering import (
 )
 from backend.core.config import Settings
 from backend.prompting.registry import PromptRegistry
+from backend.providers.inference import inference_priority
 from backend.utils import to_jsonable
 
 CHECKPOINT_MESSAGE_PREFIX = "[ScholarWeave context checkpoint]"
@@ -54,6 +59,10 @@ _IMPORTANT_KEYS = {
     "status",
     "summary",
     "query",
+    "checkpoint_path",
+    "next_start",
+    "next_offset",
+    "complete",
 }
 _TEXT_KEYS = {
     "text",
@@ -71,6 +80,12 @@ _DEFAULT_COMPACTION_INSTRUCTIONS = (
     "objective, decisions, completed work, verified findings, citations and result_ref "
     "values, unresolved questions, blockers, and the exact next action. Omit verbose tool "
     "payloads and internal repetition. Return only the continuation summary."
+)
+_REFERENCE_LIFETIME_INSTRUCTIONS = (
+    "Run-scoped result references and checkpoint artifacts may expire during history cleanup. "
+    "Only retained text, citations, and readable durable paper/workspace evidence are known facts. "
+    "If a reference is unavailable, use permitted durable/source reads or report missing evidence; "
+    "never reconstruct omitted details."
 )
 
 
@@ -104,45 +119,91 @@ class ContextBudgetPolicy:
         *,
         turn_index: int,
     ) -> PreparedInput:
+        instructions = "\n\n".join(filter(None, (instructions, _REFERENCE_LIFETIME_INSTRUCTIONS)))
         context_window_tokens = self.context_window_tokens(agent)
-        high_water_tokens = int(
-            context_window_tokens * self._settings.agent_context_high_water_ratio
+        response_tokens = (
+            agent.model_settings.max_tokens
+            or self._settings.agent_context_response_reserve_tokens
         )
+        working_limit = self._settings.agent_working_context_tokens
+        request_limit = min(
+            working_limit,
+            context_window_tokens - response_tokens,
+        )
+        high_water_tokens = int(request_limit * self._settings.agent_context_high_water_ratio)
         target_tokens = _adaptive_target_tokens(
             high_water_tokens,
             self._settings.agent_context_compaction_target_tokens,
         )
         tool_result_tokens = min(
             self._settings.tool_result_max_tokens,
-            max(512, context_window_tokens // 4),
+            max(128, request_limit // 4),
         )
 
         present_steering_ids = steering_message_ids(items)
-        prepared = strip_steering_markers(items)
+        last_user_index = max(
+            (index for index, item in enumerate(items)
+             if item.get("role") == "user" and not _is_checkpoint(item)),
+            default=-1,
+        )
+        prepared = [
+            item for index, item in enumerate(items)
+            if item.get("_scholarweave_internal_continuation") is not True
+            or index == last_user_index
+        ]
         prepared = _replace_checkpointed_paper_reads(prepared)
         prepared = await _bound_tool_output_items(prepared, context, tool_result_tokens)
 
-        total_chars = serialized_characters(prepared) + len(instructions or "")
-        if total_chars < high_water_tokens * 4:
-            return PreparedInput(
-                items=await _apply_steering(prepared, context, present_steering_ids),
-                instructions=instructions,
-                working_items=prepared,
+        # Apply pending guidance before measuring; it must never escape the budget.
+        model_items = await _apply_steering(prepared, context, present_steering_ids)
+        steering_delta = model_items[len(prepared):]
+        required = _required_history_items(model_items)
+        mandatory_tokens = _request_tokens(agent, required, instructions, context)
+        if mandatory_tokens > request_limit:
+            _budget_failure(mandatory_tokens, request_limit, response_tokens)
+        before_tokens = _request_tokens(agent, model_items, instructions, context)
+        compacted = prepared
+        did_compact = before_tokens > high_water_tokens and any(
+            not _is_verbatim_constraint(item)
+            for item in prepared
+        )
+        if did_compact:
+            fixed_tokens = _request_tokens(agent, steering_delta, instructions, context)
+            compacted = await self._compact(
+                agent, prepared, "", context,
+                context_window_tokens=context_window_tokens,
+                target_tokens=max(0, target_tokens - fixed_tokens),
+                total_chars=before_tokens * 4,
             )
-
-        compacted = await self._compact(
-            agent,
-            prepared,
-            instructions,
-            context,
-            context_window_tokens=context_window_tokens,
-            target_tokens=target_tokens,
-            total_chars=total_chars,
+        final_items = strip_steering_markers([*compacted, *steering_delta])
+        after_tokens = _request_tokens(agent, final_items, instructions, context)
+        if after_tokens > request_limit:
+            _budget_failure(after_tokens, request_limit, response_tokens)
+        await context.emit(
+            "context.prepared",
+            {
+                "agent_name": agent.name,
+                "turn_index": turn_index,
+                "estimated_tokens_before": before_tokens,
+                "estimated_input_tokens": after_tokens,
+                "tool_schema_tokens": _estimated_tokens([
+                    tool_payload(tool) for tool in agent.enabled_tools(context)
+                ]),
+                "instruction_tokens": _estimated_tokens(instructions),
+                "request_overhead_tokens": _request_tokens(agent, [], instructions, context),
+                "response_headroom_tokens": response_tokens,
+                "working_context_tokens": working_limit,
+                "input_budget_tokens": request_limit,
+                "context_window_tokens": context_window_tokens,
+                "compacted": did_compact,
+                "item_count": len(final_items),
+            },
         )
         return PreparedInput(
-            items=await _apply_steering(compacted, context, present_steering_ids),
+            items=final_items,
             instructions=instructions,
             working_items=compacted,
+            response_max_tokens=response_tokens,
         )
 
     async def _compact(
@@ -163,13 +224,28 @@ class ContextBudgetPolicy:
             receipts=context.receipts,
             estimated_tokens=math.ceil(total_chars / 4),
         )
-        summary_max_tokens = max(256, min(4_096, target_tokens // 4))
+        narrative = [
+            _excerpt(item.get("content"), 480)
+            for item in items
+            if item.get("role") == "assistant" and isinstance(item.get("content"), str)
+        ]
+        if narrative:
+            checkpoint["model_summary"] = "\n".join(narrative[-6:])
+        summary_max_tokens = max(64, min(1_024, target_tokens // 4))
+        model_summary_enabled = self._settings.agent_context_model_summary_enabled
+        if not model_summary_enabled:
+            checkpoint["summary_limitations"] = (
+                "Model summarization is disabled. Bounded excerpts and prior summaries may "
+                "omit narrative understanding; re-read durable evidence rather than infer "
+                "omitted findings."
+            )
         remaining_chars = max(
             0,
             target_tokens * 4
             - len(instructions or "")
             - _checkpoint_message_characters(checkpoint)
-            - summary_max_tokens * 4,
+            - (summary_max_tokens * 4 if model_summary_enabled else 0)
+            - 512,
         )
         discarded, recent, preserved_user_messages = _split_with_verbatim_user_messages(
             items,
@@ -184,7 +260,7 @@ class ContextBudgetPolicy:
                 "context_window_tokens": context_window_tokens,
                 "target_tokens": target_tokens,
                 "discarded_item_count": len(discarded) - len(preserved_user_messages),
-                "preserved_user_message_count": len(preserved_user_messages),
+                "preserved_user_message_count": len(_verbatim_user_messages(discarded)),
             },
         )
         model_summary, summary_method = await self._summarize_discarded_history(
@@ -206,22 +282,41 @@ class ContextBudgetPolicy:
             context.metadata[_CHECKPOINTS_KEY] = checkpoints
         checkpoints.append(checkpoint)
         del checkpoints[:-20]
+        checkpoint = deepcopy(checkpoint)
 
         compacted: RunInputItems = [
             {
                 "role": "user",
+                "_scholarweave_context_checkpoint": True,
                 "content": (
                     f"{CHECKPOINT_MESSAGE_PREFIX}\n"
                     "Continue from this rolling summary and structured checkpoint. Treat "
-                    "omitted raw tool output as available only through its result_ref and "
-                    "the targeted result reader. Do not repeat completed work or invent "
-                    "omitted details.\n\n"
+                    "retained excerpts as partial evidence; raw result references may expire. "
+                    "Do not repeat completed work or invent omitted details.\n\n"
                     + json.dumps(checkpoint, ensure_ascii=False, separators=(",", ":"))
                 ),
             },
             *preserved_user_messages,
             *recent,
         ]
+        # Checkpoint receipts can themselves be large. Drop optional older material,
+        # never exact user/developer constraints, until the configured target fits.
+        protected = _required_history_items(items)
+        if _estimated_tokens(compacted) > target_tokens:
+            compacted = [compacted[0], *protected]
+        for key in ("activity", "evidence", "caveats", "unresolved_questions", "references"):
+            while _estimated_tokens(compacted) > target_tokens and checkpoint.get(key):
+                if key == "evidence" and len(checkpoint[key]) == 1:
+                    # Keep a self-contained excerpt, not just an expiring artifact pointer.
+                    break
+                checkpoint[key].pop(0 if key == "activity" else -1)
+                compacted[0] = _checkpoint_item(checkpoint)
+        if _estimated_tokens(compacted) > target_tokens:
+            checkpoint.pop("model_summary", None)
+            checkpoint.pop("work_state", None)
+            compacted[0] = _checkpoint_item(checkpoint)
+        # The target bounds optional memory, not immutable instructions. The caller
+        # enforces the hard request ceiling after reattaching schemas and steering.
         await context.emit(
             "context.compacted",
             {
@@ -234,8 +329,9 @@ class ContextBudgetPolicy:
                 "context_window_tokens": context_window_tokens,
                 "target_tokens": target_tokens,
                 "discarded_item_count": len(discarded) - len(preserved_user_messages),
-                "preserved_user_message_count": len(preserved_user_messages),
+                "preserved_user_message_count": len(_verbatim_user_messages(discarded)),
                 "summary_method": summary_method,
+                "summary_input_truncated": bool(checkpoint.get("summary_input_truncated")),
                 "storage": checkpoint.get("storage"),
             },
         )
@@ -250,7 +346,11 @@ class ContextBudgetPolicy:
         max_tokens: int,
         context: ScholarWeaveContext,
     ) -> tuple[str | None, str]:
-        if not discarded:
+        if not discarded or not self._settings.agent_context_model_summary_enabled:
+            return None, "structured"
+        required_ids = {id(item) for item in _required_history_items(discarded)}
+        summarizable = [item for item in discarded if id(item) not in required_ids]
+        if not summarizable:
             return None, "structured"
         summary_agent = AgentDefinition(
             id=f"{agent.id}:compaction",
@@ -271,7 +371,7 @@ class ContextBudgetPolicy:
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "history": to_jsonable(discarded),
+                            "history": to_jsonable(summarizable),
                             "structured_checkpoint": checkpoint,
                         },
                         ensure_ascii=False,
@@ -282,8 +382,43 @@ class ContextBudgetPolicy:
             [],
             stream=False,
         )
+        summary_limit = min(
+            self.context_window_tokens(agent) - max_tokens,
+            self._settings.agent_working_context_tokens,
+        )
+        if _estimated_tokens(parameters) > summary_limit:
+            checkpoint["summary_input_truncated"] = True
+            checkpoint["caveats"].append(
+                "The summarizer saw a bounded history sample. Omitted narrative is not "
+                "verified here; consult durable source evidence when more detail is needed."
+            )
+            parameters["messages"][1]["content"] = json.dumps(
+                {
+                    "history_sample": [
+                        {
+                            key: _excerpt(value, 512) if isinstance(value, str) else value
+                            for key, value in item.items()
+                        }
+                        for item in summarizable[-12:]
+                    ],
+                    "structured_checkpoint": checkpoint,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            if _estimated_tokens(parameters) > summary_limit:
+                await context.emit(
+                    "context.compaction_failed",
+                    {
+                        "agent_name": agent.name,
+                        "error_type": "SummaryInputBudgetExceeded",
+                        "error": "A bounded summary request cannot fit; only retained excerpts remain available.",
+                    },
+                )
+                return None, "structured_input_limit"
         try:
-            response = await agent.binding.client.chat.completions.create(**parameters)
+            with inference_priority("background"):
+                response = await agent.binding.client.chat.completions.create(**parameters)
             summary = _response_text(response)
         except (OpenAIError, HarnessError) as exc:
             await context.emit(
@@ -306,7 +441,7 @@ class ContextBudgetPolicy:
                 },
             )
             return None, "structured_fallback"
-        return summary, "model"
+        return summary[:max_tokens * 4], "model"
 
 
 def _response_text(response: Any) -> str:
@@ -332,14 +467,56 @@ async def _apply_steering(
     return await inbox.apply(items, context, present_message_ids=present_message_ids)
 
 
-def _adaptive_target_tokens(high_water_tokens: int, configured_floor: int) -> int:
-    headroom = max(256, high_water_tokens // 10)
-    upper_bound = max(512, high_water_tokens - headroom)
-    dynamic_target = int(high_water_tokens * 0.65)
-    return min(
-        upper_bound,
-        max(512, min(configured_floor, upper_bound), dynamic_target),
+def _adaptive_target_tokens(high_water_tokens: int, configured_ceiling: int) -> int:
+    return max(0, min(configured_ceiling, int(high_water_tokens * 0.8)))
+
+
+def _estimated_tokens(value: Any) -> int:
+    """Byte-based sizing heuristic; provider tokenizers are not available here."""
+    return math.ceil(len(json.dumps(to_jsonable(value), ensure_ascii=False).encode("utf-8")) / 4)
+
+
+def _request_tokens(
+    agent: AgentDefinition, items: RunInputItems, instructions: str, context: ScholarWeaveContext
+) -> int:
+    messages = to_chat_messages(
+        strip_steering_markers(items), instructions,
+        preserve_thinking=agent.binding.preserve_thinking, model_name=agent.binding.model_name,
     )
+    parameters = request_parameters(agent, messages, agent.enabled_tools(context), stream=False)
+    return _estimated_tokens(parameters) + 8 * len(messages)
+
+
+def _budget_failure(required: int, available: int, response: int) -> None:
+    raise RunPolicyViolation(
+        "Working context budget cannot fit preserved constraints, uncheckpointed evidence, "
+        "instructions, tool schemas "
+        "and response headroom. Shorten the request/tool surface or increase the task budget.",
+        policy="working_context",
+        detail={"estimated_required_tokens": required, "available_input_tokens": available,
+                "response_headroom_tokens": response},
+    )
+
+
+def _is_checkpoint(item: dict[str, Any]) -> bool:
+    return item.get("_scholarweave_context_checkpoint") is True
+
+
+def _is_verbatim_constraint(item: dict[str, Any]) -> bool:
+    return (
+        item.get("role") in {"user", "system", "developer"}
+        and not _is_checkpoint(item)
+    )
+
+
+def _checkpoint_item(checkpoint: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "role": "user",
+        "_scholarweave_context_checkpoint": True,
+        "content": CHECKPOINT_MESSAGE_PREFIX + "\n\n" + json.dumps(
+            checkpoint, ensure_ascii=False, separators=(",", ":")
+        ),
+    }
 
 
 def _checkpoint_message_characters(checkpoint: dict[str, Any]) -> int:
@@ -377,6 +554,7 @@ async def _bound_tool_output_items(
             field is None
             or serialized_characters(output) <= max_characters
             or _is_bounded_result(output)
+            or _tool_output_object(output).get("checkpoint_required") is True
         ):
             bounded_items.append(item)
             continue
@@ -429,9 +607,7 @@ def _is_bounded_result(value: Any) -> bool:
 
 def _replace_checkpointed_paper_reads(items: RunInputItems) -> RunInputItems:
     calls: dict[str, tuple[str, dict[str, Any]]] = {}
-    latest_successful_append = -1
-    latest_append_call_id: str | None = None
-    latest_append_result: dict[str, Any] = {}
+    successful_appends: list[tuple[int, str, dict[str, Any], dict[str, Any]]] = []
     for index, item in enumerate(items):
         if not isinstance(item, dict):
             continue
@@ -449,26 +625,25 @@ def _replace_checkpointed_paper_reads(items: RunInputItems) -> RunInputItems:
         if (
             name == "paper_summary_checkpoint"
             and arguments.get("action") == "append"
-            and _tool_output_object(item.get("output")).get("status") == "appended"
+            and _tool_output_object(item.get("output")).get("status") in {"appended", "reconciled"}
         ):
-            latest_successful_append = index
-            latest_append_call_id = call_id
-            latest_append_result = _tool_output_object(item.get("output"))
+            successful_appends.append((index, call_id, arguments, _tool_output_object(item.get("output"))))
 
-    if latest_successful_append < 0:
+    if not successful_appends:
         return items
 
+    append_ids = {call_id for _, call_id, _, _ in successful_appends}
     changed = False
     replaced: RunInputItems = []
     for index, item in enumerate(items):
-        if not isinstance(item, dict) or index > latest_successful_append:
+        if not isinstance(item, dict):
             replaced.append(item)
             continue
         call_id = item.get("call_id")
         name, arguments = (
             calls.get(call_id, ("", {})) if isinstance(call_id, str) else ("", {})
         )
-        if item.get("type") == "function_call" and call_id == latest_append_call_id:
+        if item.get("type") == "function_call" and call_id in append_ids:
             replacement = dict(item)
             replacement["arguments"] = json.dumps(
                 {
@@ -491,11 +666,59 @@ def _replace_checkpointed_paper_reads(items: RunInputItems) -> RunInputItems:
         if field is None or not replaceable_read:
             replaced.append(item)
             continue
+        output = _tool_output_object(item.get(field))
+        document_id = arguments.get("document_id") or output.get("document_id")
+        latest_append_result = None
+        for append_index, _, append_arguments, append_result in successful_appends:
+            if (
+                append_index <= index
+                or not document_id
+                or document_id != append_arguments.get("document_id")
+            ):
+                continue
+            path = output.get("checkpoint_path")
+            if path is not None and path != append_result.get("checkpoint_path"):
+                continue
+            if (
+                output.get("coverage") is not None
+                and output["coverage"] != append_result.get("coverage")
+            ):
+                continue
+            batch = output.get("summary_batch", output.get("batch"))
+            batch_id = output.get("batch_id")
+            if batch_id is not None:
+                if batch_id != append_result.get("batch_id"):
+                    continue
+            elif batch is not None:
+                if batch != append_result.get("checkpointed_batch"):
+                    continue
+            elif name == "read_paper_summary_batch":
+                coverage = append_result.get("coverage") or {}
+                if output.get("coverage") is not None:
+                    if output["coverage"] != coverage:
+                        continue
+                elif arguments.get("start") != coverage.get("start"):
+                    continue
+            elif name == "read_tool_result":
+                # A generic retained-result read is not evidence for this paper
+                # merely because some later checkpoint happened to succeed.
+                continue
+            latest_append_result = append_result
+            break
+        if latest_append_result is None:
+            replaced.append(item)
+            continue
         receipt = {
             "status": "replaced_by_summary_checkpoint",
+            "document_id": document_id,
             "checkpoint_path": latest_append_result.get("checkpoint_path"),
+            "batch_id": latest_append_result.get("batch_id"),
             "checkpointed_batch": latest_append_result.get("checkpointed_batch"),
             "coverage": latest_append_result.get("coverage"),
+            "next_start": latest_append_result.get("next_start"),
+            "next_offset": latest_append_result.get("next_offset"),
+            "has_more_paper": latest_append_result.get("has_more_paper"),
+            "complete": latest_append_result.get("complete"),
             "instruction": (
                 "Raw batch content was removed after its understanding was appended to the "
                 "paper-summary checkpoint."
@@ -549,7 +772,28 @@ def _build_checkpoint(
     caveats: list[str] = []
     unresolved_questions: list[str] = []
     seen: set[str] = set()
-    for item in to_jsonable(items):
+    previous = next(
+        (
+            _tool_output_object(str(item.get("content", "")).split("\n\n")[-1])
+            for item in reversed(items)
+            if _is_checkpoint(item)
+        ),
+        {},
+    )
+    for item in reversed(to_jsonable(items)):
+        if isinstance(item, dict) and _is_checkpoint(item):
+            try:
+                prior = json.loads(str(item.get("content", "")).split("\n\n")[-1])
+            except (json.JSONDecodeError, IndexError):
+                prior = {}
+            _collect_checkpoint_values(
+                prior, evidence=evidence, references=references, caveats=caveats,
+                unresolved_questions=unresolved_questions, seen=seen,
+            )
+            if isinstance(prior, dict):
+                for reference in prior.get("references", []):
+                    if isinstance(reference, str):
+                        _append_unique(references, reference)
         _collect_checkpoint_values(
             item,
             evidence=evidence,
@@ -564,6 +808,8 @@ def _build_checkpoint(
         "checkpoint_id": str(uuid.uuid4()),
         "agent_name": agent_name,
         "estimated_tokens_before": estimated_tokens,
+        "reference_lifetime": "Run-scoped raw references may expire; retained excerpts are self-contained.",
+        "prior_summary": previous.get("model_summary") or previous.get("prior_summary"),
         "evidence": evidence[:40],
         "references": references[:60],
         "caveats": caveats[:20],
@@ -603,6 +849,7 @@ def _collect_checkpoint_values(
                 _append_unique(references, item)
             if normalized in _TEXT_KEYS and isinstance(item, str):
                 excerpt = _excerpt(item)
+                selected[str(key)] = excerpt
                 if normalized in {"caveat", "limitation", "error"}:
                     _append_unique(caveats, excerpt)
                 for line in item.splitlines():
@@ -636,6 +883,15 @@ def _collect_checkpoint_values(
                 unresolved_questions=unresolved_questions,
                 seen=seen,
             )
+    elif isinstance(value, str) and value.lstrip().startswith(("{", "[")):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return
+        _collect_checkpoint_values(
+            parsed, evidence=evidence, references=references, caveats=caveats,
+            unresolved_questions=unresolved_questions, seen=seen,
+        )
 
 
 def _work_state(metadata: dict[str, Any]) -> dict[str, Any]:
@@ -673,7 +929,7 @@ def _split_with_verbatim_user_messages(
     while previous_discarded_count != len(discarded):
         previous_discarded_count = len(discarded)
         discarded, recent = _split_recent_history(items, adjusted_budget)
-        preserved = _verbatim_user_messages(discarded)
+        preserved = _required_history_items(discarded)
         adjusted_budget = max(0, budget_chars - serialized_characters(preserved))
     return discarded, recent, preserved
 
@@ -683,11 +939,24 @@ def _verbatim_user_messages(items: RunInputItems) -> RunInputItems:
         item
         for item in items
         if isinstance(item, dict)
-        and item.get("role") == "user"
-        and not (
-            isinstance(item.get("content"), str)
-            and item["content"].startswith(CHECKPOINT_MESSAGE_PREFIX)
+        and _is_verbatim_constraint(item)
+    ]
+
+
+def _required_history_items(items: RunInputItems) -> RunInputItems:
+    pending_item_ids = {
+        id(item)
+        for chunk in _history_chunks(items)
+        if any(
+            _tool_output_object(candidate.get(_tool_output_field(candidate) or "output"))
+            .get("checkpoint_required") is True
+            for candidate in chunk
         )
+        for item in chunk
+    }
+    return [
+        item for item in items
+        if _is_verbatim_constraint(item) or id(item) in pending_item_ids
     ]
 
 

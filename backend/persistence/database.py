@@ -103,7 +103,8 @@ def create_session_factory(settings: Settings) -> sessionmaker[Session]:
         poolclass=NullPool,
         future=True,
     )
-    _cut_over_schema(engine, settings)
+    backed_up = _cut_over_schema(engine, settings)
+    _add_provider_runtime_settings(engine, settings, backed_up=backed_up)
     Base.metadata.create_all(engine)
     _remove_legacy_compaction_items(engine)
     _restore_preserved_runtime_dependents(engine)
@@ -114,6 +115,22 @@ def create_session_factory(settings: Settings) -> sessionmaker[Session]:
         autocommit=False,
         expire_on_commit=False,
     )
+
+
+def _add_provider_runtime_settings(
+    engine: Engine, settings: Settings, *, backed_up: bool = False
+) -> None:
+    inspector = inspect(engine)
+    if "provider_profiles" not in inspector.get_table_names():
+        return
+    if "config_json" in {column["name"] for column in inspector.get_columns("provider_profiles")}:
+        return
+    if not backed_up:
+        _backup_database(settings.database_path)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "ALTER TABLE provider_profiles ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'"
+        )
 
 
 def session_scope(session_factory: sessionmaker[Session]) -> Iterator[Session]:
@@ -147,13 +164,13 @@ def _register_models() -> None:
     from backend.workspace import models as workspace_models  # noqa: F401
 
 
-def _cut_over_schema(engine: Engine, settings: Settings) -> None:
+def _cut_over_schema(engine: Engine, settings: Settings) -> bool:
     tables = set(inspect(engine).get_table_names())
     generation = _read_schema_generation(engine) if "app_settings" in tables else None
     if generation == SCHEMA_GENERATION:
-        return
+        return False
     if not tables:
-        return
+        return False
 
     _backup_database(settings.database_path)
     with engine.connect() as connection:
@@ -182,6 +199,7 @@ def _cut_over_schema(engine: Engine, settings: Settings) -> None:
         connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         connection.commit()
     _remove_legacy_memory(settings)
+    return True
 
 
 def _restore_preserved_runtime_dependents(engine: Engine) -> None:

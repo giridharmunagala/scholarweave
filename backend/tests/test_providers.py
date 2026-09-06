@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
@@ -12,10 +13,150 @@ from backend.core.config import Settings
 from backend.core.models import AppSetting
 from backend.providers.types import ProviderRuntimeError
 from backend.providers.ollama import OllamaClient
+from backend.providers.logging import ScheduledTransport
 from backend.providers.repository import ProviderRepository
 from backend.providers.runtime import ResolvedModel, _compatible_context_window
 from backend.providers.schemas import ProviderCreate, ProviderModel
+from backend.providers.schemas import ResidencyConfirm
+from backend.core.errors import ConflictError, ValidationError
 from backend.providers.types import AgentModelDefaults, ModelReference
+
+
+@pytest.mark.anyio
+async def test_residency_requires_explicit_confirmation_and_safe_persistence(test_settings, monkeypatch):
+    services = create_services(test_settings)
+    provider = services.providers.create(ProviderCreate(
+        name="Manual GPU", kind="openai_compatible", base_url="http://127.0.0.1:8080/v1",
+        models=[ProviderModel(name="main")],
+    ))
+    service = services.providers
+    await service.configure_residency(provider.id, True)
+    assert service.residency().paused
+    assert not service.residency().confirmed
+    reported = ["wrong"]
+    readiness = None
+    calls = []
+
+    def mock_client(_resolved):
+        def respond(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json={
+                "object": "list", "data": [
+                    {"id": model, "object": "model", "created": 0, "owned_by": "local",
+                     **({"status": {"value": readiness}} if readiness else {})}
+                    for model in reported
+                ],
+            })
+        return AsyncOpenAI(base_url="http://local/v1", api_key="unused",
+                           http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+
+    monkeypatch.setattr(service._runtime, "client", mock_client)
+    confirmation = ResidencyConfirm(model="main", externally_loaded=True, session_mode="batch")
+    with pytest.raises(ValidationError, match="exactly"):
+        await service.confirm_residency(provider.id, confirmation)
+    reported[:] = ["main", "small"]
+    with pytest.raises(ValidationError, match="exactly"):
+        await service.confirm_residency(provider.id, confirmation)
+    reported[:] = ["main"]
+    readiness = "loading"
+    with pytest.raises(ValidationError, match="not ready"):
+        await service.confirm_residency(provider.id, confirmation)
+    readiness = "loaded"
+    confirmed = await service.confirm_residency(provider.id, confirmation)
+    assert confirmed.confirmed and confirmed.session_mode == "batch"
+    assert calls == ["/v1/models"] * 4
+    with pytest.raises(ConflictError, match="Drain"):
+        await service.confirm_residency(provider.id, confirmation)
+    with pytest.raises(ConflictError):
+        service.archive(provider.id)
+    with pytest.raises(ConflictError):
+        await service.verify(provider.id, model_name="small")
+    stored = ProviderRepository(services.session_factory).get(provider.id)
+    assert stored.config_json["residency"]["resident_model"] == "main"
+    restarted = create_services(test_settings)
+    assert restarted.providers.residency().resident_model == "main"
+    assert restarted.providers.residency().session_mode == "batch"
+    assert not restarted.providers.residency().confirmed
+    await service.begin_residency_switch(provider.id)
+    await service.configure_residency(provider.id, False)
+    assert not service.residency().enabled
+
+
+@pytest.mark.anyio
+async def test_residency_rejects_remote_profiles_and_does_not_probe_active_swap(test_settings, monkeypatch):
+    services = create_services(test_settings)
+    service = services.providers
+    remote = service.create(ProviderCreate(
+        name="Remote", kind="openai_compatible", base_url="https://example.com/v1",
+    ))
+    with pytest.raises(ValidationError, match="local"):
+        await service.configure_residency(remote.id, True)
+    local = service.create(ProviderCreate(
+        name="Local", kind="openai_compatible", base_url="http://localhost:8080/v1",
+    ))
+    await service.configure_residency(local.id, True)
+    scheduler = service._runtime.inference_scheduler
+    await scheduler.confirm(local.id, "main", "interactive")
+    def unexpected_probe(_resolved):
+        raise AssertionError("An active switch must not contact the provider.")
+    monkeypatch.setattr(service._runtime, "client", unexpected_probe)
+    async with scheduler.request(
+        profile_id=local.id, model="main", server_url="http://localhost:8080/v1",
+    ):
+        with pytest.raises(ConflictError, match="Drain"):
+            await service.confirm_residency(
+                local.id, ResidencyConfirm(model="small", externally_loaded=True),
+            )
+
+
+def test_residency_http_control_requires_external_load_attestation(test_settings):
+    client = TestClient(create_app(test_settings))
+    profile = client.post("/api/providers", json={
+        "name": "Managed local", "kind": "openai_compatible",
+        "base_url": "http://127.0.0.1:8080/v1",
+    }).json()
+    path = f"/api/providers/{profile['id']}/residency"
+    assert client.get("/api/providers/inference/residency").json()["enabled"] is False
+    response = client.put(path, json={"enabled": True})
+    assert response.status_code == 200
+    assert response.json()["paused"]
+    assert client.post(path + "/drain").json()["active_requests"] == 0
+    assert client.post(path + "/confirm", json={"model": "main"}).status_code == 422
+    assert client.put(path, json={"enabled": False}).status_code == 200
+
+
+@pytest.mark.anyio
+async def test_residency_blocks_retired_client_targeting_previous_server(test_settings):
+    services = create_services(test_settings)
+    profile = services.providers.create(ProviderCreate(
+        name="Moved server", kind="openai_compatible", base_url="http://127.0.0.1:8081/v1",
+    ))
+    scheduler = services.providers._runtime.inference_scheduler
+    calls = []
+
+    def old_server(request):
+        calls.append(request.url)
+        return httpx.Response(200, json={"ok": True})
+
+    # A run can retain a retired client after the profile URL changes between turns.
+    transport = ScheduledTransport(httpx.MockTransport(old_server), scheduler, profile.id)
+    await services.providers.configure_residency(profile.id, True)
+    await scheduler.confirm(profile.id, "main", "interactive")
+    async with httpx.AsyncClient(transport=transport) as client:
+        task = asyncio.create_task(client.post(
+            "http://127.0.0.1:8080/v1/chat/completions", json={"model": "main"},
+        ))
+        try:
+            await asyncio.sleep(0)
+            assert not calls
+            assert scheduler.snapshot()["queue"][0]["blocked_by_residency"]
+            await asyncio.wait_for(client.post(
+                "http://127.0.0.1:8081/v1/chat/completions", json={"model": "main"},
+            ), 1)
+            assert len(calls) == 1 and calls[0].port == 8081
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 def test_compatible_model_context_is_read_from_llama_cpp_metadata() -> None:
@@ -157,6 +298,8 @@ def test_provider_models_expose_model_specific_reasoning_efforts(test_settings) 
                 {"name": "gemma-4-12b-q6-bf16-long"},
                 {"name": "gemma-4-12b-q8-long"},
                 {"name": "custom-model"},
+                {"name": "/models/Qwen3.8-27B-GGUF/Qwen3.8-27B-IQ3_S.gguf"},
+                {"name": "qwen3.6-27b"},
             ],
         },
     ).json()["models"]
@@ -169,10 +312,12 @@ def test_provider_models_expose_model_specific_reasoning_efforts(test_settings) 
         "xhigh",
         "max",
     ]
-    assert compatible[0]["reasoning_efforts"] == ["low", "medium", "xhigh"]
+    assert compatible[0]["reasoning_efforts"] == ["none", "low", "medium", "xhigh"]
     assert compatible[1]["reasoning_efforts"] == ["none", "high"]
     assert compatible[2]["reasoning_efforts"] == ["none", "high"]
     assert compatible[3]["reasoning_efforts"] is None
+    assert compatible[4]["reasoning_efforts"] == ["none", "low", "medium", "xhigh"]
+    assert compatible[5]["reasoning_efforts"] == ["low", "medium", "xhigh"]
 
 
 def test_user_profile_and_timezone_settings_persist(test_settings) -> None:

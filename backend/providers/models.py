@@ -25,6 +25,7 @@ class ProviderProfile(Base):
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(String(16), default="active")
     models_json: Mapped[Any] = mapped_column(JSONText, default=list)
+    config_json: Mapped[Any] = mapped_column(JSONText, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=utcnow,

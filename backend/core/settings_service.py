@@ -18,6 +18,9 @@ PERSISTED_SETTING_KEYS = {
     "request_timeout_seconds",
     "agent_context_window_tokens",
     "agent_context_high_water_ratio",
+    "agent_working_context_tokens",
+    "agent_context_response_reserve_tokens",
+    "agent_context_model_summary_enabled",
     "agent_context_compaction_target_tokens",
     "tool_result_max_tokens",
     "agent_epoch_max_turns",
@@ -68,6 +71,9 @@ class SettingsResponse(SettingsSchema):
     request_timeout_seconds: float
     agent_context_window_tokens: int
     agent_context_high_water_ratio: float
+    agent_working_context_tokens: int
+    agent_context_response_reserve_tokens: int
+    agent_context_model_summary_enabled: bool
     agent_context_compaction_target_tokens: int
     tool_result_max_tokens: int
     agent_epoch_max_turns: int
@@ -91,6 +97,9 @@ class SettingsUpdate(SettingsSchema):
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     agent_context_window_tokens: int | None = Field(default=None, ge=4_096)
     agent_context_high_water_ratio: float | None = Field(default=None, ge=0.5, le=0.9)
+    agent_working_context_tokens: int | None = Field(default=None, ge=2_048, le=500_000)
+    agent_context_response_reserve_tokens: int | None = Field(default=None, ge=256, le=128_000)
+    agent_context_model_summary_enabled: bool | None = None
     agent_context_compaction_target_tokens: int | None = Field(default=None, ge=512)
     tool_result_max_tokens: int | None = Field(default=None, ge=256)
     agent_epoch_max_turns: int | None = Field(default=None, ge=2, le=100)
@@ -164,6 +173,9 @@ class SettingsService:
             request_timeout_seconds=self.settings.request_timeout_seconds,
             agent_context_window_tokens=self.settings.agent_context_window_tokens,
             agent_context_high_water_ratio=self.settings.agent_context_high_water_ratio,
+            agent_working_context_tokens=self.settings.agent_working_context_tokens,
+            agent_context_response_reserve_tokens=self.settings.agent_context_response_reserve_tokens,
+            agent_context_model_summary_enabled=self.settings.agent_context_model_summary_enabled,
             agent_context_compaction_target_tokens=(
                 self.settings.agent_context_compaction_target_tokens
             ),
@@ -188,6 +200,11 @@ class SettingsService:
         values = payload.model_dump(exclude_unset=True)
         normalized: dict[str, Any] = {}
         for key, value in values.items():
+            if key in {
+                "agent_working_context_tokens", "agent_context_response_reserve_tokens",
+                "agent_context_model_summary_enabled",
+            } and value is None:
+                continue
             if key in {"user_timezone", "user_profile"} and value is None:
                 continue
             if key == "default_model_references" and value is not None:

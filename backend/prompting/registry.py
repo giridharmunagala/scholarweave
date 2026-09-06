@@ -49,6 +49,7 @@ PROMPT_DEFINITIONS = {
         ),
         PromptDefinition("run-recovery", frozenset({"run_id"})),
         PromptDefinition("paper-summary"),
+        PromptDefinition("paper-summary-overview"),
     )
 }
 

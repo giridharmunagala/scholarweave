@@ -9,8 +9,10 @@ import pytest
 from backend.providers.logging import (
     LLMCallLogger,
     LoggingTransport,
+    ScheduledTransport,
     _decode_response_body,
 )
+from backend.providers.inference import InferenceScheduler
 
 
 def test_decodes_streaming_chat_response_as_a_complete_json_response() -> None:
@@ -150,6 +152,9 @@ async def test_logging_transport_persists_normalized_stream_response(tmp_path) -
     logged = json.loads(log_path.read_text())
     assert logged["response"]["object"] == "chat.completion"
     assert logged["response"]["choices"][0]["message"]["content"] == "Hello world"
+    assert logged["timing"]["first_byte_seconds"] is None
+    assert logged["timing"]["queue_wait_seconds"] is None
+    assert logged["timing"]["response_complete"] is True
 
 
 @pytest.mark.anyio
@@ -186,3 +191,72 @@ async def test_logging_transport_does_not_buffer_streaming_response(tmp_path) ->
                 await anext(chunks)
 
     assert json.loads(log_path.read_text())["response"] == "firstsecond"
+
+
+@pytest.mark.anyio
+async def test_logs_queue_request_and_observed_body_byte_timings_without_credentials(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr("backend.providers.logging.perf_counter", lambda: clock[0])
+    scheduler = InferenceScheduler()
+    lease = scheduler.request()
+    await lease.__aenter__()
+
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            clock[0] = 0.09
+            yield b": heartbeat\n\n"
+            clock[0] = 0.12
+            yield b"data: [DONE]\n\n"
+            clock[0] = 0.15
+
+    def provider(_request):
+        clock[0] = 0.05
+        return httpx.Response(200, stream=Stream())
+
+    path = tmp_path / "metrics.jsonl"
+    transport = ScheduledTransport(
+        LoggingTransport(LLMCallLogger(path), "test", httpx.MockTransport(provider)), scheduler,
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        task = asyncio.create_task(client.post(
+            "http://stub/v1/chat/completions", headers={"Authorization": "Bearer secret-header"},
+            json={"model": "main", "api_key": "secret-body"},
+        ))
+        await asyncio.sleep(0)
+        clock[0] = 0.02
+        await lease.release()
+        await task
+    logged = json.loads(path.read_text())
+    metrics = logged["timing"]
+    assert metrics["queue_wait_seconds"] == pytest.approx(0.02)
+    assert metrics["response_headers_seconds"] == pytest.approx(0.03)
+    assert metrics["first_byte_seconds"] == pytest.approx(0.07)
+    assert metrics["duration_seconds"] == pytest.approx(0.13)
+    assert metrics["total_duration_seconds"] == pytest.approx(0.15)
+    assert metrics["response_complete"] is True
+    assert "token" not in " ".join(metrics)
+    assert "secret-header" not in path.read_text()
+    assert "secret-body" not in path.read_text()
+
+
+@pytest.mark.anyio
+async def test_interrupted_stream_logs_incomplete_timing_once(tmp_path):
+    class Stream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"first"
+            raise asyncio.CancelledError()
+
+    path = tmp_path / "metrics.jsonl"
+    transport = LoggingTransport(
+        LLMCallLogger(path), "test",
+        httpx.MockTransport(lambda _request: httpx.Response(200, stream=Stream())),
+    )
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.post("http://stub/v1/chat/completions", json={"model": "main"})
+    lines = path.read_text().splitlines()
+    assert len(lines) == 1
+    logged = json.loads(lines[0])
+    assert logged["timing"]["response_complete"] is False
+    assert logged["timing"]["first_byte_seconds"] is not None
+    assert logged["error"]["type"] == "CancelledError"

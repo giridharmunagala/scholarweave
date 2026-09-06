@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import asyncio
 
 from openai import OpenAIError
+from backend.core.errors import ConflictError, ValidationError
 
 from backend.agents.harness import (
     AgentDefinition,
@@ -16,7 +18,7 @@ from backend.agents.harness import (
 from backend.agents.context import ScholarWeaveContext
 from backend.providers.ollama import OllamaError
 from backend.providers.reasoning import infer_reasoning_efforts
-from backend.providers.runtime import ModelRuntime
+from backend.providers.runtime import ModelRuntime, ResolvedModel, uses_local_inference
 from backend.providers.repository import ProviderRepository
 from backend.providers.schemas import (
     ProviderCreate,
@@ -25,6 +27,8 @@ from backend.providers.schemas import (
     ProviderResponse,
     ProviderUpdate,
     ProviderVerifyResponse,
+    ResidencyConfirm,
+    ResidencyResponse,
 )
 from backend.providers.binding import ProfileModelResolver, ProviderClientPool
 from backend.providers.types import (
@@ -66,6 +70,69 @@ class ProviderService:
         self._models = model_resolver
         self._clients = clients
         self._prompts = prompts
+        self._residency_control = asyncio.Lock()
+
+    def residency(self) -> ResidencyResponse:
+        return ResidencyResponse.model_validate(self._runtime.inference_scheduler.snapshot())
+
+    async def configure_residency(self, profile_id: str, enabled: bool) -> ResidencyResponse:
+        async with self._residency_control:
+            profile = self._repository.get(profile_id)
+            scheduler = self._runtime.inference_scheduler
+            if enabled:
+                if profile.kind != "openai_compatible" or not uses_local_inference(profile.kind, profile.base_url):
+                    raise ValidationError("Manual residency protection requires a local OpenAI-compatible profile.")
+                if scheduler.profile_id == profile_id:
+                    return self.residency()
+                if scheduler.snapshot()["active_requests"] or scheduler.snapshot()["queue"]:
+                    raise ConflictError("Stop active and queued local work before enabling residency protection.")
+                scheduler.restore(profile_id, None, server_url=profile.base_url)
+            else:
+                await scheduler.disable(profile_id)
+            self._save_residency(profile_id, enabled=enabled, resident_model=None)
+            return self.residency()
+
+    async def begin_residency_switch(self, profile_id: str) -> ResidencyResponse:
+        async with self._residency_control:
+            self._repository.get(profile_id)
+            await self._runtime.inference_scheduler.begin_switch(profile_id)
+            return self.residency()
+
+    async def confirm_residency(self, profile_id: str, payload: ResidencyConfirm) -> ResidencyResponse:
+        async with self._residency_control:
+            profile = self._repository.get(profile_id)
+            scheduler = self._runtime.inference_scheduler
+            state = scheduler.snapshot()
+            if state["profile_id"] != profile_id or not state["paused"] or state["active_requests"]:
+                raise ConflictError("Drain and pause inference before confirming externally loaded weights.")
+            # /v1/models is discovery, not a load command. The user separately attests
+            # that the desired weights were loaded; catalog entries alone cannot prove it.
+            resolved = ResolvedModel(profile.id, profile.name, profile.kind,
+                                     profile.base_url, profile.api_key, payload.model)
+            try:
+                async with self._runtime.client(resolved) as client:
+                    result = await client.models.list()
+            except OpenAIError as exc:
+                raise ValidationError("The server is not ready: /v1/models must succeed before confirmation.") from exc
+            if [item.id for item in result.data] != [payload.model]:
+                raise ValidationError(
+                    "Manual single-model confirmation requires /v1/models to report exactly the selected model. "
+                    "Catalog/router servers are not supported by this conservative mode."
+                )
+            reported = result.data[0].model_dump().get("status")
+            readiness = reported.get("value") if isinstance(reported, dict) else reported
+            if readiness is not None and readiness not in ("loaded", "ready"):
+                raise ValidationError("The server reports that this model is not ready; leave inference paused.")
+            self._save_residency(profile_id, enabled=True, resident_model=payload.model,
+                                 session_mode=payload.session_mode)
+            await scheduler.confirm(profile_id, payload.model, payload.session_mode)
+            return self.residency()
+
+    def _save_residency(self, profile_id: str, **values) -> None:
+        profile = self._repository.get(profile_id)
+        self._repository.update(profile_id, config_json={
+            **(profile.config_json or {}), "residency": values,
+        })
 
     def list(self, *, include_archived: bool = False) -> list[ProviderResponse]:
         return [
@@ -92,6 +159,10 @@ class ProviderService:
 
     def update(self, profile_id: str, payload: ProviderUpdate) -> ProviderResponse:
         values = payload.model_dump(exclude_unset=True)
+        if self._runtime.inference_scheduler.profile_id == profile_id and (
+            {"kind", "base_url", "api_key"} & values.keys()
+        ):
+            raise ConflictError("Disable residency protection before changing the server connection.")
         if "models" in values:
             provider_kind = values.get("kind") or self._repository.get(profile_id).kind
             values["models_json"] = [
@@ -110,6 +181,8 @@ class ProviderService:
         return self._response(record)
 
     def archive(self, profile_id: str) -> ProviderResponse:
+        if self._runtime.inference_scheduler.profile_id == profile_id:
+            raise ConflictError("Disable residency protection before archiving this profile.")
         record = self._repository.archive(profile_id)
         self._clients.invalidate_profile(profile_id)
         return self._response(record)
@@ -168,6 +241,12 @@ class ProviderService:
                 tool_calling=False,
                 detail="Choose or discover a model before verification.",
             )
+        state = self.residency()
+        if state.enabled and uses_local_inference(profile.kind, profile.base_url) and (
+            state.profile_id != profile_id or not state.confirmed or state.paused
+            or state.resident_model != selected
+        ):
+            raise ConflictError("Confirm this model's residency before running provider verification.")
         declared = next(
             (
                 item

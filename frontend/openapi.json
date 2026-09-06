@@ -230,6 +230,23 @@
             ],
             "title": "Reasoning Effort"
           },
+          "research_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "learn",
+                  "understand",
+                  "review"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted preserves review behavior, or learn for legacy Fast Answer. Deep Work always requires review.",
+            "title": "Research Mode"
+          },
           "web_enabled": {
             "default": true,
             "title": "Web Enabled",
@@ -576,6 +593,53 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "InferenceQueueEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "blocked_by_residency": {
+            "title": "Blocked By Residency",
+            "type": "boolean"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "priority": {
+            "enum": [
+              "interactive",
+              "background"
+            ],
+            "title": "Priority",
+            "type": "string"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
+          }
+        },
+        "required": [
+          "profile_id",
+          "model",
+          "priority",
+          "blocked_by_residency"
+        ],
+        "title": "InferenceQueueEntry",
+        "type": "object"
+      },
       "IngestionOptionsResponse": {
         "additionalProperties": false,
         "properties": {
@@ -747,6 +811,75 @@
         "title": "PaperFolderResponse",
         "type": "object"
       },
+      "PaperSummaryBatchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "document_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Document Ids",
+            "type": "array"
+          },
+          "mode": {
+            "default": "reviewed",
+            "enum": [
+              "overview",
+              "reviewed"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          }
+        },
+        "required": [
+          "document_ids"
+        ],
+        "title": "PaperSummaryBatchRequest",
+        "type": "object"
+      },
+      "PaperSummaryBatchResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/PaperSummaryRunResponse"
+            },
+            "title": "Runs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "runs"
+        ],
+        "title": "PaperSummaryBatchResponse",
+        "type": "object"
+      },
       "PaperSummaryContentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -763,6 +896,80 @@
           "content"
         ],
         "title": "PaperSummaryContentResponse",
+        "type": "object"
+      },
+      "PaperSummaryCoverageResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpointed_batches": {
+            "default": 0,
+            "title": "Checkpointed Batches",
+            "type": "integer"
+          },
+          "exact_spans_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exact Spans Path"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pages",
+                  "chunks"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          }
+        },
+        "title": "PaperSummaryCoverageResponse",
+        "type": "object"
+      },
+      "PaperSummaryModelResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "title": "Model",
+            "type": "string"
+          },
+          "provider_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Kind"
+          },
+          "provider_profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider Profile Id"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "PaperSummaryModelResponse",
         "type": "object"
       },
       "PaperSummaryPromotionResponse": {
@@ -791,6 +998,15 @@
       "PaperSummaryRunRequest": {
         "additionalProperties": false,
         "properties": {
+          "mode": {
+            "default": "reviewed",
+            "enum": [
+              "overview",
+              "reviewed"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
           "model_reference": {
             "$ref": "#/components/schemas/ModelReferenceSpec"
           },
@@ -821,6 +1037,17 @@
       "PaperSummaryRunResponse": {
         "additionalProperties": false,
         "properties": {
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
           "prompt_revision": {
             "title": "Prompt Revision",
             "type": "string"
@@ -839,9 +1066,63 @@
       "PaperSummaryVersionResponse": {
         "additionalProperties": false,
         "properties": {
+          "canonical_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Path"
+          },
+          "canonical_updated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canonical Updated"
+          },
           "citation_count": {
             "title": "Citation Count",
             "type": "integer"
+          },
+          "content_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Hash"
+          },
+          "coverage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaperSummaryCoverageResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "coverage_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverage Complete"
           },
           "created_at": {
             "format": "date-time",
@@ -852,9 +1133,76 @@
             "title": "Document Id",
             "type": "string"
           },
+          "evidence_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Path"
+          },
+          "extraction_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extraction Hash"
+          },
           "id": {
             "title": "Id",
             "type": "string"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "overview",
+                  "reviewed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaperSummaryModelResponse"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "next_offset": {
+            "default": 0,
+            "title": "Next Offset",
+            "type": "integer"
+          },
+          "next_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Start"
           },
           "path": {
             "title": "Path",
@@ -871,6 +1219,17 @@
             ],
             "title": "Prompt Revision"
           },
+          "review_complete": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Complete"
+          },
           "review_summary": {
             "title": "Review Summary",
             "type": "string"
@@ -878,6 +1237,28 @@
           "run_id": {
             "title": "Run Id",
             "type": "string"
+          },
+          "source_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Hash"
+          },
+          "source_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version"
           },
           "status": {
             "title": "Status",
@@ -1397,6 +1778,131 @@
         "title": "ResearchConversationCreateRequest",
         "type": "object"
       },
+      "ResidencyConfigure": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ],
+        "title": "ResidencyConfigure",
+        "type": "object"
+      },
+      "ResidencyConfirm": {
+        "additionalProperties": false,
+        "properties": {
+          "externally_loaded": {
+            "const": true,
+            "title": "Externally Loaded",
+            "type": "boolean"
+          },
+          "model": {
+            "maxLength": 255,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "session_mode": {
+            "default": "interactive",
+            "enum": [
+              "interactive",
+              "batch"
+            ],
+            "title": "Session Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model",
+          "externally_loaded"
+        ],
+        "title": "ResidencyConfirm",
+        "type": "object"
+      },
+      "ResidencyResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active_requests": {
+            "title": "Active Requests",
+            "type": "integer"
+          },
+          "background_queued": {
+            "title": "Background Queued",
+            "type": "integer"
+          },
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "interactive_queued": {
+            "title": "Interactive Queued",
+            "type": "integer"
+          },
+          "paused": {
+            "title": "Paused",
+            "type": "boolean"
+          },
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
+          },
+          "queue": {
+            "items": {
+              "$ref": "#/components/schemas/InferenceQueueEntry"
+            },
+            "title": "Queue",
+            "type": "array"
+          },
+          "resident_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resident Model"
+          },
+          "session_mode": {
+            "enum": [
+              "interactive",
+              "batch"
+            ],
+            "title": "Session Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile_id",
+          "enabled",
+          "resident_model",
+          "confirmed",
+          "paused",
+          "active_requests",
+          "session_mode",
+          "queue",
+          "interactive_queued",
+          "background_queued"
+        ],
+        "title": "ResidencyResponse",
+        "type": "object"
+      },
       "RunEpochResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1807,6 +2313,14 @@
             "title": "Agent Context High Water Ratio",
             "type": "number"
           },
+          "agent_context_model_summary_enabled": {
+            "title": "Agent Context Model Summary Enabled",
+            "type": "boolean"
+          },
+          "agent_context_response_reserve_tokens": {
+            "title": "Agent Context Response Reserve Tokens",
+            "type": "integer"
+          },
           "agent_context_window_tokens": {
             "title": "Agent Context Window Tokens",
             "type": "integer"
@@ -1822,6 +2336,10 @@
           "agent_run_timeout_seconds": {
             "title": "Agent Run Timeout Seconds",
             "type": "number"
+          },
+          "agent_working_context_tokens": {
+            "title": "Agent Working Context Tokens",
+            "type": "integer"
           },
           "artifacts_dir": {
             "title": "Artifacts Dir",
@@ -1929,6 +2447,9 @@
           "request_timeout_seconds",
           "agent_context_window_tokens",
           "agent_context_high_water_ratio",
+          "agent_working_context_tokens",
+          "agent_context_response_reserve_tokens",
+          "agent_context_model_summary_enabled",
           "agent_context_compaction_target_tokens",
           "tool_result_max_tokens",
           "agent_epoch_max_turns",
@@ -1974,6 +2495,30 @@
               }
             ],
             "title": "Agent Context High Water Ratio"
+          },
+          "agent_context_model_summary_enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Context Model Summary Enabled"
+          },
+          "agent_context_response_reserve_tokens": {
+            "anyOf": [
+              {
+                "maximum": 128000.0,
+                "minimum": 256.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Context Response Reserve Tokens"
           },
           "agent_context_window_tokens": {
             "anyOf": [
@@ -2025,6 +2570,19 @@
               }
             ],
             "title": "Agent Run Timeout Seconds"
+          },
+          "agent_working_context_tokens": {
+            "anyOf": [
+              {
+                "maximum": 500000.0,
+                "minimum": 2048.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Working Context Tokens"
           },
           "default_model_references": {
             "anyOf": [
@@ -3414,6 +3972,47 @@
         ]
       }
     },
+    "/api/documents/summary-batches": {
+      "post": {
+        "operationId": "start_summary_batch_api_documents_summary_batches_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperSummaryBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperSummaryBatchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Summary Batch",
+        "tags": [
+          "research"
+        ]
+      }
+    },
     "/api/documents/{document_id}": {
       "delete": {
         "operationId": "delete_document_api_documents__document_id__delete",
@@ -4125,6 +4724,27 @@
         ]
       }
     },
+    "/api/providers/inference/residency": {
+      "get": {
+        "operationId": "residency_status_api_providers_inference_residency_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Residency Status",
+        "tags": [
+          "providers"
+        ]
+      }
+    },
     "/api/providers/{profile_id}": {
       "delete": {
         "operationId": "archive_provider_api_providers__profile_id__delete",
@@ -4294,6 +4914,152 @@
           }
         },
         "summary": "Discover Models",
+        "tags": [
+          "providers"
+        ]
+      }
+    },
+    "/api/providers/{profile_id}/residency": {
+      "put": {
+        "operationId": "configure_residency_api_providers__profile_id__residency_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResidencyConfigure"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Configure Residency",
+        "tags": [
+          "providers"
+        ]
+      }
+    },
+    "/api/providers/{profile_id}/residency/confirm": {
+      "post": {
+        "operationId": "confirm_residency_api_providers__profile_id__residency_confirm_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResidencyConfirm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Confirm Residency",
+        "tags": [
+          "providers"
+        ]
+      }
+    },
+    "/api/providers/{profile_id}/residency/drain": {
+      "post": {
+        "operationId": "drain_residency_api_providers__profile_id__residency_drain_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "profile_id",
+            "required": true,
+            "schema": {
+              "title": "Profile Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Drain Residency",
         "tags": [
           "providers"
         ]

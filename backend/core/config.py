@@ -32,13 +32,21 @@ class Settings(BaseSettings):
     request_timeout_seconds: float = 300.0
     agent_context_window_tokens: int = Field(default=32_768, ge=4_096, le=2_000_000)
     agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.95)
+    agent_working_context_tokens: int = Field(
+        default=12_000, ge=2_048, le=500_000,
+        description="Preferred maximum model input, including instructions and tool schemas.",
+    )
+    agent_context_response_reserve_tokens: int = Field(
+        default=2_048, ge=256, le=128_000,
+        description="Context-window capacity reserved for model output.",
+    )
+    agent_context_model_summary_enabled: bool = True
     agent_context_compaction_target_tokens: int = Field(
         default=8_192,
         ge=1_024,
         le=500_000,
         description=(
-            "Minimum preferred post-compaction context size. The runtime scales the actual target "
-            "with each selected model's context window."
+            "Preferred post-compaction input size, clamped to the working budget and model window."
         ),
     )
     tool_result_max_tokens: int = Field(default=3_000, ge=512, le=16_000)

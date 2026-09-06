@@ -21,6 +21,7 @@ from backend.agents.harness import (
     RunPolicyViolation,
     RunSettings,
     ToolCallAccumulator,
+    current_tool_model_identity,
     delegation_tool,
     request_parameters,
     run_agent,
@@ -141,6 +142,83 @@ async def test_streamed_text_reaches_the_sink_and_final_output() -> None:
     ]
     assert raw_types[0] == "response.created"
     assert raw_types[-1] == "response.completed"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("text", "finish_reason", "error"),
+    [
+        ("", "length", "finish_reason=length"),
+        ("Partial answer", "length", "finish_reason=length"),
+        ("", "stop", "no answer text or tool calls"),
+        (" \n ", "stop", "no answer text or tool calls"),
+        ("", None, "no answer text or tool calls"),
+        ("Filtered partial answer", "content_filter", "finish_reason=content_filter"),
+    ],
+)
+async def test_unusable_model_completion_is_not_a_success(text, finish_reason, error) -> None:
+    chunks = text_chunks(text, usage={"prompt_tokens": 1515, "completion_tokens": 2048})
+    chunks[-2]["choices"][0]["finish_reason"] = finish_reason
+    chunks.insert(0, {"choices": [{"delta": {"reasoning_content": "Still thinking."}}]})
+    client = FakeClient.scripted([chunks])
+    with pytest.raises(ModelBehaviorError, match=error):
+        await run_agent(
+            agent(client), "Answer.", context=make_context(),
+            settings=RunSettings(), max_turns=3,
+        )
+    assert len(client.requests) == 1
+    assert "reasoning_effort" not in client.requests[0]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("arguments", ['{"text":"valid but truncated turn"}', '{"text":'])
+async def test_length_truncated_tool_turn_never_dispatches_tools(arguments) -> None:
+    chunks = tool_call_chunks("echo", arguments)
+    chunks[-1]["choices"][0]["finish_reason"] = "length"
+    client = FakeClient.scripted([chunks])
+    calls: list[str] = []
+    with pytest.raises(ModelBehaviorError, match="finish_reason=length"):
+        await run_agent(
+            agent(client, tools=[echo_tool(calls)]), "Use a tool.",
+            context=make_context(), settings=RunSettings(), max_turns=3,
+        )
+    assert calls == []
+    assert len(client.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_tool_only_turn_measures_generation_from_first_argument_delta() -> None:
+    now = 10.0
+
+    async def create(**_parameters):
+        async def chunks():
+            nonlocal now
+            scripted = tool_call_chunks("echo", '{"text":"hello"}')
+            now = 12.0
+            yield scripted[0]
+            now = 15.0
+            yield scripted[1]
+            yield {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 30}}
+        return chunks()
+
+    downstream = RecordingSink()
+    sink = BufferedRunEventSink(downstream, clock=lambda: now)
+    calls: list[str] = []
+    result = await run_agent(
+        agent(FakeClient(create), tools=[echo_tool(calls)], stop_on_first_tool=True),
+        "Use the tool.", context=make_context(sink), settings=RunSettings(),
+        hooks=ScholarWeaveRunHooks(), max_turns=1,
+    )
+    await sink.flush()
+    assert result.final_output == "ok"
+    assert calls == ['{"text":"hello"}']
+    assert sink.performance()["prompt_seconds"] == 2.0
+    assert sink.performance()["generation_seconds"] == 3.0
+    assert sink.performance()["generation_tokens_per_second"] == 10.0
+    assert not any(
+        payload.get("snapshot") for event_type, payload in downstream.events
+        if event_type == "model.stream"
+    )
 
 
 @pytest.mark.anyio
@@ -720,6 +798,94 @@ def test_assistant_preamble_keeps_its_reasoning_when_folded() -> None:
 
 
 # --- Regression: per-tool single-flight rejection (finding 3) -------------------
+
+
+@pytest.mark.anyio
+async def test_parallel_agents_keep_task_local_actual_model_provenance() -> None:
+    context = make_context()
+    both_started = asyncio.Event()
+    started = []
+    observed = {}
+
+    async def record(invocation, _arguments):
+        assert invocation.context.metadata["active_model"]["model"] == invocation.agent_name
+        started.append(invocation.agent_name)
+        if len(started) == 2:
+            both_started.set()
+        await both_started.wait()
+        observed[invocation.agent_name] = current_tool_model_identity()
+        return "Recorded."
+
+    definitions = []
+    for model in ("model-a", "model-b"):
+        client = FakeClient.scripted([tool_call_chunks("record", "{}"), text_chunks("Done.")])
+        definitions.append(agent(
+            client, id=model, name=model,
+            binding=ModelBinding(client=client, model_name=model, provider_kind="ollama"),
+            tools=[FunctionTool("record", "Record provenance.", {"type": "object"}, record)],
+        ))
+    async with asyncio.timeout(2):
+        await asyncio.gather(*(
+            run_agent(definition, "Record.", context=context, settings=RunSettings(), max_turns=2)
+            for definition in definitions
+        ))
+    assert observed == {
+        model: {"model": model, "provider_kind": "ollama"} for model in ("model-a", "model-b")
+    }
+    assert current_tool_model_identity() is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure_kind", ["ownership", "lease_lost", "cancelled", "policy"])
+async def test_fatal_tool_errors_propagate_and_cancel_parallel_siblings(failure_kind) -> None:
+    from backend.runs.repository import LeaseOwnershipError
+    from backend.runs.service import RunLeaseLost
+    from backend.tools.failures import recoverable_tool_invoker
+
+    errors = {
+        "ownership": LeaseOwnershipError("Another executor owns this run."),
+        "lease_lost": RunLeaseLost("The claim expired."),
+        "cancelled": asyncio.CancelledError(),
+        "policy": RunPolicyViolation("Budget exhausted.", policy="working_context", detail={}),
+    }
+    error = errors[failure_kind]
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def slow(_invocation, _arguments):
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    async def fatal(_invocation, _arguments):
+        await sibling_started.wait()
+        raise error
+
+    handler = (
+        fatal if failure_kind == "policy"
+        else recoverable_tool_invoker("fatal", fatal, catalog_id="research.notes.write")
+    )
+    client = FakeClient.scripted([
+        multi_tool_call_chunks([("slow", "{}"), ("fatal", "{}")]),
+        text_chunks("Must never be requested."),
+    ])
+    context = make_context()
+    with pytest.raises(type(error)) as raised:
+        async with asyncio.timeout(2):
+            await run_agent(
+                agent(client, tools=[
+                    FunctionTool("slow", "In-flight work.", {"type": "object"}, slow),
+                    FunctionTool("fatal", "Fatal control failure.", {"type": "object"}, handler),
+                ]),
+                "Run tools.", context=context, settings=RunSettings(), max_turns=3,
+            )
+    assert raised.value is error
+    assert sibling_cancelled.is_set()
+    assert len(client.requests) == 1
+    assert not context.metadata.get("_recoverable_tool_failures")
 
 
 @pytest.mark.anyio
