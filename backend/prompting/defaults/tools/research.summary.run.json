@@ -1,0 +1,9 @@
+{
+  "label": "Summarize paper",
+  "description": "Run a dedicated, isolated summary writer for one ready paper and wait for its saved version. Use this for missing paper summaries instead of drafting through a general research worker. Summary jobs are serialized, use their own model-aware context, and default to reasoning disabled where supported. Wait for each receipt before starting the next paper. Reviewed summaries require complete source coverage; a partial or overview receipt does not satisfy a full review. Read source passages and save durable research notes separately.",
+  "parameter_descriptions": {
+    "document_id": "The exact ID of one already ingested local paper.",
+    "mode": "reviewed for a citation-grounded full review; overview only when the user requests a quick, explicitly limited orientation.",
+    "reasoning_effort": "Null uses the dedicated writer's nonthinking default where supported. Set a supported explicit effort only when the user explicitly requests reasoning for summary writing; do not inherit the research agent's reasoning setting. If an explicit effort is rejected, report the incompatibility rather than silently retrying with a different effort."
+  }
+}

@@ -26,6 +26,11 @@ from backend.workspace.repository import WorkspaceRepository
 from backend.workspace.service import WorkspaceService
 from backend.tools.catalog import create_tool_catalog
 from backend.tools.policy import ToolInputError
+from backend.conversations.turns import (
+    deep_work_blueprint,
+    research_blueprint,
+    validate_paper_work_completion,
+)
 
 
 @dataclass
@@ -34,6 +39,305 @@ class FakeCompiled:
     entry_agent: Any
     completion_validator: Any = None
     completion_policy_id: str | None = None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("reasoning_effort", [None, "high"])
+async def test_research_summary_tool_uses_serial_isolated_writer(
+    test_settings, stub_provider, reasoning_effort, monkeypatch,
+):
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="dedicated.pdf", title="Dedicated",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [
+        {"text": "The result is 42 units.", "citation": "p.1"},
+    ])
+    client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
+    binding = ModelBinding(
+        client=client, model_name="qwen-27b", provider_kind="openai_compatible",
+        context_window_tokens=80000,
+    )
+    compiler = AgentCompiler(
+        SimpleNamespace(resolve_agent_model=lambda *args, **kwargs: binding),
+        create_tool_catalog(), settings=test_settings,
+    )
+    monkeypatch.setattr(services.summaries, "_compiler", compiler)
+    runtime = services.runs._tool_runtime
+    parent = services.runs._repository.create(
+        conversation_id=None, agent_name="Research", input_value="A private research instruction",
+        blueprint=research_blueprint({}).model_dump(mode="json"),
+    )
+    forwarded_events = []
+
+    async def emit(kind, payload):
+        forwarded_events.append((kind, payload))
+
+    context = ScholarWeaveContext(
+        run_id=parent.id, tool_runtime=runtime, event_sink=SimpleNamespace(emit=emit),
+    )
+    stub_provider.call_tool = "save_paper_summary_version"
+    stub_provider.tool_arguments = {
+        "document_id": document.id,
+        "content": "# Summary\n\n" + "The supplied extraction reports 42 units [p.1]. " * 5,
+        "review_summary": "Verified the result and citation; no unsupported claims.",
+    }
+    try:
+        async with asyncio.timeout(20):
+            results = await asyncio.gather(*(
+                runtime.invoke("research.summary.run", {
+                    "document_id": document.id, "mode": mode, "reasoning_effort": reasoning_effort,
+                }, context) for mode in ("reviewed", "overview")
+            ))
+        runs = [services.runs.get(result["summary_run_id"]) for result in results]
+        assert all(run.completion_policy_id == PAPER_SUMMARY_COMPLETION_POLICY_ID for run in runs)
+        assert runs[0].finished_at <= runs[1].started_at
+        assert runs[0].finished_at <= runs[1].created_at
+        assert all(result["coverage_complete"] for result in results)
+        assert any(item["action"] == "summary_saved" for item in context.metadata["paper_activity"])
+        assert any(item["action"] == "read" for item in context.metadata["paper_activity"])
+        assert not any(item["action"] == "notes_saved" for item in context.metadata["paper_activity"])
+        with pytest.raises(ValidationError) as incomplete:
+            validate_paper_work_completion(context)
+        assert "notes.md" in str(incomplete.value.issues)
+        await runtime.invoke("research.notes.save", {
+            "target": "paper_notes", "mode": "append", "document_id": document.id,
+            "path": None, "name": None, "content": "Parent-owned findings: 42 units [p.1].", "tags": [],
+        }, context)
+        validate_paper_work_completion(context)
+        telemetry = [payload for kind, payload in forwarded_events if kind == "model.telemetry"]
+        assert len(telemetry) == len(stub_provider.requests)
+        assert len({item["model_call_id"] for item in telemetry}) == len(telemetry)
+        assert all(item["context_scope"] == "delegate" and item["delegated"] for item in telemetry)
+        assert not any(kind == "model.stream" for kind, _ in forwarded_events)
+        for request in stub_provider.requests:
+            assert request["reasoning_effort"] == (reasoning_effort or "none")
+            assert request["max_tokens"] == 20000
+            assert "A private research instruction" not in str(request["messages"])
+            offered = {tool["function"]["name"] for tool in request["tools"]}
+            assert "save_paper_summary_version" in offered
+            assert offered <= {
+                "read_paper_summary_batch", "paper_summary_checkpoint", "save_paper_summary_version",
+                "read_tool_result",
+            }
+        for blueprint in (research_blueprint({}), deep_work_blueprint({})):
+            assert "research.summary.run" in {tool.catalog_id for tool in blueprint.tools}
+            assert not {"research.summary.read", "research.summary.checkpoint", "research.summary.save"} & {
+                tool.catalog_id for tool in blueprint.tools
+            }
+    finally:
+        await client.close()
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "parent_cancel"])
+async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(monkeypatch, status):
+    payload = {"model_call_id": "child-compaction-call", "context_scope": "compaction", "usage_complete": True}
+    child = SimpleNamespace(
+        id="child", status="running" if status == "parent_cancel" else status, error="Child failed.",
+        runtime_metadata_json={
+            "paper_summary_parent_run_id": "parent", "paper_summary_document_id": "paper",
+            "paper_summary_mode": "reviewed",
+        },
+        events=[SimpleNamespace(sequence=1, event_type="model.telemetry", payload_json=payload)],
+    )
+    parent = SimpleNamespace(blueprint_json=research_blueprint({}).model_dump(mode="json"), events=[])
+    created = []
+    runs = SimpleNamespace(
+        get=lambda run_id: parent if run_id == "parent" else child,
+        create=lambda *args, **kwargs: created.append("child") or SimpleNamespace(id="child", status="pending"),
+    )
+
+    async def cancel(run_id):
+        assert run_id == "child"
+        child.status = "cancelled"
+        child.events.append(SimpleNamespace(
+            sequence=2, event_type="model.telemetry",
+            payload_json={**payload, "model_call_id": "cancelled-child-call", "completed": False},
+        ))
+
+    runs.cancel = cancel
+    receipts = {}
+
+    def read_file(path):
+        if path not in receipts:
+            raise FileNotFoundError(path)
+        return SimpleNamespace(content=receipts[path])
+
+    workspace = SimpleNamespace(
+        read_file=read_file, write_file=lambda path, content, **kwargs: receipts.update({path: content}),
+    )
+    service = PaperSummaryService(None, runs, None, workspace, None)
+    compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
+        model_name="qwen-27b", provider_kind="openai_compatible",
+    )))
+    monkeypatch.setattr(service, "_prepare", lambda *args, **kwargs: (compiled, "Summarize.", {}, "revision"))
+    monkeypatch.setattr(service, "version", lambda *args: ({}, "Saved summary."))
+    events = []
+    forwarded_event = asyncio.Event()
+
+    async def emit(kind, data):
+        events.append((kind, data))
+        parent.events.append(SimpleNamespace(event_type=kind, payload_json=data))
+        forwarded_event.set()
+
+    context = ScholarWeaveContext(
+        run_id="parent", tool_runtime=None, event_sink=SimpleNamespace(emit=emit),
+    )
+    call = service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
+    if status == "parent_cancel":
+        task = asyncio.create_task(call)
+        await asyncio.wait_for(forwarded_event.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif status == "completed":
+        await call
+    else:
+        with pytest.raises(ValidationError):
+            await call
+    expected_events = 2 if status == "parent_cancel" else 1
+    assert len(events) == expected_events
+    assert events[0][0] == "model.telemetry"
+    forwarded = events[0][1]
+    assert forwarded["model_call_id"] == payload["model_call_id"]
+    assert forwarded["context_scope"] == "compaction"
+    assert forwarded["delegated"] is True
+    assert "delegated" not in payload
+    replay = service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
+    if status == "completed":
+        await replay
+    else:
+        with pytest.raises(ValidationError):
+            await replay
+    assert created == ["child"]
+    assert len(events) == expected_events
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["malformed", "missing-run-id", "write-failed"])
+async def test_summary_job_receipt_failures_do_not_start_untracked_work(monkeypatch, failure):
+    parent = SimpleNamespace(blueprint_json=research_blueprint({}).model_dump(mode="json"))
+    created = []
+    cancelled = []
+
+    async def cancel(run_id):
+        cancelled.append(run_id)
+
+    runs = SimpleNamespace(
+        get=lambda run_id: parent,
+        create=lambda *args, **kwargs: created.append("child") or SimpleNamespace(id="child"),
+        cancel=cancel,
+    )
+
+    def read_file(path):
+        if failure == "write-failed":
+            raise FileNotFoundError(path)
+        return SimpleNamespace(content=[] if failure == "malformed" else {"run_id": ""})
+
+    def write_file(*args, **kwargs):
+        raise OSError("Receipt storage unavailable")
+
+    service = PaperSummaryService(
+        None, runs, None, SimpleNamespace(read_file=read_file, write_file=write_file), None,
+    )
+    compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
+        model_name="qwen-27b", provider_kind="openai_compatible",
+    )))
+    monkeypatch.setattr(service, "_prepare", lambda *args, **kwargs: (compiled, "Summarize.", {}, "revision"))
+    context = ScholarWeaveContext(run_id="parent", tool_runtime=None)
+    expected_error = OSError if failure == "write-failed" else ValidationError
+    with pytest.raises(expected_error):
+        await service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
+    expected_jobs = ["child"] if failure == "write-failed" else []
+    assert created == expected_jobs
+    assert cancelled == expected_jobs
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["overview", "reviewed"])
+async def test_full_paper_over_old_character_caps_is_inlined(test_settings, mode):
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="full.pdf", title="Full",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=80, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [
+        {"text": f"Page {index} findings. " * 40, "citation": f"p.{index}"}
+        for index in range(1, 81)
+    ])
+    captured = []
+    compiled = FakeCompiled(
+        context_window_tokens=80000,
+        entry_agent=SimpleNamespace(binding=SimpleNamespace(model_name="test", provider_kind="openai")),
+    )
+    service = PaperSummaryService(
+        SimpleNamespace(compile=lambda blueprint: compiled),
+        SimpleNamespace(create=lambda agent, instruction, **kwargs: captured.append((instruction, kwargs))),
+        services.documents, services.workspace, PromptRegistry(test_settings.prompt_config_dir),
+    )
+    try:
+        service.start(document.id, model_reference=ModelReferenceSpec(), mode=mode)
+        instruction, options = captured[0]
+        assert len(instruction) > 12000
+        assert "Page 80 findings." in instruction
+        pending = options["runtime_metadata"]["_paper_summary_checkpoint_states"][document.id]["pending_checkpoint"]
+        assert pending["has_more"] is False
+        assert pending["next_start"] is None
+        assert len(pending["coverage"]["spans"]) == 80
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("character", "fits"), [("a", True), ("漢", False)])
+async def test_full_source_budget_uses_serialized_tokens_not_raw_character_count(test_settings, character, fits):
+    from backend.agents.context_budget import _REFERENCE_LIFETIME_INSTRUCTIONS, _request_tokens
+    from backend.tests.harness_support import FakeClient
+
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="token-budget.pdf", title="Token budget",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    text = character * 150000
+    services.retrieval.replace_document_chunks(document.id, [{"text": text, "citation": "p.1"}])
+    binding = ModelBinding(
+        client=FakeClient.failing(AssertionError("Sizing must not call a provider.")),
+        model_name="qwen-27b", provider_kind="openai_compatible",
+        context_window_tokens=80000,
+    )
+    compiler = AgentCompiler(
+        SimpleNamespace(resolve_agent_model=lambda *args, **kwargs: binding),
+        create_tool_catalog(), settings=test_settings,
+    )
+    service = PaperSummaryService(
+        compiler, services.runs, services.documents, services.workspace,
+        PromptRegistry(test_settings.prompt_config_dir),
+    )
+    try:
+        compiled, instruction, metadata, _ = service._prepare(
+            document.id, model_reference=ModelReferenceSpec(), mode="reviewed",
+        )
+        assert (text in instruction) is fits
+        if fits:
+            context = ScholarWeaveContext(
+                run_id="source-sizing", tool_runtime=services.runs._tool_runtime, metadata=metadata,
+            )
+            estimate = _request_tokens(
+                compiled.entry_agent, [{"role": "user", "content": instruction}],
+                compiled.entry_agent.instructions + "\n\n" + _REFERENCE_LIFETIME_INSTRUCTIONS,
+                context,
+            )
+            assert 37500 < estimate <= 52000
+            assert len(text) / 12000 == 12.5
+        else:
+            assert "resume at its exact cursor" in instruction
+            assert "_paper_summary_checkpoint_states" not in metadata
+    finally:
+        await services.close()
 
 
 @pytest.mark.anyio
@@ -135,13 +439,14 @@ def test_coverage_can_fill_character_gaps_after_out_of_order_reads():
 @pytest.mark.anyio
 @pytest.mark.parametrize(("mode", "requested", "model", "expected"), [
     ("overview", None, "Qwen3.8-27B-Q6_K.gguf", "none"),
+    ("overview", None, "qwen-27b", "none"),
+    ("reviewed", None, "qwen-27b", "none"),
     ("overview", "low", "Qwen3.8-27B-Q6_K.gguf", "low"),
-    ("reviewed", None, "Qwen3.8-27B-Q6_K.gguf", None),
-    ("reviewed", "high", "Qwen3.8-27B-Q6_K.gguf", "high"),
+    ("reviewed", None, "Qwen3.8-27B-Q6_K.gguf", "none"),
+    ("reviewed", "xhigh", "Qwen3.8-27B-Q6_K.gguf", "xhigh"),
     ("overview", None, "unknown-model", None),
-    ("overview", "none", "unknown-model", "none"),
 ])
-async def test_overview_selects_supported_nonreasoning_without_changing_other_defaults(
+async def test_summary_selects_supported_nonreasoning_unless_explicitly_requested(
     test_settings, mode, requested, model, expected,
 ) -> None:
     services = create_services(test_settings)
@@ -173,13 +478,49 @@ async def test_overview_selects_supported_nonreasoning_without_changing_other_de
         await services.close()
 
 
+@pytest.mark.parametrize(("declared", "requested", "expected"), [
+    (None, None, "none"),
+    ((), None, None),
+    (("high",), None, None),
+    (("none", "high"), None, "none"),
+    (("none", "high"), "high", "high"),
+])
+def test_summary_reasoning_honors_declared_provider_capabilities(declared, requested, expected):
+    from backend.documents.summaries import _effective_summary_reasoning
+
+    compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
+        provider_kind="openai_compatible", model_name="qwen-27b", reasoning_efforts=declared,
+    )))
+    assert _effective_summary_reasoning(compiled, "reviewed", requested) == expected
+
+
+@pytest.mark.parametrize(("model", "declared", "requested"), [
+    ("qwen-27b", (), "none"),
+    ("qwen-27b", ("high",), "none"),
+    ("qwen-27b", None, "low"),
+    ("Qwen3.6-27B", None, "none"),
+    ("unknown-model", None, "high"),
+    ("unknown-model", None, "none"),
+])
+def test_summary_explicit_unsupported_reasoning_is_rejected(model, declared, requested):
+    from backend.documents.summaries import _effective_summary_reasoning
+
+    compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
+        provider_kind="openai_compatible", model_name=model, reasoning_efforts=declared,
+    )))
+    with pytest.raises(ValidationError, match="does not advertise support"):
+        _effective_summary_reasoning(compiled, "reviewed", requested)
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("mode", ["overview", "reviewed"])
-@pytest.mark.parametrize("repair_save", [False, True])
+@pytest.mark.parametrize("repair_after", [None, 1, 41])
 async def test_summary_final_without_save_is_repaired_or_rejected(
-    test_settings, stub_provider, mode, repair_save,
+    test_settings, stub_provider, monkeypatch, mode, repair_after,
 ) -> None:
     test_settings.agent_max_epochs = 2
+    test_settings.agent_run_timeout_seconds = 0.01
+    test_settings.agent_context_window_tokens = 131_072
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
         b"%PDF-1.4\n%%EOF", filename="required-save.pdf", title="Required save",
@@ -191,6 +532,7 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
     client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
     binding = ModelBinding(
         client=client, model_name="stub-model", provider_kind="openai_compatible",
+        reasoning_efforts=("none",),
     )
     compiler = AgentCompiler(
         SimpleNamespace(resolve_agent_model=lambda *args, **kwargs: binding),
@@ -201,8 +543,8 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
         PromptRegistry(test_settings.prompt_config_dir),
     )
     stub_provider.reply = "The paper reports 42 units [p.1]. Here is my summary."
-    if repair_save:
-        stub_provider.tool_plans = [(
+    if repair_after is not None:
+        repair_plan = [(
             "Your attempted final answer did not satisfy",
             "save_paper_summary_version",
             {
@@ -216,13 +558,34 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
                 "review_summary": "Checked the supplied result and cited its page; preserved the evidence limits.",
             },
         )]
+
+        def delayed_save(_payload):
+            if len(stub_provider.requests) >= repair_after:
+                stub_provider.tool_plans = repair_plan
+            return stub_provider.reply
+
+        monkeypatch.setattr(stub_provider, "_reply_for", delayed_save)
     try:
         run, _ = service.start(
             document.id, model_reference=ModelReferenceSpec(), mode=mode,
             reasoning_effort="none" if mode == "overview" else None,
         )
-        await asyncio.wait_for(services.runs._tasks[run.id], timeout=15)
+        if repair_after is None:
+            async with asyncio.timeout(15):
+                while sum(
+                    event.event_type == "run.epoch.completed"
+                    and event.payload_json.get("terminal_reason") == "completion_rejected"
+                    for event in services.runs.get(run.id).events
+                ) < 3:
+                    await asyncio.sleep(0.01)
+            assert services.runs.get(run.id).status == "running"
+            assert service.versions(document.id) == []
+            await services.runs.cancel(run.id)
+        else:
+            await asyncio.wait_for(services.runs._tasks[run.id], timeout=60)
         result = services.runs.get(run.id)
+        assert result.conversation_id is None
+        assert result.blueprint_json["run"]["max_turns"] is None
         assert result.completion_policy_id == PAPER_SUMMARY_COMPLETION_POLICY_ID
         if mode == "overview":
             assert all(request.get("reasoning_effort") == "none" for request in stub_provider.requests)
@@ -232,12 +595,17 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
             for request in stub_provider.requests
         )
         versions = service.versions(document.id)
-        if repair_save:
+        if repair_after is not None:
             assert result.status == "completed"
             assert len(versions) == 1
             assert versions[0]["mode"] == mode
-            if mode == "overview":
-                assert len(stub_provider.requests) == 2
+            assert len(stub_provider.requests) == repair_after + (1 if mode == "overview" else 2)
+            saves = [
+                attempt for attempt in result.tool_attempts
+                if attempt.catalog_id == "research.summary.save"
+            ]
+            assert len(saves) == 1
+            assert saves[0].status == "completed"
             context = ScholarWeaveContext(
                 run_id=run.id, tool_runtime=services.runs._tool_runtime,
                 metadata=result.runtime_metadata_json,
@@ -247,9 +615,9 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
             with pytest.raises(ValidationError, match="not been durably saved"):
                 validate_paper_summary_completion(context, workspace=services.workspace)
         else:
-            assert result.status == "failed"
+            assert result.status == "cancelled"
             assert versions == []
-            assert len(stub_provider.requests) == 2
+            assert len(stub_provider.requests) >= 3
     finally:
         await services.close()
         await client.close()
@@ -281,7 +649,9 @@ async def test_summary_batch_is_bounded_prevalidated_and_uses_one_explicit_model
         compiled_models.append(blueprint.agents[0].model)
         return FakeCompiled(
             context_window_tokens=32768,
-            entry_agent=SimpleNamespace(binding=SimpleNamespace(model_name="batch-model", provider_kind="openai_compatible")),
+            entry_agent=SimpleNamespace(binding=SimpleNamespace(
+                model_name="batch-model", provider_kind="openai_compatible", reasoning_efforts=("none", "low"),
+            )),
         )
 
     def create_run(agent, instruction, **kwargs):
@@ -336,7 +706,7 @@ async def test_overview_uses_bounded_excerpt_and_never_replaces_reviewed_summary
     )
     services.documents.repository.mark_ready(document.id, page_count=2, metadata={})
     services.retrieval.replace_document_chunks(document.id, [
-        {"text": "The apparent method uses sparse attention. " * 1000, "citation": "p.1"},
+        {"text": "The apparent method uses sparse attention. " * 10000, "citation": "p.1"},
         {"text": "Unseen later results.", "citation": "p.2"},
     ])
     queued = []
@@ -360,9 +730,9 @@ async def test_overview_uses_bounded_excerpt_and_never_replaces_reviewed_summary
         services.workspace.write_file(str(paper["notes_path"]), "# User notes")
         service.start(document.id, model_reference=ModelReferenceSpec(), reasoning_effort=None, mode="overview")
         instruction, options = queued[0]
-        assert len(instruction) < 8000
+        assert 12000 < len(instruction) < 32768 * 4
         assert "Unseen later results." not in instruction
-        assert blueprints[0].run.max_turns == 4
+        assert blueprints[0].run.max_turns is None
         assert [tool.catalog_id for tool in blueprints[0].tools] == ["research.summary.save"]
         assert "150-250 words" in blueprints[0].agents[0].instructions
         metadata = options["runtime_metadata"]
@@ -390,7 +760,7 @@ async def test_overview_uses_bounded_excerpt_and_never_replaces_reviewed_summary
         assert services.workspace.read_file(str(paper["summary_path"])).content == "# Existing reviewed summary"
         assert services.workspace.read_file(str(paper["notes_path"])).content == "# User notes"
         service.start(document.id, model_reference=ModelReferenceSpec(), reasoning_effort=None, mode="reviewed")
-        assert blueprints[1].run.max_turns == 40
+        assert blueprints[1].run.max_turns is None
         assert len(blueprints[1].tools) == 3
         assert "resume at its exact cursor" in queued[1][0]
     finally:
@@ -570,7 +940,9 @@ def test_summary_blueprint_is_one_model_job_with_direct_read_and_save(test_setti
         "research.summary.read",
         "research.summary.save",
     }
-    assert blueprint.run.max_turns == 40
+    assert blueprint.run.max_turns is None
+    assert blueprint.run.max_input_characters is None
+    assert blueprint.run.max_output_characters is None
     assert blueprint.agents[0].model_settings.parallel_tool_calls is False
     assert "citation" in blueprint.agents[0].instructions.casefold()
     assert "an empty checkpoint needs no read" in blueprint.agents[0].instructions.casefold()

@@ -181,7 +181,6 @@
         "additionalProperties": false,
         "properties": {
           "content": {
-            "maxLength": 100000,
             "minLength": 1,
             "title": "Content",
             "type": "string"
@@ -591,53 +590,6 @@
           "ocr_available"
         ],
         "title": "HealthResponse",
-        "type": "object"
-      },
-      "InferenceQueueEntry": {
-        "additionalProperties": false,
-        "properties": {
-          "blocked_by_residency": {
-            "title": "Blocked By Residency",
-            "type": "boolean"
-          },
-          "model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model"
-          },
-          "priority": {
-            "enum": [
-              "interactive",
-              "background"
-            ],
-            "title": "Priority",
-            "type": "string"
-          },
-          "profile_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Profile Id"
-          }
-        },
-        "required": [
-          "profile_id",
-          "model",
-          "priority",
-          "blocked_by_residency"
-        ],
-        "title": "InferenceQueueEntry",
         "type": "object"
       },
       "IngestionOptionsResponse": {
@@ -1376,6 +1328,18 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "serialize_model_switches": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Prevent overlapping calls to different models on this provider. Defaults on for local providers.",
+            "title": "Serialize Model Switches"
           }
         },
         "required": [
@@ -1532,6 +1496,10 @@
             "title": "Name",
             "type": "string"
           },
+          "serialize_model_switches": {
+            "title": "Serialize Model Switches",
+            "type": "boolean"
+          },
           "state": {
             "enum": [
               "active",
@@ -1554,6 +1522,7 @@
           "api_key_set",
           "state",
           "models",
+          "serialize_model_switches",
           "created_at",
           "updated_at"
         ],
@@ -1632,6 +1601,12 @@
               }
             ],
             "title": "Name"
+          },
+          "serialize_model_switches": {
+            "default": true,
+            "description": "Allow same-model concurrency, but wait for active calls before switching models.",
+            "title": "Serialize Model Switches",
+            "type": "boolean"
           }
         },
         "title": "ProviderUpdate",
@@ -1776,131 +1751,6 @@
           }
         },
         "title": "ResearchConversationCreateRequest",
-        "type": "object"
-      },
-      "ResidencyConfigure": {
-        "additionalProperties": false,
-        "properties": {
-          "enabled": {
-            "title": "Enabled",
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "enabled"
-        ],
-        "title": "ResidencyConfigure",
-        "type": "object"
-      },
-      "ResidencyConfirm": {
-        "additionalProperties": false,
-        "properties": {
-          "externally_loaded": {
-            "const": true,
-            "title": "Externally Loaded",
-            "type": "boolean"
-          },
-          "model": {
-            "maxLength": 255,
-            "minLength": 1,
-            "title": "Model",
-            "type": "string"
-          },
-          "session_mode": {
-            "default": "interactive",
-            "enum": [
-              "interactive",
-              "batch"
-            ],
-            "title": "Session Mode",
-            "type": "string"
-          }
-        },
-        "required": [
-          "model",
-          "externally_loaded"
-        ],
-        "title": "ResidencyConfirm",
-        "type": "object"
-      },
-      "ResidencyResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "active_requests": {
-            "title": "Active Requests",
-            "type": "integer"
-          },
-          "background_queued": {
-            "title": "Background Queued",
-            "type": "integer"
-          },
-          "confirmed": {
-            "title": "Confirmed",
-            "type": "boolean"
-          },
-          "enabled": {
-            "title": "Enabled",
-            "type": "boolean"
-          },
-          "interactive_queued": {
-            "title": "Interactive Queued",
-            "type": "integer"
-          },
-          "paused": {
-            "title": "Paused",
-            "type": "boolean"
-          },
-          "profile_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Profile Id"
-          },
-          "queue": {
-            "items": {
-              "$ref": "#/components/schemas/InferenceQueueEntry"
-            },
-            "title": "Queue",
-            "type": "array"
-          },
-          "resident_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Resident Model"
-          },
-          "session_mode": {
-            "enum": [
-              "interactive",
-              "batch"
-            ],
-            "title": "Session Mode",
-            "type": "string"
-          }
-        },
-        "required": [
-          "profile_id",
-          "enabled",
-          "resident_model",
-          "confirmed",
-          "paused",
-          "active_requests",
-          "session_mode",
-          "queue",
-          "interactive_queued",
-          "background_queued"
-        ],
-        "title": "ResidencyResponse",
         "type": "object"
       },
       "RunEpochResponse": {
@@ -2321,6 +2171,10 @@
             "title": "Agent Context Response Reserve Tokens",
             "type": "integer"
           },
+          "agent_context_use_model_window": {
+            "title": "Agent Context Use Model Window",
+            "type": "boolean"
+          },
           "agent_context_window_tokens": {
             "title": "Agent Context Window Tokens",
             "type": "integer"
@@ -2447,6 +2301,7 @@
           "request_timeout_seconds",
           "agent_context_window_tokens",
           "agent_context_high_water_ratio",
+          "agent_context_use_model_window",
           "agent_working_context_tokens",
           "agent_context_response_reserve_tokens",
           "agent_context_model_summary_enabled",
@@ -2486,7 +2341,7 @@
           "agent_context_high_water_ratio": {
             "anyOf": [
               {
-                "maximum": 0.9,
+                "maximum": 0.95,
                 "minimum": 0.5,
                 "type": "number"
               },
@@ -2519,6 +2374,17 @@
               }
             ],
             "title": "Agent Context Response Reserve Tokens"
+          },
+          "agent_context_use_model_window": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Context Use Model Window"
           },
           "agent_context_window_tokens": {
             "anyOf": [
@@ -2749,7 +2615,6 @@
         "additionalProperties": false,
         "properties": {
           "content": {
-            "maxLength": 100000,
             "minLength": 1,
             "title": "Content",
             "type": "string"
@@ -4724,27 +4589,6 @@
         ]
       }
     },
-    "/api/providers/inference/residency": {
-      "get": {
-        "operationId": "residency_status_api_providers_inference_residency_get",
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResidencyResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          }
-        },
-        "summary": "Residency Status",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
     "/api/providers/{profile_id}": {
       "delete": {
         "operationId": "archive_provider_api_providers__profile_id__delete",
@@ -4914,152 +4758,6 @@
           }
         },
         "summary": "Discover Models",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/{profile_id}/residency": {
-      "put": {
-        "operationId": "configure_residency_api_providers__profile_id__residency_put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "profile_id",
-            "required": true,
-            "schema": {
-              "title": "Profile Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResidencyConfigure"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResidencyResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Configure Residency",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/{profile_id}/residency/confirm": {
-      "post": {
-        "operationId": "confirm_residency_api_providers__profile_id__residency_confirm_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "profile_id",
-            "required": true,
-            "schema": {
-              "title": "Profile Id",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResidencyConfirm"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResidencyResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Confirm Residency",
-        "tags": [
-          "providers"
-        ]
-      }
-    },
-    "/api/providers/{profile_id}/residency/drain": {
-      "post": {
-        "operationId": "drain_residency_api_providers__profile_id__residency_drain_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "profile_id",
-            "required": true,
-            "schema": {
-              "title": "Profile Id",
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResidencyResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Drain Residency",
         "tags": [
           "providers"
         ]

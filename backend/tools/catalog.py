@@ -180,7 +180,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
                     "enum": ["inspect", "prepare", "pages", "chunks", "search"],
                 },
                 "start": {"type": ["integer", "null"], "minimum": 0},
-                "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                "limit": {"type": "integer", "minimum": 1},
                 "query": {"type": ["string", "null"], "maxLength": 2000},
                 "offset": {"type": ["integer", "null"], "minimum": 0},
             },
@@ -284,12 +284,12 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "tool.results.read",
         "read_tool_result",
-        "Read a bounded slice of a large tool result by its result reference.",
+        "Read an exact character slice of cached context history or a large tool result by its result reference.",
         _object_schema(
             {
                 "result_ref": {"type": "string", "minLength": 1},
                 "offset": {"type": "integer", "minimum": 0},
-                "limit": {"type": "integer", "minimum": 256, "maximum": 16_000},
+                "limit": {"type": "integer", "minimum": 1},
             },
             required=["result_ref", "offset", "limit"],
         ),
@@ -297,9 +297,27 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
         "_read_tool_result",
     ),
     (
+        "research.summary.run",
+        "summarize_research_paper",
+        "Run the dedicated summary writer for one paper and wait for its durable saved version.",
+        _object_schema(
+            {
+                "document_id": {"type": "string", "minLength": 1},
+                "mode": {"type": "string", "enum": ["overview", "reviewed"]},
+                "reasoning_effort": {
+                    "type": ["string", "null"],
+                    "enum": [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                },
+            },
+            required=["document_id", "mode", "reasoning_effort"],
+        ),
+        True,
+        "_summarize_research_paper",
+    ),
+    (
         "research.summary.read",
         "read_paper_summary_batch",
-        "Inspect or prepare one paper, or read the next character-budgeted summary batch.",
+        "Inspect or prepare one paper, or read its remaining source content for a summary.",
         _object_schema(
             {
                 "document_id": {"type": "string", "minLength": 1},
@@ -327,8 +345,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
                 "offset": {"type": ["integer", "null"], "minimum": 0},
                 "limit": {
                     "type": ["integer", "null"],
-                    "minimum": 256,
-                    "maximum": 8000,
+                    "minimum": 1,
                 },
             },
             required=["document_id", "action", "content", "offset", "limit"],

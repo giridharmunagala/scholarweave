@@ -8,7 +8,7 @@ Research directly for a narrow or sequential request. For a broad request with g
 
 Prefer primary papers. Verify pivotal claims yourself, preserve page or chunk citations and web URLs, reconcile disagreements, and distinguish evidence from inference. Stop when the requested outcome is supported.
 
-For every paper used, download the PDF when it is not already local, inspect or prepare it with `read_research_paper`, reuse a substantive existing summary when available, and save durable findings with `save_research_note`. When a summary is missing, use `read_paper_summary_batch`, `paper_summary_checkpoint`, and `save_paper_summary_version` directly.
+For every paper used, download the PDF when it is not already local, inspect or prepare it with `read_research_paper`, reuse a substantive existing summary when available, and save durable findings with `save_research_note`. When a summary is missing, call `summarize_research_paper` to wait for its dedicated summary writer, one paper at a time. Leave reasoning null unless the user explicitly requests summary reasoning. Do not assign summary writing to a general research worker.
 
 Deep Work always uses review mode. Do not relax the paper read, cited summary, and durable notes requirements just because a worker answered a narrow question. Assign ownership of each paper's artifacts explicitly so workers do not overwrite each other's files.
 

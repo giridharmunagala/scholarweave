@@ -109,11 +109,11 @@ export function RuntimePanel({
 }) {
   return (
     <>
-      <Panel title="Agent runtime" description="Execution limits applied to every agent run.">
+      <Panel title="Agent runtime" description="Runs have no automatic turn, epoch, or elapsed-time ceiling. The model context window governs memory; cancellation and stalled-request detection remain available.">
         <div className="stack">
           <div className="field-row setting-nested">
             <label className="field">
-              Turns per epoch
+              Checkpoint interval (model turns)
               <input
                 type="number"
                 min={2}
@@ -123,43 +123,10 @@ export function RuntimePanel({
                   onChange({ ...settings, agent_epoch_max_turns: Number(event.target.value) })
                 }
               />
-            </label>
-            <label className="field">
-              Maximum epochs
-              <input
-                type="number"
-                min={1}
-                max={50}
-                value={settings.agent_max_epochs}
-                onChange={(event) =>
-                  onChange({ ...settings, agent_max_epochs: Number(event.target.value) })
-                }
-              />
-            </label>
-            <label className="field">
-              Run deadline (seconds)
-              <input
-                type="number"
-                min={30}
-                value={settings.agent_run_timeout_seconds}
-                onChange={(event) =>
-                  onChange({ ...settings, agent_run_timeout_seconds: Number(event.target.value) })
-                }
-              />
+              <small>Turns between epoch checkpoints, not a total turn limit for chat or Deep Work.</small>
             </label>
           </div>
           <div className="field-row setting-nested">
-            <label className="field">
-              Tool deadline (seconds)
-              <input
-                type="number"
-                min={1}
-                value={settings.tool_call_timeout_seconds}
-                onChange={(event) =>
-                  onChange({ ...settings, tool_call_timeout_seconds: Number(event.target.value) })
-                }
-              />
-            </label>
             <label className="field">
               Safe-read attempts
               <input
@@ -172,34 +139,20 @@ export function RuntimePanel({
                 }
               />
             </label>
-            <label className="field">
-              Tool result limit (tokens)
-              <input
-                type="number"
-                min={256}
-                value={settings.tool_result_max_tokens}
-                onChange={(event) =>
-                  onChange({ ...settings, tool_result_max_tokens: Number(event.target.value) })
-                }
-              />
-            </label>
+          </div>
+          <div className="setting-row">
+            <div className="setting-label">
+              <strong>Model-context memory management</strong>
+              <small>
+                Uses the selected model&apos;s configured context capacity. Tool outputs remain intact
+                while they fit; older evidence is archived and summarized when space is needed.
+                Exact archived content stays readable.
+              </small>
+            </div>
           </div>
           <div className="field-row setting-nested">
             <label className="field">
-              Working context budget (tokens)
-              <input
-                type="number"
-                min={2048}
-                max={500000}
-                value={settings.agent_working_context_tokens}
-                onChange={(event) =>
-                  onChange({ ...settings, agent_working_context_tokens: Number(event.target.value) })
-                }
-              />
-              <small>Preferred maximum input, including instructions and tool schemas; bounded by the model window.</small>
-            </label>
-            <label className="field">
-              Response reserve (tokens)
+              Initial response allowance (tokens)
               <input
                 type="number"
                 min={256}
@@ -209,13 +162,13 @@ export function RuntimePanel({
                   onChange({ ...settings, agent_context_response_reserve_tokens: Number(event.target.value) })
                 }
               />
-              <small>Capacity kept available for the model response, not additional input context.</small>
+              <small>Starting allowance, including reasoning. Automatically grows on truncation within available model context; not a hard output cap.</small>
             </label>
           </div>
           <div className="setting-row">
             <div className="setting-label">
               <strong>Summarize older conversation with the model</strong>
-              <small>Retains understanding; disabling uses deterministic excerpts with less detail.</small>
+              <small>Last resort after older cached tool output is evicted; disabling uses deterministic excerpts with less detail.</small>
             </div>
             <Toggle
               checked={settings.agent_context_model_summary_enabled}
@@ -234,34 +187,21 @@ export function RuntimePanel({
                   onChange({ ...settings, agent_context_window_tokens: Number(event.target.value) })
                 }
               />
+              <small>Used only when the selected model&apos;s context window is unknown.</small>
             </label>
             <label className="field">
               Compaction high-water ratio
               <input
                 type="number"
                 min={0.5}
-                max={0.9}
+                max={0.95}
                 step={0.05}
                 value={settings.agent_context_high_water_ratio}
                 onChange={(event) =>
                   onChange({ ...settings, agent_context_high_water_ratio: Number(event.target.value) })
                 }
               />
-            </label>
-            <label className="field">
-              Compaction target (tokens)
-              <input
-                type="number"
-                min={512}
-                value={settings.agent_context_compaction_target_tokens}
-                onChange={(event) =>
-                  onChange({
-                    ...settings,
-                    agent_context_compaction_target_tokens: Number(event.target.value),
-                  })
-                }
-              />
-              <small>Desired input size after compaction, clamped to the working budget and model window; not a floor.</small>
+              <small>Fraction of the available input budget that triggers context cleanup; 0.85 means 85%.</small>
             </label>
           </div>
           <div className="field-row setting-nested">

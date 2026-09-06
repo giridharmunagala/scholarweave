@@ -8,21 +8,12 @@ export type ProviderCreate = components['schemas']['ProviderCreate'];
 export type ProviderUpdate = components['schemas']['ProviderUpdate'];
 export type ProviderModels = components['schemas']['ProviderModelsResponse'];
 export type ProviderVerification = components['schemas']['ProviderVerifyResponse'];
-export type ResidencyStatus = components['schemas']['ResidencyResponse'];
 
 export function modelIsEnabled(model: Provider['models'][number]): boolean {
   return model.enabled;
 }
 
 export const providersApi = {
-  residency: () => request<ResidencyStatus>('/providers/inference/residency'),
-  configureResidency: (id: string, enabled: boolean) =>
-    request<ResidencyStatus>(`/providers/${encodeURIComponent(id)}/residency`, json('PUT', { enabled })),
-  drainResidency: (id: string) =>
-    request<ResidencyStatus>(`/providers/${encodeURIComponent(id)}/residency/drain`, json('POST', {})),
-  confirmResidency: (id: string, model: string, sessionMode: 'interactive' | 'batch') =>
-    request<ResidencyStatus>(`/providers/${encodeURIComponent(id)}/residency/confirm`,
-      json('POST', { model, externally_loaded: true, session_mode: sessionMode })),
   settings: () => request<Settings>('/settings'),
   updateSettings: (payload: SettingsUpdate) =>
     request<Settings>('/settings', json('PUT', payload)),

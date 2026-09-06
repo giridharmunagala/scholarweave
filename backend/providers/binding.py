@@ -89,4 +89,5 @@ class ProfileModelResolver:
             preserve_thinking=resolved.preserve_thinking,
             context_window_tokens=resolved.context_window_tokens,
             local_inference=resolved.local_inference,
+            reasoning_efforts=resolved.reasoning_efforts,
         )

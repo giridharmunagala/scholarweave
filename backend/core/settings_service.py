@@ -18,6 +18,7 @@ PERSISTED_SETTING_KEYS = {
     "request_timeout_seconds",
     "agent_context_window_tokens",
     "agent_context_high_water_ratio",
+    "agent_context_use_model_window",
     "agent_working_context_tokens",
     "agent_context_response_reserve_tokens",
     "agent_context_model_summary_enabled",
@@ -39,6 +40,7 @@ MODEL_DEFAULT_CAPABILITIES = {
     "chat",
     "embedding",
     "vision",
+    "compaction",
 }
 OPTIONAL_MODEL_SETTING_KEYS = {"ocr_llm_model", "ocr_llm_triage_model"}
 
@@ -71,6 +73,7 @@ class SettingsResponse(SettingsSchema):
     request_timeout_seconds: float
     agent_context_window_tokens: int
     agent_context_high_water_ratio: float
+    agent_context_use_model_window: bool
     agent_working_context_tokens: int
     agent_context_response_reserve_tokens: int
     agent_context_model_summary_enabled: bool
@@ -96,7 +99,8 @@ class SettingsUpdate(SettingsSchema):
     last_chat_model_reference: ModelReferenceSpec | None = None
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     agent_context_window_tokens: int | None = Field(default=None, ge=4_096)
-    agent_context_high_water_ratio: float | None = Field(default=None, ge=0.5, le=0.9)
+    agent_context_high_water_ratio: float | None = Field(default=None, ge=0.5, le=0.95)
+    agent_context_use_model_window: bool | None = None
     agent_working_context_tokens: int | None = Field(default=None, ge=2_048, le=500_000)
     agent_context_response_reserve_tokens: int | None = Field(default=None, ge=256, le=128_000)
     agent_context_model_summary_enabled: bool | None = None
@@ -173,6 +177,7 @@ class SettingsService:
             request_timeout_seconds=self.settings.request_timeout_seconds,
             agent_context_window_tokens=self.settings.agent_context_window_tokens,
             agent_context_high_water_ratio=self.settings.agent_context_high_water_ratio,
+            agent_context_use_model_window=self.settings.agent_context_use_model_window,
             agent_working_context_tokens=self.settings.agent_working_context_tokens,
             agent_context_response_reserve_tokens=self.settings.agent_context_response_reserve_tokens,
             agent_context_model_summary_enabled=self.settings.agent_context_model_summary_enabled,
@@ -203,6 +208,7 @@ class SettingsService:
             if key in {
                 "agent_working_context_tokens", "agent_context_response_reserve_tokens",
                 "agent_context_model_summary_enabled",
+                "agent_context_use_model_window",
             } and value is None:
                 continue
             if key in {"user_timezone", "user_profile"} and value is None:

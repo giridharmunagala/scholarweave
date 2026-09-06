@@ -353,6 +353,13 @@ class RunRepository:
     def update_usage(self, run_id: str, usage: dict[str, Any]) -> None:
         self._update(run_id, usage_json=usage)
 
+    def get_usage(self, run_id: str) -> dict[str, Any]:
+        with self._sessions() as session:
+            usage = session.scalar(
+                select(AgentRunRecord.usage_json).where(AgentRunRecord.id == run_id)
+            )
+            return dict(usage or {})
+
     def update_usage_owned(self, lease: RunLease, usage: dict[str, Any]) -> None:
         self._update_owned(lease, usage_json=usage)
 

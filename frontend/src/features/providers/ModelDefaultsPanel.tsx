@@ -26,6 +26,12 @@ const CAPABILITIES = [
     icon: 'scan',
     description: 'Cleans up OCR output on scanned or text-poor pages.',
   },
+  {
+    key: 'compaction',
+    label: 'Context maintenance',
+    icon: 'builder',
+    description: 'Optional helper for older conversation summaries. Uses the main agent when unset or if the helper fails or cannot fit the history.',
+  },
 ] as const;
 
 export function ModelDefaultsPanel({
@@ -73,9 +79,9 @@ export function ModelDefaultsPanel({
               <ModelSelect
                 options={options}
                 value={current}
-                emptyOptionLabel="Not configured"
-                emptyOptionHint="Agents must then pick a model explicitly"
-                placeholder="Not configured"
+                emptyOptionLabel={capability.key === 'compaction' ? 'Use main agent model' : 'Not configured'}
+                emptyOptionHint={capability.key === 'compaction' ? 'No separate housekeeping model' : 'Agents must then pick a model explicitly'}
+                placeholder={capability.key === 'compaction' ? 'Use main agent model' : 'Not configured'}
                 inline
                 onChange={(reference) => setReference(capability.key, reference)}
               />
@@ -96,7 +102,8 @@ export type ModelCapability =
   | 'chat'
   | 'embedding'
   | 'vision'
-  | 'tools';
+  | 'tools'
+  | 'compaction';
 
 export function capabilityOptions(providers: Provider[], capability: ModelCapability): ModelOption[] {
   return providers.flatMap((provider) =>
@@ -104,7 +111,9 @@ export function capabilityOptions(providers: Provider[], capability: ModelCapabi
       .filter(
         (model) =>
           modelIsEnabled(model)
-          && (!model.capabilities?.length || model.capabilities.includes(capability)),
+          && (!model.capabilities?.length || model.capabilities.includes(
+            capability === 'compaction' ? 'chat' : capability,
+          )),
       )
       .map((model) => ({
         providerId: provider.id,

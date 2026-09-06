@@ -4,6 +4,7 @@ import { createRoot } from 'react-dom/client';
 import { expect, it, vi } from 'vitest';
 import { PaperSummaryPanel } from './PaperSummaryPanel';
 import { subscribeToRun } from '../../api/events';
+import { summaryApi } from './summaryApi';
 
 const version = vi.hoisted(() => ({
   id: 'version', created_at: '2026-01-01T00:00:00Z', citation_count: 1,
@@ -19,6 +20,40 @@ vi.mock('./summaryApi', () => ({
   },
 }));
 vi.mock('../../api/events', () => ({ subscribeToRun: vi.fn(() => () => undefined) }));
+vi.mock('../providers/api', () => ({
+  providersApi: {
+    list: vi.fn().mockResolvedValue([{
+      id: 'local', models: [{ name: 'qwen-27b', reasoning_efforts: ['none', 'high'] }],
+    }]),
+    settings: vi.fn().mockResolvedValue({
+      default_model_references: { chat: { provider_profile_id: 'local', model: 'qwen-27b' } },
+    }),
+  },
+}));
+
+it.each([null, 'high'] as const)('only enables summary reasoning on explicit selection: %s', async (effort) => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const element = document.createElement('div');
+  const root = createRoot(element);
+  await act(async () => root.render(<PaperSummaryPanel documentId="paper" ready />));
+  const reasoning = element.querySelector<HTMLSelectElement>('[aria-label="Paper summary reasoning"]')!;
+  expect(reasoning.value).toBe('');
+  expect(reasoning.textContent).toContain('Off by default');
+  if (effort) {
+    await act(async () => {
+      reasoning.value = effort;
+      reasoning.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  }
+  const start = Array.from(element.querySelectorAll('button'))
+    .find((button) => button.textContent?.includes('Rerun summary'))!;
+  await act(async () => start.click());
+  expect(summaryApi.start).toHaveBeenLastCalledWith('paper', {
+    mode: 'reviewed', ...(effort ? { reasoning_effort: effort } : {}),
+  });
+  expect(reasoning.disabled).toBe(true);
+  await act(async () => root.unmount());
+});
 
 it('distinguishes full source coverage from review and exposes saved provenance', async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;

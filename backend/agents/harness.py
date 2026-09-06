@@ -21,14 +21,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from contextvars import ContextVar
+from enum import Enum
 from typing import Any, Literal, Protocol
 
 from jsonschema import Draft202012Validator, ValidationError as JsonSchemaValidationError
-from openai import AsyncOpenAI, OpenAIError
+from openai import AsyncOpenAI, BadRequestError, OpenAIError
 
 from backend.agents.context import ScholarWeaveContext
 from backend.runs.repository import LeaseOwnershipError
@@ -182,6 +184,7 @@ class ModelBinding:
     preserve_thinking: bool = False
     context_window_tokens: int | None = None
     local_inference: bool = False
+    reasoning_efforts: tuple[str, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -200,9 +203,13 @@ class AgentDefinition:
         return [tool for tool in self.tools if tool.enabled_for(context)]
 
 
+class _TurnLimitDefault(Enum):
+    FROM_SETTINGS = "from_settings"
+
+
 @dataclass(frozen=True, slots=True)
 class RunSettings:
-    max_turns: int = 10
+    max_turns: int | None = None
     max_tool_concurrency: int | None = None
     max_input_characters: int | None = None
     max_output_characters: int | None = None
@@ -264,6 +271,10 @@ class PreparedInput:
     instructions: str
     working_items: RunInputItems | None = None
     response_max_tokens: int | None = None
+    response_retry_max_tokens: int | None = None
+    estimated_input_tokens: int | None = None
+    context_window_tokens: int | None = None
+    safety_headroom_tokens: int = 256
 
 
 class ContextPolicy(Protocol):
@@ -595,6 +606,7 @@ class ModelTurn:
     tool_calls: list[StreamedToolCall]
     usage: Usage
     finish_reason: str | None
+    timings: dict[str, float] = field(default_factory=dict)
 
 
 def usage_from_payload(payload: Any) -> Usage:
@@ -669,6 +681,22 @@ def request_parameters(
     return parameters
 
 
+def _is_context_overflow(error: OpenAIError) -> bool:
+    if not isinstance(error, BadRequestError):
+        return False
+    detail = error.body
+    if isinstance(detail, dict):
+        detail = detail.get("error", detail)
+    if not isinstance(detail, dict):
+        return False
+    codes = {str(detail.get(key) or "").lower() for key in ("code", "type")}
+    message = str(detail.get("message") or "").lower()
+    return bool(codes & {"context_length_exceeded", "exceed_context_size_error"}) or (
+        "maximum context length" in message
+        or "exceeds the available context size" in message
+    )
+
+
 async def stream_model_turn(
     agent: AgentDefinition,
     messages: list[dict[str, Any]],
@@ -681,14 +709,42 @@ async def stream_model_turn(
     reasoning_parts: list[str] = []
     calls = ToolCallAccumulator()
     usage = Usage(requests=1)
+    usage_complete = False
+    timings: dict[str, float] = {}
+    model_call_id = str(uuid.uuid4())
     finish_reason: str | None = None
     await context.emit("model.stream", {"raw_type": "response.created"})
-    stream = await agent.binding.client.chat.completions.create(**parameters)
+    stream = None
+    completed = False
     try:
+        stream = await agent.binding.client.chat.completions.create(**parameters)
         async for chunk in stream:
             raw = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)
             if raw.get("usage"):
                 usage = usage_from_payload(raw["usage"])
+                raw_usage = raw["usage"]
+                usage_complete = isinstance(raw_usage, dict) and all(
+                    type(value) is int and value >= 0
+                    for value in (
+                        raw_usage.get("prompt_tokens", raw_usage.get("input_tokens")),
+                        raw_usage.get("completion_tokens", raw_usage.get("output_tokens")),
+                    )
+                )
+            raw_timings = raw.get("timings")
+            if isinstance(raw_timings, dict):
+                # llama.cpp sends cumulative server measurements, sometimes only on
+                # a final chunk with no choices. Replace, never sum, chunk values.
+                for key in ("prompt_n", "prompt_ms", "predicted_n", "predicted_ms"):
+                    value = raw_timings.get(key)
+                    if (
+                        isinstance(value, (int, float))
+                        and not isinstance(value, bool)
+                        and math.isfinite(value)
+                        and value >= 0
+                    ):
+                        timings[key] = value
+                    elif key in raw_timings:
+                        timings.pop(key, None)
             for choice in raw.get("choices") or []:
                 finish_reason = choice.get("finish_reason") or finish_reason
                 delta = choice.get("delta") or {}
@@ -717,12 +773,27 @@ async def stream_model_turn(
                             "model.stream",
                             {"raw_type": "response.function_call_arguments.delta", "delta": arguments},
                         )
+        completed = True
     finally:
-        close = getattr(stream, "close", None)
-        if close is not None:
-            outcome = close()
-            if asyncio.iscoroutine(outcome):
-                await outcome
+        try:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                outcome = close()
+                if asyncio.iscoroutine(outcome):
+                    await outcome
+        finally:
+            await context.emit("model.telemetry", {
+                "model_call_id": model_call_id,
+                "agent_id": agent.id,
+                "agent_name": agent.name,
+                "model": agent.binding.model_name,
+                "context_scope": "compaction" if agent.id.endswith(":compaction") else "main",
+                "usage": usage.to_dict(),
+                "usage_complete": usage_complete,
+                "timings": timings,
+                "completed": completed,
+                "finish_reason": finish_reason,
+            })
     await context.emit(
         "model.stream",
         {
@@ -737,6 +808,7 @@ async def stream_model_turn(
         tool_calls=calls.calls(),
         usage=usage,
         finish_reason=finish_reason,
+        timings=timings,
     )
 
 
@@ -761,8 +833,17 @@ class AgentRunner:
         self._depth = depth
         self._working_snapshot: RunInputItems | None = None
         self._snapshot_generated_count = 0
+        self._response_max_tokens: int | None = None
 
-    async def run(self, input_value: RunInput, *, max_turns: int) -> RunResult:
+    async def run(
+        self,
+        input_value: RunInput,
+        *,
+        max_turns: int | None | _TurnLimitDefault = _TurnLimitDefault.FROM_SETTINGS,
+    ) -> RunResult:
+        """Inherit the settings limit when omitted; explicit ``None`` is unlimited."""
+        if isinstance(max_turns, _TurnLimitDefault):
+            max_turns = self._settings.max_turns
         history = normalize_run_input(input_value)
         self._enforce_input_policy(history)
         # `working` is what the model sees and may be rewritten by compaction;
@@ -773,9 +854,11 @@ class AgentRunner:
         usage = Usage()
         if self._hooks is not None:
             await self._hooks.on_agent_start(self._context, self._agent)
-        for turn_index in range(max_turns):
+        turn_index = 0
+        while max_turns is None or turn_index < max_turns:
             self._snapshot_generated_count = len(generated)
             turn = await self._model_turn(working, turn_index, usage)
+            turn_index += 1
             if turn.reasoning:
                 item = reasoning_item(turn.reasoning, self._agent.binding.model_name)
                 working.append(item)
@@ -883,63 +966,146 @@ class AgentRunner:
         turn_index: int,
         usage: Usage,
     ) -> ModelTurn:
-        instructions = self._agent.instructions
         request_agent = self._agent
-        prepared: RunInputItems = working
-        if self._context_policy is not None:
-            outcome = await self._context_policy.prepare(
-                self._agent,
-                list(working),
-                instructions,
-                self._context,
-                turn_index=turn_index,
+        if self._response_max_tokens is not None:
+            request_agent = replace(
+                request_agent,
+                model_settings=replace(
+                    request_agent.model_settings, max_tokens=self._response_max_tokens,
+                ),
             )
-            prepared = outcome.items
-            instructions = outcome.instructions
-            if outcome.working_items is not None:
-                working[:] = outcome.working_items
-            if outcome.response_max_tokens is not None:
-                request_agent = replace(
-                    self._agent,
-                    model_settings=replace(
-                        self._agent.model_settings, max_tokens=outcome.response_max_tokens
-                    ),
-                )
         tools = self._agent.enabled_tools(self._context)
-        self._working_snapshot = list(working)
-        messages = to_chat_messages(
-            prepared,
-            instructions,
-            preserve_thinking=self._agent.binding.preserve_thinking,
-            model_name=self._agent.binding.model_name,
-        )
-        if self._hooks is not None:
-            await self._hooks.on_llm_start(
-                self._context,
-                self._agent,
-                instructions,
+        attempt = 0
+        rejected_request: dict[str, Any] | None = None
+        while True:
+            instructions = self._agent.instructions
+            prepared: RunInputItems = working
+            retry_limit: int | None = None
+            estimated_input_tokens: int | None = None
+            context_window_tokens: int | None = None
+            safety_headroom_tokens = 256
+            if self._context_policy is not None:
+                outcome = await self._context_policy.prepare(
+                    request_agent,
+                    list(working),
+                    instructions,
+                    self._context,
+                    turn_index=turn_index,
+                )
+                prepared = outcome.items
+                instructions = outcome.instructions
+                retry_limit = outcome.response_retry_max_tokens
+                estimated_input_tokens = outcome.estimated_input_tokens
+                context_window_tokens = outcome.context_window_tokens
+                safety_headroom_tokens = outcome.safety_headroom_tokens
+                if outcome.working_items is not None:
+                    working[:] = outcome.working_items
+                if outcome.response_max_tokens is not None:
+                    request_agent = replace(
+                        request_agent,
+                        model_settings=replace(
+                            request_agent.model_settings, max_tokens=outcome.response_max_tokens,
+                        ),
+                    )
+            self._working_snapshot = list(working)
+            messages = to_chat_messages(
                 prepared,
+                instructions,
+                preserve_thinking=self._agent.binding.preserve_thinking,
+                model_name=self._agent.binding.model_name,
             )
-        try:
-            turn = await stream_model_turn(request_agent, messages, tools, self._context)
-        except OpenAIError as exc:
-            raise ModelBehaviorError(
-                f"The provider request failed: {type(exc).__name__}: {exc}"
-            ) from exc
-        usage.add(turn.usage)
-        if self._hooks is not None:
-            await self._hooks.on_llm_end(
-                self._context,
-                self._agent,
-                turn.usage.to_dict(),
+            parameters = request_parameters(request_agent, messages, tools, stream=False)
+            if rejected_request == parameters:
+                raise ModelBehaviorError(
+                    "The provider rejected the context and no smaller safe request could be prepared."
+                )
+            if self._hooks is not None:
+                await self._hooks.on_llm_start(
+                    self._context, request_agent, instructions, prepared,
+                )
+            try:
+                turn = await stream_model_turn(request_agent, messages, tools, self._context)
+            except OpenAIError as exc:
+                if (
+                    _is_context_overflow(exc)
+                    and estimated_input_tokens
+                    and context_window_tokens
+                ):
+                    # Provider rejection is stronger evidence than a tokenizer estimate.
+                    input_room = (
+                        context_window_tokens - (request_agent.model_settings.max_tokens or 0)
+                        - safety_headroom_tokens
+                    )
+                    self._update_context_ratio(max(
+                        1.25, input_room / estimated_input_tokens * 1.1,
+                    ))
+                    rejected_request = parameters
+                    usage.requests += 1
+                    attempt += 1
+                    await self._context.emit(
+                        "model.retry",
+                        {
+                            "agent_name": self._agent.name,
+                            "turn_index": turn_index,
+                            "attempt": attempt,
+                            "reason": "context_length_exceeded",
+                            "max_tokens": request_agent.model_settings.max_tokens,
+                            "discarded_text_characters": 0,
+                        },
+                    )
+                    continue
+                raise ModelBehaviorError(
+                    f"The provider request failed: {type(exc).__name__}: {exc}"
+                ) from exc
+            usage.add(turn.usage)
+            if estimated_input_tokens and turn.usage.input_tokens > 0:
+                self._update_context_ratio(
+                    turn.usage.input_tokens / estimated_input_tokens,
+                )
+            if retry_limit is not None and context_window_tokens is not None:
+                retry_limit = min(
+                    retry_limit,
+                    context_window_tokens - turn.usage.input_tokens - safety_headroom_tokens,
+                )
+            if self._hooks is not None:
+                await self._hooks.on_llm_end(
+                    self._context, request_agent, turn.usage.to_dict(),
+                )
+            if turn.finish_reason != "length":
+                break
+            current_budget = request_agent.model_settings.max_tokens
+            next_budget = (
+                min(current_budget * 2, retry_limit)
+                if current_budget is not None and retry_limit is not None
+                else None
             )
-        if turn.finish_reason == "length":
-            raise ModelBehaviorError(
-                "Model response was truncated (finish_reason=length; "
-                f"output_tokens={turn.usage.output_tokens}; "
-                f"max_tokens={request_agent.model_settings.max_tokens}). "
-                "No tool calls from this turn were executed. Increase the configured "
-                "response budget or select a supported lower reasoning effort."
+            explicit_cap = self._agent.model_settings.max_tokens is not None
+            if explicit_cap or next_budget is None or next_budget <= (current_budget or 0):
+                boundary = "explicit response cap" if explicit_cap else "available context"
+                raise ModelBehaviorError(
+                    "Model response was truncated (finish_reason=length; "
+                    f"output_tokens={turn.usage.output_tokens}; max_tokens={current_budget}). "
+                    f"Cannot increase generation within the {boundary}. "
+                    "No tool calls from this turn were executed."
+                )
+            attempt += 1
+            await self._context.emit(
+                "model.retry",
+                {
+                    "agent_name": self._agent.name,
+                    "turn_index": turn_index,
+                    "attempt": attempt,
+                    "reason": "length",
+                    "previous_max_tokens": current_budget,
+                    "max_tokens": next_budget,
+                    "discarded_text_characters": len(turn.text),
+                },
+            )
+            # Recompute the uncommitted turn, not any previously executed tools.
+            self._response_max_tokens = next_budget
+            request_agent = replace(
+                request_agent,
+                model_settings=replace(request_agent.model_settings, max_tokens=next_budget),
             )
         if turn.finish_reason == "content_filter":
             raise ModelBehaviorError(
@@ -952,6 +1118,15 @@ class AgentRunner:
                 "Reasoning alone is not a completed answer."
             )
         return turn
+
+    def _update_context_ratio(self, factor: float) -> None:
+        ratios = self._context.metadata.setdefault("_context_token_ratios", {})
+        if not isinstance(ratios, dict):
+            raise HarnessError("Invalid context token calibration state.")
+        previous_ratio = ratios.get(self._agent.id, 1.0)
+        if not isinstance(previous_ratio, (int, float)) or previous_ratio < 1:
+            raise HarnessError("Invalid context token calibration ratio.")
+        ratios[self._agent.id] = previous_ratio * max(1.0, factor)
 
     async def _execute_tool_calls(
         self,
@@ -1194,6 +1369,9 @@ class DelegatedEventSink:
         return {
             **payload,
             "delegated": True,
+            "context_scope": (
+                "compaction" if payload.get("context_scope") == "compaction" else "delegate"
+            ),
             "delegation_depth": self._depth,
             "parent_agent_name": self._parent_agent_name,
             "delegate_agent_name": self._delegate_agent_name,
@@ -1232,7 +1410,7 @@ def delegation_tool(
     delegate: AgentDefinition,
     tool_name: str,
     tool_description: str,
-    max_turns: int,
+    max_turns: int | None = None,
     settings: RunSettings,
     hooks: RunHooks | None = None,
     context_policy: ContextPolicy | None = None,
@@ -1310,7 +1488,6 @@ def delegation_tool(
                 "request": {
                     "type": "string",
                     "minLength": 1,
-                    "maxLength": 20_000,
                     "description": (
                         "The complete, self-contained instruction for the sub-agent. It "
                         "cannot see this conversation, so include every needed detail."
@@ -1347,11 +1524,11 @@ def run_streamed(
     *,
     context: ScholarWeaveContext,
     settings: RunSettings,
-    max_turns: int,
+    max_turns: int | None | _TurnLimitDefault = _TurnLimitDefault.FROM_SETTINGS,
     hooks: RunHooks | None = None,
     context_policy: ContextPolicy | None = None,
 ) -> RunHandle:
-    """Start one agent run; events reach the caller through ``context.emit``."""
+    """Start a run, inheriting its settings limit unless ``max_turns`` is supplied."""
     runner = AgentRunner(
         agent,
         context=context,
@@ -1368,11 +1545,11 @@ async def run_agent(
     *,
     context: ScholarWeaveContext,
     settings: RunSettings,
-    max_turns: int,
+    max_turns: int | None | _TurnLimitDefault = _TurnLimitDefault.FROM_SETTINGS,
     hooks: RunHooks | None = None,
     context_policy: ContextPolicy | None = None,
 ) -> RunResult:
-    """Run one agent to completion in the caller's task."""
+    """Run in the caller's task, inheriting the limit unless ``max_turns`` is supplied."""
     runner = AgentRunner(
         agent,
         context=context,

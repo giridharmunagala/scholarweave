@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import httpx
 
-from backend.agents.blueprint import FunctionToolSpec, ModelReferenceSpec
+from backend.agents.blueprint import FunctionToolSpec, ModelReferenceSpec, SessionPolicySpec
 from backend.conversations.turns import (
     RESEARCH_TOOL_IDS,
     deep_work_blueprint,
@@ -21,6 +21,7 @@ from backend.bootstrap import create_services
 from backend.documents.models import Document
 from backend.research.sources import WebSourceUnavailable
 from backend.agents.context import ScholarWeaveContext
+from backend.persistence.files import StorageError
 from backend.tools.catalog import APPLICATION_TOOLS, _factory, create_tool_catalog
 from backend.tools.runtime import (
     ApplicationToolRuntime,
@@ -121,41 +122,46 @@ async def test_catalog_validator_preserves_schema_optional_properties(strict) ->
 
 
 @pytest.mark.anyio
-async def test_tool_retry_deadline_includes_attempts_and_retry_after(test_settings, monkeypatch) -> None:
+async def test_tool_retries_keep_transport_timeouts_and_retry_after_without_global_deadline(
+    test_settings, monkeypatch,
+) -> None:
     services = create_services(test_settings)
     runtime = services.runs._tool_runtime
-    context = ScholarWeaveContext(run_id="deadline", tool_runtime=runtime)
-    test_settings.tool_call_timeout_seconds = 0.08
+    context = ScholarWeaveContext(run_id="no-deadline", tool_runtime=runtime)
+    test_settings.tool_call_timeout_seconds = 0.001
     test_settings.tool_read_retry_attempts = 4
     calls = 0
 
     async def rate_limited(arguments, context):
         nonlocal calls
         calls += 1
+        if calls == 2:
+            return {"ready": True}
         response = httpx.Response(
-            429, headers={"Retry-After": "10"},
+            429, headers={"Retry-After": "0.03"},
             request=httpx.Request("GET", "http://localhost/source"),
         )
         raise httpx.HTTPStatusError("rate limited", request=response.request, response=response)
 
     monkeypatch.setattr(runtime, "_read_research_paper", rate_limited)
     try:
-        with pytest.raises(httpx.HTTPStatusError):
-            await runtime.invoke("research.paper.read", {"action": "pages"}, context)
-        assert calls == 1
+        started = asyncio.get_running_loop().time()
+        assert await runtime.invoke("research.paper.read", {"action": "pages"}, context) == {"ready": True}
+        assert asyncio.get_running_loop().time() - started >= 0.03
+        assert calls == 2
 
         async def slow_read(arguments, context):
             nonlocal calls
             calls += 1
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.02)
             raise httpx.ReadTimeout("slow source")
 
         monkeypatch.setattr(runtime, "_read_research_paper", slow_read)
         monkeypatch.setattr("backend.tools.runtime.retry_delay", lambda *args: 0)
         calls = 0
-        with pytest.raises(TimeoutError):
+        with pytest.raises(httpx.ReadTimeout):
             await runtime.invoke("research.paper.read", {"action": "pages"}, context)
-        assert calls == 2
+        assert calls == 4
 
         calls = 0
         with pytest.raises(httpx.ReadTimeout):
@@ -166,7 +172,78 @@ async def test_tool_retry_deadline_includes_attempts_and_retry_after(test_settin
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("interrupt", ["cancel", "timeout"])
+@pytest.mark.parametrize("handler_kind", ["async", "sync", "returned_awaitable"])
+async def test_legacy_tool_timeout_does_not_interrupt_handler_completion(
+    test_settings, monkeypatch, handler_kind,
+) -> None:
+    test_settings.tool_call_timeout_seconds = 0.001
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext("slow-tool", runtime)
+    expected = {"evidence": "Completed after the legacy deadline."}
+
+    async def async_read(arguments, context):
+        await asyncio.sleep(0.03)
+        return expected
+
+    def sync_read(arguments, context):
+        threading.Event().wait(0.03)
+        return expected
+
+    def returned_awaitable(arguments, context):
+        return async_read(arguments, context)
+
+    monkeypatch.setattr(runtime, "_read_research_paper", {
+        "async": async_read, "sync": sync_read, "returned_awaitable": returned_awaitable,
+    }[handler_kind])
+    try:
+        assert await runtime.invoke("research.paper.read", {"action": "pages"}, context) == expected
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_async_tool_remains_cancellable_without_whole_operation_timeout(
+    test_settings, monkeypatch,
+) -> None:
+    test_settings.tool_call_timeout_seconds = 0.001
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    run = services.runs._repository.create(
+        conversation_id=None, agent_name="Cancelable read", input_value="read", blueprint={},
+    )
+    context = ScholarWeaveContext(run.id, runtime)
+    entered = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def read(arguments, context):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(runtime, "_read_research_paper", read)
+    task = asyncio.create_task(runtime.invoke("research.paper.read", {"action": "pages"}, context))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        await asyncio.sleep(0.02)
+        assert not task.done()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert stopped.is_set()
+        attempts = services.runs.get(run.id).tool_attempts
+        assert len(attempts) == 1
+        assert attempts[0].status == "cancelled"
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("interrupt", ["cancel", "none"])
 async def test_dispatched_write_is_joined_before_mutation_lock_released(test_settings, monkeypatch, interrupt) -> None:
     services = create_services(test_settings)
     runtime = services.runs._tool_runtime
@@ -183,7 +260,7 @@ async def test_dispatched_write_is_joined_before_mutation_lock_released(test_set
         return {"saved": arguments["name"]}
 
     monkeypatch.setattr(runtime, "_save_research_note", write)
-    test_settings.tool_call_timeout_seconds = 0.03 if interrupt == "timeout" else 1
+    test_settings.tool_call_timeout_seconds = 0.001
     first = asyncio.create_task(runtime.invoke("research.notes.save", {"name": "first"}, context))
     second = None
     try:
@@ -193,13 +270,16 @@ async def test_dispatched_write_is_joined_before_mutation_lock_released(test_set
         await asyncio.sleep(0.05)
         assert not first.done()
         assert runtime._mutation_lock.locked()
-        test_settings.tool_call_timeout_seconds = 1
         second = asyncio.create_task(runtime.invoke("research.notes.save", {"name": "second"}, context))
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.02)
         assert completed == []
+        assert not second.done()
         release.set()
-        with pytest.raises(asyncio.CancelledError if interrupt == "cancel" else TimeoutError):
-            await first
+        if interrupt == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await first
+        else:
+            assert await first == {"saved": "first"}
         assert await second == {"saved": "second"}
         assert completed == ["first", "second"]
         assert not runtime._mutation_lock.locked()
@@ -210,7 +290,266 @@ async def test_dispatched_write_is_joined_before_mutation_lock_released(test_set
 
 
 @pytest.mark.anyio
-async def test_budgeted_paper_reads_search_and_resumable_evidence(test_settings) -> None:
+@pytest.mark.parametrize("catalog_id,handler_name", [
+    ("research.notes.read", "_read_research_note"),
+    ("research.summary.checkpoint", "_paper_summary_checkpoint"),
+])
+async def test_fresh_tool_outputs_are_not_clipped_to_a_global_budget(
+    test_settings, monkeypatch, catalog_id, handler_name,
+) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    run = services.runs._repository.create(
+        conversation_id=None, agent_name="Reader", input_value="Read all evidence", blueprint={},
+    )
+    context = ScholarWeaveContext(run.id, runtime)
+    text = "Exact finding π with quoted \"evidence\".\n" * 1800
+    result = {"content": text, "final_checkpoint": text}
+
+    def read(arguments, active_context):
+        return result
+
+    monkeypatch.setattr(runtime, handler_name, read)
+    try:
+        assert await runtime.bound_tool_result(catalog_id, result, context) is result
+        assert await runtime.bound_tool_result(catalog_id, text, context) == text
+        assert await runtime.invoke(catalog_id, {"action": "read"}, context) is result
+        assert not list(test_settings.artifacts_dir.rglob("tool-results"))
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_explicit_cached_result_slice_is_not_reclipped(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext("explicit-slice", runtime)
+    text = "Exact quoted \"evidence\" π\n" * 5000
+    try:
+        stored = await runtime.bound_tool_result("lookup", text, context, max_tokens=1)
+        serialized = json.dumps(text, ensure_ascii=False)
+        tool = create_tool_catalog().build_function_tool(
+            FunctionToolSpec(id="read", catalog_id="tool.results.read"),
+        )
+        arguments = {"result_ref": stored["result_ref"], "offset": 17, "limit": 60_000}
+        page = await tool.on_invoke_tool(
+            SimpleNamespace(context=context, tool_call_id="slice"), json.dumps(arguments),
+        )
+        assert page == {
+            "result_ref": stored["result_ref"],
+            "offset": 17,
+            "content": serialized[17:60_017],
+            "has_more": True,
+            "next_offset": 60_017,
+            "size_characters": len(serialized),
+        }
+        assert await runtime.bound_tool_result("tool.results.read", page, context) is page
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["pages", "chunks"])
+async def test_paper_reads_honor_requested_items_without_hidden_output_caps(
+    test_settings, action,
+) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="full-paper.pdf", title="Full paper",
+    )
+    texts = ["Long cited text π with \"quotes\".\n" * 1000] + [
+        f"Evidence for page {index}." for index in range(2, 71)
+    ]
+    services.documents.repository.mark_ready(document.id, page_count=len(texts), metadata={})
+    services.retrieval.replace_document_chunks(
+        document.id, [{"text": text, "citation": f"p.{index + 1}"} for index, text in enumerate(texts)],
+    )
+    manifest = services.storage.write_json(
+        test_settings.artifacts_dir, f"documents/{document.id}/manifest.json",
+        {"pages": [{"page": index + 1, "text": text} for index, text in enumerate(texts)]},
+    )
+    services.documents.create_artifact_record(
+        owner_type="document", kind="extracted_manifest", document_id=document.id,
+        relative_path=manifest.relative_path, media_type="application/json",
+        stored=manifest, storage_area="artifacts",
+    )
+    context = ScholarWeaveContext("full-paper", runtime)
+    first_index = 1 if action == "pages" else 0
+    key = "pages" if action == "pages" else "chunks"
+    cursor_key = "next_page" if action == "pages" else "next_start"
+    try:
+        tool = create_tool_catalog().build_function_tool(
+            FunctionToolSpec(id="paper", catalog_id="research.paper.read"),
+        )
+        result = await tool.on_invoke_tool(
+            SimpleNamespace(context=context, tool_call_id="paper"),
+            json.dumps({
+                "document_id": document.id, "action": action, "start": first_index,
+                "limit": 11, "offset": 17, "query": None,
+            }),
+        )
+        assert [item["text"] for item in result[key]] == [texts[0][17:]] + texts[1:11]
+        assert all(item["text_complete"] for item in result[key])
+        assert result[key][0]["offset"] == 17
+        assert result["has_more"] is True
+        assert result[cursor_key] == first_index + 11
+        assert result["next_offset"] == 0
+        summary = await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": action, "start": first_index}, context,
+        )
+        assert [item["text"] for item in summary[key]] == texts
+        assert summary["has_more"] is False
+        assert summary["next_start"] is None
+        assert len(summary["coverage"]["spans"]) == 70
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("available_chars", [12_000, 80_000])
+async def test_context_sized_summary_batches_checkpoint_only_visible_spans(
+    test_settings, available_chars,
+) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="context-sized.pdf", title="Context sized",
+    )
+    texts = ["Quoted \"finding\" π.\n" * 1800, "Last cited result." * 1000]
+    services.documents.repository.mark_ready(document.id, page_count=2, metadata={})
+    services.retrieval.replace_document_chunks(
+        document.id, [{"text": text, "citation": f"p.{index + 1}"} for index, text in enumerate(texts)],
+    )
+    context = ScholarWeaveContext("context-sized-summary", runtime)
+    reconstructed = ["", ""]
+    batch_count = 0
+    try:
+        while True:
+            full = await runtime._read_paper_summary_batch(
+                {"document_id": document.id, "action": "chunks", "start": None}, context,
+            )
+            visible = runtime.constrain_paper_summary_batch(
+                full, context, max_chars=available_chars,
+            )
+            assert visible is not None
+            assert len(json.dumps(visible, ensure_ascii=False)) <= available_chars
+            pending = runtime._paper_summary_state(context, document.id)["pending_checkpoint"]
+            assert pending["id"] == visible["batch_id"]
+            assert pending["coverage"] == visible["coverage"]
+            for chunk, span in zip(visible["chunks"], visible["coverage"]["spans"]):
+                index = chunk["chunk_index"]
+                assert chunk["offset"] == len(reconstructed[index])
+                reconstructed[index] += chunk["text"]
+                assert span["end_offset"] == len(reconstructed[index])
+            batch_count += 1
+            appended = await runtime._paper_summary_checkpoint(
+                {
+                    "document_id": document.id, "action": "append",
+                    "content": f"Visible batch {batch_count} findings [p.1].",
+                },
+                context,
+            )
+            assert appended["complete"] is (not visible["has_more"])
+            if not visible["has_more"]:
+                break
+        assert reconstructed == texts
+        assert batch_count > 1 if available_chars == 12_000 else batch_count == 1
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_archived_pending_summary_cannot_claim_complete_coverage(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="archived-source.pdf", title="Archived source",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [{"text": "Source evidence.", "citation": "p.1"}])
+    context = ScholarWeaveContext("archived-summary", runtime)
+    try:
+        result = await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "chunks", "start": 0}, context,
+        )
+        runtime.mark_paper_summary_batch_unavailable(result, context)
+        with pytest.raises(ValueError, match="archived"):
+            await runtime._paper_summary_checkpoint(
+                {"document_id": document.id, "action": "append", "content": "Unseen claim [p.1]."},
+                context,
+            )
+        with pytest.raises(ValueError, match="archived"):
+            runtime._save_paper_summary_version(
+                {
+                    "document_id": document.id, "content": "Unseen summary [p.1].",
+                    "review_summary": "Unseen source.",
+                },
+                context,
+            )
+        assert not runtime._load_summary_evidence(
+            runtime._paper_summary_state(context, document.id),
+        )["complete"]
+        await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "chunks", "start": 0}, context,
+        )
+        appended = await runtime._paper_summary_checkpoint(
+            {"document_id": document.id, "action": "append", "content": "Reread evidence [p.1]."},
+            context,
+        )
+        assert appended["complete"] is True
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_context_batch_sizing_retries_original_without_stale_coverage(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="retry-source.pdf", title="Retry source",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(
+        document.id, [{"text": "Exact source evidence. " * 3000, "citation": "p.1"}],
+    )
+    context = ScholarWeaveContext("retry-summary", runtime)
+    try:
+        original = await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "chunks", "start": 0}, context,
+        )
+        first = runtime.constrain_paper_summary_batch(original, context, max_chars=20_000)
+        assert first is not None
+        smaller = runtime.constrain_paper_summary_batch(original, context, max_chars=12_000)
+        assert smaller is not None
+        assert smaller["next_offset"] < first["next_offset"]
+        state = runtime._paper_summary_state(context, document.id)
+        assert state["pending_checkpoint"]["coverage"] == smaller["coverage"]
+        restored = runtime.constrain_paper_summary_batch(original, context, max_chars=100_000)
+        assert restored is original
+        assert state["pending_checkpoint"]["coverage"] == original["coverage"]
+        assert state["pending_checkpoint"]["has_more"] is False
+        assert runtime.constrain_paper_summary_batch(original, context, max_chars=1) is None
+        assert runtime.constrain_paper_summary_batch(
+            {**original, "batch_id": "unrelated"}, context, max_chars=100_000,
+        ) is None
+        assert runtime.constrain_paper_summary_batch(
+            {"document_id": document.id}, context, max_chars=100_000,
+        ) is None
+        assert runtime.constrain_paper_summary_batch(original, context, max_chars=12_000) is not None
+        runtime.mark_paper_summary_batch_unavailable(original, context)
+        assert state["pending_checkpoint"]["content_unavailable"] is True
+        with pytest.raises(ValueError, match="archived"):
+            await runtime._paper_summary_checkpoint(
+                {"document_id": document.id, "action": "append", "content": "Incomplete evidence."},
+                context,
+            )
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_full_paper_reads_search_and_durable_evidence(test_settings) -> None:
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
         b"%PDF-1.4\n%%EOF", filename="bounded.pdf", title="Bounded",
@@ -233,7 +572,7 @@ async def test_budgeted_paper_reads_search_and_resumable_evidence(test_settings)
         assert hit["matches"][0]["citation"] == "p.1"
         assert hit["matches"][0]["chunk_index"] == 0
         assert context.metadata["paper_activity"][-1]["citations"] == ["p.1"]
-        assert len(json.dumps(hit, ensure_ascii=False)) <= test_settings.tool_result_max_tokens * 4
+        assert hit["matches"][0]["excerpt"] is True
         reconstructed = ["", ""]
         cursor, offset = 0, 0
         batches = 0
@@ -242,7 +581,7 @@ async def test_budgeted_paper_reads_search_and_resumable_evidence(test_settings)
                 {"document_id": document.id, "action": "chunks", "start": cursor, "offset": offset},
                 context,
             )
-            assert len(json.dumps(batch, ensure_ascii=False)) <= test_settings.tool_result_max_tokens * 4
+            assert len(json.dumps(batch, ensure_ascii=False)) > 12_000
             assert not (await runtime.bound_tool_result("research.summary.read", batch, context)).get("result_ref")
             for chunk in batch["chunks"]:
                 reconstructed[chunk["chunk_index"]] += chunk["text"]
@@ -266,7 +605,7 @@ async def test_budgeted_paper_reads_search_and_resumable_evidence(test_settings)
             )
             assert (resumed["resume_start"], resumed["resume_offset"]) == (cursor, offset)
         assert reconstructed == texts
-        assert batches > 5
+        assert batches == 1
         assert appended["complete"] is True
         index = services.workspace.read_file(appended["checkpoint_path"]).content
         assert len(index["records"]) == batches
@@ -325,6 +664,8 @@ def test_catalog_contains_research_and_persistence_tools() -> None:
         "conversation.title.set",
         "tool.results.read",
         "research.summary.save",
+        "research.summary.read",
+        "research.summary.checkpoint",
         "work.plan.create",
         "work.plan.update",
         "work.plan.read",
@@ -391,6 +732,179 @@ def test_only_main_agent_receives_title_tool_on_first_turn() -> None:
     assert "set-title" not in later_research.agents[0].tool_ids
     assert "set-title" in first_deep_work.agents[0].tool_ids
     assert "set-title" not in first_deep_work.agents[1].tool_ids
+
+
+@pytest.mark.anyio
+async def test_context_history_and_tool_cache_survive_run_cleanup(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    previous = services.runs._repository.create(
+        conversation_id="durable", agent_name="Previous", input_value="old", blueprint={},
+    )
+    context = ScholarWeaveContext(previous.id, runtime, conversation_id="durable")
+    items = [
+        {"role": "user", "content": "Keep exact π, 🧪, newlines\nand \"quotes\"."},
+        {"type": "function_call", "name": "lookup", "call_id": "c1", "arguments": '{"q":"π"}'},
+        {"type": "function_call_output", "call_id": "c1", "output": {"values": [1, None, False]}},
+    ]
+    try:
+        history = runtime.store_context_history(items, context)
+        assert history == runtime.store_context_history(items, context)
+        tool_value = {"evidence": "exact tool text " * 100}
+        tool = await runtime.bound_tool_result("lookup", tool_value, context, max_tokens=1)
+        assert history["result_ref"].startswith("conversations/durable/context-history/")
+        assert tool["result_ref"].startswith("conversations/durable/tool-results/")
+        legacy = services.storage.write_text(
+            test_settings.artifacts_dir, f"runs/{previous.id}/tool-results/old.json", "old",
+        )
+        standalone = services.runs._repository.create(
+            conversation_id=None, agent_name="Standalone", input_value="old", blueprint={},
+        )
+        standalone_cache = runtime.store_context_history(
+            items, ScholarWeaveContext(standalone.id, runtime),
+        )
+        assert services.runs.clear_history() == 2
+        assert not services.runs._repository.exists(previous.id)
+        assert not legacy.absolute_path.exists()
+        assert not (test_settings.artifacts_dir / standalone_cache["result_ref"]).exists()
+        later = ScholarWeaveContext("later", runtime, conversation_id="durable")
+        page = runtime._read_tool_result(
+            {"result_ref": history["result_ref"], "offset": 0, "limit": 16000}, later,
+        )
+        assert json.loads(page["content"]) == items
+        assert history["size_bytes"] == len(page["content"].encode("utf-8"))
+        for item, entry in zip(items, history["index"]):
+            assert json.loads(page["content"][entry["offset"]:entry["offset"] + entry["length"]]) == item
+        assert json.loads(runtime._read_tool_result(
+            {"result_ref": tool["result_ref"], "offset": 0, "limit": 16000}, later,
+        )["content"]) == tool_value
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_context_history_chunks_large_unicode_archive_and_indexes(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext("large", runtime, conversation_id="large")
+    items = [{"role": "tool", "name": "web", "content": "🧪π" * 1_100_000}]
+    try:
+        history = runtime.store_context_history(items, context)
+        assert history["size_bytes"] > test_settings.max_artifact_bytes
+        assert history["result_ref"].endswith(".manifest.json")
+        serialized = "[" + json.dumps(items[0], ensure_ascii=False) + "]"
+        reconstructed: list[str] = []
+        offset = 0
+        while True:
+            page = runtime._read_tool_result(
+                {"result_ref": history["result_ref"], "offset": offset, "limit": 16000}, context,
+            )
+            reconstructed.append(page["content"])
+            if not page["has_more"]:
+                break
+            offset = page["next_offset"]
+        assert "".join(reconstructed) == serialized
+        assert all(
+            path.stat().st_size <= test_settings.max_artifact_bytes
+            for path in test_settings.artifacts_dir.rglob("*") if path.is_file()
+        )
+        many = runtime.store_context_history([{"role": "user", "content": str(i)} for i in range(100)], context)
+        assert "index" not in many and "index_ref" in many
+        index = json.loads(runtime._read_tool_result(
+            {"result_ref": many["index_ref"], "offset": 0, "limit": 16000}, context,
+        )["content"])
+        last = runtime._read_tool_result(
+            {"result_ref": many["result_ref"], "offset": index[-1]["offset"], "limit": index[-1]["length"]}, context,
+        )
+        assert json.loads(last["content"]) == {"role": "user", "content": "99"}
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_context_history_scopes_and_traversal_are_guarded(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext("active", runtime, conversation_id="first")
+    try:
+        stored = runtime.store_context_history([{"role": "user", "content": "private"}], context)
+        for forbidden_context in (
+            ScholarWeaveContext("active", runtime, conversation_id="second"),
+            ScholarWeaveContext("active", runtime),
+        ):
+            with pytest.raises(ValueError, match="active run or its conversation"):
+                runtime._read_tool_result(
+                    {"result_ref": stored["result_ref"], "offset": 0, "limit": 256}, forbidden_context,
+                )
+        for path in (
+            "conversations/first/../second/context-history/a.json",
+            "conversations\\first\\context-history\\..\\..\\second\\a.json",
+            "conversations/first./context-history/a.json",
+            "conversations/first/notes/a.json",
+            "/conversations/first/context-history/a.json",
+            "C:\\conversations\\first\\context-history\\a.json",
+        ):
+            with pytest.raises(ValueError, match="result_ref"):
+                runtime._read_tool_result({"result_ref": path, "offset": 0, "limit": 256}, context)
+        standalone = ScholarWeaveContext("standalone", runtime)
+        standalone_ref = runtime.store_context_history([{"role": "user", "content": "local"}], standalone)["result_ref"]
+        assert standalone_ref.startswith("runs/standalone/context-history/")
+        assert runtime._read_tool_result(
+            {"result_ref": standalone_ref, "offset": 0, "limit": 256}, standalone,
+        )["content"]
+        with pytest.raises(ValueError, match="active run or its conversation"):
+            runtime._read_tool_result(
+                {"result_ref": standalone_ref, "offset": 0, "limit": 256}, context,
+            )
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_context_history_storage_failures_raise_without_false_success(test_settings, monkeypatch) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext("failure", runtime)
+    try:
+        existing = runtime.store_context_history([{"role": "user", "content": "deduplicated"}], context)
+        def fail_write(*args, **kwargs):
+            raise OSError("disk full")
+        monkeypatch.setattr(services.storage, "write_bytes", fail_write)
+        assert runtime.store_context_history([{"role": "user", "content": "deduplicated"}], context) == existing
+        with pytest.raises(OSError, match="disk full"):
+            runtime.store_context_history([{"role": "user", "content": "must keep"}], context)
+        with pytest.raises(OSError, match="disk full"):
+            await runtime.bound_tool_result("lookup", {"text": "large" * 100}, context, max_tokens=1)
+        with pytest.raises(TypeError):
+            runtime.store_context_history([{"role": "user", "content": object()}], context)
+        monkeypatch.setattr(test_settings, "max_artifact_bytes", 16)
+        with pytest.raises(StorageError, match="manifest exceeds"):
+            runtime.store_context_history([{"role": "user", "content": "large" * 100}], context)
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_conversation_deletion_removes_only_its_durable_caches(test_settings) -> None:
+    services = create_services(test_settings)
+    runtime = services.runs._tool_runtime
+    try:
+        conversations = [
+            services.conversations.create(
+                title=title, kind="research", model_reference={}, session_policy=SessionPolicySpec(),
+            ) for title in ("Delete", "Keep")
+        ]
+        references: list[str] = []
+        for conversation in conversations:
+            context = ScholarWeaveContext("run-" + conversation.id, runtime, conversation_id=conversation.id)
+            references.append(runtime.store_context_history([{"role": "user", "content": "exact"}], context)["result_ref"])
+            await runtime.bound_tool_result("lookup", {"text": "tool" * 100}, context, max_tokens=1)
+        await services.conversations.delete(conversations[0].id)
+        assert not (test_settings.artifacts_dir / "conversations" / conversations[0].id).exists()
+        assert (test_settings.artifacts_dir / references[1]).exists()
+        assert services.conversations.get(conversations[1].id).title == "Keep"
+    finally:
+        await services.close()
 
 
 @pytest.mark.anyio
@@ -983,7 +1497,7 @@ async def test_paper_summary_reader_continues_after_five_without_overlap(
     async def read_batch(arguments, _context):
         delegated_calls.append(arguments)
         start = int(arguments["start"])
-        limit = int(arguments["limit"])
+        limit = 64
         return {
             "pages": [],
             "has_more": True,
@@ -1014,7 +1528,7 @@ async def test_paper_summary_reader_continues_after_five_without_overlap(
         await services.close()
 
     assert [result["summary_batch"] for result in results] == [1, 2, 3, 4, 5, 6]
-    assert [call["limit"] for call in delegated_calls] == [64] * 6
+    assert [call["limit"] for call in delegated_calls] == [None] * 6
     assert [result["next_start"] for result in results] == [65, 129, 193, 257, 321, 385]
     assert len(delegated_calls) == 6
 
@@ -1069,9 +1583,14 @@ async def test_paper_summary_reader_requires_checkpoint_before_next_batch(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("evidence", [
+    "Contribution and evidence [p.1].",
+    "Contribution and evidence [p.1]. " * 1500,
+], ids=["short", "large"])
 async def test_final_paper_summary_checkpoint_is_returned_without_reread(
     test_settings,
     monkeypatch,
+    evidence,
 ) -> None:
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
@@ -1110,17 +1629,32 @@ async def test_final_paper_summary_checkpoint_is_returned_without_reread(
             {
                 "document_id": document.id,
                 "action": "append",
-                "content": "Contribution and evidence [p.1].",
+                "content": evidence,
                 "offset": None,
                 "limit": None,
             },
             context,
         )
+        tool = create_tool_catalog().build_function_tool(
+            FunctionToolSpec(id="checkpoint", catalog_id="research.summary.checkpoint"),
+        )
+        for limit in (None, 20_000):
+            page = await tool.on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id="checkpoint"),
+                json.dumps({
+                    "document_id": document.id, "action": "read", "content": None,
+                    "offset": 0, "limit": limit,
+                }),
+            )
+            checkpoint = evidence.strip() + "\n"
+            assert page["content"] == checkpoint[:limit]
+            assert page["has_more"] == (limit is not None and len(checkpoint) > limit)
+            assert page["next_offset"] == (limit if page["has_more"] else None)
     finally:
         await services.close()
 
     assert appended["has_more_paper"] is False
-    assert appended["final_checkpoint"] == "Contribution and evidence [p.1].\n"
+    assert appended["final_checkpoint"] == evidence.strip() + "\n"
     assert "without rereading" in appended["instruction"]
 
 
@@ -1256,10 +1790,9 @@ def test_chat_agent_can_use_persistence_tools_directly() -> None:
 
     assert {
         "save-note",
-        "summary-read",
-        "summary-checkpoint",
-        "save-summary",
+        "summarize-paper",
     }.issubset(researcher_tools)
+    assert not {"summary-read", "summary-checkpoint", "save-summary"} & researcher_tools
     assert blueprint.agent_tools == []
 
 

@@ -21,8 +21,7 @@ async def delete_conversation(
     conversation_id: str,
     container=Depends(services),
 ) -> Response:
-    await container.runs.cancel_conversation_runs(conversation_id)
-    await container.conversations.delete(conversation_id)
+    await container.conversation_turns.delete_conversation(conversation_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

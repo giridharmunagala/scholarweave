@@ -145,7 +145,11 @@ class VisionEnhancer:
     ) -> dict[str, Any]:
         image = base64.b64encode(image_png).decode("ascii")
         ollama_base_url = getattr(self.ollama, "base_url", model.base_url)
-        if model.kind == "ollama" and str(ollama_base_url).rstrip("/") == model.base_url.rstrip("/"):
+        if (
+            model.kind == "ollama"
+            and self.ollama.profile_id == model.profile_id
+            and str(ollama_base_url).rstrip("/") == model.base_url.rstrip("/")
+        ):
             kwargs: dict[str, Any] = {
                 "stream": False,
                 "options": {"temperature": 0},

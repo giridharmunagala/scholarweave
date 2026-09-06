@@ -21,11 +21,14 @@ from backend.agents.harness import (
     JsonSchemaOutput,
     ModelBehaviorError,
     ModelBinding,
+    ToolInvocation,
     request_parameters,
 )
 from backend.core.errors import ValidationError
-from backend.providers.types import ModelReference, ResolvedAgentModel
-from backend.tests.harness_support import FakeClient
+from backend.conversations.turns import deep_work_blueprint, research_blueprint
+from backend.providers.types import ModelReference, ProviderRuntimeError, ResolvedAgentModel
+from backend.tests.harness_support import FakeClient, StubResolver, stub_binding
+from backend.tools.catalog import create_tool_catalog
 
 
 class Resolver:
@@ -136,8 +139,65 @@ def test_compiler_builds_native_agent_topology() -> None:
     assert '"required":["answer"]' in compiled.agents_by_id["researcher"].instructions
     assert "System information:\nCurrent date:" in compiled.entry_agent.instructions
     assert "\nCurrent time:" in compiled.entry_agent.instructions
-    assert compiled.max_turns == 10
-    assert compiled.run_settings.max_turns == 10
+    assert compiled.max_turns is None
+    assert compiled.run_settings.max_turns is None
+
+
+@pytest.mark.parametrize("configured", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_compiler_resolves_optional_compaction_model_once(test_settings, configured, enabled) -> None:
+    calls = []
+
+    class TrackingResolver(Resolver):
+        def resolve_agent_model(self, reference, *, require_tools=False):
+            calls.append((reference, require_tools))
+            return super().resolve_agent_model(reference, require_tools=require_tools)
+
+    test_settings.agent_context_model_summary_enabled = enabled
+    test_settings.default_model_references = (
+        {"compaction": {"provider_profile_id": "local", "model": "gemma4-12b"}}
+        if configured else {}
+    )
+    compiled = AgentCompiler(TrackingResolver(), tool_catalog(), test_settings).compile(blueprint(
+        tools=[], agent_tools=[], agents=[
+            {"id": "triage", "name": "Main", "instructions": "Main"},
+            {"id": "researcher", "name": "Researcher", "instructions": "Research"},
+        ],
+    ))
+    assert len(calls) == 2 + int(configured and enabled)
+    assert compiled.context_policy is not None
+    assert (compiled.context_policy._compaction_model is not None) == (configured and enabled)
+    if configured and enabled:
+        assert calls[-1] == (ModelReference("local", "gemma4-12b"), False)
+    assert set(compiled.resolved_models) == {"triage", "researcher"}
+
+
+@pytest.mark.parametrize("reference", [
+    {"provider_profile_id": "missing", "model": "gemma4-12b"},
+    {"model": "gemma4-12b"},
+    {"provider_profile_id": "local"},
+])
+def test_invalid_optional_compaction_reference_does_not_block_main_agent(test_settings, reference) -> None:
+    calls = []
+
+    class MissingHelperResolver(Resolver):
+        def resolve_agent_model(self, selected, *, require_tools=False):
+            calls.append(selected)
+            if selected.model == "gemma4-12b":
+                raise ProviderRuntimeError("Provider profile was not found.")
+            return super().resolve_agent_model(selected, require_tools=require_tools)
+
+    test_settings.default_model_references = {"compaction": reference}
+    compiled = AgentCompiler(MissingHelperResolver(), tool_catalog(), test_settings).compile(blueprint(
+        tools=[], agent_tools=[], agents=[
+            {"id": "triage", "name": "Main", "instructions": "Main"},
+            {"id": "researcher", "name": "Researcher", "instructions": "Research"},
+        ],
+    ))
+    assert compiled.context_policy is not None
+    assert compiled.context_policy._compaction_model is None
+    assert compiled.context_policy._compaction_model_error["error_type"] == "ProviderRuntimeError"
+    assert len(calls) == (3 if len(reference) == 2 else 2)
 
 
 def test_delegation_tool_exposes_one_self_contained_request_parameter() -> None:
@@ -150,6 +210,63 @@ def test_delegation_tool_exposes_one_self_contained_request_parameter() -> None:
     assert delegation.is_delegation is True
     assert delegation.params_json_schema["required"] == ["request"]
     assert delegation.params_json_schema["additionalProperties"] is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("max_turns", [None, 2])
+async def test_compiled_delegation_has_only_opt_in_turn_limits(
+    stub_provider, max_turns,
+) -> None:
+    stub_provider.tool_plans = [
+        ("extended research", "echo", {"text": str(index)}) for index in range(101)
+    ]
+    model = stub_binding(stub_provider)
+    payload = blueprint().model_dump(by_alias=True)
+    payload["run"]["max_turns"] = 1
+    payload["agents"][1]["output"] = None
+    payload["agents"][1]["tool_ids"] = ["echo-tool"]
+    if max_turns is not None:
+        payload["agent_tools"][0]["max_turns"] = max_turns
+    else:
+        payload["agent_tools"][0].pop("max_turns")
+    compiled = AgentCompiler(StubResolver(model), tool_catalog()).compile(
+        AgentBlueprint.model_validate(payload)
+    )
+    delegation = compiled.entry_agent.tools[1]
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=SimpleNamespace())
+    try:
+        output = await delegation.on_invoke_tool(
+            ToolInvocation(context, "delegate-1", delegation.name, "Triage"),
+            json.dumps({"request": "Complete this extended research."}),
+        )
+    finally:
+        await model.client.close()
+
+    if max_turns is None:
+        assert output == stub_provider.reply
+        assert len(stub_provider.requests) == 102
+    else:
+        assert "whole 2-turn budget" in output
+        assert len(stub_provider.requests) == 2
+
+
+@pytest.mark.parametrize("max_turns", [None, 1, 101])
+def test_blueprint_accepts_optional_positive_turn_limits(max_turns) -> None:
+    payload = blueprint(run={"max_turns": max_turns}).model_dump(by_alias=True)
+    payload["agent_tools"][0]["max_turns"] = max_turns
+    spec = AgentBlueprint.model_validate(payload)
+    assert spec.run.max_turns == max_turns
+    assert spec.agent_tools[0].max_turns == max_turns
+
+
+@pytest.mark.parametrize("max_turns", [0, -1])
+@pytest.mark.parametrize("target", ["run", "delegate"])
+def test_blueprint_rejects_nonpositive_turn_limits(max_turns, target) -> None:
+    payload = blueprint().model_dump(by_alias=True)
+    settings = payload["run"] if target == "run" else payload["agent_tools"][0]
+    settings["max_turns"] = max_turns
+    with pytest.raises(ValueError):
+        AgentBlueprint.model_validate(payload)
 
 
 def test_compiler_applies_explicit_context_window_to_every_agent() -> None:
@@ -188,6 +305,36 @@ def test_compiler_applies_explicit_context_window_to_every_agent() -> None:
         == 65_536
     )
     assert compiled.context_window_tokens == 65_536
+    assert all(not agent.tools for agent in compiled.agents_by_id.values())
+
+
+@pytest.mark.parametrize(
+    ("deep_work", "web_enabled", "fast_answer"),
+    [
+        (False, True, False),
+        (False, False, False),
+        (False, True, True),
+        (True, True, False),
+        (True, False, False),
+    ],
+)
+def test_product_agents_can_recover_cached_context(
+    test_settings, deep_work, web_enabled, fast_answer,
+) -> None:
+    spec = (
+        deep_work_blueprint({}, web_enabled=web_enabled)
+        if deep_work
+        else research_blueprint({}, web_enabled=web_enabled, fast_answer=fast_answer)
+    )
+    compiled = AgentCompiler(
+        Resolver(), create_tool_catalog(), settings=test_settings,
+    ).compile(spec)
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=SimpleNamespace())
+
+    assert compiled.context_policy is not None
+    for definition in compiled.agents_by_id.values():
+        names = [tool.name for tool in definition.enabled_tools(context)]
+        assert names.count("read_tool_result") == 1
 
 
 def test_json_schema_output_accepts_fenced_json() -> None:

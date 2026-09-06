@@ -82,10 +82,21 @@ def to_jsonable(value: Any) -> Any:
 
 
 def merge_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    if left.get("timing_source") == "server" or right.get("timing_source") == "server":
+        timing_keys = {
+            "prompt_seconds", "generation_seconds", "timed_prompt_tokens",
+            "timed_output_tokens", "prompt_tokens_per_second", "generation_tokens_per_second",
+        }
+        if left.get("timing_source") != "server":
+            left = {key: value for key, value in left.items() if key not in timing_keys}
+        if right.get("timing_source") != "server":
+            right = {key: value for key, value in right.items() if key not in timing_keys}
     merged = dict(left)
     for key, value in right.items():
         current = merged.get(key)
-        if (
+        if key == "usage_complete" and isinstance(current, bool):
+            merged[key] = current and value is True
+        elif (
             isinstance(current, (int, float))
             and not isinstance(current, bool)
             and isinstance(value, (int, float))
@@ -98,6 +109,18 @@ def merge_usage(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
             merged[key] = [*current, *value][-100:]
         else:
             merged[key] = value
+    if merged.get("timing_source") == "server":
+        for phase, tokens_key, seconds_key in (
+            ("prompt", "timed_prompt_tokens", "prompt_seconds"),
+            ("generation", "timed_output_tokens", "generation_seconds"),
+        ):
+            seconds = merged.get(seconds_key)
+            tokens = merged.get(tokens_key)
+            merged[f"{phase}_tokens_per_second"] = (
+                round(tokens / seconds, 3)
+                if isinstance(tokens, (int, float)) and isinstance(seconds, (int, float))
+                and seconds > 0 else None
+            )
     return merged
 
 

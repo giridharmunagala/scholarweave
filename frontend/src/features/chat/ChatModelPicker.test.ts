@@ -16,6 +16,7 @@ describe('builder chat model picker', () => {
       {
         id: 'provider-1',
         name: 'Local models',
+        serialize_model_switches: true,
         models: [
           { name: 'builder', capabilities: ['chat', 'tools'], enabled: true },
           { name: 'unknown', capabilities: [], enabled: true },
@@ -74,6 +75,7 @@ describe('builder chat model picker', () => {
     const providers = [
       {
         id: 'provider-1',
+        serialize_model_switches: true,
         models: [
           {
             name: 'qwen',
@@ -103,6 +105,7 @@ describe('builder chat model picker', () => {
     const providers = [
       {
         id: 'provider-1',
+        serialize_model_switches: true,
         models: [
           { name: 'qwen', enabled: true, reasoning_efforts: ['low', 'medium', 'high'] },
         ],

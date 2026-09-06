@@ -23,7 +23,7 @@ from backend.agents.context import ScholarWeaveContext, ToolReceipt
 from backend.agents.harness import current_tool_model_identity
 from backend.runs.repository import LeaseOwnershipError, RunRepository
 from backend.utils import to_jsonable
-from backend.persistence.files import SafeStorage
+from backend.persistence.files import SafeStorage, StorageError
 from backend.prompting.registry import PromptRegistry
 from backend.research.search import ResearchSearchService
 from backend.research.sources import SourceDownloadService, WebSourceUnavailable
@@ -103,15 +103,18 @@ def _normalize_result_ref(value: Any) -> str:
         or raw.startswith(("/", "\\"))
         or re.match(r"^[a-zA-Z]:", raw)
     ):
-        raise ValueError("result_ref must be a safe relative run path.")
+        raise ValueError("result_ref must be a safe relative cache path.")
     normalized = re.sub(r"[\\/]+", "/", raw)
     parts = normalized.split("/")
     if (
         len(parts) < 3
-        or parts[0] != "runs"
-        or any(part in {"", ".", ".."} or ":" in part for part in parts)
+        or parts[0] not in {"runs", "conversations"}
+        or any(
+            part in {"", ".", ".."} or ":" in part or part.endswith((".", " "))
+            for part in parts
+        )
     ):
-        raise ValueError("result_ref must be a safe relative run path.")
+        raise ValueError("result_ref must be a safe relative cache path.")
     return PurePosixPath(*parts).as_posix()
 
 
@@ -289,6 +292,18 @@ class ApplicationToolRuntime:
         self._paper_summary_lock = asyncio.Lock()
         self._summary_save_lock = threading.RLock()
         self._mutation_lock = asyncio.Lock()
+        self._cache_lock = threading.RLock()
+        self._summary_runner = None
+
+    def set_summary_runner(self, runner: Any) -> None:
+        self._summary_runner = runner
+
+    async def _summarize_research_paper(
+        self, arguments: dict[str, Any], context: ScholarWeaveContext,
+    ) -> Any:
+        if self._summary_runner is None:
+            raise RuntimeError("The dedicated summary writer is unavailable.")
+        return await self._summary_runner(arguments, context)
 
     async def invoke(
         self,
@@ -298,7 +313,7 @@ class ApplicationToolRuntime:
         *,
         tool_call_id: str | None = None,
     ) -> Any:
-        """Dispatch one catalog tool and record its bounded result and activity metadata."""
+        """Dispatch one catalog tool and record its full result and activity metadata."""
         handler_name = APPLICATION_TOOL_HANDLERS.get(catalog_id)
         if handler_name is None:
             raise ValueError(f"Unknown application tool '{catalog_id}'.")
@@ -310,16 +325,9 @@ class ApplicationToolRuntime:
         )
         policy = operation_policy(catalog_id, arguments)
         attempts = self._settings.tool_read_retry_attempts if policy.safe_retry else 1
-        loop = asyncio.get_running_loop()
-        timeout = self._settings.tool_call_timeout_seconds
-        if policy.timeout_seconds is not None:
-            timeout = min(timeout, policy.timeout_seconds)
-        deadline = loop.time() + timeout
         provider_call_id = tool_call_id
         call_id = f"invoke-{uuid.uuid4()}"
         for attempt_number in range(1, attempts + 1):
-            if loop.time() >= deadline:
-                raise TimeoutError("The tool operation deadline was exhausted.")
             if journal is not None and journal.cancel_requested(context.run_id):
                 raise asyncio.CancelledError
             lease_getter = getattr(context.event_sink, "current_lease", None)
@@ -365,35 +373,16 @@ class ApplicationToolRuntime:
             try:
                 try:
                     if policy.mutating:
-                        await asyncio.wait_for(
-                            self._mutation_lock.acquire(),
-                            timeout=max(0.0, deadline - loop.time()),
-                        )
+                        await self._mutation_lock.acquire()
                         mutation_locked = True
-                    if loop.time() >= deadline:
-                        raise TimeoutError("The tool operation deadline was exhausted before dispatch.")
                     dispatched = True
                     result = await self._dispatch_tool_handler(
                         handler, arguments, context,
-                        deadline=deadline, mutating=policy.mutating,
+                        mutating=policy.mutating,
                     )
                 finally:
                     if mutation_locked:
                         self._mutation_lock.release()
-                if journal is not None:
-                    max_tokens = (
-                        6_000
-                        if catalog_id == "research.summary.checkpoint"
-                        and isinstance(result, dict)
-                        and result.get("final_checkpoint") is not None
-                        else None
-                    )
-                    result = await self.bound_tool_result(
-                        catalog_id,
-                        result,
-                        context,
-                        max_tokens=max_tokens,
-                    )
                 if attempt is not None:
                     self._finish_tool_attempt(
                         journal,
@@ -443,7 +432,6 @@ class ApplicationToolRuntime:
                 delay = retry_delay(error, attempt_number) if policy.safe_retry and transient else 0.0
                 retryable = (
                     policy.safe_retry and transient and attempt_number < attempts
-                    and delay < deadline - loop.time()
                 )
                 unknown = policy.mutating and dispatched and not isinstance(error, ToolInputError)
                 status = "unknown_outcome" if unknown else "failed"
@@ -481,21 +469,14 @@ class ApplicationToolRuntime:
         arguments: dict[str, Any],
         context: ScholarWeaveContext,
         *,
-        deadline: float,
         mutating: bool,
     ) -> Any:
-        loop = asyncio.get_running_loop()
         if inspect.iscoroutinefunction(handler):
-            return await asyncio.wait_for(
-                handler(arguments, context), timeout=max(0.0, deadline - loop.time()),
-            )
+            return await handler(arguments, context)
         worker = asyncio.create_task(asyncio.to_thread(handler, arguments, context))
         try:
-            result = await asyncio.wait_for(
-                asyncio.shield(worker) if mutating else worker,
-                timeout=max(0.0, deadline - loop.time()),
-            )
-        except (TimeoutError, asyncio.CancelledError):
+            result = await (asyncio.shield(worker) if mutating else worker)
+        except asyncio.CancelledError:
             if mutating:
                 # Cancellation cannot stop a Python thread. Keep the mutation lock until
                 # the dispatched write finishes, even under repeated run cancellation.
@@ -514,9 +495,7 @@ class ApplicationToolRuntime:
                         late_result.cancel()
             raise
         if inspect.isawaitable(result):
-            return await asyncio.wait_for(
-                result, timeout=max(0.0, deadline - loop.time()),
-            )
+            return await result
         return result
 
     @staticmethod
@@ -725,10 +704,7 @@ class ApplicationToolRuntime:
                 pending = state.get("pending_checkpoint")
                 evidence = self._append_summary_evidence(context, document_id, content)
                 checkpoint = self._evidence_text(evidence)
-                final_checkpoint = checkpoint if (
-                    evidence.get("complete") and
-                    len(json.dumps(checkpoint)) < self._settings.tool_result_max_tokens * 4 - 1500
-                ) else None
+                final_checkpoint = checkpoint if evidence.get("complete") else None
                 return {
                     "status": "reconciled" if state.get("last_append_reconciled") else "appended",
                     "document_id": document_id,
@@ -766,9 +742,9 @@ class ApplicationToolRuntime:
                 evidence = self._load_summary_evidence(state)
                 checkpoint = self._evidence_text(evidence)
                 offset = int(arguments.get("offset") or 0)
-                limit = min(int(arguments.get("limit") or 8000), max(
-                    256, self._settings.tool_result_max_tokens * 2,
-                ))
+                limit = int(arguments["limit"]) if arguments.get("limit") is not None else len(checkpoint)
+                if offset < 0 or limit < 0 or (arguments.get("limit") is not None and limit == 0):
+                    raise ValueError("offset must be nonnegative and limit must be positive.")
                 content = checkpoint[offset : offset + limit]
                 if content.strip():
                     self._record_paper_activity(
@@ -866,6 +842,11 @@ class ApplicationToolRuntime:
             state = self._paper_summary_state(context, document_id)
             evidence = self._load_summary_evidence(state)
             pending = state.get("pending_checkpoint")
+            if isinstance(pending, dict) and pending.get("content_unavailable"):
+                raise ValueError(
+                    "The pending source batch was archived before its evidence was checkpointed. "
+                    "Read the batch again before appending evidence or saving a complete summary."
+                )
             record_id = (
                 pending["id"] if isinstance(pending, dict)
                 else next(
@@ -928,38 +909,143 @@ class ApplicationToolRuntime:
         *,
         max_tokens: int | None = None,
     ) -> Any:
-        """Return a model-safe result, persisting oversized payloads behind a result reference."""
+        """Preserve fresh output unless the caller explicitly requests an archive preview."""
+        if max_tokens is None:
+            return result
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be positive.")
         if isinstance(result, dict) and result.get("result_ref") and result.get("truncated"):
             return result
         if catalog_id == "tool.results.read":
             return result
         serialized = json.dumps(result, ensure_ascii=False, default=str)
-        limit = (max_tokens or self._settings.tool_result_max_tokens) * 4
+        limit = max_tokens * 4
         if len(serialized) <= limit:
             return result
-        relative_path = (
-            f"runs/{context.run_id}/tool-results/{uuid.uuid4().hex}.json"
-        )
-        stored = self._storage.write_text(
-            self._settings.artifacts_dir,
-            relative_path,
-            serialized,
-        )
+        stored = self._store_cached_text(serialized, context, "tool-results")
         await context.emit(
             "tool.result.stored",
             {
                 "catalog_id": catalog_id,
-                "result_ref": stored.relative_path,
-                "size_bytes": stored.size_bytes,
+                **stored,
             },
         )
         return {
             "truncated": True,
-            "result_ref": stored.relative_path,
-            "size_bytes": stored.size_bytes,
+            **stored,
             "preview": serialized[:limit],
             "instruction": "Use read_tool_result with this result_ref for targeted slices.",
         }
+
+    def store_context_history(
+        self,
+        items: list[dict[str, Any]],
+        context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        """Persist lossless JSON history before replacing any model context."""
+        serialized_items = [
+            json.dumps(item, ensure_ascii=False, allow_nan=False) for item in items
+        ]
+        index: list[dict[str, Any]] = []
+        offset = 1
+        for position, (item, serialized) in enumerate(zip(items, serialized_items)):
+            index.append({
+                "item": position,
+                "role": str(item.get("role") or item.get("type") or "")[:80],
+                "name": str(item.get("name") or item.get("tool_call_id") or item.get("call_id") or "")[:80],
+                "offset": offset,
+                "length": len(serialized),
+            })
+            offset += len(serialized) + 2
+        stored = self._store_cached_text(
+            "[" + ",\n".join(serialized_items) + "]", context, "context-history"
+        )
+        serialized_index = json.dumps(index, ensure_ascii=False)
+        if len(serialized_index) <= 4_096:
+            stored["index"] = index
+        else:
+            stored["index_ref"] = self._store_cached_text(
+                serialized_index, context, "context-history"
+            )["result_ref"]
+        stored["item_count"] = len(items)
+        return stored
+
+    def _cache_scope(self, context: ScholarWeaveContext) -> str:
+        kind = "conversations" if context.conversation_id else "runs"
+        identity = context.conversation_id or context.run_id
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", identity):
+            raise StorageError("Invalid context cache scope.")
+        return f"{kind}/{identity}"
+
+    def _store_cached_text(
+        self,
+        content: str,
+        context: ScholarWeaveContext,
+        category: str,
+    ) -> dict[str, Any]:
+        data = content.encode("utf-8")
+        digest = hashlib.sha256(data).hexdigest()
+        prefix = f"{self._cache_scope(context)}/{category}/{digest}"
+        maximum = self._settings.max_artifact_bytes
+        if maximum < 4:
+            raise StorageError("Artifact size limit is too small for context caching.")
+        with self._cache_lock:
+            if len(data) <= maximum:
+                result_ref = f"{prefix}.json"
+                self._write_cached_bytes(result_ref, data)
+            else:
+                # Character-aligned chunks keep read_tool_result offsets independent of UTF-8.
+                chunk_size = maximum // 4
+                chunks: list[dict[str, Any]] = []
+                for offset in range(0, len(content), chunk_size):
+                    chunk = content[offset : offset + chunk_size]
+                    chunk_ref = f"{prefix}/part-{len(chunks):06d}.json"
+                    chunks.append({
+                        "result_ref": chunk_ref,
+                        "offset": offset,
+                        "length": len(chunk),
+                    })
+                manifest = json.dumps({
+                    "format": "scholarweave.context-cache.v1",
+                    "size_characters": len(content),
+                    "size_bytes": len(data),
+                    "chunks": chunks,
+                }, ensure_ascii=False).encode("utf-8")
+                if len(manifest) > maximum:
+                    raise StorageError("Context cache manifest exceeds maximum artifact size.")
+                for chunk in chunks:
+                    self._write_cached_bytes(
+                        chunk["result_ref"],
+                        content[chunk["offset"] : chunk["offset"] + chunk["length"]].encode("utf-8"),
+                    )
+                result_ref = f"{prefix}.manifest.json"
+                self._write_cached_bytes(result_ref, manifest)
+        return {
+            "result_ref": result_ref,
+            "size_bytes": len(data),
+            "size_characters": len(content),
+        }
+
+    def _write_cached_bytes(self, result_ref: str, data: bytes) -> None:
+        self._guard_cache_path(result_ref)
+        try:
+            existing = self._storage.read_text(self._settings.artifacts_dir, result_ref)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and existing.encode("utf-8") == data:
+            return
+        self._storage.write_bytes(self._settings.artifacts_dir, result_ref, data)
+        if self._storage.read_text(self._settings.artifacts_dir, result_ref).encode("utf-8") != data:
+            raise StorageError("Context cache write verification failed.")
+
+    def _guard_cache_path(self, result_ref: str) -> None:
+        parts = PurePosixPath(result_ref).parts
+        resolved = self._storage._safe_path(self._settings.artifacts_dir, result_ref)
+        scope = self._settings.artifacts_dir.resolve() / parts[0] / parts[1]
+        try:
+            resolved.relative_to(scope)
+        except ValueError as exc:
+            raise StorageError("result_ref escapes its run or conversation cache.") from exc
 
     def store_context_checkpoint(
         self,
@@ -986,14 +1072,38 @@ class ApplicationToolRuntime:
         result_ref = self._authorized_result_ref(arguments["result_ref"], context)
         offset = int(arguments["offset"])
         limit = int(arguments.get("limit", 10))
-        content = self._storage.read_artifact(result_ref).decode("utf-8")
+        if offset < 0 or limit < 1:
+            raise ValueError("offset must be nonnegative and limit must be positive.")
+        content = self._storage.read_text(self._settings.artifacts_dir, result_ref)
+        size = len(content)
+        if result_ref.endswith(".manifest.json"):
+            manifest = json.loads(content)
+            if manifest.get("format") != "scholarweave.context-cache.v1":
+                raise StorageError("Unsupported context cache manifest.")
+            size = int(manifest["size_characters"])
+            slices: list[str] = []
+            for chunk in manifest["chunks"]:
+                start = int(chunk["offset"])
+                end = start + int(chunk["length"])
+                if start >= offset + limit or end <= offset:
+                    continue
+                chunk_ref = self._authorized_result_ref(chunk["result_ref"], context)
+                if not chunk_ref.startswith(result_ref.removesuffix(".manifest.json") + "/"):
+                    raise StorageError("Context cache chunk is outside its archive.")
+                text = self._storage.read_text(self._settings.artifacts_dir, chunk_ref)
+                if len(text) != end - start:
+                    raise StorageError("Context cache chunk length mismatch.")
+                slices.append(text[max(0, offset - start) : min(end, offset + limit) - start])
+            content = "".join(slices)
+        else:
+            content = content[offset : offset + limit]
         return {
             "result_ref": result_ref,
             "offset": offset,
-            "content": content[offset : offset + limit],
-            "has_more": offset + limit < len(content),
-            "next_offset": min(len(content), offset + limit),
-            "size_characters": len(content),
+            "content": content,
+            "has_more": offset + limit < size,
+            "next_offset": min(size, offset + limit),
+            "size_characters": size,
         }
 
     def _result_ref_is_accessible(
@@ -1014,6 +1124,17 @@ class ApplicationToolRuntime:
     ) -> str:
         normalized = _normalize_result_ref(result_ref)
         parts = PurePosixPath(normalized).parts
+        self._guard_cache_path(normalized)
+        if parts[0] == "conversations":
+            if (
+                parts[1] != context.conversation_id
+                or len(parts) < 4
+                or parts[2] not in {"context-history", "tool-results"}
+            ):
+                raise ValueError(
+                    "result_ref does not belong to the active run or its conversation."
+                )
+            return normalized
         referenced_run_id = parts[1]
         if referenced_run_id == context.run_id:
             return normalized
@@ -1255,7 +1376,7 @@ class ApplicationToolRuntime:
                 "instruction": "Use chunk_index and match_offset with action=chunks to expand a hit.",
             }
         start = arguments.get("start")
-        limit = int(arguments["limit"])
+        limit = int(arguments["limit"]) if arguments.get("limit") is not None else None
         if action == "pages":
             return self._read_paper_pages(
                 {
@@ -1292,8 +1413,7 @@ class ApplicationToolRuntime:
             "action": action,
             "start": arguments.get("start"),
             "offset": arguments.get("offset"),
-            "limit": 64,
-            "_max_output_chars": max(256, self._settings.tool_result_max_tokens * 4 // 3),
+            "limit": None,
         }
         if action in {"inspect", "prepare"}:
             result = await self._read_research_paper(delegated, context)
@@ -1312,6 +1432,9 @@ class ApplicationToolRuntime:
         async with self._paper_summary_lock:
             state = self._paper_summary_state(context, document_id)
             pending = state.get("pending_checkpoint")
+            if isinstance(pending, dict) and pending.get("content_unavailable"):
+                state.pop("pending_checkpoint")
+                pending = None
             if isinstance(pending, dict):
                 # A replay of the same read may occur after recovery before its checkpoint.
                 if (
@@ -1377,6 +1500,106 @@ class ApplicationToolRuntime:
                     ),
                 }
             return result
+
+    def constrain_paper_summary_batch(
+        self,
+        result: dict[str, Any],
+        context: ScholarWeaveContext,
+        *,
+        max_chars: int,
+    ) -> dict[str, Any] | None:
+        """Fit pending source coverage to space in the actual next model request."""
+        document_id = str(result.get("document_id") or "")
+        states = context.metadata.get("_paper_summary_checkpoint_states", {})
+        state = states.get(document_id, {}) if isinstance(states, dict) else {}
+        pending = state.get("pending_checkpoint")
+        if not result.get("batch_id") or not isinstance(pending, dict) or result["batch_id"] not in {
+            pending.get("id"), pending.get("source_batch_id"),
+        }:
+            return None
+        source_batch_id = pending.get("source_batch_id") or pending["id"]
+        if max_chars < 1:
+            return None
+        if len(json.dumps(result, ensure_ascii=False)) <= max_chars:
+            state["pending_checkpoint"] = {
+                **pending,
+                "id": result["batch_id"],
+                "source_batch_id": source_batch_id,
+                "coverage": result["coverage"],
+                "has_more": bool(result.get("has_more")),
+                "next_start": self._paper_summary_next_start(pending["action"], result),
+                "next_offset": int(result.get("next_offset") or 0),
+                "content_unavailable": False,
+            }
+            return result
+        action = pending["action"]
+        key = "pages" if action == "pages" else "chunks"
+        sources = result.get(key)
+        if not isinstance(sources, list) or not sources:
+            return None
+        source_budget = max_chars
+        while source_budget > 0:
+            try:
+                selected, _, _ = self._bounded_source_items(
+                    sources, offset=0, max_chars=source_budget,
+                )
+            except ValueError:
+                return None
+            for original, selected_item in zip(sources, selected):
+                selected_item["offset"] += int(original.get("offset") or 0)
+                selected_item["text_complete"] = (
+                    selected_item["text_complete"] and bool(original.get("text_complete", True))
+                )
+            last = selected[-1]
+            index = int(last["page_number" if action == "pages" else "chunk_index"])
+            next_offset = (
+                0 if last["text_complete"] else last["offset"] + len(last["text"])
+            )
+            has_more = bool(result.get("has_more")) or len(selected) < len(sources) or bool(next_offset)
+            next_start = index + (1 if last["text_complete"] else 0) if has_more else None
+            resized = {
+                **result,
+                key: selected,
+                "has_more": has_more,
+                "next_start": next_start,
+                "next_offset": next_offset,
+            }
+            if action == "pages":
+                resized["next_page"] = next_start
+            coverage = self._paper_summary_coverage(action, pending, resized)
+            batch_id = hashlib.sha256(json.dumps(
+                [state["source_version"], coverage], sort_keys=True,
+            ).encode()).hexdigest()
+            resized.update(coverage=coverage, batch_id=batch_id)
+            overflow = len(json.dumps(resized, ensure_ascii=False)) - max_chars
+            if overflow <= 0:
+                state["pending_checkpoint"] = {
+                    **pending,
+                    "id": batch_id,
+                    "source_batch_id": source_batch_id,
+                    "coverage": coverage,
+                    "has_more": has_more,
+                    "next_start": next_start,
+                    "next_offset": next_offset,
+                    "content_unavailable": False,
+                }
+                return resized
+            source_budget -= overflow
+        return None
+
+    @staticmethod
+    def mark_paper_summary_batch_unavailable(
+        result: dict[str, Any],
+        context: ScholarWeaveContext,
+    ) -> None:
+        """Prevent archived, uncheckpointed raw text from becoming claimed coverage."""
+        states = context.metadata.get("_paper_summary_checkpoint_states", {})
+        state = states.get(str(result.get("document_id") or ""), {}) if isinstance(states, dict) else {}
+        pending = state.get("pending_checkpoint")
+        if result.get("batch_id") and isinstance(pending, dict) and result["batch_id"] in {
+            pending.get("id"), pending.get("source_batch_id"),
+        }:
+            pending["content_unavailable"] = True
 
     @staticmethod
     def _paper_summary_next_start(action: str, result: dict[str, Any]) -> int | None:
@@ -1770,7 +1993,7 @@ class ApplicationToolRuntime:
             )
         pages = manifest_pages(self._documents.artifact_content(manifest_artifact))
         start_page = int(arguments["start_page"])
-        limit = int(arguments["limit"])
+        limit = int(arguments["limit"]) if arguments.get("limit") is not None else None
         available = [
             page for page in pages if int(page.get("page") or 0) >= start_page
         ]
@@ -1819,7 +2042,7 @@ class ApplicationToolRuntime:
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
         start = int(arguments.get("start") or 0)
-        limit = int(arguments.get("limit") or 20)
+        limit = int(arguments["limit"]) if arguments.get("limit") is not None else None
         document_id = str(arguments["document_id"])
         document = self._documents.get_document(document_id)
         if document is None:
@@ -1874,8 +2097,9 @@ class ApplicationToolRuntime:
     def _bounded_source_items(
         self, items: list[dict[str, Any]], *, offset: int, max_chars: int | None = None,
     ) -> tuple[list[dict[str, Any]], int, int]:
-        total_budget = self._settings.tool_result_max_tokens * 4
-        budget = max_chars or (total_budget - min(3000, total_budget // 2))
+        budget = max_chars
+        if budget is not None and budget < 1:
+            raise ValueError("max_chars must be positive.")
         selected: list[dict[str, Any]] = []
         complete = 0
         next_offset = 0
@@ -1885,6 +2109,10 @@ class ApplicationToolRuntime:
             if start > len(text):
                 raise ValueError("offset is beyond this source item's text.")
             result = {**item, "offset": start, "text": text[start:], "text_complete": True}
+            if budget is None:
+                selected.append(result)
+                complete += 1
+                continue
             size = len(json.dumps(result, ensure_ascii=False))
             if size > budget:
                 if selected:

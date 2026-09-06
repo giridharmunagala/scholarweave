@@ -82,18 +82,23 @@ class AgentToolSpec(BlueprintModel):
     delegate_agent_id: Identifier
     tool_name: Identifier
     tool_description: str = Field(min_length=1, max_length=2_000)
-    max_turns: int | None = Field(default=None, ge=1, le=100)
+    max_turns: int | None = Field(
+        default=None, ge=1, description="Optional delegated turn limit; null means unlimited."
+    )
     serialize_calls: bool = False
 
 
 class RunSettingsSpec(BlueprintModel):
-    max_turns: int = Field(default=10, ge=1, le=100)
+    max_turns: int | None = Field(
+        default=None, ge=1, description="Optional total turn limit; null means unlimited."
+    )
     max_tool_concurrency: int | None = Field(default=None, ge=1, le=64)
     max_input_characters: int | None = Field(default=None, ge=1, le=10_000_000)
     max_output_characters: int | None = Field(default=None, ge=1, le=10_000_000)
     exclusive_inference: bool = Field(
         default=False,
         exclude_if=lambda value: not value,
+        description="Legacy saved-blueprint field; model concurrency is now configured per provider.",
     )
 
 

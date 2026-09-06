@@ -47,6 +47,10 @@ class ProviderCreate(ProviderSchema):
     base_url: str = Field(min_length=1, max_length=1024)
     api_key: str | None = Field(default=None, max_length=16_384)
     models: list[ProviderModel] = Field(default_factory=list)
+    serialize_model_switches: bool | None = Field(
+        default=None,
+        description="Prevent overlapping calls to different models on this provider. Defaults on for local providers.",
+    )
 
     @model_validator(mode="after")
     def validate_provider(self) -> "ProviderCreate":
@@ -61,6 +65,10 @@ class ProviderUpdate(ProviderSchema):
     base_url: str | None = Field(default=None, min_length=1, max_length=1024)
     api_key: str | None = Field(default=None, max_length=16_384)
     models: list[ProviderModel] | None = None
+    serialize_model_switches: bool = Field(
+        default=True,
+        description="Allow same-model concurrency, but wait for active calls before switching models.",
+    )
 
 
 class ProviderResponse(ProviderSchema):
@@ -71,6 +79,7 @@ class ProviderResponse(ProviderSchema):
     api_key_set: bool
     state: Literal["active", "archived"]
     models: list[ProviderModel]
+    serialize_model_switches: bool
     created_at: datetime
     updated_at: datetime
 
@@ -91,33 +100,3 @@ class ProviderVerifyResponse(ProviderSchema):
     reachable: bool
     tool_calling: bool
     detail: str
-
-
-class ResidencyConfigure(ProviderSchema):
-    enabled: bool
-
-
-class ResidencyConfirm(ProviderSchema):
-    model: str = Field(min_length=1, max_length=255)
-    externally_loaded: Literal[True]
-    session_mode: Literal["interactive", "batch"] = "interactive"
-
-
-class InferenceQueueEntry(ProviderSchema):
-    profile_id: str | None
-    model: str | None
-    priority: Literal["interactive", "background"]
-    blocked_by_residency: bool
-
-
-class ResidencyResponse(ProviderSchema):
-    profile_id: str | None
-    enabled: bool
-    resident_model: str | None
-    confirmed: bool
-    paused: bool
-    active_requests: int
-    session_mode: Literal["interactive", "batch"]
-    queue: list[InferenceQueueEntry]
-    interactive_queued: int
-    background_queued: int

@@ -48,7 +48,7 @@ class ConversationDetailResponse(ConversationResponse):
 
 
 class ConversationMessageRequest(ConversationSchema):
-    content: str = Field(min_length=1, max_length=100_000)
+    content: str = Field(min_length=1)
     reasoning_effort: ReasoningEffort | None = None
     web_enabled: bool = True
     deep_work: bool = Field(

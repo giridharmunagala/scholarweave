@@ -106,9 +106,11 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     settings_service.load()
 
     provider_repository = ProviderRepository(session_factory)
-    provider_repository.ensure_default_ollama(base_url=resolved.ollama_base_url)
+    default_ollama = provider_repository.ensure_default_ollama(base_url=resolved.ollama_base_url)
     inference_scheduler = InferenceScheduler()
-    ollama = OllamaClient(resolved, inference_scheduler=inference_scheduler)
+    ollama = OllamaClient(
+        resolved, inference_scheduler=inference_scheduler, profile_id=default_ollama.id,
+    )
     model_runtime = ModelRuntime(
         session_factory,
         resolved,
@@ -167,6 +169,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     conversations = ConversationService(
         ConversationRepository(session_factory),
         conversation_sessions,
+        storage,
     )
     events = EventBroker()
     run_repository = RunRepository(session_factory)
@@ -213,6 +216,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         workspace,
         prompts,
     )
+    tool_runtime.set_summary_runner(summaries.run_for_agent)
     providers = ProviderService(
         provider_repository,
         model_runtime,

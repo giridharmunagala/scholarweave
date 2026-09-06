@@ -60,6 +60,7 @@ import {
   TurnTimelineView,
 } from './TurnTimeline';
 import './chat.css';
+import { useThrottledRates } from './useThrottledRates';
 
 const SUGGESTIONS = [
   'Summarise the key findings across the papers in my library.',
@@ -730,6 +731,20 @@ export function ResearchChatPage() {
     .reverse()
     .find((step) => step.kind === 'agent' && step.status === 'running');
   const compaction = compactionIndicator(runs, run, stream.events);
+  const rawMetrics = useMemo(() => {
+    const values = new Map<string, TurnMetrics>();
+    for (const candidate of runs) {
+      const metrics = turnMetrics(candidate);
+      if (metrics) values.set(candidate.id, metrics);
+    }
+    if (run) {
+      const metrics = turnMetrics(run, stream.events);
+      if (metrics) values.set(run.id, metrics);
+    }
+    return values;
+  }, [runs, run, stream.events]);
+  const metricsByRun = useThrottledRates(rawMetrics);
+  const liveMetrics = run ? metricsByRun.get(run.id) ?? null : null;
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
@@ -931,7 +946,7 @@ export function ResearchChatPage() {
                     <Message
                       role={role}
                       text={item.text}
-                      metrics={responseRun ? turnMetrics(responseRun) : null}
+                      metrics={responseRun ? metricsByRun.get(responseRun.id) ?? null : null}
                       sources={responseRun ? timelineFor(responseRun).sources : null}
                       onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
                       canRetry={!sending}
@@ -942,7 +957,7 @@ export function ResearchChatPage() {
                         text={text}
                         metrics={
                           recoveredRun && responseIndex === recoveredResponses.length - 1
-                            ? turnMetrics(recoveredRun)
+                            ? metricsByRun.get(recoveredRun.id) ?? null
                             : null
                         }
                         sources={
@@ -976,9 +991,12 @@ export function ResearchChatPage() {
                   text={stream.assistant}
                   className="streaming"
                   streaming
-                  metrics={run ? turnMetrics(run, stream.events) : null}
+                  metrics={liveMetrics}
                   sources={liveTimeline.sources}
                 />
+              ) : null}
+              {runActive && !stream.assistant && liveMetrics ? (
+                <TurnMetadata metrics={liveMetrics} />
               ) : null}
               {liveActivity ? (
                 <LiveActivityBar
@@ -1283,23 +1301,70 @@ function compactionIndicator(
       for (const event of liveEvents) bySequence.set(event.sequence, event);
       events = [...bySequence.values()];
     }
-    return [...events]
-      .sort((left, right) => left.sequence - right.sequence)
+    const orderedEvents = [...events].sort((left, right) => left.sequence - right.sequence);
+    const identityEvents = orderedEvents.filter((event) => (
+      ['agent.started', 'context.prepared', 'model.telemetry'].includes(event.event_type)
+      && event.payload.delegated !== true
+      && (event.payload.context_scope == null || event.payload.context_scope === 'main')
+      && (typeof event.payload.agent_name === 'string' || typeof event.payload.agent_id === 'string')
+    ));
+    const entryAgent = identityEvents[0]?.payload;
+    const mainAgent = entryAgent && {
+      ...entryAgent,
+      agent_id: entryAgent.agent_id ?? identityEvents.find((event) => (
+        event.payload.agent_name === entryAgent.agent_name
+        && typeof event.payload.agent_id === 'string'
+      ))?.payload.agent_id,
+      agent_name: entryAgent.agent_name ?? identityEvents.find((event) => (
+        event.payload.agent_id === entryAgent.agent_id
+        && typeof event.payload.agent_name === 'string'
+      ))?.payload.agent_name,
+    };
+    return orderedEvents
+      .filter((event) => isMainContextEvent(event, mainAgent, candidate.agent_name))
       .filter((event) => (
         event.event_type.startsWith('context.compact')
         || event.event_type === 'context.prepared'
         || event.event_type === 'context.sized'
+        || event.event_type === 'model.retry'
+        || event.event_type === 'model.completed'
+        || event.event_type === 'model.telemetry'
       ))
       .map((event) => ({ runId: candidate.id, event }));
   });
+  const latestModelEvent = [...contextEvents].reverse().find(({ event }) => (
+    (event.event_type === 'model.retry' || event.event_type === 'model.completed')
+    && event.payload.delegated !== true
+  ));
+  if (
+    latestModelEvent?.event.event_type === 'model.retry'
+    && latestModelEvent.runId === activeRun?.id
+    && activeRun != null
+    && !isTerminalRun(activeRun)
+  ) {
+    return {
+      state: 'active',
+      label: 'Recomputing response',
+      title: latestModelEvent.event.payload.reason === 'context_length_exceeded'
+        ? 'The provider rejected the context size. Recomputing with a smaller request; completed tools will not be repeated.'
+        : `Retrying the unfinished response with ${Number(
+          latestModelEvent.event.payload.max_tokens,
+        ).toLocaleString()} output tokens. Completed tools will not be repeated.`,
+    };
+  }
   const compactions = contextEvents.filter(({ event }) => (
     event.event_type.startsWith('context.compact')
   ));
-  const sizingEvent = [...contextEvents].reverse().find(({ event }) => (
-    (event.event_type === 'context.prepared' || event.event_type === 'context.sized')
+  const sizingEntry = [...contextEvents].reverse().find(({ event }) => (
+    (event.event_type === 'context.prepared' || event.event_type === 'context.sized'
+      || event.event_type === 'model.telemetry')
     && contextSizing(event) !== null
+  ));
+  const prepared = sizingEntry && [...contextEvents].reverse().find(({ event, runId }) => (
+    runId === sizingEntry.runId && event.sequence < sizingEntry.event.sequence
+    && (event.event_type === 'context.prepared' || event.event_type === 'context.sized')
   ))?.event;
-  const sizing = sizingEvent ? contextSizing(sizingEvent) : null;
+  const sizing = sizingEntry ? contextSizing(sizingEntry.event, prepared) : null;
   if (!compactions.length) {
     return sizing ? { state: 'complete', label: `Context ${sizing.label}`, title: sizing.title } : null;
   }
@@ -1335,7 +1400,41 @@ function compactionIndicator(
   };
 }
 
-function contextSizing(event: RunStreamEvent): { label: string; title: string } | null {
+function isMainContextEvent(
+  event: RunStreamEvent,
+  mainAgent: Record<string, unknown> | undefined,
+  mainName: string,
+): boolean {
+  const payload = event.payload;
+  if (payload.delegated === true
+    || (payload.context_scope != null && payload.context_scope !== 'main')) return false;
+  if (typeof payload.agent_id === 'string' && typeof mainAgent?.agent_id === 'string'
+    && payload.agent_id !== mainAgent.agent_id) return false;
+  const name = mainAgent?.agent_name ?? mainName;
+  return typeof payload.agent_name !== 'string' || payload.agent_name === name;
+}
+
+function contextSizing(
+  event: RunStreamEvent,
+  prepared?: RunStreamEvent,
+): { label: string; title: string } | null {
+  if (event.event_type === 'model.telemetry') {
+    if (event.payload.completed !== true || event.payload.finish_reason === 'length'
+      || event.payload.usage_complete === false) return null;
+    const usage = isRecord(event.payload.usage) ? event.payload.usage : null;
+    const input = metricNumber(usage?.input_tokens ?? usage?.prompt_tokens);
+    const output = metricNumber(usage?.output_tokens ?? usage?.completion_tokens);
+    if (input == null || output == null) return null;
+    const used = metricNumber(input + output);
+    if (used == null) return null;
+    const capacity = positiveMetricNumber(prepared?.payload.context_window_tokens);
+    return {
+      label: `${used.toLocaleString()}${capacity == null ? '' : ` / ${capacity.toLocaleString()}`}`,
+      title: `MAIN context: ${used.toLocaleString()} tokens used (${input.toLocaleString()} input + ${output.toLocaleString()} generated) from the latest completed MAIN call.`
+        + (capacity == null ? ' Full context capacity unavailable.' : ` Full context window: ${capacity.toLocaleString()} tokens.`)
+        + ' Not overall run usage.',
+    };
+  }
   const estimated = event.payload.estimated_input_tokens;
   const budget = event.payload.input_budget_tokens;
   if (
@@ -1348,7 +1447,7 @@ function contextSizing(event: RunStreamEvent): { label: string; title: string } 
   const agent = typeof event.payload.agent_name === 'string' ? `${event.payload.agent_name}: ` : '';
   return {
     label,
-    title: `${agent}Estimated input ${estimated.toLocaleString()} of ${budget.toLocaleString()} tokens, including tool schemas.`
+    title: `${agent}MAIN context: Estimated input ${estimated.toLocaleString()} of ${budget.toLocaleString()} tokens, including tool schemas.`
       + (typeof schemas === 'number' && Number.isFinite(schemas)
         ? ` Tool schemas: ~${schemas.toLocaleString()} tokens.` : '')
       + (typeof reserve === 'number' && Number.isFinite(reserve)
@@ -1625,30 +1724,43 @@ interface TurnMetrics {
   promptRate: number | null;
   generationRate: number | null;
   durationSeconds: number | null;
+  modelCalls: number | null;
+  usageComplete: boolean | null;
 }
 
 export function turnMetrics(
   run: Run,
   events: readonly RunStreamEvent[] = [],
 ): TurnMetrics | null {
-  const usage = latestUsageUpdate(events) ?? run.usage as Record<string, unknown>;
+  const persistedUsage = run.usage as Record<string, unknown>;
+  const usage = isTerminalRun(run) && isRecord(persistedUsage.performance)
+    ? persistedUsage
+    : latestUsageUpdate(events) ?? persistedUsage;
   const performance = isRecord(usage.performance) ? usage.performance : null;
+  const usageComplete = typeof performance?.usage_complete === 'boolean'
+    ? performance.usage_complete : null;
+  const tokenCount = usageComplete === false ? positiveMetricNumber : metricNumber;
   const inputTokens = performance
-    ? metricNumber(performance.input_tokens)
+    ? tokenCount(performance.input_tokens)
     : positiveMetricNumber(usage.input_tokens);
   const outputTokens = performance
-    ? metricNumber(performance.output_tokens)
+    ? tokenCount(performance.output_tokens)
     : positiveMetricNumber(usage.output_tokens);
   const durationSeconds = elapsedSeconds(run.started_at, run.finished_at);
-  if (inputTokens == null && outputTokens == null && durationSeconds == null) return null;
+  const modelCalls = metricNumber(performance?.model_calls);
+  if (inputTokens == null && outputTokens == null && durationSeconds == null
+    && modelCalls == null && usageComplete !== false) return null;
+  const serverTiming = performance?.timing_source === 'server';
   return {
     inputTokens,
     outputTokens,
     inputEstimated: performance?.input_tokens_estimated === true,
     outputEstimated: performance?.output_tokens_estimated === true,
-    promptRate: metricNumber(performance?.prompt_tokens_per_second),
-    generationRate: metricNumber(performance?.generation_tokens_per_second),
+    promptRate: serverTiming ? metricNumber(performance.prompt_tokens_per_second) : null,
+    generationRate: serverTiming ? metricNumber(performance.generation_tokens_per_second) : null,
     durationSeconds,
+    modelCalls,
+    usageComplete,
   };
 }
 
@@ -1669,20 +1781,25 @@ function TurnMetadata({ metrics }: { metrics: TurnMetrics }) {
   const outputPrefix = metrics.outputEstimated ? '~' : '';
   const estimated = metrics.inputEstimated || metrics.outputEstimated;
   const details = [
-    metrics.inputTokens != null ? `${inputPrefix}${formatMetric(metrics.inputTokens)} in` : null,
-    metrics.outputTokens != null ? `${outputPrefix}${formatMetric(metrics.outputTokens)} out` : null,
+    'Overall',
+    metrics.inputTokens != null ? `${inputPrefix}${formatMetric(metrics.inputTokens)} in` : 'Input tokens unavailable',
+    metrics.outputTokens != null ? `${outputPrefix}${formatMetric(metrics.outputTokens)} out` : 'Output tokens unavailable',
+    metrics.modelCalls != null ? `${formatMetric(metrics.modelCalls)} calls` : null,
+    metrics.usageComplete === false ? 'Usage incomplete (known tokens only)' : null,
     metrics.promptRate != null
-      ? `${metrics.inputEstimated ? '~' : ''}${formatRate(metrics.promptRate)} prompt`
-      : null,
+      ? `${formatRate(metrics.promptRate)} prompt`
+      : 'Prompt speed unavailable',
     metrics.generationRate != null
-      ? `${metrics.outputEstimated ? '~' : ''}${formatRate(metrics.generationRate)} generation`
-      : null,
+      ? `${formatRate(metrics.generationRate)} generation`
+      : 'Generation speed unavailable',
     metrics.durationSeconds != null ? `${formatDuration(metrics.durationSeconds)} total` : null,
   ].filter((value): value is string => value !== null);
   return (
     <div
       className="turn-metadata"
-      title={estimated ? 'Token counts and rates prefixed with ~ are estimates.' : 'Turn usage and speed.'}
+      title={'Overall run usage across MAIN, delegates, retries, and compaction; delegated usage is already included. '
+        + 'Speeds are server active-time weighted averages over timed tokens, not wall-clock rates. '
+        + (estimated ? 'Token counts prefixed with ~ are historical estimates.' : '')}
       aria-label={`Turn metadata: ${details.join(', ')}`}
     >
       {details.map((detail) => <span key={detail}>{detail}</span>)}

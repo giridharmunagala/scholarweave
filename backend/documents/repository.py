@@ -280,7 +280,7 @@ class DocumentRepository:
                 raise DocumentProcessingError("Paper must be ingested before it can be summarized.")
             rows = session.scalars(
                 select(DocumentChunk).where(DocumentChunk.document_id == document_id)
-                .order_by(DocumentChunk.chunk_index).limit(64)
+                .order_by(DocumentChunk.chunk_index)
             )
             chunks: list[dict[str, Any]] = []
             remaining = max_chars

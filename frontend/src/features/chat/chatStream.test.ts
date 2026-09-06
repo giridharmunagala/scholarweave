@@ -12,6 +12,21 @@ function event(
 }
 
 describe('builder chat streaming', () => {
+  it('retracts only a retried response, including Unicode, identically on replay', () => {
+    const events = [
+      event(1, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'Earlier. ' }),
+      event(2, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'Partial \u{1F4DA}' }),
+      event(3, 'model.retry', { discarded_text_characters: 9 }),
+      event(4, 'model.stream', {
+        raw_type: 'response.output_text.delta', delta: 'Earlier. ', snapshot: true,
+      }),
+      event(5, 'model.retry', { discarded_text_characters: 9, delegated: true }),
+      event(6, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'Complete.' }),
+    ];
+    expect(events.reduce(applyChatStreamEvent, emptyChatStream).assistant).toBe('Earlier. Complete.');
+    expect(restoreChatStream(events).assistant).toBe('Earlier. Complete.');
+  });
+
   it('streams reasoning and assistant text independently', () => {
     const reasoning = applyChatStreamEvent(
       emptyChatStream,

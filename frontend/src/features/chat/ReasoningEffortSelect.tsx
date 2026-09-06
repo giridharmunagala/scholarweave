@@ -55,11 +55,15 @@ export function ReasoningEffortSelect({
   supportedEfforts,
   disabled = false,
   onChange,
+  defaultLabel,
+  ariaLabel = 'Reasoning effort',
 }: {
   value: ReasoningEffort | null;
   supportedEfforts: readonly ReasoningEffort[] | null;
   disabled?: boolean;
   onChange: (value: ReasoningEffort | null) => void;
+  defaultLabel?: string;
+  ariaLabel?: string;
 }) {
   const unavailable = !supportedEfforts?.length;
   const hint = supportedEfforts === null
@@ -77,7 +81,7 @@ export function ReasoningEffortSelect({
         Thinking
       </span>
       <select
-        aria-label="Reasoning effort"
+        aria-label={ariaLabel}
         value={supportedEfforts?.includes(value as ReasoningEffort) ? value ?? '' : ''}
         disabled={disabled || unavailable}
         onChange={(event) => {
@@ -86,9 +90,9 @@ export function ReasoningEffortSelect({
         }}
       >
         <option value="">
-          {supportedEfforts === null
+          {defaultLabel ?? (supportedEfforts === null
             ? 'Not configured'
-            : unavailable ? 'Not supported' : 'Provider default'}
+            : unavailable ? 'Not supported' : 'Provider default')}
         </option>
         {supportedEfforts?.map((effort) => (
           <option value={effort} key={effort}>{EFFORT_LABELS[effort]}</option>

@@ -1,11 +1,11 @@
 {
   "label": "Paper summary checkpoint",
-  "description": "Maintain durable, reusable, source-versioned paper evidence outside run cleanup and separate from user notes. Append cited evidence after each batch; the write is verified before raw text may be discarded. Repeating an identical append is idempotent. Records retain exact read spans and model/prompt provenance. Extraction/source changes invalidate reuse. Read existing evidence on resumption; follow resume_action, resume_start and resume_offset. A final append returns final_checkpoint only when it fits the output budget, otherwise read bounded slices. Complete is true only for contiguous full coverage.",
+  "description": "Maintain durable, reusable, source-versioned paper evidence outside run cleanup and separate from user notes. Append cited evidence after each batch; the write is verified before raw text may be discarded. Repeating an identical append is idempotent. Records retain exact read spans and model/prompt provenance. Extraction/source changes invalidate reuse. Read existing evidence on resumption; follow resume_action, resume_start and resume_offset. A final append returns the full final_checkpoint without a separate output-token cap. Reads honor the requested character limit, or return all remaining evidence when limit is null. Context management archives content only when needed to fit the model's configured context window. Complete is true only for contiguous full coverage.",
   "parameter_descriptions": {
     "document_id": "The exact local document ID being summarized.",
-    "action": "Use append after each paper-read batch, or read to retrieve a bounded checkpoint slice.",
+    "action": "Use append after each paper-read batch, or read to retrieve checkpoint evidence.",
     "content": "For append, provide compact new evidence (usually 100-300 words, more only for dense findings): claims, mechanisms, exact results and conditions, citations, limitations, unresolved questions and unread coverage. Do not copy raw text. Use null for read.",
     "offset": "For read, the zero-based character offset. Start at 0 and follow next_offset. Use null for append.",
-    "limit": "For read, at most 8000 characters. Use null for append."
+    "limit": "For read, a positive character count or null for all remaining evidence. Use null for append."
   }
 }

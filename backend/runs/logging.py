@@ -31,6 +31,15 @@ class RunDetailLogger:
             os.replace(temporary, path)
         return path
 
+    def delete_conversation(self, conversation_id: str) -> None:
+        # Snapshots can outlive their database runs after retention cleanup.
+        with self._lock:
+            for path in self.directory.glob("*.json"):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if payload.get("run", {}).get("conversation_id") == conversation_id:
+                    path.unlink()
+                    path.with_suffix(".json.tmp").unlink(missing_ok=True)
+
 
 def _run_details(record: Any) -> dict[str, Any]:
     events = list(record.events)

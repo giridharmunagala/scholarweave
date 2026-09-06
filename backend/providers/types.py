@@ -50,6 +50,7 @@ class AgentModelDefaults:
     chat: ModelReference | None = None
     embedding: ModelReference | None = None
     vision: ModelReference | None = None
+    compaction: ModelReference | None = None
 
 
 class AgentModelResolver(Protocol):

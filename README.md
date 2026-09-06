@@ -48,9 +48,10 @@ Deep Work uses the same research tools plus three tracker operations:
 - `read_work_plan`
 - `update_work_item`
 
-The run loop feeds open items back to the model and continues in bounded epochs. A run finishes only
-when all items are `completed` or `blocked`, or when the configured epoch, turn, or time budget is
-exhausted. A focused worker remains available for genuinely independent research tracks.
+The run loop feeds open items back to the model and continues across durable checkpoint epochs.
+There is no default total turn, epoch, or elapsed-time ceiling. Completion still requires the work
+plan to be settled; cancellation and genuine provider/tool errors remain visible. A focused worker
+remains available for genuinely independent research tracks.
 
 ### Papers and OCR
 
@@ -75,33 +76,77 @@ explicit effort is requested. Reviewed summaries and ordinary chat retain their 
 Generated evidence is keyed to the source/extraction version and survives run-history cleanup.
 User-authored notes remain separate.
 
-### One GPU and a manually switched llama server
+### One GPU and a hot-swappable llama server
 
 Keep the main model resident for interactive work and occasional summaries. Switching to a smaller
 model is useful only when an entire batch saves more than both model switches and any extra review.
 For example, two 20-second switches add approximately 40 seconds before any net benefit.
 
-For a local provider, enable residency protection in Settings:
+In Settings, each provider has a **One model at a time** option. It defaults on for local
+providers and off for hosted providers:
 
-1. Drain inference before unloading the resident model.
-2. Load the chosen model using your llama server's own controls.
-3. Confirm that model in ScholarWeave; confirmation checks `/v1/models`.
-4. Queue the summary batch with that explicit provider/model.
-5. Drain and confirm the main model again when ready to return.
+- Calls to the same model may run concurrently.
+- Calls to a different model wait until the provider's active responses finish, then proceed
+  automatically. Other providers remain independent.
+- Disable the option when a provider can serve different models concurrently.
 
-ScholarWeave does not load or unload weights, guess a server-control API, automatically swap models,
-or silently run a main-model request on a smaller model. Requests for another model wait visibly.
-Confirmation requires a server advertising exactly the selected resident model; confirmation is
-required again after an application restart. The scheduler gives interactive requests priority at
-request boundaries while still allowing background work to progress.
+Your server manages loading and hot swaps based on the requested model. ScholarWeave never silently
+substitutes a smaller model. `/v1/models` can advertise multiple available models; no manual
+confirmation is needed, including after restarting the application. Old residency protection
+settings no longer pause requests.
 
-Settings also expose a working-input budget, output reserve, and compaction target. Working memory
-is separate from the full transcript: conversation checkpoints are reused across turns instead of
-replaying the entire tool history. Model-assisted compaction is enabled by default to retain
-understanding; disabling it uses deterministic excerpts and may retain less detail.
-The output budget includes a reasoning model's thinking tokens. If generation exhausts that
-budget before producing an answer, increase the response reserve or select a lower supported
-reasoning effort; a truncated response is not a completed research outcome.
+### Long conversations and context
+
+Input capacity follows the selected model's configured context window, with room for generation.
+There are no fixed working-input or tool-output caps. A proportional retention target avoids
+shrinking a large window to a tiny checkpoint. Legacy manual budget settings no longer control
+execution and are not offered in the runtime settings UI.
+
+Under context pressure, older re-readable tool output is moved out of the request first, while
+recent exchanges stay intact. Exact archived history can be retrieved in bounded slices with
+`read_tool_result`; summaries are a last resort for older history, not a replacement for the
+latest interaction. Conversation caches survive run-history cleanup and are removed with the
+conversation. This extends recoverable memory, not the model's physical context window.
+
+Working memory is separate from the full transcript and is reused across turns. Model-assisted
+summarization remains optional; disabling it retains cached history and deterministic excerpts
+rather than a semantic summary.
+
+In **Settings > Models > Context maintenance**, optionally select a smaller local model such as
+`gemma4-12b`. It summarizes older history using its own context capacity and independent reasoning
+settings; unavailable, insufficient-capacity, or failed helpers fall back visibly to the main model.
+Leaving it unset uses the main model directly. A single application-wide inference lane
+serializes all model calls, including chat, summaries, and compaction, across every provider.
+Queued chat calls get priority between responses, with a background turn after three interactive
+admissions when background work is waiting. The server handles hot swaps without manual confirmation.
+Configure the effective per-request
+context, not the training window or total context shared across server slots.
+
+Dedicated paper summaries default to reasoning off when supported, with an explicit reasoning
+selector for single-paper and collection jobs. Their context allowance reserves 10% for safety,
+25% for output, and 65% for input including prompt/tool overhead. Large papers continue through
+durable evidence checkpoints; research-requested summaries use the same isolated serial writer.
+
+Chat displays overall model token consumption separately from the main agent's current context.
+Prefill and generation speeds are server active-time weighted averages, refreshed at most every
+five seconds. They exclude idle/queue/tool time and show as unavailable when the server does not
+provide timing measurements.
+
+The response allowance includes a reasoning model's thinking tokens. If generation reaches it,
+the harness automatically recomputes that unfinished turn with a larger allowance, up to the
+remaining model context. Previously completed tools are not repeated, and incomplete tool calls
+never execute. The display retracts the partial answer and shows **Recomputing response**.
+There is no separate automatic output-token ceiling. Explicit blueprint response limits remain
+explicit limits; a provider response that cannot complete within the available context fails
+honestly rather than being presented as finished research.
+Provider-reported token usage calibrates subsequent estimates. Recognized context-overflow
+rejections trigger tighter context preparation rather than replaying completed research.
+
+Chat, Deep Work, paper summaries, and delegated research have no default total turn or run-time cap.
+Epochs are durability/checkpoint intervals, not conversation limits. Network timeouts still detect
+stalled I/O; there is no whole-tool elapsed-time ceiling.
+Stop-and-answer intentionally requests just one answer.
+Explicitly budgeted custom blueprints can still request a finite turn limit.
 
 ## Setup
 

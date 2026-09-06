@@ -29,6 +29,12 @@ class ToolRuntime(Protocol):
         context: "ScholarWeaveContext",
     ) -> dict[str, Any]: ...
 
+    def store_context_history(
+        self,
+        items: list[dict[str, Any]],
+        context: "ScholarWeaveContext",
+    ) -> dict[str, Any]: ...
+
 
 class RuntimeEventSink(Protocol):
     async def emit(self, event_type: str, payload: dict[str, Any]) -> None: ...

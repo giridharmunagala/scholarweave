@@ -20,7 +20,9 @@ from backend.runs.service import (
     STOP_AND_ANSWER_BLUEPRINT_DESCRIPTION,
     STOP_AND_ANSWER_PROMPT,
     RunService,
+    _persisted_stream_text,
     _restore_pending_steering,
+    _restore_work_plan,
 )
 from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import SteeringMessage
@@ -90,11 +92,12 @@ class BoundingToolRuntime:
         self.calls.append((catalog_id, arguments))
         if catalog_id == "tool.results.read":
             return {"content": "Targeted retained evidence.", "has_more": False}
-        return {
+        result = {
             "id": "source-1",
             "url": "https://example.com/source-1",
             "text": "do-not-forward-raw-content " * 1_000,
         }
+        return await self.bound_tool_result(catalog_id, result, context)
 
     async def bound_tool_result(
         self,
@@ -136,6 +139,65 @@ def blocking_binding(started: asyncio.Event) -> ModelBinding:
 @pytest.fixture
 def anyio_backend() -> str:
     return "asyncio"
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+@pytest.mark.parametrize("discarded", [5, 100, 0, -1, True, 1.5, "5", None])
+def test_replayed_retry_discards_only_the_owner_partial_assistant_suffix(delegated, discarded):
+    events = [
+        SimpleNamespace(
+            event_type="model.stream",
+            payload_json={"raw_type": "response.reasoning_text.delta", "delta": "Reasoning"},
+        ),
+        SimpleNamespace(
+            event_type="model.stream",
+            payload_json={
+                "raw_type": "response.output_text.delta",
+                "delta": "Committed. 🧠oops",
+                "snapshot": True,
+            },
+        ),
+        SimpleNamespace(
+            event_type="model.retry",
+            payload_json={"discarded_text_characters": discarded, "delegated": delegated},
+        ),
+    ]
+    expected = "Committed. 🧠oops"
+    if not delegated and type(discarded) is int and discarded > 0:
+        expected = expected[:-discarded]
+    assert _persisted_stream_text(events) == ("Reasoning", expected)
+    events.append(SimpleNamespace(
+        event_type="model.stream",
+        payload_json={
+            "raw_type": "response.output_text.delta", "delta": "Final snapshot", "snapshot": True,
+        },
+    ))
+    assert _persisted_stream_text(events) == ("Reasoning", "Final snapshot")
+
+
+@pytest.mark.parametrize("status", ["in_progress", "completed", "blocked"])
+def test_recovery_restores_latest_successful_work_plan_without_replaying_tools(status):
+    pending = {"id": "research", "title": "Research", "status": "pending", "summary": ""}
+    latest = {**pending, "status": status, "summary": "Durable findings."}
+    attempts = [
+        SimpleNamespace(
+            catalog_id="work.plan.create", status="completed", result_json={"items": [pending]},
+        ),
+        SimpleNamespace(
+            catalog_id="work.plan.update", status="completed", result_json={"items": [latest]},
+        ),
+        SimpleNamespace(
+            catalog_id="work.plan.update", status="failed", result_json={"items": [pending]},
+        ),
+        SimpleNamespace(
+            catalog_id="research.notes.save", status="completed", result_json={"items": []},
+        ),
+    ]
+    metadata = {}
+    _restore_work_plan(metadata, attempts)
+    assert metadata["work_plan"] == [latest]
+    metadata["work_plan"][0]["summary"] = "New work"
+    assert latest["summary"] == "Durable findings."
 
 
 def test_tool_failure_state_restores_by_logical_call_and_success_resets_it() -> None:
@@ -188,13 +250,21 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
     settings = Settings(
         data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
         database_path=tmp_path / "metadata.sqlite3",
-        agent_context_window_tokens=128_000,
+        agent_context_window_tokens=32_768,
         agent_context_model_summary_enabled=False,
     )
     settings.ensure_directories()
     storage = SafeStorage(settings)
 
     class CheckpointRuntime(ToolRuntime):
+        def store_context_history(self, items, context):
+            stored = storage.write_json(
+                settings.artifacts_dir,
+                f"conversations/{context.conversation_id}/history.json",
+                items,
+            )
+            return {"result_ref": stored.relative_path}
+
         def store_context_checkpoint(self, checkpoint, context):
             stored = storage.write_json(
                 settings.artifacts_dir, f"runs/{context.run_id}/checkpoint.json", checkpoint
@@ -205,7 +275,13 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
     compiled = AgentCompiler(Resolver(binding), create_tool_catalog(), settings=settings).compile(
         AgentBlueprint.model_validate({
             "name": "Researcher", "entry_agent_id": "researcher",
-            "agents": [{"id": "researcher", "name": "Researcher", "instructions": "Answer."}],
+            "agents": [{
+                "id": "researcher", "name": "Researcher", "instructions": "Answer.",
+                "tool_ids": ["context-reader"],
+            }],
+            "tools": [{
+                "id": "context-reader", "kind": "function", "catalog_id": "tool.results.read",
+            }],
         })
     )
     repository = RunRepository(create_session_factory(settings))
@@ -221,6 +297,10 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
             "citation": "https://example.com/study#p2",
             "text": "Measured accuracy was 91% [p.2].",
         }},
+        {"role": "user", "content": "Check the method."},
+        {"role": "assistant", "content": "The method used held-out evaluation."},
+        {"role": "user", "content": "Check the scope."},
+        {"role": "assistant", "content": "The study evaluated the benchmark dataset."},
     ]
     await session.add_items(original)
     service = RunService(
@@ -251,9 +331,10 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
     assert original[0] in stub_provider.requests[-1]["messages"]
     assert original[1] not in stub_provider.requests[-1]["messages"]
     assert "Measured accuracy was 91%" in json.dumps(stub_provider.requests[-1]["messages"])
-    assert "references and checkpoint artifacts may expire" in str(
-        stub_provider.requests[-1]["messages"]
-    )
+    instructions = stub_provider.requests[-1]["messages"][0]["content"]
+    assert "conversations/ survive run cleanup" in instructions
+    assert "may expire during run cleanup" in instructions
+    assert "with read_tool_result" in instructions
     assert stub_provider.requests[-1]["max_tokens"] == 2048
     assert original[1] in await reopened.get("conversation-1", compiled.blueprint.session).get_items()
     await service.close()
@@ -561,6 +642,8 @@ async def test_failed_completion_preserves_user_message_for_next_turn(
         conversation_id="conversation-1",
     )
     assert first.status == "completed"
+    assert compiled.max_turns is None
+    assert first.blueprint_json["run"]["max_turns"] is None
 
     def reject_completion(_context) -> None:
         raise ValueError("Completion rejected.")
@@ -575,6 +658,7 @@ async def test_failed_completion_preserves_user_message_for_next_turn(
         conversation_id="conversation-1",
     )
     assert rejected.status == "failed"
+    assert rejected.blueprint_json["run"]["max_turns"] is None
 
     third = await service.run_now(
         compiled,
@@ -582,6 +666,7 @@ async def test_failed_completion_preserves_user_message_for_next_turn(
         conversation_id="conversation-1",
     )
     assert third.status == "completed"
+    assert third.blueprint_json["run"]["max_turns"] is None
 
     third_request_messages = stub_provider.requests[2]["messages"]
     assert any(
@@ -907,6 +992,7 @@ async def test_real_tool_loop_receives_bounded_output_and_reads_retained_result(
         workspace_dir=tmp_path / "workspace",
         database_path=tmp_path / "metadata.sqlite3",
         tool_result_max_tokens=512,
+        agent_context_use_model_window=False,
     )
     compiled = AgentCompiler(
         Resolver(binding),

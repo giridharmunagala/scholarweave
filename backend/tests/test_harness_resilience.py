@@ -6,10 +6,13 @@ import threading
 import time
 from dataclasses import replace
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 from backend.agents.blueprint import AgentBlueprint
 from backend.agents.compiler import AgentCompiler
+from backend.agents.harness import ModelBinding
 from backend.core.config import Settings
 from backend.utils import utcnow
 from backend.persistence import create_session_factory
@@ -20,6 +23,7 @@ from backend.runs.service import LeaseDeadline, RunService, _continuation_instru
 from backend.agents.context import ScholarWeaveContext
 from backend.conversations.sessions import ConversationSessionFactory
 from backend.providers.inference import InferenceScheduler
+from backend.providers.logging import ScheduledTransport
 from backend.tests.harness_support import stub_binding
 from backend.tools.catalog import create_tool_catalog
 
@@ -57,7 +61,7 @@ class _ToolRuntime:
         return {"documents": []}
 
 
-def _compiled(model, settings: Settings, *, max_turns: int = 20):
+def _compiled(model, settings: Settings, *, max_turns: int | None = None):
     return AgentCompiler(
         _Resolver(model),
         create_tool_catalog(),
@@ -144,12 +148,72 @@ async def test_supervisor_continues_across_bounded_epochs(tmp_path, stub_provide
 
 
 @pytest.mark.anyio
-async def test_startup_recovery_abandons_interrupted_epoch(tmp_path, stub_provider) -> None:
+async def test_unlimited_run_continues_past_turn_and_legacy_epoch_caps(
+    tmp_path, stub_provider,
+) -> None:
+    stub_provider.tool_plans = [
+        (
+            "extended research",
+            "search_research_library",
+            {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
+        )
+    ] * 20
+    model = stub_binding(stub_provider)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+        agent_epoch_max_turns=2,
+        agent_max_epochs=1,
+    )
+    settings.ensure_directories()
+    runtime = _ToolRuntime()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        runtime,
+        EventBroker(),
+        settings=settings,
+    )
+    compiled = _compiled(model, settings)
+    assert compiled.max_turns is None
+    try:
+        run = await service.run_now(
+            compiled,
+            "Complete this extended research.",
+            conversation_id="conversation-1",
+        )
+    finally:
+        await service.close()
+        await model.client.close()
+
+    assert run.status == "completed", run.error
+    assert len(stub_provider.requests) == 21
+    assert len(runtime.calls) == 20
+    assert [epoch.terminal_reason for epoch in run.epochs] == [
+        *(["turn_boundary"] * 10),
+        "goal_completed",
+    ]
+    assert sum(int(epoch.usage_json["model_turns"]) for epoch in run.epochs) == 21
+    starts = [event for event in run.events if event.event_type == "run.epoch.started"]
+    assert len(starts) == 11
+    assert all(event.payload_json["max_epochs"] is None for event in starts)
+    assert all(event.payload_json["remaining_run_turns"] is None for event in starts)
+    assert all(event.payload_json["max_turns"] == 2 for event in starts)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("prior_turns", [0, 16])
+@pytest.mark.parametrize("autonomous_work", [False, True])
+async def test_startup_recovery_abandons_interrupted_epoch(
+    tmp_path, stub_provider, prior_turns, autonomous_work,
+) -> None:
     model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
         database_path=tmp_path / "metadata.sqlite3",
+        agent_max_epochs=1,
     )
     settings.ensure_directories()
     repository = RunRepository(create_session_factory(settings))
@@ -159,9 +223,40 @@ async def test_startup_recovery_abandons_interrupted_epoch(tmp_path, stub_provid
         agent_name=compiled.blueprint.name,
         input_value="Original goal",
         blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
+        runtime_metadata={"autonomous_work": autonomous_work},
     )
     repository.mark_running(record.id)
-    repository.begin_epoch(record.id, "Original goal")
+    assert record.blueprint_json["run"]["max_turns"] is None
+    if prior_turns:
+        completed = repository.begin_epoch(record.id, "Earlier work")
+        repository.finish_epoch(
+            completed.id,
+            status="completed",
+            terminal_reason="turn_boundary",
+            usage={"model_turns": prior_turns},
+        )
+    interrupted_epoch = repository.begin_epoch(record.id, "Original goal")
+    if autonomous_work:
+        plan_attempt = repository.begin_tool_attempt(
+            run_id=record.id,
+            epoch_id=interrupted_epoch.id,
+            tool_call_id="plan-complete",
+            catalog_id="work.plan.update",
+            attempt=1,
+            arguments={"id": "research", "status": "completed", "summary": "Saved the findings."},
+        )
+        repository.finish_tool_attempt(
+            plan_attempt.id,
+            status="completed",
+            result={
+                "items": [{
+                    "id": "research", "title": "Research", "status": "completed",
+                    "summary": "Saved the findings.",
+                }],
+                "pending": [],
+                "complete": True,
+            },
+        )
     invalid = repository.create(
         conversation_id=None,
         agent_name="Invalid recovery",
@@ -186,7 +281,10 @@ async def test_startup_recovery_abandons_interrupted_epoch(tmp_path, stub_provid
         await asyncio.sleep(0.01)
 
     assert recovered.status == "completed", recovered.error
-    assert recovered.epochs[0].status == "abandoned"
+    assert recovered.epochs[-2].status == "abandoned"
+    assert recovered.epochs[-1].terminal_reason == "goal_completed"
+    assert repository.consumed_model_turns(record.id) == prior_turns + 1
+    assert len(stub_provider.requests) == 1
     assert any(event.event_type == "run.recovered" for event in recovered.events)
     assert service.get(invalid.id).status == "failed"
     await service.close()
@@ -723,7 +821,6 @@ async def test_expired_preclaim_is_rejected_before_execution(
         compiled,
         "recover",
         conversation_id=None,
-        deadline=asyncio.get_running_loop().time() + 1,
         preclaimed=True,
         lease_deadline=LeaseDeadline(
             lease,
@@ -842,11 +939,43 @@ async def test_standalone_recovery_restores_execution_contract_and_sdk_session(
 
 
 @pytest.mark.anyio
-async def test_run_deadline_includes_waiting_for_exclusive_local_inference(
+async def test_active_stream_outlives_legacy_run_timeout(tmp_path, stub_provider) -> None:
+    stub_provider.stream_delay_seconds = 0.03
+    stub_provider.reply = "A complete answer after the former lifetime deadline."
+    model = stub_binding(stub_provider)
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        workspace_dir=tmp_path / "workspace",
+        database_path=tmp_path / "metadata.sqlite3",
+    )
+    settings.agent_run_timeout_seconds = 0.01
+    settings.ensure_directories()
+    service = RunService(
+        RunRepository(create_session_factory(settings)),
+        ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
+        _ToolRuntime(),
+        EventBroker(),
+        settings=settings,
+    )
+    try:
+        run = await asyncio.wait_for(
+            service.run_now(_compiled(model, settings), "Finish the answer."),
+            timeout=5,
+        )
+        assert run.status == "completed", run.error
+        assert run.final_output_json == stub_provider.reply
+        assert len(stub_provider.requests) == 1
+        assert not any(event.event_type == "run.failed" for event in run.events)
+    finally:
+        await service.close()
+        await model.client.close()
+
+
+@pytest.mark.anyio
+async def test_run_waits_for_provider_model_switch_without_lifetime_deadline(
     tmp_path,
     stub_provider,
 ) -> None:
-    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -855,6 +984,19 @@ async def test_run_deadline_includes_waiting_for_exclusive_local_inference(
     settings.agent_run_timeout_seconds = 0.05
     settings.ensure_directories()
     scheduler = InferenceScheduler()
+    scheduler.configure("local", serialize_model_switches=True)
+    model = ModelBinding(
+        client=AsyncOpenAI(
+            api_key="test",
+            base_url=f"{stub_provider.base_url}/v1",
+            http_client=httpx.AsyncClient(
+                transport=ScheduledTransport(httpx.AsyncHTTPTransport(), scheduler, "local"),
+            ),
+        ),
+        model_name="stub-model",
+        provider_kind="ollama",
+        local_inference=True,
+    )
     repository = RunRepository(create_session_factory(settings))
     service = RunService(
         repository,
@@ -876,23 +1018,35 @@ async def test_run_deadline_includes_waiting_for_exclusive_local_inference(
         ),
     )
 
-    async with scheduler.request():
-        run = service.create(compiled, "Queued work", conversation_id=None)
-        await asyncio.sleep(0.1)
+    try:
+        async with scheduler.request(profile_id="local", model="other"):
+            run = service.create(compiled, "Queued work", conversation_id=None)
+            execution = service._tasks[run.id]
+            async with asyncio.timeout(5):
+                while not scheduler.snapshot()["queue"]:
+                    await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
+            assert service.get(run.id).status == "running"
+            assert stub_provider.requests == []
+            assert scheduler.snapshot()["queue"]
 
-    failed = service.get(run.id)
-    assert failed.status == "failed"
-    assert "deadline" in (failed.error or "")
-    await service.close()
-    await model.client.close()
+        await asyncio.wait_for(execution, timeout=5)
+        completed = service.get(run.id)
+        assert completed.status == "completed", completed.error
+        assert scheduler.snapshot()["queue"] == []
+        assert len(stub_provider.requests) == 1
+    finally:
+        await service.close()
+        await model.client.close()
 
 
 @pytest.mark.anyio
-async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
+@pytest.mark.parametrize("local_inference", [False, True])
+async def test_legacy_exclusive_run_waits_for_global_lane_without_nested_lease(
     tmp_path,
     stub_provider,
+    local_inference,
 ) -> None:
-    model = stub_binding(stub_provider, local_inference=True)
     settings = Settings(
         data_dir=tmp_path / "data",
         workspace_dir=tmp_path / "workspace",
@@ -900,6 +1054,19 @@ async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
     )
     settings.ensure_directories()
     scheduler = InferenceScheduler()
+    scheduler.configure("local", serialize_model_switches=True)
+    model = ModelBinding(
+        client=AsyncOpenAI(
+            api_key="test",
+            base_url=f"{stub_provider.base_url}/v1",
+            http_client=httpx.AsyncClient(
+                transport=ScheduledTransport(httpx.AsyncHTTPTransport(), scheduler, "local"),
+            ),
+        ),
+        model_name="stub-model",
+        provider_kind="ollama" if local_inference else "openai_compatible",
+        local_inference=local_inference,
+    )
     service = RunService(
         RunRepository(create_session_factory(settings)),
         ConversationSessionFactory(tmp_path / "sdk-sessions.sqlite3"),
@@ -909,7 +1076,6 @@ async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
         inference_scheduler=scheduler,
     )
     compiled = _compiled(model, settings)
-    entry_id = compiled.blueprint.entry_agent_id
     compiled = replace(
         compiled,
         blueprint=compiled.blueprint.model_copy(
@@ -919,22 +1085,21 @@ async def test_exclusive_hosted_run_bypasses_local_inference_scheduler(
                 )
             }
         ),
-        resolved_models={
-            entry_id: replace(
-                compiled.resolved_models[entry_id],
-                provider_kind="openai_compatible",
-                local_inference=False,
-            )
-        },
     )
 
-    async with scheduler.request():
-        run = await asyncio.wait_for(
+    async with scheduler.request(profile_id="local", model="stub-model"):
+        pending = asyncio.create_task(
             service.run_now(compiled, "Hosted work", conversation_id=None),
-            timeout=3,
         )
+        async with asyncio.timeout(3):
+            while not scheduler.snapshot()["queue"]:
+                await asyncio.sleep(0.01)
+        assert not pending.done()
+        assert scheduler.snapshot()["active_requests"] == 1
 
+    run = await asyncio.wait_for(pending, timeout=3)
     assert run.status == "completed", run.error
+    assert scheduler.snapshot()["active_requests"] == 0
     await service.close()
     await model.client.close()
 
@@ -996,9 +1161,21 @@ async def test_claim_releases_and_run_fails_when_claimed_setup_raises(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("max_turns", "max_epochs", "error", "epochs", "turns"),
+    [
+        (2, 10, "exhausted its 2-turn budget", 1, 2),
+        (20, 1, None, 2, 4),
+    ],
+)
 async def test_epoch_continuation_respects_total_blueprint_turn_budget(
     tmp_path,
     stub_provider,
+    max_turns,
+    max_epochs,
+    error,
+    epochs,
+    turns,
 ) -> None:
     stub_provider.tool_plans = [
         (
@@ -1023,7 +1200,7 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
         workspace_dir=tmp_path / "workspace",
         database_path=tmp_path / "metadata.sqlite3",
         agent_epoch_max_turns=2,
-        agent_max_epochs=10,
+        agent_max_epochs=max_epochs,
     )
     settings.ensure_directories()
     service = RunService(
@@ -1035,15 +1212,21 @@ async def test_epoch_continuation_respects_total_blueprint_turn_budget(
     )
 
     run = await service.run_now(
-        _compiled(model, settings, max_turns=2),
+        _compiled(model, settings, max_turns=max_turns),
         "Work on this bounded goal.",
         conversation_id="conversation-1",
     )
 
-    assert run.status == "failed"
-    assert "exhausted its 2-turn budget" in (run.error or "")
-    assert len(run.epochs) == 1
-    assert sum(int(epoch.usage_json["model_turns"]) for epoch in run.epochs) == 2
+    assert run.status == ("failed" if error else "completed"), run.error
+    if error:
+        assert error in (run.error or "")
+    assert len(run.epochs) == epochs
+    assert sum(int(epoch.usage_json.get("model_turns", 0)) for epoch in run.epochs) == turns
+    assert all(
+        event.payload_json["max_epochs"] is None
+        for event in run.events if event.event_type == "run.epoch.started"
+    )
+    await service.close()
     await model.client.close()
 
 
@@ -1083,7 +1266,7 @@ async def test_queued_run_can_be_cancelled_before_model_start(
 
 
 @pytest.mark.anyio
-async def test_tool_results_are_bounded_and_attempts_are_journaled(
+async def test_tool_results_are_preserved_and_attempts_are_journaled(
     test_settings,
     monkeypatch,
 ) -> None:
@@ -1118,12 +1301,13 @@ async def test_tool_results_are_bounded_and_attempts_are_journaled(
             tool_call_id="call-1",
         )
 
-        assert result["truncated"] is True
-        assert result["result_ref"]
+        assert result == {"items": ["large result " * 1000]}
         stored = services.runs.get(run.id)
         assert len(stored.tool_attempts) == 1
         assert stored.tool_attempts[0].status == "completed"
-        assert stored.tool_attempts[0].result_ref == result["result_ref"]
+        assert stored.tool_attempts[0].result_json == result
+        assert stored.tool_attempts[0].result_ref is None
+        assert not (test_settings.artifacts_dir / "runs" / run.id / "tool-results").exists()
     finally:
         await services.close()
 

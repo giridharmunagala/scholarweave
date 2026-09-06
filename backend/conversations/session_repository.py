@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Generator
+
+logger = logging.getLogger(__name__)
 
 
 class SessionRepository:
@@ -89,7 +92,15 @@ class SessionRepository:
                     try:
                         value = json.loads(row[1])
                         if isinstance(value, list) and all(isinstance(v, dict) for v in value):
-                            cursor, prefix = row[0], value
+                            legacy_checkpoint = any(
+                                item.get("_scholarweave_context_checkpoint") is True
+                                and item.get("_scholarweave_context_policy_version") != 2
+                                for item in value
+                            )
+                            if legacy_checkpoint:
+                                logger.info("Rebuilding legacy compacted context from canonical session history.")
+                            else:
+                                cursor, prefix = row[0], value
                     except json.JSONDecodeError:
                         pass
             rows = connection.execute(

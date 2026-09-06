@@ -424,4 +424,4 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     )
     assert {agent.id for agent in autonomous.agents} == {"researcher"}
     assert {"save-note", "save-summary"}.issubset(autonomous.agents[0].tool_ids)
-    assert autonomous.run.max_turns == 16
+    assert autonomous.run.max_turns is None

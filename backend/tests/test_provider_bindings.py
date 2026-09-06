@@ -160,6 +160,32 @@ async def test_every_provider_kind_binds_one_chat_completions_client() -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("declared", "expected"), [
+    (["high", "none"], ("none", "high")),
+    (["low", "medium", "high"], ("low", "medium", "high")),
+    ([], ()),
+    (None, None),
+])
+async def test_profile_declared_reasoning_levels_reach_model_binding(test_settings, declared, expected) -> None:
+    from backend.bootstrap import create_services
+    from backend.providers.schemas import ProviderCreate, ProviderModel
+
+    services = create_services(test_settings)
+    try:
+        profile = services.providers.create(ProviderCreate(
+            name="Local helper", kind="openai_compatible", base_url="http://127.0.0.1:9999/v1",
+            models=[ProviderModel(
+                name="gemma4-12b", reasoning_efforts=declared, context_window_tokens=65536,
+            )],
+        ))
+        binding = services.model_resolver.resolve_agent_model(ModelReference(profile.id, "gemma4-12b"))
+        assert binding.reasoning_efforts == expected
+        assert binding.context_window_tokens == 65536
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
 async def test_client_pool_retires_invalidated_clients_until_safe_shutdown() -> None:
     class Client:
         def __init__(self) -> None:
@@ -200,7 +226,7 @@ async def test_client_pool_retires_invalidated_clients_until_safe_shutdown() -> 
 
 
 @pytest.mark.anyio
-async def test_only_local_provider_clients_use_inference_scheduler(
+async def test_every_provider_client_uses_its_configurable_inference_scheduler(
     monkeypatch,
 ) -> None:
     scheduler = InferenceScheduler()
@@ -245,7 +271,7 @@ async def test_only_local_provider_clients_use_inference_scheduler(
         for kind, base_url in profiles
     ]
 
-    assert observed == [None, None, None, scheduler, scheduler, None]
+    assert observed == [scheduler] * len(profiles)
     for client in clients:
         await client.close()
 

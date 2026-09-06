@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { RUN_EVENT_TYPES } from '../../api/events';
 
 /**
  * Long research turns emit several assistant messages and a burst of tool calls, and later
@@ -272,6 +273,7 @@ class FakeEventSource {
 
 const SETTINGS = {
   agent_context_window_tokens: 32768,
+  agent_context_use_model_window: true,
   default_model_references: {
     chat: { provider_profile_id: 'p1', model: 'gemini' },
   },
@@ -672,7 +674,7 @@ describe('chat transcript detail', () => {
         sequence: 1,
         event_type: 'context.prepared',
         payload: {
-          agent_name: 'Researcher',
+          agent_name: 'ScholarWeave autonomous agent',
           estimated_input_tokens: 5600,
           input_budget_tokens: 12000,
           tool_schema_tokens: 3400,
@@ -705,6 +707,302 @@ describe('chat transcript detail', () => {
     });
     await flush(2);
     expect(text(indicator())).toContain('Context compacted · ~6,000 / 12,000');
+  });
+
+  it.each([
+    { delegated: true },
+    { context_scope: 'delegate' },
+    { context_scope: 'compaction' },
+    { agent_id: 'worker' },
+    { agent_name: 'Worker' },
+  ])('keeps MAIN context separate from other calls: %j', async (identity) => {
+    expect(RUN_EVENT_TYPES).toContain('model.telemetry');
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    const source = server.listeners.get('run-1');
+    let sequence = 0;
+    const deliver = (event_type: string, payload: Record<string, unknown>) => {
+      source?.deliver({ sequence: ++sequence, event_type, payload });
+    };
+    await act(async () => {
+      deliver('context.prepared', {
+        estimated_input_tokens: 5600, input_budget_tokens: 12000,
+        context_window_tokens: 16384,
+        agent_id: 'main', context_scope: 'main',
+      });
+      deliver('model.telemetry', {
+        model_call_id: 'main-1', agent_id: 'main', context_scope: 'main',
+        agent_name: 'ScholarWeave autonomous agent',
+        completed: true, finish_reason: 'tool_calls',
+        usage: { input_tokens: 5500, output_tokens: 20 },
+      });
+    });
+    await flush(2);
+    const indicator = () => container.querySelector('.compaction-indicator');
+    expect(text(indicator())).toBe('Context 5,520 / 16,384');
+    expect(indicator()?.getAttribute('title')).toContain('5,500 input + 20 generated');
+    for (const event_type of [
+      'context.prepared', 'context.sized', 'context.compaction_started',
+      'context.compacted', 'context.compaction_failed', 'model.telemetry', 'model.retry',
+    ]) {
+      await act(async () => {
+        deliver(event_type, {
+          agent_id: 'main', agent_name: 'ScholarWeave autonomous agent', ...identity,
+          estimated_input_tokens: 999, input_budget_tokens: 1000,
+          context_window_tokens: 2000, completed: true, finish_reason: 'stop',
+          usage: { input_tokens: 999, output_tokens: 999 },
+        });
+      });
+      await flush(2);
+      expect(text(indicator())).toBe('Context 5,520 / 16,384');
+    }
+    await act(async () => {
+      deliver('usage.updated', {
+        performance: {
+          input_tokens: 16000, output_tokens: 400, model_calls: 5,
+          delegated_input_tokens: 5000, delegated_output_tokens: 100,
+          timing_source: 'server', prompt_tokens_per_second: 120,
+          generation_tokens_per_second: 40, usage_complete: false,
+        },
+      });
+    });
+    await flush(2);
+    expect(text(indicator())).toBe('Context 5,520 / 16,384');
+    const metadata = container.querySelector('.turn-metadata');
+    expect(text(metadata)).toContain('Overall16K in400 out5 calls');
+    expect(text(metadata)).toContain('Usage incomplete');
+    expect(text(metadata)).toContain('120 tok/s prompt');
+    expect(metadata?.getAttribute('title')).toContain('MAIN, delegates, retries, and compaction');
+    await act(async () => {
+      deliver('context.prepared', {
+        agent_id: 'main', estimated_input_tokens: 6000, input_budget_tokens: 12000,
+      });
+      deliver('model.telemetry', {
+        agent_id: 'main', model_call_id: 'main-2', context_scope: 'main', usage: null,
+        completed: true, finish_reason: 'stop',
+      });
+      deliver('model.telemetry', {
+        agent_id: 'main', model_call_id: 'main-3', context_scope: 'main',
+        usage: { input_tokens: 0, output_tokens: 0 }, usage_complete: false,
+        completed: true, finish_reason: 'stop',
+      });
+    });
+    await flush(2);
+    expect(text(indicator())).toBe('Context ~6,000 / 12,000');
+  });
+
+  it.each(['agent.started', 'context.prepared', 'model.telemetry'])(
+    'resolves the coordinator independently of blueprint name from %s',
+    async (firstEventType) => {
+      const run = server.startRun(TURNS[0].input);
+      run.status = 'completed';
+      run.agent_name = 'ScholarWeave deep work';
+      run.events = [
+        { sequence: 1, event_type: 'agent.started', payload: {
+          agent_name: 'Early Worker', agent_id: 'worker', delegated: true,
+        } },
+        { sequence: 2, event_type: 'model.telemetry', payload: {
+          agent_name: 'Context summarizer', agent_id: 'main:compaction',
+          context_scope: 'compaction', completed: true,
+          usage: { input_tokens: 99999, output_tokens: 100 },
+        } },
+        { sequence: 3, event_type: firstEventType, payload: {
+          agent_name: 'Deep Work Coordinator',
+          ...(firstEventType === 'model.telemetry' ? { agent_id: 'main' } : {}),
+        } },
+        { sequence: 4, event_type: 'context.prepared', payload: {
+          agent_name: 'Deep Work Coordinator',
+          estimated_input_tokens: 5500, input_budget_tokens: 12000,
+          context_window_tokens: 16384,
+        } },
+        { sequence: 5, event_type: 'model.telemetry', payload: {
+          agent_name: 'Deep Work Coordinator', agent_id: 'main', context_scope: 'main',
+          completed: true, finish_reason: 'tool_calls', usage_complete: true,
+          usage: { input_tokens: 5400, output_tokens: 100 },
+        } },
+        { sequence: 6, event_type: 'context.prepared', payload: {
+          agent_name: 'Research Worker', delegated: true,
+          estimated_input_tokens: 9900, input_budget_tokens: 10000,
+        } },
+        { sequence: 7, event_type: 'model.telemetry', payload: {
+          agent_name: 'Research Worker', agent_id: 'worker', context_scope: 'delegate',
+          completed: true, usage_complete: true,
+          usage: { input_tokens: 9900, output_tokens: 100 },
+        } },
+        { sequence: 8, event_type: 'context.prepared', payload: {
+          agent_name: 'Deep Work Coordinator', agent_id: 'other',
+          estimated_input_tokens: 9900, input_budget_tokens: 10000,
+        } },
+      ];
+      server.sessionItems = [
+        { id: 'u1', role: 'user', type: 'message', text: TURNS[0].input },
+        { id: 'a1', role: 'assistant', type: 'message', text: 'Answer' },
+      ];
+      const { default: ChatPage } = await import('./ChatPage');
+      await mount(ChatPage as () => JSX.Element);
+      const indicator = container.querySelector('.compaction-indicator');
+      expect(text(indicator)).toBe('Context 5,500 / 16,384');
+      expect(indicator?.getAttribute('title')).toContain('5,400 input + 100 generated');
+    },
+  );
+
+  it.each([undefined, 0, 'invalid', 16384])('restores full MAIN usage with context capacity %s, never input budget', async (capacity) => {
+    const run = server.startRun(TURNS[0].input);
+    run.status = 'completed';
+    run.usage = {
+      performance: {
+        input_tokens: 16000, output_tokens: 400,
+        prompt_tokens_per_second: 999, generation_tokens_per_second: 888,
+      },
+    };
+    run.events = [
+      { sequence: 1, event_type: 'context.prepared', payload: {
+        estimated_input_tokens: 5500, input_budget_tokens: 12000,
+        context_window_tokens: capacity,
+      } },
+      { sequence: 2, event_type: 'model.telemetry', payload: {
+        context_scope: 'main', usage: { input_tokens: 5400, output_tokens: 100 },
+        completed: true, finish_reason: 'stop',
+      } },
+      { sequence: 3, event_type: 'model.telemetry', payload: {
+        context_scope: 'compaction', usage: { input_tokens: 9000, output_tokens: 1000 },
+        completed: true, finish_reason: 'stop',
+      } },
+      { sequence: 4, event_type: 'usage.updated', payload: {
+        performance: {
+          input_tokens: 1000, output_tokens: 100, timing_source: 'server',
+          prompt_tokens_per_second: 100, generation_tokens_per_second: 20,
+        },
+      } },
+    ];
+    server.sessionItems = [
+      { id: 'u1', role: 'user', type: 'message', text: TURNS[0].input },
+      { id: 'a1', role: 'assistant', type: 'message', text: 'Answer' },
+    ];
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const indicator = container.querySelector('.compaction-indicator');
+    expect(text(indicator)).toBe(capacity === 16384 ? 'Context 5,500 / 16,384' : 'Context 5,500');
+    expect(indicator?.getAttribute('title')).toContain('5,400 input + 100 generated');
+    const metadata = text(container.querySelector('.turn-metadata'));
+    expect(metadata).toContain('Overall16K in400 out');
+    expect(metadata).toContain('Prompt speed unavailable');
+    expect(metadata).toContain('Generation speed unavailable');
+    expect(metadata).not.toContain('tok/s');
+  });
+
+  it('ignores discarded and incomplete attempts for MAIN context without dropping overall spend', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    const source = server.listeners.get('run-1');
+    let sequence = 0;
+    const deliver = (event_type: string, payload: Record<string, unknown>) => {
+      source?.deliver({ sequence: ++sequence, event_type, payload });
+    };
+    await act(async () => {
+      deliver('context.prepared', {
+        estimated_input_tokens: 1500, input_budget_tokens: 3000, context_window_tokens: 4096,
+      });
+      deliver('model.telemetry', {
+        model_call_id: 'main-1', context_scope: 'main',
+        completed: true, finish_reason: 'stop', usage_complete: true,
+        usage: { input_tokens: 1400, output_tokens: 200 },
+      });
+    });
+    await flush(2);
+    const indicator = () => container.querySelector('.compaction-indicator');
+    expect(text(indicator())).toBe('Context 1,600 / 4,096');
+    const attempts = [
+      { completed: false },
+      { finish_reason: 'length' },
+      { completed: undefined },
+      { usage: { input_tokens: 1800 } },
+      { usage_complete: false, usage: { input_tokens: 0, output_tokens: 0 } },
+    ];
+    for (const [index, attempt] of attempts.entries()) {
+      await act(async () => {
+        deliver('model.telemetry', {
+          model_call_id: `attempt-${index}`, context_scope: 'main',
+          completed: true, finish_reason: 'stop', usage_complete: true,
+          usage: { input_tokens: 1800, output_tokens: 500 }, ...attempt,
+        });
+        deliver('usage.updated', {
+          performance: {
+            input_tokens: 3200, output_tokens: 700, model_calls: index + 2,
+            usage_complete: false,
+          },
+        });
+      });
+      await flush(2);
+      expect(text(indicator())).toBe('Context 1,600 / 4,096');
+      expect(text(container.querySelector('.turn-metadata'))).toContain('Overall3.2K in700 out');
+      expect(text(container.querySelector('.turn-metadata'))).toContain(`${index + 2} calls`);
+    }
+    await act(async () => {
+      deliver('context.prepared', { estimated_input_tokens: 2000, input_budget_tokens: 3000 });
+      deliver('model.telemetry', {
+        context_scope: 'main', completed: true, finish_reason: 'length',
+        usage: { input_tokens: 1800, output_tokens: 500 },
+      });
+    });
+    await flush(2);
+    expect(text(indicator())).toBe('Context ~2,000 / 3,000');
+    await act(async () => {
+      deliver('model.telemetry', {
+        context_scope: 'main', completed: true, finish_reason: 'stop',
+        usage: { input_tokens: 1900, output_tokens: 300 },
+      });
+    });
+    await flush(2);
+    expect(text(indicator())).toBe('Context 2,200');
+  });
+
+  it.each([0, 150])('labels incomplete usage with %s known input tokens without misleading zeros', async (inputTokens) => {
+    const run = server.startRun(TURNS[0].input);
+    run.status = 'completed';
+    run.usage = {
+      performance: {
+        input_tokens: inputTokens, output_tokens: 0, usage_complete: false, model_calls: 2,
+      },
+    };
+    server.sessionItems = [
+      { id: 'u1', role: 'user', type: 'message', text: TURNS[0].input },
+      { id: 'a1', role: 'assistant', type: 'message', text: 'Answer' },
+    ];
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const metadata = text(container.querySelector('.turn-metadata'));
+    expect(metadata).toContain(inputTokens === 0 ? 'Input tokens unavailable' : '150 in');
+    expect(metadata).toContain('Output tokens unavailable');
+    expect(metadata).toContain('Usage incomplete (known tokens only)');
+    expect(metadata).toContain('Prompt speed unavailable');
+    expect(metadata).toContain('Generation speed unavailable');
+    expect(metadata).not.toContain('0 out');
+  });
+
+  it.each(['length', 'context_length_exceeded'])('shows %s recovery without treating it as a failed run', async (reason) => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send(TURNS[0].input);
+    const source = server.listeners.get('run-1');
+    await act(async () => {
+      source?.deliver({
+        sequence: 1, event_type: 'model.retry',
+        payload: { reason, max_tokens: 4096, discarded_text_characters: 0 },
+      });
+    });
+    await flush(2);
+    expect(text(container.querySelector('.compaction-indicator'))).toContain('Recomputing response');
+    expect(container.querySelector('.compaction-indicator')?.getAttribute('title')).toContain(
+      reason === 'length' ? '4,096' : 'smaller request',
+    );
+    await act(async () => {
+      source?.deliver({ sequence: 2, event_type: 'model.completed', payload: {} });
+    });
+    await flush(2);
+    expect(container.querySelector('.compaction-indicator')).toBeNull();
   });
 
   it('ignores incomplete context-size telemetry instead of showing NaN', async () => {

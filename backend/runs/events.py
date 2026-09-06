@@ -31,6 +31,16 @@ class EventBroker:
         ] = defaultdict(set)
         self._history: dict[str, deque[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
+        self._sink_locks: dict[str, asyncio.Lock] = {}
+        self._next_sequences: dict[str, int] = {}
+
+    def sink_lock(self, run_id: str) -> asyncio.Lock:
+        return self._sink_locks.setdefault(run_id, asyncio.Lock())
+
+    def take_sequences(self, run_id: str, minimum: int, count: int) -> int:
+        start = max(minimum, self._next_sequences.get(run_id, 0))
+        self._next_sequences[run_id] = start + count
+        return start
 
     async def publish(self, run_id: str, event: dict[str, Any]) -> None:
         """Publish an event and disconnect subscribers whose queues have overflowed."""
@@ -105,6 +115,8 @@ class RunEventSink(Protocol):
 
 
 class PersistedRunEventSink:
+    cumulative_telemetry = True
+
     def __init__(
         self,
         run_id: str,
@@ -116,8 +128,13 @@ class PersistedRunEventSink:
         self._repository = repository
         self._broker = broker
         self._lease = lease
-        self._lock = asyncio.Lock()
+        self._lock = (
+            broker.sink_lock(run_id) if hasattr(broker, "sink_lock") else asyncio.Lock()
+        )
         self._next_sequence = repository.next_event_sequence(run_id)
+        self._telemetry = ModelTelemetry()
+        self._telemetry_cursor = -1
+        self._native_telemetry_seen = False
 
     def current_lease(self) -> RunLease | None:
         return self._lease() if self._lease is not None else None
@@ -176,8 +193,57 @@ class PersistedRunEventSink:
                     "created_at": event.created_at.isoformat(),
                 },
             )
+        if any(kind == "model.telemetry" for kind, _ in events):
+            self._refresh_telemetry()
+            await self._emit_batch([
+                ("usage.updated", {"performance": self._telemetry.performance()}),
+            ])
+        elif any(kind in {"run.completed", "run.failed", "run.cancelled",
+                          "run.epoch.completed"} for kind, _ in events):
+            self._refresh_telemetry()
+
+    def _refresh_telemetry(self) -> None:
+        for event in self._repository.events_after(self._run_id, self._telemetry_cursor):
+            self._telemetry_cursor = max(self._telemetry_cursor, event.sequence)
+            if event.event_type == "model.telemetry":
+                self._native_telemetry_seen = True
+                self._telemetry.record(event.payload_json)
+            elif event.event_type == "model.completed" and not self._native_telemetry_seen:
+                # Runs resumed after an upgrade can have legacy lifecycle usage.
+                # Never reinterpret their wall-clock speeds as server measurements.
+                payload = event.payload_json
+                usage = payload.get("usage")
+                self._telemetry.record({
+                    **payload,
+                    "model_call_id": f"legacy:{event.sequence}",
+                    "usage_complete": isinstance(usage, dict) and any(
+                        _token_count(usage.get(key)) > 0
+                        for key in ("input_tokens", "output_tokens")
+                    ),
+                    "timings": {},
+                })
+        performance = self._telemetry.performance()
+        if not performance["model_calls"]:
+            return
+        usage = self._repository.get_usage(self._run_id)
+        usage.update({
+            "requests": performance["model_calls"],
+            "input_tokens": performance["input_tokens"],
+            "output_tokens": performance["output_tokens"],
+            "total_tokens": performance["input_tokens"] + performance["output_tokens"],
+            "performance": performance,
+        })
+        lease = self.current_lease()
+        if lease is None:
+            self._repository.update_usage(self._run_id, usage)
+        else:
+            self._repository.update_usage_owned(lease, usage)
 
     def _take_sequences(self, count: int) -> int:
+        if hasattr(self._broker, "take_sequences"):
+            self._next_sequence = self._broker.take_sequences(
+                self._run_id, self._next_sequence, count,
+            )
         start = self._next_sequence
         self._next_sequence += count
         return start
@@ -194,6 +260,91 @@ class PersistedRunEventSink:
             "payload": payload,
             "created_at": datetime.now(UTC).isoformat(),
         }
+
+
+class ModelTelemetry:
+    """Idempotent spend and server active-time accounting, also used during replay."""
+
+    def __init__(self) -> None:
+        self._seen_model_calls: set[str] = set()
+        self._model_calls = 0
+        self._main_model_calls = 0
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._delegated_model_calls = 0
+        self._delegated_input_tokens = 0
+        self._delegated_output_tokens = 0
+        self._usage_complete = True
+        self._timed_prompt_tokens = 0.0
+        self._timed_output_tokens = 0.0
+        self._prompt_seconds = 0.0
+        self._generation_seconds = 0.0
+
+    def performance(self) -> dict[str, Any]:
+        prompt_rate = (
+            self._timed_prompt_tokens / self._prompt_seconds
+            if self._prompt_seconds > 0
+            else None
+        )
+        generation_rate = (
+            self._timed_output_tokens / self._generation_seconds
+            if self._generation_seconds > 0
+            else None
+        )
+        return {
+            "model_calls": self._model_calls,
+            "main_model_calls": self._main_model_calls,
+            "input_tokens": self._input_tokens,
+            "output_tokens": self._output_tokens,
+            "delegated_model_calls": self._delegated_model_calls,
+            "delegated_input_tokens": self._delegated_input_tokens,
+            "delegated_output_tokens": self._delegated_output_tokens,
+            "input_tokens_estimated": False,
+            "output_tokens_estimated": False,
+            "usage_complete": self._usage_complete,
+            "timing_source": "server",
+            "timed_prompt_tokens": self._timed_prompt_tokens,
+            "timed_output_tokens": self._timed_output_tokens,
+            "prompt_seconds": round(self._prompt_seconds, 6),
+            "generation_seconds": round(self._generation_seconds, 6),
+            "prompt_tokens_per_second": round(prompt_rate, 3)
+            if prompt_rate is not None
+            else None,
+            "generation_tokens_per_second": round(generation_rate, 3)
+            if generation_rate is not None
+            else None,
+        }
+
+    def record(self, payload: dict[str, Any]) -> bool:
+        call_id = payload.get("model_call_id")
+        if not isinstance(call_id, str) or not call_id or call_id in self._seen_model_calls:
+            return False
+        self._seen_model_calls.add(call_id)
+        usage = payload.get("usage")
+        usage = usage if isinstance(usage, dict) else {}
+        input_tokens = _token_count(usage.get("input_tokens"))
+        output_tokens = _token_count(usage.get("output_tokens"))
+        self._usage_complete = self._usage_complete and payload.get("usage_complete") is True
+        self._input_tokens += input_tokens
+        self._output_tokens += output_tokens
+        self._model_calls += 1
+        if payload.get("delegated") is True or payload.get("context_scope") == "delegate":
+            self._delegated_model_calls += 1
+            self._delegated_input_tokens += input_tokens
+            self._delegated_output_tokens += output_tokens
+        elif payload.get("context_scope", "main") == "main":
+            self._main_model_calls += 1
+        timings = payload.get("timings")
+        timings = timings if isinstance(timings, dict) else {}
+        prompt = _server_phase(timings, "prompt_n", "prompt_ms")
+        generation = _server_phase(timings, "predicted_n", "predicted_ms")
+        if prompt is not None:
+            self._timed_prompt_tokens += prompt[0]
+            self._prompt_seconds += prompt[1]
+        if generation is not None:
+            self._timed_output_tokens += generation[0]
+            self._generation_seconds += generation[1]
+        return True
 
 
 class BufferedRunEventSink:
@@ -222,20 +373,7 @@ class BufferedRunEventSink:
         self._reasoning_parts: list[str] = [initial_reasoning] if initial_reasoning else []
         self._assistant_parts: list[str] = [initial_assistant] if initial_assistant else []
         self._snapshot_dirty = False
-        self._model_started_at: float | None = None
-        self._first_generated_at: float | None = None
-        self._model_input_chars = 0
-        self._model_generated_chars = 0
-        self._model_calls = 0
-        self._input_tokens = 0
-        self._output_tokens = 0
-        self._delegated_model_calls = 0
-        self._delegated_input_tokens = 0
-        self._delegated_output_tokens = 0
-        self._input_tokens_estimated = False
-        self._output_tokens_estimated = False
-        self._prompt_seconds = 0.0
-        self._generation_seconds = 0.0
+        self._telemetry = ModelTelemetry()
 
     def current_lease(self) -> RunLease | None:
         current_lease = getattr(self._downstream, "current_lease", None)
@@ -251,34 +389,7 @@ class BufferedRunEventSink:
             await self._emit_snapshot()
 
     def performance(self) -> dict[str, Any]:
-        prompt_rate = (
-            self._input_tokens / self._prompt_seconds
-            if self._input_tokens and self._prompt_seconds > 0
-            else None
-        )
-        generation_rate = (
-            self._output_tokens / self._generation_seconds
-            if self._output_tokens and self._generation_seconds > 0
-            else None
-        )
-        return {
-            "model_calls": self._model_calls,
-            "input_tokens": self._input_tokens,
-            "output_tokens": self._output_tokens,
-            "delegated_model_calls": self._delegated_model_calls,
-            "delegated_input_tokens": self._delegated_input_tokens,
-            "delegated_output_tokens": self._delegated_output_tokens,
-            "input_tokens_estimated": self._input_tokens_estimated,
-            "output_tokens_estimated": self._output_tokens_estimated,
-            "prompt_seconds": round(self._prompt_seconds, 6),
-            "generation_seconds": round(self._generation_seconds, 6),
-            "prompt_tokens_per_second": round(prompt_rate, 3)
-            if prompt_rate is not None
-            else None,
-            "generation_tokens_per_second": round(generation_rate, 3)
-            if generation_rate is not None
-            else None,
-        }
+        return self._telemetry.performance()
 
     async def _emit(self, event_type: str, payload: dict[str, Any]) -> None:
         raw_type = str(payload.get("raw_type") or "")
@@ -291,15 +402,8 @@ class BufferedRunEventSink:
             and isinstance(delta, str)
         )
 
-        if event_type == "model.started" and not delegated:
-            self._start_model_call(payload)
-        elif event_type == "model.completed":
-            # A delegated sub-agent's model calls are real spend but they are not the
-            # parent's turns, so they never touch the parent's turn accounting.
-            if delegated:
-                self._record_delegated_model_call(payload)
-            else:
-                usage_updated = self._finish_model_call(payload)
+        if event_type == "model.telemetry":
+            usage_updated = self._telemetry.record(payload)
 
         if event_type == "model.stream":
             if raw_type == "response.created":
@@ -309,7 +413,6 @@ class BufferedRunEventSink:
                 await self._downstream.emit_transient(event_type, payload)
                 return
             if is_delta:
-                self._record_generated_delta(delta)
                 self._append_snapshot_delta(raw_type, delta)
                 await self._emit_live_delta(raw_type, delta)
                 return
@@ -322,61 +425,17 @@ class BufferedRunEventSink:
         await self._flush_live()
         await self._emit_snapshot()
         await self._downstream.emit(event_type, payload)
-        if usage_updated:
+        if event_type == "model.retry" and not delegated:
+            discarded = payload.get("discarded_text_characters")
+            if isinstance(discarded, int) and discarded > 0:
+                self._assistant_parts = ["".join(self._assistant_parts)[:-discarded]]
+                self._snapshot_dirty = True
+                await self._emit_snapshot()
+        if usage_updated and not getattr(self._downstream, "cumulative_telemetry", False):
             await self._downstream.emit(
                 "usage.updated",
                 {"performance": self.performance()},
             )
-
-    def _start_model_call(self, payload: dict[str, Any]) -> None:
-        self._model_started_at = self._clock()
-        self._first_generated_at = None
-        self._model_generated_chars = 0
-        input_chars = payload.get("input_character_count")
-        self._model_input_chars = input_chars if isinstance(input_chars, int) else 0
-
-    def _record_delegated_model_call(self, payload: dict[str, Any]) -> None:
-        usage = payload.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        self._delegated_model_calls += 1
-        if isinstance(input_tokens, int) and input_tokens > 0:
-            self._delegated_input_tokens += input_tokens
-        if isinstance(output_tokens, int) and output_tokens > 0:
-            self._delegated_output_tokens += output_tokens
-
-    def _record_generated_delta(self, delta: str) -> None:
-        if self._model_started_at is not None and self._first_generated_at is None:
-            self._first_generated_at = self._clock()
-        self._model_generated_chars += len(delta)
-
-    def _finish_model_call(self, payload: dict[str, Any]) -> bool:
-        if self._model_started_at is None:
-            return False
-        finished_at = self._clock()
-        first_generated_at = self._first_generated_at or finished_at
-        self._prompt_seconds += max(0.0, first_generated_at - self._model_started_at)
-        self._generation_seconds += max(0.0, finished_at - first_generated_at)
-
-        usage = payload.get("usage")
-        usage = usage if isinstance(usage, dict) else {}
-        input_tokens = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        if not isinstance(input_tokens, int) or input_tokens <= 0:
-            input_tokens = _estimated_tokens(self._model_input_chars)
-            self._input_tokens_estimated = True
-        if not isinstance(output_tokens, int) or output_tokens <= 0:
-            output_tokens = _estimated_tokens(self._model_generated_chars)
-            self._output_tokens_estimated = True
-        self._input_tokens += input_tokens
-        self._output_tokens += output_tokens
-        self._model_calls += 1
-        self._model_started_at = None
-        self._first_generated_at = None
-        self._model_input_chars = 0
-        self._model_generated_chars = 0
-        return True
 
     async def _emit_live_delta(self, raw_type: str, delta: str) -> None:
         if raw_type not in self._seen_delta_types:
@@ -456,5 +515,20 @@ class BufferedRunEventSink:
         self._snapshot_dirty = False
 
 
-def _estimated_tokens(character_count: int) -> int:
-    return math.ceil(character_count / 4) if character_count > 0 else 0
+def _token_count(value: Any) -> int:
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _server_phase(
+    timings: dict[str, Any], tokens_key: str, milliseconds_key: str,
+) -> tuple[float, float] | None:
+    tokens, milliseconds = timings.get(tokens_key), timings.get(milliseconds_key)
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value)
+        for value in (tokens, milliseconds)
+    ):
+        return None
+    if tokens < 0 or milliseconds <= 0:
+        return None
+    return float(tokens), float(milliseconds) / 1000

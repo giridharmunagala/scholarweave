@@ -40,7 +40,6 @@ from backend.providers.types import (
 )
 from backend.runs.hooks import ScholarWeaveRunHooks
 
-UNLIMITED_AGENT_TOOL_TURNS = 100
 GLOBAL_AGENT_INSTRUCTIONS = default_prompt_registry().render("global")
 
 
@@ -119,7 +118,7 @@ class CompiledAgent:
     agents_by_id: dict[str, AgentDefinition]
     resolved_models: dict[str, ResolvedAgentModel]
     run_settings: RunSettings
-    max_turns: int
+    max_turns: int | None
     context_policy: ContextBudgetPolicy | None = None
     completion_validator: Callable[[ScholarWeaveContext], None] | None = None
     completion_policy_id: str | None = None
@@ -139,7 +138,6 @@ class AgentCompiler:
         self._tools = tool_catalog
         self._settings = settings
         self._prompts = prompts
-        self._inference_scheduler = inference_scheduler
 
     def compile(
         self,
@@ -208,6 +206,26 @@ class AgentCompiler:
             max_output_characters=blueprint.run.max_output_characters,
             workflow_name=blueprint.name,
         )
+        compaction_model = None
+        compaction_model_error = None
+        if self._settings and getattr(self._settings, "agent_context_model_summary_enabled", True):
+            reference = getattr(self._settings, "default_model_references", {}).get("compaction")
+            if reference and any(reference.values()):
+                try:
+                    if not reference.get("provider_profile_id") or not reference.get("model"):
+                        raise ProviderRuntimeError(
+                            "The compaction model needs an explicit provider profile and model name."
+                        )
+                    compaction_model = self._models.resolve_agent_model(
+                        ModelReference.model_validate(reference), require_tools=False,
+                    )
+                except ProviderRuntimeError as exc:
+                    # A stale optional helper must not prevent the main agent from running.
+                    compaction_model_error = {
+                        "error_type": type(exc).__name__, "error": str(exc),
+                        "model_name": reference.get("model") or "",
+                        "provider_profile_id": reference.get("provider_profile_id") or "",
+                    }
         context_policy = (
             ContextBudgetPolicy(
                 self._settings,
@@ -218,6 +236,8 @@ class AgentCompiler:
                     is not None
                 },
                 prompt_registry=self._prompts,
+                compaction_model=compaction_model,
+                compaction_model_error=compaction_model_error,
             )
             if self._settings is not None
             else None
@@ -245,19 +265,16 @@ class AgentCompiler:
                 delegations_by_owner[spec.delegate_agent_id],
             )
             delegations_by_owner[spec.owner_agent_id].append(
-                self._serialized(
-                    delegation_tool(
-                        owner_depth=depths[spec.owner_agent_id],
-                        delegate=delegate,
-                        tool_name=spec.tool_name,
-                        tool_description=spec.tool_description,
-                        max_turns=spec.max_turns or UNLIMITED_AGENT_TOOL_TURNS,
-                        settings=run_settings,
-                        hooks=hooks,
-                        context_policy=context_policy,
-                        serialize_calls=spec.serialize_calls,
-                    ),
-                    serialize=spec.serialize_calls,
+                delegation_tool(
+                    owner_depth=depths[spec.owner_agent_id],
+                    delegate=delegate,
+                    tool_name=spec.tool_name,
+                    tool_description=spec.tool_description,
+                    max_turns=spec.max_turns,
+                    settings=run_settings,
+                    hooks=hooks,
+                    context_policy=context_policy,
+                    serialize_calls=spec.serialize_calls,
                 )
             )
 
@@ -320,20 +337,6 @@ class AgentCompiler:
                 )
             )
         return bound
-
-    def _serialized(self, tool: FunctionTool, *, serialize: bool) -> FunctionTool:
-        """Route serialized delegations through the exclusive-inference scheduler."""
-        scheduler = self._inference_scheduler
-        if not serialize or scheduler is None:
-            return tool
-        invoke = tool.on_invoke_tool
-
-        async def invoke_exclusively(invocation: Any, raw_arguments: str) -> Any:
-            async with scheduler.exclusive():
-                return await invoke(invocation, raw_arguments)
-
-        tool.on_invoke_tool = invoke_exclusively
-        return tool
 
     @staticmethod
     def _agent_requires_tools(agent_id: str, blueprint: AgentBlueprint) -> bool:

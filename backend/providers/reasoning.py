@@ -42,4 +42,6 @@ def infer_reasoning_efforts(
         return ["none", "low", "medium", "xhigh"]
     if provider_kind == "openai_compatible" and model.startswith("qwen3.6-"):
         return ["low", "medium", "xhigh"]
+    if provider_kind == "openai_compatible" and model == "qwen-27b":
+        return ["none", "high"]
     return None

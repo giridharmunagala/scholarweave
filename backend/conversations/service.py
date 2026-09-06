@@ -9,6 +9,7 @@ from backend.conversations.repository import ConversationRepository
 from backend.utils import to_jsonable
 from backend.conversations.sessions import ConversationSessionFactory
 from backend.conversations.steering import strip_steering_marker
+from backend.persistence.files import SafeStorage, StorageError
 
 
 class ConversationService:
@@ -16,9 +17,11 @@ class ConversationService:
         self,
         repository: ConversationRepository,
         sessions: ConversationSessionFactory,
+        storage: SafeStorage,
     ) -> None:
         self._repository = repository
         self._sessions = sessions
+        self._storage = storage
 
     def create(
         self,
@@ -69,7 +72,16 @@ class ConversationService:
         conversation_id: str,
     ) -> None:
         record = self.get(conversation_id)
+        cache_root = self._storage.settings.artifacts_dir
+        relative_cache = f"conversations/{record.id}"
+        if self._storage._safe_path(cache_root, relative_cache) != (
+            cache_root.resolve() / "conversations" / record.id
+        ):
+            raise StorageError("Conversation cache escapes its storage scope.")
         await self._sessions.evict(record.id, clear=True)
+        self._storage.delete_stored_tree(
+            cache_root, relative_cache
+        )
         self._repository.delete(conversation_id)
 
 

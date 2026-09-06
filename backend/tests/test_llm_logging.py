@@ -198,7 +198,8 @@ async def test_logs_queue_request_and_observed_body_byte_timings_without_credent
     clock = [0.0]
     monkeypatch.setattr("backend.providers.logging.perf_counter", lambda: clock[0])
     scheduler = InferenceScheduler()
-    lease = scheduler.request()
+    scheduler.configure("local", serialize_model_switches=True)
+    lease = scheduler.request(profile_id="local", model="previous")
     await lease.__aenter__()
 
     class Stream(httpx.AsyncByteStream):
@@ -215,7 +216,7 @@ async def test_logs_queue_request_and_observed_body_byte_timings_without_credent
 
     path = tmp_path / "metrics.jsonl"
     transport = ScheduledTransport(
-        LoggingTransport(LLMCallLogger(path), "test", httpx.MockTransport(provider)), scheduler,
+        LoggingTransport(LLMCallLogger(path), "test", httpx.MockTransport(provider)), scheduler, "local",
     )
     async with httpx.AsyncClient(transport=transport) as client:
         task = asyncio.create_task(client.post(

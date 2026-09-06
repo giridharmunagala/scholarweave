@@ -225,6 +225,34 @@ async def test_snapshot_retains_steering_persisted_during_model_execution(tmp_pa
 
 
 @pytest.mark.anyio
+async def test_legacy_compaction_rehydrates_canonical_history_once(tmp_path: Path) -> None:
+    session = ConversationSession("conversation", tmp_path / "sessions.sqlite3")
+    original = [{"role": "user", "content": "Keep the source details."}]
+    await session.add_items(original)
+    cursor = await session.checkpoint()
+    previous = {"role": "assistant", "content": "Detailed findings before harsh compaction."}
+    legacy = {
+        "role": "user",
+        "_scholarweave_context_checkpoint": True,
+        "content": "Old lossy checkpoint",
+    }
+    await session.commit_working_items(
+        [previous], [legacy], base_cursor=cursor, commit_id="legacy",
+    )
+    assert await session.get_working_items() == [*original, previous]
+    current = {
+        **legacy,
+        "_scholarweave_context_policy_version": 2,
+        "content": "Recoverable cached context",
+    }
+    await session.commit_working_items(
+        [], [current], base_cursor=await session.checkpoint(), commit_id="current",
+    )
+    assert await session.get_working_items() == [current]
+    assert await session.get_items() == [*original, previous]
+
+
+@pytest.mark.anyio
 async def test_bounded_snapshot_leaves_unprepared_last_round_as_audit_delta(tmp_path: Path) -> None:
     import json
     import sqlite3

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from unittest.mock import Mock
 
 import anyio
@@ -12,6 +13,7 @@ from backend.agents.context_budget import _request_tokens
 from backend.app import create_app
 from backend.conversations.schemas import ConversationMessageRequest
 from backend.conversations.turns import (
+    deep_work_blueprint,
     research_blueprint,
     validate_paper_work_completion,
 )
@@ -141,6 +143,90 @@ def test_explicit_modes_offer_local_paper_tools_without_web(mode):
     assert f"Selected research mode: {mode}." in blueprint.agents[0].instructions
 
 
+@pytest.mark.parametrize("mode", ["learn", "understand", "review", "deep_work", "fast_answer"])
+def test_product_blueprints_have_no_turn_character_or_delegation_ceiling(mode):
+    blueprint = (
+        deep_work_blueprint({})
+        if mode == "deep_work"
+        else research_blueprint(
+            {},
+            fast_answer=mode == "fast_answer",
+            research_mode=None if mode == "fast_answer" else mode,
+        )
+    )
+    assert blueprint.run.max_turns is None
+    assert blueprint.run.max_input_characters is None
+    assert blueprint.run.max_output_characters is None
+    assert all(delegate.max_turns is None for delegate in blueprint.agent_tools)
+    assert blueprint.session.history_max_items is None
+    assert blueprint.session.messages_only is False
+
+
+@pytest.mark.parametrize("deep_work", [False, True])
+def test_product_runs_continue_across_epochs_without_repeating_writes(
+    test_settings, stub_provider, deep_work,
+):
+    test_settings.agent_epoch_max_turns = 2
+    test_settings.agent_max_epochs = 1
+    test_settings.agent_run_timeout_seconds = 0.01
+    goal = "Record every durable checkpoint."
+    expected = [f"Evidence marker {index:02d}." for index in range(20)]
+    stub_provider.tool_plans = [
+        (
+            goal,
+            "save_research_note",
+            {
+                "target": "path", "mode": "append", "path": "notes/checkpoints.md",
+                "document_id": None, "name": None, "content": content, "tags": [],
+            },
+        )
+        for content in expected
+    ]
+    if deep_work:
+        stub_provider.tool_plans.insert(
+            0,
+            (goal, "create_work_plan", {"items": [{"id": "record", "title": goal}]}),
+        )
+        stub_provider.tool_plans.append(
+            (
+                goal, "update_work_item",
+                {"id": "record", "status": "completed", "summary": "All evidence recorded."},
+            )
+        )
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            "/api/agent/conversations",
+            json={"model_reference": {"provider_profile_id": profile_id, "model": "stub-model"}},
+        ).json()
+        services = client.app.state.services
+        services.workspace.write_file("notes/checkpoints.md", "")
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={
+                "content": goal, "deep_work": deep_work, "web_enabled": False,
+                "context_window_tokens": 131_072,
+            },
+        )
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        content = services.workspace.read_file("notes/checkpoints.md").content
+        assert isinstance(content, str)
+        assert [line for line in content.splitlines() if line.strip()] == expected
+        record = services.runs.get(run["id"])
+        assert len(record.epochs) > 10
+        assert len(stub_provider.requests) == len(stub_provider.tool_plans) + 1
+        if deep_work:
+            updates = [
+                attempt for attempt in record.tool_attempts
+                if attempt.catalog_id == "work.plan.update"
+            ]
+            assert len(updates) == 1
+            assert updates[0].result_json["complete"] is True
+            assert updates[0].result_json["items"][0]["status"] == "completed"
+
+
 @pytest.mark.parametrize(
     "options",
     [
@@ -153,6 +239,42 @@ def test_explicit_modes_offer_local_paper_tools_without_web(mode):
 def test_incompatible_mode_requests_are_rejected(options):
     with pytest.raises(SchemaValidationError):
         ConversationMessageRequest(content="Question", **options)
+
+
+def test_message_input_has_no_character_ceiling_but_requires_content():
+    content = "Research evidence " * 10_000
+    assert ConversationMessageRequest(content=content).content == content
+    schema = ConversationMessageRequest.model_json_schema()["properties"]["content"]
+    assert "maxLength" not in schema
+    assert schema["minLength"] == 1
+    with pytest.raises(SchemaValidationError):
+        ConversationMessageRequest(content="")
+
+
+def test_large_message_reaches_model_when_configured_context_has_room(test_settings, stub_provider):
+    content = "x" * 100_001
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            "/api/agent/conversations",
+            json={"model_reference": {"provider_profile_id": profile_id, "model": "stub-model"}},
+        ).json()
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={
+                "content": content, "web_enabled": False, "context_window_tokens": 131_072,
+            },
+        )
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        record = client.app.state.services.runs.get(run["id"])
+        assert record.input_json == content
+        assert any(
+            message.get("role") == "user" and message.get("content") == content
+            for request in stub_provider.requests
+            for message in request["messages"]
+        )
 
 
 def test_modes_switch_per_turn_and_are_durable_in_run_metadata(test_settings, stub_provider):
@@ -214,8 +336,21 @@ def test_quick_paper_answer_uses_actual_read_evidence_without_full_review(
                   "web_enabled": False},
         )
         assert response.status_code == 202, response.text
-        run = wait_for_run(client, response.json()["run"]["id"])
-        assert run["status"] == ("completed" if cited else "failed"), run["error"]
+        run_id = response.json()["run"]["id"]
+        if not cited:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if any(
+                    event.payload_json.get("terminal_reason") == "completion_rejected"
+                    for event in services.runs.get(run_id).events
+                ):
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("Uncited completion was not rejected.")
+            assert client.post(f"/api/runs/{run_id}/cancel").status_code == 200
+        run = wait_for_run(client, run_id)
+        assert run["status"] == ("completed" if cited else "cancelled"), run["error"]
         record = services.runs.get(run["id"])
         activity = record.runtime_metadata_json["paper_activity"]
         assert any(

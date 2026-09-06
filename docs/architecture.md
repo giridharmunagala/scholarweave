@@ -226,8 +226,8 @@ stateDiagram-v2
 
     FinalizeCalls --> ExecuteTools: Tool calls present
     ExecuteTools --> AppendResults
-    AppendResults --> PrepareContext: Turns remain
-    AppendResults --> BudgetExceeded: Turn budget exhausted
+    AppendResults --> PrepareContext: Continue work
+    AppendResults --> BudgetExceeded: Explicit turn limit exhausted
 
     Completed --> [*]
     Failed --> [*]
@@ -247,7 +247,7 @@ differences.
 
 The harness enforces:
 
-- model-turn and input/output size limits;
+- optional model-turn limits and input/output size limits;
 - tool concurrency;
 - per-turn single-flight tools;
 - structured-output JSON Schema;
@@ -261,7 +261,7 @@ flowchart TD
     Agent[AgentRunner] --> Tool[FunctionTool]
     Tool --> Runtime[ApplicationToolRuntime]
 
-    Runtime --> Middleware["Shared execution policy<br/>timeout, cancellation, retries,<br/>attempt journal, result bounds"]
+    Runtime --> Middleware["Shared execution policy<br/>cancellation, transport retries,<br/>attempt journal, exact results"]
 
     Middleware --> Sources[Web, arXiv,<br/>Wikipedia]
     Middleware --> Documents[PDF acquisition,<br/>OCR, reading, retrieval]
@@ -360,6 +360,19 @@ The same event list reconstructs:
 - context compaction;
 - usage and run terminal state.
 
+Each model attempt emits `model.telemetry` with a unique call ID. Overall usage includes main,
+delegated, dedicated-summary, retry, and compaction calls; replay and forwarded child events
+are deduplicated by call ID. Missing provider usage is marked incomplete rather than estimated
+from output characters. Main-agent context is tracked separately: estimated request input before
+generation, then provider-reported input plus output for the latest successful main-agent call.
+Delegate and compaction measurements cannot replace that context indicator.
+
+Prefill and generation speeds use llama.cpp response `timings` (`prompt_n`/`prompt_ms` and
+`predicted_n`/`predicted_ms`), including timing-only terminal stream chunks. Each average is total
+timed tokens divided by total server phase time, excluding queueing, tools, idle gaps, and network
+latency. Missing timings display as unavailable; old wall-clock estimates are not relabeled as
+server measurements. Visible speed readings update at most once every five seconds per run.
+
 ## 10. Durability, epochs, and recovery
 
 ```mermaid
@@ -412,14 +425,17 @@ coroutine or resume a partially received model stream.
 ```mermaid
 flowchart TD
     History[Canonical history] --> Normalize[Remove stale steering markers<br/>and superseded reads]
-    Normalize --> Bound[Bound oversized tool outputs]
-    Bound --> Size{Above context<br/>high-water mark?}
+    Normalize --> Size{Above model-aware input<br/>high-water mark?}
     Size -->|No| Steering[Append queued steering]
-    Size -->|Yes| Split[Split older and recent work]
-    Split --> Preserve[Preserve every user message verbatim]
-    Split --> Summarize[Summarize discarded model/tool history]
+    Size -->|Yes| Cache[Archive older re-readable output<br/>replace payloads with retrieval refs]
+    Cache --> Fits{Enough space?}
+    Fits -->|Yes| Steering
+    Fits -->|No| Split[Split older and recent work]
+    Split --> Preserve[Preserve current instructions<br/>and recent complete rounds]
+    Split --> Archive[Cache exact older history]
+    Archive --> Summarize[Summarize older history if enabled]
     Summarize --> Checkpoint[Structured checkpoint<br/>evidence, refs, receipts, plan]
-    Preserve --> Rebuild[Checkpoint + user messages<br/>+ recent items]
+    Preserve --> Rebuild[Checkpoint + constraints<br/>+ recent items]
     Checkpoint --> Rebuild
     Rebuild --> Steering
     Steering --> Model[Next model request]
@@ -430,18 +446,55 @@ new working context, while generated items remain available for durable history.
 session working snapshot and cursor allow subsequent turns to read the snapshot plus new items
 instead of recompacting the original transcript. Snapshot recovery and rollback preserve
 conversation ordering and steering.
+Legacy lossy working snapshots are rebuilt from canonical session history on their next read;
+versioned cache-backed snapshots then take over without deleting the original transcript.
 
-The working-input budget is independent of model context-window capacity. Request accounting
-includes instructions and tool schemas, reserves model output capacity, and reports estimates
-through `context.prepared` (the UI also accepts older `context.sized` events). It uses conservative
-estimates, not a claim of exact provider tokenization.
-Unfit irreducible instructions fail explicitly rather than being silently truncated. Source reads
-are bounded before entering history; durable paper evidence makes superseded raw reads evictable.
+The selected model's context window, minus response capacity, determines the input ceiling.
+Legacy manual working-input, tool-output, and compaction-target settings no longer constrain
+execution. Context preparation derives a proportional retention target instead of collapsing an
+80k-token window to an 8k-token checkpoint.
+Request accounting includes instructions and tool schemas and reports estimates through
+`context.prepared` (the UI also accepts older `context.sized` events). Provider-reported prompt usage
+calibrates subsequent per-agent estimates; these remain estimates, not exact provider tokenization.
+Unfit irreducible instructions fail explicitly rather than being silently truncated. Fresh tool
+outputs are not clipped to a fixed token allowance. Context preparation archives oversized evidence
+when necessary; durable paper evidence makes superseded raw reads evictable.
+Pending summary batches are resized to actual request space with matching source spans and
+checkpoint cursors. Archived-only raw source cannot be claimed as complete read coverage.
 
-Model-assisted compaction is enabled by default. The deterministic-only setting avoids its model
-call but retains excerpts rather than a semantic summary, so it has a different information-loss
-tradeoff. Neither writing a cache file nor provider KV caching reduces active context unless the
-request itself replaces or omits the original text.
+Older cached tool payloads are evicted before narrative compression, preserving recent complete
+model/tool rounds. Exact context history is retained behind paginated `read_tool_result` references;
+conversation-scoped caches survive run-history cleanup and are deleted with their conversation.
+Chat deletion first cancels and waits for its runs, then removes their database history, run-scoped
+artifacts, operational snapshots (including snapshots retained after run cleanup), and conversation
+caches. Saved library papers, notes, summaries, and workspace files remain independent research
+outputs and are not deleted with a chat.
+The shared provider traffic audit log is not conversation-scoped and is not erased by chat deletion.
+Model-assisted summarization is a last resort for the older prefix. The deterministic-only setting
+avoids its model call but retains excerpts rather than a semantic summary. Neither writing a cache
+file nor provider KV caching reduces active context unless the request itself replaces or omits
+the original text.
+An optional `default_model_references.compaction` selects a helper through the normal provider
+resolver. It uses its own known context window, not the coordinator's capacity or reasoning setting.
+Insufficient capacity or an unusable helper response emits a compaction failure/fallback event and
+retries the main model before using the existing explicit deterministic fallback. Provider model
+switches use the shared inference scheduler.
+
+Default chat, Deep Work, paper summaries, and delegated research have no total turn cap. The harness
+represents unbounded work with `max_turns=None`, not a large sentinel. Epoch checkpoints remain bounded for
+durability, without limiting the number of epochs. There is no total run wall-clock deadline.
+Cancellation, network timeouts for stalled I/O, leases, and completion gates still apply.
+There is no whole-tool wall-clock deadline around loading, prefill, execution, or queued mutations.
+Explicit custom blueprint turn limits remain opt-in; stop-and-answer requests one response.
+
+For automatic response allowances, `finish_reason=length` recomputes only the uncommitted model
+turn with a doubled allowance, bounded by remaining context rather than a fixed output ceiling.
+Every attempt contributes to usage. No partial tool calls enter execution or durable conversation
+history. `model.retry` retracts partial assistant text in both live and persisted stream projections;
+completed tool operations and prior assistant messages remain intact. Cancellation interrupts
+recomputation normally. Explicit blueprint response caps are not silently overridden.
+Recognized provider context-overflow rejections tighten calibration and rerun context preparation.
+An identical rejected request is never resent; unrelated provider errors still surface explicitly.
 
 ## 12. Research data pipeline
 
@@ -495,11 +548,26 @@ Folder assignment changes document metadata only; it does not move source PDFs o
 All user-controlled paths pass through `SafeStorage` or `WorkspaceService`.
 
 Paper content search uses SQLite FTS5 with transactional chunk-index triggers, not an embedding or
-model call. Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses have a serialized
-character budget and explicit item/character continuation cursors, including oversized single pages.
+model call. Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses honor explicit
+item/character continuation cursors without a hidden global output cap.
 
 Summary jobs use one serial model worker. Short extractions fitting the context allowance are
 included directly; longer papers use adaptive read/checkpoint batches with no fixed page cap.
+Dedicated summaries reserve 10% of the configured effective model window for safety and 25% for
+the initial response allowance; the remaining 65% covers input, including instructions and tool
+schemas. An 80,000-token window therefore allows 52,000 input tokens, 20,000 output tokens, and
+8,000 safety tokens. This allocation is summary-specific; general research retains its existing
+context policy. Source admission measures the serialized request rather than imposing a fixed
+character cap. Papers that do not fit continue through exact durable evidence cursors.
+Reasoning defaults to off for both reviewed summaries and overviews when the model declares support
+for disabling it. Explicit summary reasoning selections take precedence; unsupported selections
+are rejected. Models without a supported off setting retain provider behavior.
+Research agents use the dedicated summary tool to invoke an isolated persistent summary run instead
+of drafting the summary in the general research transcript. Agent-requested summary jobs are
+serialized over their entire lifetime. Their telemetry is forwarded to the parent without exposing
+their transcript or replacing its main-agent context measurements.
+Durable per-paper job receipts let recovered callers reattach to the same child run and replay
+unforwarded telemetry instead of creating duplicate summaries.
 The `paper_evidence` table retains source/extraction-versioned evidence independently of runs, with
 a guarded `papers/<id>/evidence/<source-version>/index.json` workspace mirror. SQLite commits precede
 mirror verification and raw-context eviction; interrupted mirrors are repaired from SQLite.
@@ -513,9 +581,9 @@ Evidence never overwrites user notes; source changes invalidate generated summar
 ```mermaid
 flowchart LR
     ModelChoice[Model proposes work] --> Policies[Deterministic policies]
-    Policies --> Turns[Turn and epoch budgets]
-    Policies --> Deadline[Wall-clock deadline]
-    Policies --> Tools[Tool timeout, retries,<br/>concurrency, journaling]
+    Policies --> Turns[Opt-in custom blueprint turn budgets]
+    Policies --> Cancellation[User cancellation]
+    Policies --> Tools[Transport retries,<br/>concurrency, journaling]
     Policies --> Context[Context high-water mark]
     Policies --> Lease[Lease ownership]
     Policies --> Completion[Plan and paper-work gates]
@@ -532,11 +600,16 @@ even when exposed under a read tool. Pure reads use bounded retry deadlines with
 jitter. Unknown write outcomes are reconciled, not blindly retried. Source-specific repeated
 failures pause that source rather than disabling access to unrelated papers or URLs.
 
-Local model residency is opt-in per provider. The scheduler never changes weights: it gates
-requests by their bound provider/model, drains before external switching, and requires explicit
-single-model readiness confirmation. Interactive/background priorities apply between requests,
-not by preempting an in-flight generation. Provider residency configuration is added to existing
-databases without a schema-generation cutover or deletion of research history.
+All model requests share one application-wide inference lane, even for the same model or different
+provider profiles. The transport holds it until the response is consumed or closed, not across tool
+execution or delegation, so child requests and compaction do not deadlock behind a coordinator.
+Interactive requests take priority between responses; a waiting background request is admitted
+after three interactive calls to prevent starvation. Queued cancellation does not interrupt an active
+response. The legacy `serialize_model_switches` field remains accepted for stored-profile/API
+compatibility, but cannot bypass the global lane and is no longer exposed as a concurrency toggle.
+The server owns model loading and hot swaps; `/v1/models` may list any number of models.
+There is no manual load confirmation or restart pause. Old residency configuration is ignored,
+and provider updates remove it without a database cutover or deletion of research history.
 
 ## 14. Extension map
 

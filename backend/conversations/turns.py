@@ -13,7 +13,7 @@ from backend.agents.blueprint import (
 from backend.agents.compiler import AgentCompiler
 from backend.conversations.service import ConversationService
 from backend.conversations.schemas import ResearchMode
-from backend.core.errors import ValidationError
+from backend.core.errors import ConflictError, ValidationError
 from backend.runs.service import RunService
 from backend.prompting.registry import PromptRegistry, default_prompt_registry
 from backend.agents.context import ScholarWeaveContext
@@ -30,9 +30,7 @@ RESEARCH_TOOL_IDS = (
     ("search-notes", "research.notes.search"),
     ("read-note", "research.notes.read"),
     ("save-note", "research.notes.save"),
-    ("summary-read", "research.summary.read"),
-    ("summary-checkpoint", "research.summary.checkpoint"),
-    ("save-summary", "research.summary.save"),
+    ("summarize-paper", "research.summary.run"),
 )
 CONVERSATION_TITLE_TOOL = ("set-title", "conversation.title.set")
 WORK_PLAN_TOOL_IDS = (
@@ -87,6 +85,7 @@ class ConversationTurnService:
         self._conversations = conversations
         self._runs = runs
         self._prompts = prompts
+        self._deleting_conversations: set[str] = set()
 
     def create_conversation(
         self,
@@ -128,6 +127,17 @@ class ConversationTurnService:
 
     def list_conversations(self):
         return self._conversations.list()
+
+    async def delete_conversation(self, conversation_id: str) -> None:
+        self._conversations.get(conversation_id)
+        if conversation_id in self._deleting_conversations:
+            raise ConflictError("Conversation deletion is already in progress.")
+        self._deleting_conversations.add(conversation_id)
+        try:
+            await self._runs.delete_conversation_runs(conversation_id)
+            await self._conversations.delete(conversation_id)
+        finally:
+            self._deleting_conversations.discard(conversation_id)
 
     def list_deep_work_conversations(self):
         return self._conversations.list(kind="deep_work")
@@ -311,6 +321,8 @@ class ConversationTurnService:
         reasoning_effort: ReasoningEffort | None,
         runtime_metadata: dict | None,
     ):
+        if conversation_id in self._deleting_conversations:
+            raise ConflictError("Conversation deletion is in progress.")
         self._conversations.touch(conversation_id, message)
         return self._runs.create(
             compiled,
@@ -388,7 +400,7 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
         if not {"summary_saved", "summary_reused"} & set(actions):
             missing.append(
                 "reuse a substantive cited summary or populate summary.md through "
-                "save_paper_summary_version"
+                "summarize_research_paper"
             )
         if "read" in actions:
             read_index = actions.index("read")
@@ -499,7 +511,7 @@ def research_blueprint(
                 }
             ],
             "tools": tools,
-            "run": {"max_turns": 16, "max_tool_concurrency": 4},
+            "run": {"max_tool_concurrency": 4},
         }
     )
 
@@ -563,11 +575,9 @@ def deep_work_blueprint(
                     "tool_description": (
                         "Delegate one self-contained research track and receive a compact evidence handoff."
                     ),
-                    "max_turns": 24,
                 },
             ],
-            "run": {"max_turns": 48, "max_tool_concurrency": 4},
-            "session": {"history_max_items": 20, "messages_only": True},
+            "run": {"max_tool_concurrency": 4},
         }
     )
 

@@ -31,14 +31,18 @@ class Settings(BaseSettings):
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 300.0
     agent_context_window_tokens: int = Field(default=32_768, ge=4_096, le=2_000_000)
-    agent_context_high_water_ratio: float = Field(default=0.7, ge=0.5, le=0.95)
+    agent_context_high_water_ratio: float = Field(default=0.85, ge=0.5, le=0.95)
+    agent_context_use_model_window: bool = Field(
+        default=True,
+        description="Legacy compatibility setting; model-window budgeting is always active.",
+    )
     agent_working_context_tokens: int = Field(
         default=12_000, ge=2_048, le=500_000,
-        description="Preferred maximum model input, including instructions and tool schemas.",
+        description="Legacy compatibility value; no longer limits model input.",
     )
     agent_context_response_reserve_tokens: int = Field(
         default=2_048, ge=256, le=128_000,
-        description="Context-window capacity reserved for model output.",
+        description="Initial generation allowance, including reasoning; automatically grows within model context.",
     )
     agent_context_model_summary_enabled: bool = True
     agent_context_compaction_target_tokens: int = Field(
@@ -46,14 +50,23 @@ class Settings(BaseSettings):
         ge=1_024,
         le=500_000,
         description=(
-            "Preferred post-compaction input size, clamped to the working budget and model window."
+            "Legacy compatibility value; retention targets now follow model context capacity."
         ),
     )
-    tool_result_max_tokens: int = Field(default=3_000, ge=512, le=16_000)
+    tool_result_max_tokens: int = Field(
+        default=3_000, ge=512, le=16_000,
+        description="Legacy compatibility value; fresh tool outputs are not capped.",
+    )
     agent_epoch_max_turns: int = Field(default=12, ge=2, le=100)
-    agent_max_epochs: int = Field(default=8, ge=1, le=50)
-    agent_run_timeout_seconds: float = Field(default=3_600.0, ge=30.0)
-    tool_call_timeout_seconds: float = Field(default=600.0, ge=1.0)
+    agent_max_epochs: int = Field(
+        default=8, ge=1, le=50, description="Legacy compatibility value; epochs have no total ceiling.",
+    )
+    agent_run_timeout_seconds: float = Field(
+        default=3_600.0, ge=30.0, description="Legacy compatibility value; runs have no lifetime deadline.",
+    )
+    tool_call_timeout_seconds: float = Field(
+        default=600.0, ge=1.0, description="Legacy compatibility value; tools have no whole-operation deadline.",
+    )
     tool_read_retry_attempts: int = Field(default=2, ge=1, le=5)
 
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
@@ -87,14 +100,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def derive_paths(self) -> "Settings":
-        high_water_tokens = int(
-            self.agent_context_window_tokens * self.agent_context_high_water_ratio
-        )
-        if self.agent_context_compaction_target_tokens >= high_water_tokens:
-            raise ValueError(
-                "agent_context_compaction_target_tokens must be below the fallback context "
-                "high-water mark."
-            )
         try:
             ZoneInfo(self.user_timezone)
         except ZoneInfoNotFoundError as exc:

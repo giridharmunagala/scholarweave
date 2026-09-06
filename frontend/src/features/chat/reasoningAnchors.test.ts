@@ -176,7 +176,7 @@ describe('missingRunResponsesByUserIndex', () => {
 });
 
 describe('turnMetrics', () => {
-  it('uses measured performance and preserves estimate labels', () => {
+  it('preserves historical estimate labels but rejects old wall-clock speeds', () => {
     const candidate = run('run-1', 'Question', 'Reasoning');
     candidate.started_at = '2026-08-06T00:00:00Z';
     candidate.finished_at = '2026-08-06T00:00:05Z';
@@ -196,9 +196,11 @@ describe('turnMetrics', () => {
       outputTokens: 40,
       inputEstimated: true,
       outputEstimated: false,
-      promptRate: 60,
-      generationRate: 20,
+      promptRate: null,
+      generationRate: null,
       durationSeconds: 5,
+      modelCalls: null,
+      usageComplete: null,
     });
   });
 
@@ -216,7 +218,7 @@ describe('turnMetrics', () => {
   it('uses the latest streamed usage update while a run is active', () => {
     const candidate = run('run-1', 'Question', 'Reasoning');
     candidate.status = 'running';
-    candidate.usage = {};
+    candidate.usage = { performance: { input_tokens: 100, output_tokens: 20 } };
     const events: RunStreamEvent[] = [
       {
         sequence: 8,
@@ -229,6 +231,7 @@ describe('turnMetrics', () => {
             output_tokens_estimated: true,
             prompt_tokens_per_second: 80,
             generation_tokens_per_second: 30,
+            timing_source: 'server',
           },
         },
       },
@@ -241,6 +244,123 @@ describe('turnMetrics', () => {
       outputEstimated: true,
       promptRate: 80,
       generationRate: 30,
+    });
+  });
+
+  describe('authoritative telemetry', () => {
+    it.each(['completed', 'failed', 'cancelled'] as const)(
+      'prefers persisted final performance to an earlier epoch event when %s',
+      (status) => {
+        const candidate = run('run-1', 'Question', 'Reasoning');
+        candidate.status = status;
+        candidate.usage = {
+          performance: {
+            input_tokens: 500, output_tokens: 100, model_calls: 4,
+            usage_complete: false,
+            prompt_tokens_per_second: 999, generation_tokens_per_second: 888,
+          },
+        };
+        const events: RunStreamEvent[] = [{
+          sequence: 20, event_type: 'usage.updated', payload: {
+            performance: {
+              input_tokens: 200, output_tokens: 40, model_calls: 2,
+              usage_complete: true, timing_source: 'server',
+              prompt_tokens_per_second: 80, generation_tokens_per_second: 20,
+            },
+          },
+        }];
+        expect(turnMetrics(candidate, events)).toMatchObject({
+          inputTokens: 500, outputTokens: 100, modelCalls: 4,
+          usageComplete: false, promptRate: null, generationRate: null,
+        });
+      },
+    );
+
+    it('uses cumulative events for terminal runs without persisted performance', () => {
+      const candidate = run('run-1', 'Question', 'Reasoning');
+      const events: RunStreamEvent[] = [{
+        sequence: 20, event_type: 'usage.updated',
+        payload: { performance: { input_tokens: 500, output_tokens: 100 } },
+      }];
+      expect(turnMetrics(candidate, events)).toMatchObject({
+        inputTokens: 500, outputTokens: 100,
+      });
+    });
+
+    it('uses authoritative all-call totals and weighted rates without adding the delegate subset', () => {
+      const candidate = run('run-1', 'Question', 'Reasoning');
+      candidate.usage = {
+        performance: {
+          input_tokens: 1600,
+          output_tokens: 400,
+          model_calls: 5,
+          delegated_input_tokens: 500,
+          delegated_output_tokens: 100,
+          delegated_model_calls: 2,
+          timing_source: 'server',
+          prompt_seconds: 10,
+          generation_seconds: 8,
+          timed_prompt_tokens: 1200,
+          timed_output_tokens: 320,
+          prompt_tokens_per_second: 120,
+          generation_tokens_per_second: 40,
+          usage_complete: false,
+        },
+      };
+      expect(turnMetrics(candidate)).toMatchObject({
+        inputTokens: 1600, outputTokens: 400, modelCalls: 5,
+        promptRate: 120, generationRate: 40, usageComplete: false,
+      });
+    });
+
+    it.each([undefined, 'client', 'wallclock'])('rejects speeds with timing source %s', (source) => {
+      const candidate = run('run-1', 'Question', 'Reasoning');
+      candidate.usage = {
+        performance: {
+          input_tokens: 100, output_tokens: 10, timing_source: source,
+          prompt_tokens_per_second: 200, generation_tokens_per_second: 50,
+        },
+      };
+      expect(turnMetrics(candidate)).toMatchObject({ promptRate: null, generationRate: null });
+    });
+
+    it('does not derive missing speeds from tokens, active seconds, or run duration', () => {
+      const candidate = run('run-1', 'Question', 'Reasoning');
+      candidate.usage = {
+        performance: {
+          usage_complete: false, model_calls: 2, timing_source: 'server',
+          prompt_seconds: 1, generation_seconds: 1,
+          timed_prompt_tokens: 100, timed_output_tokens: 50,
+        },
+      };
+      expect(turnMetrics(candidate)).toMatchObject({
+        inputTokens: null, outputTokens: null,
+        promptRate: null, generationRate: null, usageComplete: false,
+      });
+    });
+
+    it('does not present missing usage as zero or fabricate invalid speeds', () => {
+      const candidate = run('run-1', 'Question', 'Reasoning');
+      candidate.usage = {
+        performance: {
+          input_tokens: 0, output_tokens: 0, usage_complete: false, timing_source: 'server',
+          prompt_tokens_per_second: -1, generation_tokens_per_second: NaN,
+        },
+      };
+      expect(turnMetrics(candidate)).toMatchObject({
+        inputTokens: null, outputTokens: null, promptRate: null, generationRate: null,
+        usageComplete: false,
+      });
+    });
+
+    it('preserves explicitly complete zero usage', () => {
+      const candidate = run('run-1', 'Question', 'Reasoning');
+      candidate.usage = {
+        performance: { input_tokens: 0, output_tokens: 0, usage_complete: true },
+      };
+      expect(turnMetrics(candidate)).toMatchObject({
+        inputTokens: 0, outputTokens: 0, usageComplete: true,
+      });
     });
   });
 });

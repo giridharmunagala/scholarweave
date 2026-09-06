@@ -28,6 +28,7 @@ from backend.providers.types import (
     ProviderRuntimeError,
 )
 from backend.providers.inference import InferenceScheduler
+from backend.providers.reasoning import REASONING_EFFORTS
 
 Capability = Literal["chat", "embedding", "vision", "tools"]
 OLLAMA_PLACEHOLDER_KEY = "ollama"
@@ -50,6 +51,12 @@ def uses_local_inference(provider_kind: str, base_url: str) -> bool:
     return address.is_loopback or address.is_private or address.is_link_local
 
 
+def serializes_model_switches(profile: ProviderProfileRecord) -> bool:
+    return bool((profile.config_json or {}).get(
+        "serialize_model_switches", uses_local_inference(profile.kind, profile.base_url),
+    ))
+
+
 @dataclass(frozen=True, slots=True)
 class ResolvedModel:
     profile_id: str
@@ -60,6 +67,7 @@ class ResolvedModel:
     model: str
     context_window_tokens: int | None = None
     preserve_thinking: bool = False
+    reasoning_efforts: tuple[str, ...] | None = None
 
     @property
     def agent_base_url(self) -> str:
@@ -84,13 +92,9 @@ class ModelRuntime:
         self.inference_scheduler = inference_scheduler
         self.llm_logger = LLMCallLogger(settings.llm_log_path)
         for profile in ProviderRepository(session_factory).list():
-            residency = (profile.config_json or {}).get("residency", {})
-            if residency.get("enabled"):
-                self.inference_scheduler.restore(
-                    profile.id, residency.get("resident_model"),
-                    "batch" if residency.get("session_mode") == "batch" else "interactive",
-                    server_url=profile.base_url,
-                )
+            self.inference_scheduler.configure(
+                profile.id, serialize_model_switches=serializes_model_switches(profile),
+            )
 
     def profiles(self, *, include_archived: bool = False) -> list[ProviderProfileRecord]:
         with self.session_factory() as session:
@@ -181,17 +185,19 @@ class ModelRuntime:
                 declared_model is not None
                 and declared_model.get("preserve_thinking", False)
             ),
+            reasoning_efforts=(
+                tuple(effort for effort in REASONING_EFFORTS if effort in declared_model["reasoning_efforts"])
+                if declared_model is not None
+                and isinstance(declared_model.get("reasoning_efforts"), (list, tuple))
+                else None
+            ),
         )
 
     def client(self, resolved: ResolvedModel) -> AsyncOpenAI:
         http_client = logged_http_client(
             self.settings,
             resolved.kind,
-            inference_scheduler=(
-                self.inference_scheduler
-                if resolved.local_inference
-                else None
-            ),
+            inference_scheduler=self.inference_scheduler,
             profile_id=resolved.profile_id,
         )
         if resolved.kind == "ollama":
@@ -347,11 +353,13 @@ class ModelRuntime:
         if resolved.kind == "ollama":
             client = (
                 self.ollama
-                if self.ollama.base_url.rstrip("/") == resolved.base_url.rstrip("/")
+                if self.ollama.profile_id == resolved.profile_id
+                and self.ollama.base_url.rstrip("/") == resolved.base_url.rstrip("/")
                 else OllamaClient(
                     self.settings,
                     resolved.base_url,
                     inference_scheduler=self.inference_scheduler,
+                    profile_id=resolved.profile_id,
                 )
             )
             try:
@@ -407,11 +415,13 @@ class ModelRuntime:
         if resolved.kind == "ollama":
             client = (
                 self.ollama
-                if self.ollama.base_url.rstrip("/") == resolved.base_url.rstrip("/")
+                if self.ollama.profile_id == resolved.profile_id
+                and self.ollama.base_url.rstrip("/") == resolved.base_url.rstrip("/")
                 else OllamaClient(
                     self.settings,
                     resolved.base_url,
                     inference_scheduler=self.inference_scheduler,
+                    profile_id=resolved.profile_id,
                 )
             )
             try:

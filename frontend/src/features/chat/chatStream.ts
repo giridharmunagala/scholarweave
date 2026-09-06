@@ -32,6 +32,12 @@ function applyStreamText(
   state: ChatStreamState,
   event: RunStreamEvent,
 ): ChatStreamState {
+  if (event.event_type === 'model.retry' && event.payload.delegated !== true) {
+    const discarded = event.payload.discarded_text_characters;
+    if (typeof discarded === 'number' && Number.isInteger(discarded) && discarded > 0) {
+      return { ...state, assistant: Array.from(state.assistant).slice(0, -discarded).join('') };
+    }
+  }
   if (event.event_type === 'model.stream') {
     const rawType = String(event.payload.raw_type ?? '');
     const delta = event.payload.delta;

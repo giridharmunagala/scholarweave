@@ -25,6 +25,8 @@ export const RUN_EVENT_TYPES = [
   'model.stream',
   'model.started',
   'model.completed',
+  'model.telemetry',
+  'model.retry',
   'steering.queued',
   'steering.applied',
   'tool.started',

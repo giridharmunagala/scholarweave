@@ -1,5 +1,5 @@
 Create a technically precise, self-contained summary of the supplied paper, in this single model job.
-If the instruction already contains the complete short-paper extraction, draft directly from it:
+If the instruction already contains the complete paper extraction, draft directly from it:
 do not inspect or reread; the final save checkpoints that evidence and its full coverage.
 Otherwise inspect once. Prepare only if extraction is unreadable. Inspection reports reusable
 source-versioned evidence: read it in bounded slices when available, then resume its exact cursor.

@@ -91,6 +91,19 @@ def _restore_pending_steering(events: list[Any]) -> SteeringInbox:
     return inbox
 
 
+def _restore_work_plan(metadata: dict[str, Any], attempts: list[Any]) -> None:
+    for attempt in attempts:
+        if (
+            attempt.status != "completed"
+            or attempt.catalog_id not in {"work.plan.create", "work.plan.update", "work.plan.read"}
+            or not isinstance(attempt.result_json, dict)
+        ):
+            continue
+        items = attempt.result_json.get("items")
+        if isinstance(items, list) and items and all(isinstance(item, dict) for item in items):
+            metadata["work_plan"] = [dict(item) for item in items]
+
+
 class RunService:
     _CLEANUP_INTERVAL_SECONDS = 60 * 60
     _CLAIM_LEASE_SECONDS = 300.0
@@ -127,7 +140,6 @@ class RunService:
         self._delete_run_artifacts = delete_run_artifacts
         self._prompts = prompts
         self._run_logger = RunDetailLogger(run_log_dir) if run_log_dir is not None else None
-        self._inference_scheduler = inference_scheduler
         self._completion_validators = dict(completion_validators or {})
         self._owner_id = str(uuid.uuid4())
         self._closing = False
@@ -238,8 +250,9 @@ class RunService:
                 )
                 restore_tool_failure_state_from_attempts(
                     runtime_context.metadata,
-                    self._repository.get(record.id).tool_attempts,
+                    record.tool_attempts,
                 )
+                _restore_work_plan(runtime_context.metadata, record.tool_attempts)
                 lease_deadline = await self._renew_claim(lease_deadline)
                 self._schedule(
                     record.id,
@@ -567,6 +580,16 @@ class RunService:
                 break
             await asyncio.gather(*pending, return_exceptions=True)
 
+    async def delete_conversation_runs(self, conversation_id: str) -> None:
+        await self.cancel_conversation_runs(conversation_id)
+        records = self._repository.list(conversation_id=conversation_id)
+        if any(record.status not in {"completed", "failed", "cancelled"} for record in records):
+            raise ConflictError("Conversation runs are still stopping. Retry deletion once they finish.")
+        if self._run_logger is not None:
+            self._run_logger.delete_conversation(conversation_id)
+        if self._delete_history([record.id for record in records]) != len(records):
+            raise ConflictError("Conversation runs are still active and cannot be deleted.")
+
     def delete(self, run_id: str) -> None:
         record = self._repository.get(run_id)
         if record.status not in {"completed", "failed", "cancelled"}:
@@ -861,7 +884,7 @@ class RunService:
         record_metadata = self._repository.get(run_id).runtime_metadata_json
         if isinstance(record_metadata, dict) and record_metadata.get("summary_batch_previous_run_id"):
             # Recovery may preclaim all queued records. Release that claim before
-            # waiting; queue time must consume neither leases nor execution budget.
+            # waiting; queued work must not hold a lease.
             if preclaimed and lease_deadline is not None:
                 try:
                     await self._release_claim(lease_deadline.lease)
@@ -878,9 +901,6 @@ class RunService:
             except Exception as exc:
                 await self._settle_waiting_summary(run_id, error=f"{type(exc).__name__}: {exc}")
                 return
-        deadline = (
-            asyncio.get_running_loop().time() + self._settings.agent_run_timeout_seconds
-        )
         await self._execute_run(
             run_id,
             compiled,
@@ -888,7 +908,6 @@ class RunService:
             conversation_id=conversation_id,
             runtime_context=runtime_context,
             runtime_metadata=runtime_metadata,
-            deadline=deadline,
             preclaimed=preclaimed,
             lease_deadline=lease_deadline,
         )
@@ -964,7 +983,6 @@ class RunService:
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
         runtime_metadata: dict[str, Any] | None = None,
-        deadline: float,
         preclaimed: bool = False,
         lease_deadline: LeaseDeadline | None = None,
     ) -> None:
@@ -979,29 +997,27 @@ class RunService:
         execution: asyncio.Task[None] | None = None
         try:
             await self._validate_preclaimed_deadline(lease_deadline)
-            async with asyncio.timeout_at(deadline):
-                heartbeat = asyncio.create_task(
-                    self._heartbeat_claim(run_id, lease_deadline)
+            heartbeat = asyncio.create_task(
+                self._heartbeat_claim(run_id, lease_deadline)
+            )
+            execution = asyncio.create_task(
+                self._execute_owned_run(
+                    run_id,
+                    compiled,
+                    input_value,
+                    conversation_id=conversation_id,
+                    runtime_context=runtime_context,
+                    runtime_metadata=runtime_metadata,
                 )
-                execution = asyncio.create_task(
-                    self._execute_owned_run(
-                        run_id,
-                        compiled,
-                        input_value,
-                        conversation_id=conversation_id,
-                        runtime_context=runtime_context,
-                        runtime_metadata=runtime_metadata,
-                        deadline=deadline,
-                    )
-                )
-                done, _ = await asyncio.wait(
-                    {execution, heartbeat},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if heartbeat in done:
-                    await heartbeat
-                    raise RuntimeError("Run claim heartbeat stopped unexpectedly.")
-                await execution
+            )
+            done, _ = await asyncio.wait(
+                {execution, heartbeat},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if heartbeat in done:
+                await heartbeat
+                raise RuntimeError("Run claim heartbeat stopped unexpectedly.")
+            await execution
         except asyncio.CancelledError:
             if (
                 run_id not in self._lease_lost_runs
@@ -1020,24 +1036,6 @@ class RunService:
             if execution is not None:
                 execution.cancel()
                 await asyncio.gather(execution, return_exceptions=True)
-        except TimeoutError:
-            if execution is not None and not execution.done():
-                execution.cancel()
-                await asyncio.gather(execution, return_exceptions=True)
-            if run_id not in self._lease_lost_runs:
-                record = self._repository.get(run_id)
-                if record.status in {"pending", "running"}:
-                    error = (
-                        f"Run exceeded its {self._settings.agent_run_timeout_seconds:g}-second "
-                        "deadline."
-                    )
-                    await self._fail_or_cancel_owned(
-                        run_id,
-                        error,
-                        self._event_sink(run_id),
-                        {"error": error, "terminal_reason": "deadline_exceeded"},
-                    )
-                    self._log_terminal_run(run_id)
         except Exception as exc:
             record = self._repository.get(run_id)
             if (
@@ -1077,24 +1075,7 @@ class RunService:
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None,
         runtime_metadata: dict[str, Any] | None,
-        deadline: float,
     ) -> None:
-        if (
-            self._inference_scheduler is not None
-            and compiled.blueprint.run.exclusive_inference
-            and _uses_local_inference(compiled)
-        ):
-            async with self._inference_scheduler.exclusive():
-                await self._execute_claimed_run(
-                    run_id,
-                    compiled,
-                    input_value,
-                    conversation_id=conversation_id,
-                    runtime_context=runtime_context,
-                    runtime_metadata=runtime_metadata,
-                    deadline=deadline,
-                )
-            return
         await self._execute_claimed_run(
             run_id,
             compiled,
@@ -1102,7 +1083,6 @@ class RunService:
             conversation_id=conversation_id,
             runtime_context=runtime_context,
             runtime_metadata=runtime_metadata,
-            deadline=deadline,
         )
 
     async def _execute_claimed_run(
@@ -1114,7 +1094,6 @@ class RunService:
         conversation_id: str | None,
         runtime_context: ScholarWeaveContext | None = None,
         runtime_metadata: dict[str, Any] | None = None,
-        deadline: float,
     ) -> None:
         sink = self._event_sink(run_id)
         record_metadata = self._repository.get(run_id).runtime_metadata_json
@@ -1180,9 +1159,16 @@ class RunService:
         active_epoch_id: str | None = None
         deferred_steering: list[SteeringMessage] = []
         try:
-            async with asyncio.timeout_at(deadline):
-                self._raise_if_cancelled(run_id)
-                async with self._sessions.run_lock(session_id):
+            self._raise_if_cancelled(run_id)
+            async with self._sessions.run_lock(session_id):
+                priority = (
+                    "background"
+                    if context.metadata.get("autonomous_work")
+                    or context.metadata.get("paper_summary_document_id")
+                    else "interactive"
+                )
+                # Model tasks inherit priority without holding a model lease.
+                with inference_priority(priority):
                     self._raise_if_cancelled(run_id)
                     session_checkpoint: int | None = None
                     epoch_input: RunInput = input_value
@@ -1190,31 +1176,23 @@ class RunService:
                     consumed_turns = self._repository.consumed_model_turns(run_id)
                     while True:
                         self._raise_if_cancelled(run_id)
-                        remaining_turns = compiled.max_turns - consumed_turns
-                        if remaining_turns <= 0:
+                        remaining_turns = (
+                            compiled.max_turns - consumed_turns
+                            if compiled.max_turns is not None
+                            else None
+                        )
+                        if remaining_turns is not None and remaining_turns <= 0:
                             raise RunBudgetExceeded(
                                 f"Run exhausted its {compiled.max_turns}-turn budget."
                             )
-                        epoch_turn_limit = min(
-                            remaining_turns,
-                            self._settings.agent_epoch_max_turns,
-                        )
+                        epoch_turn_limit = self._settings.agent_epoch_max_turns
+                        if remaining_turns is not None:
+                            epoch_turn_limit = min(remaining_turns, epoch_turn_limit)
                         epoch = self._repository.begin_epoch_owned(
                             self._owned_lease(run_id),
                             to_jsonable(epoch_input),
                         )
                         active_epoch_id = epoch.id
-                        if epoch.epoch_index >= self._settings.agent_max_epochs:
-                            self._repository.finish_epoch_owned(
-                                self._owned_lease(run_id),
-                                epoch.id,
-                                status="failed",
-                                terminal_reason="budget_exhausted",
-                                error="Maximum epoch budget reached.",
-                            )
-                            raise RunBudgetExceeded(
-                                f"Run exhausted {self._settings.agent_max_epochs} epochs."
-                            )
                         context.metadata["active_epoch_id"] = epoch.id
                         context.metadata["epoch_index"] = epoch.epoch_index
                         context.metadata["goal_state"] = self._repository.get_goal_state(
@@ -1225,7 +1203,7 @@ class RunService:
                             {
                                 "epoch_id": epoch.id,
                                 "epoch_index": epoch.epoch_index,
-                                "max_epochs": self._settings.agent_max_epochs,
+                                "max_epochs": None,
                                 "max_turns": epoch_turn_limit,
                                 "remaining_run_turns": remaining_turns,
                             },
@@ -1248,24 +1226,15 @@ class RunService:
                         if session_checkpoint is None:
                             session_checkpoint = await session.checkpoint()
                         try:
-                            priority = (
-                                "background"
-                                if context.metadata.get("autonomous_work")
-                                or context.metadata.get("paper_summary_document_id")
-                                else "interactive"
+                            handle = run_streamed(
+                                compiled.entry_agent,
+                                epoch_items,
+                                context=context,
+                                settings=compiled.run_settings,
+                                max_turns=epoch_turn_limit,
+                                hooks=hooks,
+                                context_policy=compiled.context_policy,
                             )
-                            # run_streamed creates a task; its descendants inherit
-                            # this request priority without holding a model lease.
-                            with inference_priority(priority):
-                                handle = run_streamed(
-                                    compiled.entry_agent,
-                                    epoch_items,
-                                    context=context,
-                                    settings=compiled.run_settings,
-                                    max_turns=epoch_turn_limit,
-                                    hooks=hooks,
-                                    context_policy=compiled.context_policy,
-                                )
                             self._active_runs[run_id] = handle
                             try:
                                 result = await handle
@@ -1470,20 +1439,6 @@ class RunService:
                 if self._repository.cancel_owned(self._owned_lease(run_id)):
                     await sink.emit("run.cancelled", {"reason": "user_requested"})
             raise
-        except TimeoutError:
-            await _cleanup_internal_prompt_if_needed(context, session)
-            if run_id in self._lease_lost_runs:
-                raise asyncio.CancelledError
-            error = (
-                f"Run exceeded its {self._settings.agent_run_timeout_seconds:g}-second "
-                "deadline."
-            )
-            await self._fail_or_cancel_owned(
-                run_id,
-                error,
-                sink,
-                {"error": error, "terminal_reason": "deadline_exceeded"},
-            )
         except RunPolicyViolation as exc:
             await _cleanup_internal_prompt_if_needed(context, session)
             if run_id in self._lease_lost_runs:
@@ -1721,10 +1676,6 @@ def _validate_completion_policy(compiled: CompiledAgent) -> None:
         raise ValueError("A completion validator must have a stable completion_policy_id.")
 
 
-def _uses_local_inference(compiled: CompiledAgent) -> bool:
-    return any(model.local_inference for model in compiled.resolved_models.values())
-
-
 def _stop_and_answer_compiled(
     compiled: CompiledAgent,
     prompt: str = STOP_AND_ANSWER_PROMPT,
@@ -1893,6 +1844,17 @@ def _persisted_stream_text(events: list[Any]) -> tuple[str, str]:
     reasoning = ""
     assistant = ""
     for event in events:
+        if event.event_type == "model.retry":
+            payload = event.payload_json
+            discarded = payload.get("discarded_text_characters")
+            if (
+                payload.get("delegated") is not True
+                and isinstance(discarded, int)
+                and not isinstance(discarded, bool)
+                and discarded > 0
+            ):
+                assistant = assistant[:-discarded]
+            continue
         if event.event_type != "model.stream":
             continue
         payload = event.payload_json
@@ -1984,7 +1946,7 @@ def _work_continuation(context: ScholarWeaveContext) -> str | None:
 def _epoch_model_turns(usage: dict[str, Any], limit: int) -> int:
     performance = usage.get("performance")
     if isinstance(performance, dict):
-        model_calls = performance.get("model_calls")
+        model_calls = performance.get("main_model_calls", performance.get("model_calls"))
         if isinstance(model_calls, int) and not isinstance(model_calls, bool):
             return max(0, min(limit, model_calls))
     requests = usage.get("requests")

@@ -1,11 +1,11 @@
 {
   "label": "Read research paper",
-  "description": "Inspect, prepare, search, or read bounded cited evidence from one local paper. Prefer search for a specific claim, method, number or section; it uses the local SQLite full-text index without a model or embeddings call. Hits contain matching excerpts; expand with action=chunks, start=chunk_index and offset=match_offset. Search hits are targeted evidence, not full-paper coverage. Prepare only if extraction is incomplete. Page/chunk outputs fit a character budget: follow both next_page/next_start and next_offset exactly, including continuation within a long item. Do not reread an overlapping range or fetch a giant result reference.",
+  "description": "Inspect, prepare, search, or read cited evidence from one local paper. Prefer search for a specific claim, method, number or section; it uses the local SQLite full-text index without a model or embeddings call. Hits contain matching excerpts; expand with action=chunks, start=chunk_index and offset=match_offset. Search hits are targeted evidence, not full-paper coverage. Prepare only if extraction is incomplete. Requested pages/chunks are returned in full without a separate output-token cap. Follow next_page/next_start and next_offset exactly to avoid overlap. Context management archives content only when needed to fit the model's configured context window; retrieve archived evidence when needed.",
   "parameter_descriptions": {
     "document_id": "The exact local paper document ID returned by search_research_library; do not use an arXiv ID, title, path, or the string \"null\".",
     "action": "inspect for structure/status, prepare for extraction, search for ranked local content matches, pages for cited page slices, or chunks for indexed chunks.",
     "start": "For pages, the 1-based page number (0 also means the first page); for chunks, the zero-based chunk offset. Use JSON null for inspect or prepare.",
-    "limit": "Maximum pages, chunks, or search hits, from 1 to 10; fewer may fit the output budget.",
+    "limit": "Positive maximum number of pages, chunks, or search hits to return. Choose the range needed for the task.",
     "query": "Specific search terms for action=search. Use null for other actions.",
     "offset": "Character offset within the first page/chunk, from the preceding next_offset. Use null or 0 for a new range and for inspect, prepare, or search."
   }

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import shutil
 from pathlib import Path
 
 import anyio
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -14,7 +16,9 @@ from backend.bootstrap import create_services
 from backend.documents import DocumentProcessingError
 from backend.documents.formatting import DocumentFormatter
 from backend.documents.formatting import build_paper_manifest
-from backend.providers.ollama import OllamaError
+from backend.providers.ollama import OllamaClient, OllamaError
+from backend.providers.schemas import ProviderCreate
+from backend.providers.types import ModelReference
 from backend.documents.models import Artifact, Document, DocumentChunk
 
 
@@ -668,10 +672,52 @@ def test_image_only_pdf_uses_ocr(test_settings, tmp_path) -> None:
 
 
 @pytest.mark.anyio
+async def test_ocr_uses_selected_provider_lane_even_when_ollama_urls_match(
+    test_settings, monkeypatch,
+) -> None:
+    services = create_services(test_settings)
+    vision = services.document_vision
+    profile = services.providers.create(ProviderCreate(
+        name="OCR provider", kind="ollama", base_url=vision.ollama.base_url,
+    ))
+    model = vision.model_runtime.resolve(
+        "vision", model_reference=ModelReference(profile.id, "vision-model"),
+    )
+    calls = []
+
+    async def respond(client, _method, _path, **kwargs):
+        calls.append((client.profile_id, kwargs["json"]["model"]))
+        return httpx.Response(200, json={"response": "ok"})
+
+    monkeypatch.setattr(OllamaClient, "_request_unlocked", respond)
+    task = None
+    try:
+        async with asyncio.timeout(1):
+            async with vision.model_runtime.inference_scheduler.request(
+                profile_id=profile.id, model="chat-model",
+            ):
+                task = asyncio.create_task(vision._generate_vision(
+                    model, "read page", image_png=b"page",
+                ))
+                await asyncio.sleep(0)
+                assert calls == []
+                assert not task.done()
+            assert (await task)["response"] == "ok"
+        assert calls == [(profile.id, "vision-model")]
+    finally:
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await services.close()
+
+
+@pytest.mark.anyio
 async def test_good_ocr_skips_the_rewrite_model(test_settings) -> None:
     services = create_services(test_settings)
 
     class FakeOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
@@ -734,6 +780,8 @@ async def test_average_ocr_keeps_the_original_text(test_settings) -> None:
     services = create_services(test_settings)
 
     class FakeOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         def __init__(self) -> None:
             self.calls = 0
 
@@ -773,6 +821,8 @@ async def test_poor_ocr_is_rewritten_and_revalidated(test_settings) -> None:
     services = create_services(test_settings)
 
     class FakeOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         def __init__(self) -> None:
             self.calls: list[dict[str, object]] = []
 
@@ -836,6 +886,8 @@ async def test_empty_ocr_is_rewritten_without_a_triage_call(test_settings) -> No
     services = create_services(test_settings)
 
     class FakeOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         def __init__(self) -> None:
             self.calls: list[str] = []
 
@@ -876,6 +928,8 @@ async def test_failed_triage_request_falls_back_to_rewriting(test_settings) -> N
     services = create_services(test_settings)
 
     class FlakyOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         async def generate(self, model: str, prompt: str, **kwargs: object) -> dict[str, str]:
             if model == "small-vision-model":
                 raise OllamaError("connection reset")
@@ -912,6 +966,8 @@ async def test_llm_rewrite_falls_back_to_ocr_when_response_is_empty(test_setting
     services = create_services(test_settings)
 
     class EmptyOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         async def generate(self, model: str, prompt: str, **kwargs: object) -> dict[str, str]:
             if model == "small-vision-model":
                 return {"response": '{"quality":"poor","issues":["Text is scrambled."]}'}
@@ -951,6 +1007,8 @@ async def test_validation_rejects_unfaithful_rewrite(test_settings) -> None:
     services = create_services(test_settings)
 
     class RejectingOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         async def generate(self, model: str, prompt: str, **kwargs: object) -> dict[str, str]:
             if model == "small-vision-model":
                 if "CANDIDATE MARKDOWN" in prompt:
@@ -996,6 +1054,8 @@ async def test_forced_repair_skips_triage(test_settings) -> None:
     services = create_services(test_settings)
 
     class FakeOllama:
+        profile_id = services.document_vision.ollama.profile_id
+
         def __init__(self) -> None:
             self.calls: list[str] = []
 

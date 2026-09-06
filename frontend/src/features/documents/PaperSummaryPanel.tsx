@@ -3,6 +3,9 @@ import { subscribeToRun } from '../../api/events';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { ErrorNotice, Loading, Panel, StatusPill } from '../../shared/components/Ui';
+import { resolveModelReference } from '../chat/ChatModelPicker';
+import { reasoningEffortsForModel, ReasoningEffortSelect, type ReasoningEffort } from '../chat/ReasoningEffortSelect';
+import { providersApi } from '../providers/api';
 import { summaryApi, type SummaryContent, type SummaryRequest, type SummaryRun, type SummaryVersion } from './summaryApi';
 
 const TERMINAL_EVENTS = new Set(['run.completed', 'run.failed', 'run.cancelled']);
@@ -22,8 +25,20 @@ export function PaperSummaryPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [mode, setMode] = useState<NonNullable<SummaryRequest['mode']>>('reviewed');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
+  const [supportedEfforts, setSupportedEfforts] = useState<ReasoningEffort[] | null>(null);
 
   const load = async () => setVersions(await summaryApi.versions(documentId));
+
+  useEffect(() => {
+    let active = true;
+    Promise.all([providersApi.list(), providersApi.settings()])
+      .then(([providers, settings]) => {
+        if (active) setSupportedEfforts(reasoningEffortsForModel(providers, resolveModelReference({}, settings)));
+      })
+      .catch((nextError) => { if (active) setError(nextError); });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     setLoading(true);
@@ -58,7 +73,9 @@ export function PaperSummaryPanel({
     setBusy(true);
     setError(null);
     try {
-      setActive(await summaryApi.start(documentId, { mode }));
+      setActive(await summaryApi.start(documentId, {
+        mode, ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      }));
     } catch (nextError) {
       setError(nextError);
     } finally {
@@ -115,6 +132,14 @@ export function PaperSummaryPanel({
           <option value="overview">Quick overview (partial)</option>
         </select>
       </label>
+      <ReasoningEffortSelect
+        value={reasoningEffort}
+        supportedEfforts={supportedEfforts}
+        onChange={setReasoningEffort}
+        disabled={busy || Boolean(active)}
+        defaultLabel="Off by default (when supported)"
+        ariaLabel="Paper summary reasoning"
+      />
       {!ready ? <p className="muted">Ingest and index this paper before creating a summary.</p> : null}
       {active ? (
         <div className="summary-running" role="status">

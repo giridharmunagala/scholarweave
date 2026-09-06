@@ -23,6 +23,7 @@ class OllamaClient:
         base_url: str | None = None,
         request_lock: anyio.Lock | None = None,
         inference_scheduler: InferenceScheduler | None = None,
+        profile_id: str | None = None,
     ) -> None:
         if request_lock is not None and inference_scheduler is not None:
             raise ValueError("Configure either a request lock or an inference scheduler, not both.")
@@ -30,13 +31,18 @@ class OllamaClient:
         self._base_url = base_url.rstrip("/") if base_url else None
         self._request_lock = request_lock
         self._inference_scheduler = inference_scheduler
+        self.profile_id = profile_id
 
     @property
     def base_url(self) -> str:
         return self._base_url or self.settings.ollama_base_url.rstrip("/")
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
-        async with self._request_guard():
+        if self._request_lock is None and path not in {
+            "/api/chat", "/api/generate", "/api/embed", "/api/embeddings",
+        }:
+            return await self._request_unlocked(method, path, **kwargs)
+        async with self._request_guard(model=(kwargs.get("json") or {}).get("model")):
             return await self._request_unlocked(method, path, **kwargs)
 
     async def _request_unlocked(
@@ -113,7 +119,7 @@ class OllamaClient:
             return response.json()
 
         chunks: list[str] = []
-        async with self._request_guard():
+        async with self._request_guard(model=model):
             async with httpx.AsyncClient(base_url=self.base_url, timeout=None) as client:
                 try:
                     async with client.stream("POST", "/api/generate", json=payload) as response:
@@ -153,7 +159,7 @@ class OllamaClient:
             return response.json()
 
         chunks: list[str] = []
-        async with self._request_guard():
+        async with self._request_guard(model=model):
             async with httpx.AsyncClient(base_url=self.base_url, timeout=None) as client:
                 try:
                     async with client.stream("POST", "/api/chat", json=payload) as response:
@@ -189,9 +195,11 @@ class OllamaClient:
         raise OllamaError("Unexpected Ollama embeddings response")
 
     @asynccontextmanager
-    async def _request_guard(self) -> AsyncIterator[None]:
+    async def _request_guard(self, *, model: str | None) -> AsyncIterator[None]:
         if self._inference_scheduler is not None:
-            async with self._inference_scheduler.request():
+            async with self._inference_scheduler.request(
+                profile_id=self.profile_id, model=model, server_url=self.base_url,
+            ):
                 yield
             return
         if self._request_lock is None:

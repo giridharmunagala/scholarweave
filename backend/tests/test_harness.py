@@ -7,17 +7,22 @@ import json
 from typing import Any
 
 import pytest
+import httpx
+from openai import BadRequestError
 
 from backend.agents.context import ScholarWeaveContext
+from backend.agents.context_budget import ContextBudgetPolicy
 from backend.agents.harness import (
     MAX_DELEGATION_DEPTH,
     AgentDefinition,
+    AgentRunner,
     FunctionTool,
     JsonSchemaOutput,
     MaxTurnsExceeded,
     ModelBehaviorError,
     ModelBinding,
     ModelSettings,
+    PreparedInput,
     RunPolicyViolation,
     RunSettings,
     ToolCallAccumulator,
@@ -29,10 +34,13 @@ from backend.agents.harness import (
     to_chat_messages,
 )
 from backend.runs.events import BufferedRunEventSink
+from backend.core.config import Settings
+from backend.providers.reasoning import infer_reasoning_efforts
 from backend.runs.hooks import ScholarWeaveRunHooks
 from backend.tests.harness_support import (
     FakeClient,
     multi_tool_call_chunks,
+    stub_binding,
     text_chunks,
     tool_call_chunks,
     tool_call_fragments,
@@ -187,7 +195,211 @@ async def test_length_truncated_tool_turn_never_dispatches_tools(arguments) -> N
 
 
 @pytest.mark.anyio
-async def test_tool_only_turn_measures_generation_from_first_argument_delta() -> None:
+@pytest.mark.parametrize("arguments", ['{"text":"discard this"}', '{"text":'])
+async def test_context_budget_retries_truncation_without_dispatching_partial_tools(arguments) -> None:
+    truncated = tool_call_chunks("echo", arguments, text="Incomplete answer.")
+    truncated[-1]["choices"][0]["finish_reason"] = "length"
+    truncated.append({"choices": [], "usage": {"prompt_tokens": 1515, "completion_tokens": 2048}})
+    client = FakeClient.scripted([
+        truncated,
+        tool_call_chunks("echo", '{"text":"execute once"}'),
+        text_chunks("Complete answer.", usage={"prompt_tokens": 1600, "completion_tokens": 100}),
+    ])
+    calls: list[str] = []
+    sink = RecordingSink()
+    definition = agent(client, tools=[echo_tool(calls)])
+    result = await run_agent(
+        definition, "Do the research.", context=make_context(sink),
+        settings=RunSettings(), max_turns=2,
+        context_policy=ContextBudgetPolicy(Settings()),
+    )
+
+    assert result.final_output == "Complete answer."
+    assert calls == ['{"text":"execute once"}']
+    assert [request["max_tokens"] for request in client.requests] == [2048, 4096, 4096]
+    assert client.requests[0]["messages"] == client.requests[1]["messages"]
+    assert "Incomplete answer." not in json.dumps(result.generated_items)
+    assert result.usage.requests == 3
+    assert result.usage.output_tokens == 2148
+    assert definition.model_settings.max_tokens is None
+    retries = [payload for kind, payload in sink.events if kind == "model.retry"]
+    assert len(retries) == 1
+    assert retries[0]["discarded_text_characters"] == len("Incomplete answer.")
+
+
+@pytest.mark.anyio
+async def test_truncation_growth_uses_context_not_a_fixed_output_ceiling() -> None:
+    truncated = text_chunks("Still incomplete.")
+    truncated[-1]["choices"][0]["finish_reason"] = "length"
+    client = FakeClient.scripted([truncated] * 5 + [text_chunks("Done.")])
+    result = await run_agent(
+        agent(client), "Answer.", context=make_context(), settings=RunSettings(),
+        context_policy=ContextBudgetPolicy(Settings(agent_context_window_tokens=80_000)),
+        max_turns=1,
+    )
+    assert result.final_output == "Done."
+    assert [request["max_tokens"] for request in client.requests] == [
+        2048, 4096, 8192, 16384, 32768, 65536,
+    ]
+
+
+@pytest.mark.anyio
+async def test_truncation_stops_when_context_has_no_more_generation_room() -> None:
+    truncated = text_chunks("Incomplete.")
+    truncated[-1]["choices"][0]["finish_reason"] = "length"
+    client = FakeClient.scripted([truncated])
+    with pytest.raises(ModelBehaviorError, match="available context"):
+        await run_agent(
+            agent(client), "Answer.", context=make_context(), settings=RunSettings(),
+            context_policy=ContextBudgetPolicy(Settings(agent_context_window_tokens=4096)),
+        )
+    budgets = [request["max_tokens"] for request in client.requests]
+    assert len(budgets) > 1
+    assert budgets == sorted(set(budgets))
+    assert max(budgets) < 4096
+
+
+@pytest.mark.anyio
+async def test_explicit_response_cap_is_not_silently_overridden() -> None:
+    truncated = text_chunks("Incomplete.")
+    truncated[-1]["choices"][0]["finish_reason"] = "length"
+    client = FakeClient.scripted([truncated])
+    with pytest.raises(ModelBehaviorError, match="explicit response"):
+        await run_agent(
+            agent(client, model_settings=ModelSettings(max_tokens=1024)),
+            "Answer.", context=make_context(), settings=RunSettings(),
+            context_policy=ContextBudgetPolicy(Settings()),
+        )
+    assert len(client.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_long_tool_run_recovers_truncation_over_real_chat_completions(
+    stub_provider, monkeypatch,
+) -> None:
+    stub_provider.tool_plans = [
+        ("Research", "echo", {"text": str(index)}) for index in range(24)
+    ]
+    original_stream = stub_provider.stream
+
+    def stream(payload):
+        response = original_stream(payload)
+        if payload["max_tokens"] < 8192:
+            response = response.replace('"finish_reason": "stop"', '"finish_reason": "length"')
+        return response
+
+    monkeypatch.setattr(stub_provider, "stream", stream)
+    binding = stub_binding(stub_provider, context_window_tokens=80_000)
+    calls: list[str] = []
+    sink = RecordingSink()
+    try:
+        result = await run_agent(
+            AgentDefinition(
+                id="research", name="Research", instructions="Research carefully.",
+                binding=binding, tools=[echo_tool(calls)],
+            ),
+            "Research", context=make_context(sink), settings=RunSettings(),
+            context_policy=ContextBudgetPolicy(Settings()),
+        )
+    finally:
+        await binding.client.close()
+    assert result.final_output == stub_provider.reply
+    assert [json.loads(call)["text"] for call in calls] == [str(index) for index in range(24)]
+    assert len(stub_provider.requests) == 27
+    assert [request["max_tokens"] for request in stub_provider.requests[-3:]] == [2048, 4096, 8192]
+    assert len([item for item in result.generated_items if item.get("role") == "assistant"]) == 1
+
+
+@pytest.mark.anyio
+async def test_cancellation_interrupts_response_recovery_before_another_request() -> None:
+    retry_started = asyncio.Event()
+
+    class PausingSink(RecordingSink):
+        async def emit(self, event_type: str, payload: dict[str, Any]) -> None:
+            await super().emit(event_type, payload)
+            if event_type == "model.retry":
+                retry_started.set()
+                await asyncio.Event().wait()
+
+    truncated = tool_call_chunks("echo", '{"text":"must not execute"}')
+    truncated[-1]["choices"][0]["finish_reason"] = "length"
+    client = FakeClient.scripted([truncated, text_chunks("Not reached.")])
+    calls: list[str] = []
+    task = asyncio.create_task(run_agent(
+        agent(client, tools=[echo_tool(calls)]), "Research.",
+        context=make_context(PausingSink()), settings=RunSettings(),
+        context_policy=ContextBudgetPolicy(Settings()),
+    ))
+    try:
+        await asyncio.wait_for(retry_started.wait(), timeout=2)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert calls == []
+    assert len(client.requests) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("context_error", [True, False])
+async def test_provider_context_rejection_reprepares_without_retrying_unrelated_errors(context_error) -> None:
+    class ArchiveRuntime(NoopToolRuntime):
+        def store_context_history(self, items, context):
+            return {"result_ref": "runs/run-1/history.json"}
+
+    error = BadRequestError(
+        "Provider rejected request.",
+        response=httpx.Response(400, request=httpx.Request("POST", "http://stub.test/v1/chat/completions")),
+        body={"error": {
+            "type": "exceed_context_size_error" if context_error else "invalid_request_error",
+            "message": "Input is too large." if context_error else "Unknown model.",
+        }},
+    )
+    client = FakeClient.scripted([text_chunks("Done.")])
+    create = client.chat.completions.create
+
+    async def reject_first(**parameters):
+        if not client.requests:
+            client.requests.append(parameters)
+            raise error
+        return await create(**parameters)
+
+    client.chat.completions.create = reject_first
+    sink = RecordingSink()
+    context = ScholarWeaveContext(run_id="run-1", tool_runtime=ArchiveRuntime(), event_sink=sink)
+    calls: list[str] = []
+    history = [
+        {"role": "user", "content": "Keep exact sources."},
+        {"role": "assistant", "content": "Old research evidence. " * 2000},
+        {"role": "user", "content": "Check the method."},
+        {"role": "assistant", "content": "Checked."},
+        {"role": "user", "content": "Check scope."},
+        {"role": "assistant", "content": "Checked."},
+        {"role": "user", "content": "Answer now."},
+    ]
+    execution = run_agent(
+        agent(client, tools=[echo_tool(calls, name="read_tool_result")]),
+        history, context=context, settings=RunSettings(),
+        context_policy=ContextBudgetPolicy(Settings(agent_context_model_summary_enabled=False)),
+    )
+    if context_error:
+        result = await execution
+        assert result.final_output == "Done."
+        assert result.usage.requests == 2
+        assert len(json.dumps(client.requests[1]["messages"])) < len(json.dumps(client.requests[0]["messages"]))
+        assert any(kind == "context.compacted" for kind, _ in sink.events)
+        assert any(kind == "model.retry" and payload["reason"] == "context_length_exceeded"
+                   for kind, payload in sink.events)
+        assert calls == []
+    else:
+        with pytest.raises(ModelBehaviorError, match="provider request failed"):
+            await execution
+        assert len(client.requests) == 1
+        assert not any(kind == "model.retry" for kind, _ in sink.events)
+
+
+@pytest.mark.anyio
+async def test_tool_only_turn_uses_server_timings_not_argument_delta_time() -> None:
     now = 10.0
 
     async def create(**_parameters):
@@ -199,6 +411,9 @@ async def test_tool_only_turn_measures_generation_from_first_argument_delta() ->
             now = 15.0
             yield scripted[1]
             yield {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 30}}
+            yield {"choices": [], "timings": {
+                "prompt_n": 20, "prompt_ms": 100, "predicted_n": 30, "predicted_ms": 200,
+            }}
         return chunks()
 
     downstream = RecordingSink()
@@ -212,13 +427,160 @@ async def test_tool_only_turn_measures_generation_from_first_argument_delta() ->
     await sink.flush()
     assert result.final_output == "ok"
     assert calls == ['{"text":"hello"}']
-    assert sink.performance()["prompt_seconds"] == 2.0
-    assert sink.performance()["generation_seconds"] == 3.0
-    assert sink.performance()["generation_tokens_per_second"] == 10.0
+    assert sink.performance()["prompt_seconds"] == 0.1
+    assert sink.performance()["generation_seconds"] == 0.2
+    assert sink.performance()["generation_tokens_per_second"] == 150.0
     assert not any(
         payload.get("snapshot") for event_type, payload in downstream.events
         if event_type == "model.stream"
     )
+
+
+@pytest.mark.anyio
+async def test_official_client_preserves_final_timing_only_chunk(stub_provider, monkeypatch) -> None:
+    original_stream = stub_provider.stream
+
+    def stream(payload):
+        body = original_stream(payload)
+        records = [
+            {"choices": [], "timings": {"prompt_n": 10, "prompt_ms": 10,
+                                       "predicted_n": 1, "predicted_ms": 10}},
+            {"choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 40}},
+            {"choices": [], "timings": {"prompt_n": 100, "prompt_ms": 250,
+                                       "predicted_n": 40, "predicted_ms": 500}},
+        ]
+        return body.replace("data: [DONE]\n\n", "".join(
+            f"data: {json.dumps(record)}\n\n" for record in records
+        ) + "data: [DONE]\n\n")
+
+    monkeypatch.setattr(stub_provider, "stream", stream)
+    downstream = RecordingSink()
+    sink = BufferedRunEventSink(downstream)
+    binding = stub_binding(stub_provider)
+    try:
+        result = await run_agent(
+            AgentDefinition(id="main", name="Main", instructions="Answer.", binding=binding),
+            "Hello", context=make_context(sink), settings=RunSettings(),
+            hooks=ScholarWeaveRunHooks(),
+        )
+    finally:
+        await binding.client.close()
+    assert result.usage.input_tokens == 1000
+    telemetry = [payload for kind, payload in downstream.events if kind == "model.telemetry"]
+    assert len(telemetry) == 1
+    assert telemetry[0]["timings"]["predicted_n"] == 40
+    assert telemetry[0]["context_scope"] == "main"
+    assert sink.performance()["model_calls"] == 1
+    assert sink.performance()["input_tokens"] == 1000
+    assert sink.performance()["prompt_tokens_per_second"] == 400
+    assert sink.performance()["generation_tokens_per_second"] == 80
+
+
+@pytest.mark.parametrize("model", ["qwen-27b", "org/Qwen-27B"])
+def test_local_qwen_alias_infers_switchable_reasoning_only_for_compatible_provider(model) -> None:
+    assert infer_reasoning_efforts("openai_compatible", model) == ["none", "high"]
+    assert infer_reasoning_efforts("openai", model) is None
+    assert infer_reasoning_efforts("ollama", model) is None
+
+
+@pytest.mark.parametrize("model", ["qwen-7b", "qwen-27b-q8", "qwen-27b:latest"])
+def test_unknown_qwen_alias_does_not_infer_switchable_reasoning(model) -> None:
+    assert infer_reasoning_efforts("openai_compatible", model) is None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["none", "high"])
+async def test_qwen_reasoning_off_and_explicit_override_use_official_wire_field(stub_provider, effort) -> None:
+    binding = stub_binding(
+        stub_provider, model_name="qwen-27b", provider_kind="openai_compatible",
+        reasoning_efforts=("none", "high"),
+    )
+    try:
+        await run_agent(
+            AgentDefinition(
+                id="summary", name="Summary", instructions="Summarize.", binding=binding,
+                model_settings=ModelSettings(reasoning_effort=effort),
+            ),
+            "Paper text.", context=make_context(), settings=RunSettings(),
+        )
+    finally:
+        await binding.client.close()
+    assert stub_provider.requests[-1]["reasoning_effort"] == effort
+    assert "chat_template_kwargs" not in stub_provider.requests[-1]
+
+
+@pytest.mark.anyio
+async def test_failed_stream_retains_reported_usage_once() -> None:
+    async def create(**_parameters):
+        async def chunks():
+            yield {"choices": [], "usage": {"prompt_tokens": 20, "completion_tokens": 2},
+                   "timings": {"predicted_n": 2, "predicted_ms": 100}}
+            raise RuntimeError("connection interrupted")
+        return chunks()
+
+    downstream = RecordingSink()
+    sink = BufferedRunEventSink(downstream)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await run_agent(
+            agent(FakeClient(create)), "Answer.", context=make_context(sink),
+            settings=RunSettings(), hooks=ScholarWeaveRunHooks(),
+        )
+    assert sink.performance()["model_calls"] == 1
+    assert sink.performance()["output_tokens"] == 2
+    assert sink.performance()["generation_tokens_per_second"] == 20
+    telemetry = next(payload for kind, payload in downstream.events if kind == "model.telemetry")
+    assert telemetry["completed"] is False
+
+
+@pytest.mark.anyio
+async def test_retry_actual_usage_preserves_policy_safety_headroom() -> None:
+    class Policy:
+        async def prepare(self, candidate, items, instructions, context, *, turn_index):
+            return PreparedInput(
+                items=items, instructions=instructions,
+                response_max_tokens=candidate.model_settings.max_tokens or 3000,
+                response_retry_max_tokens=8000, estimated_input_tokens=1000,
+                context_window_tokens=10000, safety_headroom_tokens=1000,
+            )
+
+    partial = [
+        {"choices": [{"index": 0, "delta": {"content": "Partial"}, "finish_reason": "length"}]},
+        {"choices": [], "usage": {"prompt_tokens": 5000, "completion_tokens": 3000}},
+    ]
+    client = FakeClient.scripted([
+        partial, text_chunks("Complete", usage={"prompt_tokens": 5000, "completion_tokens": 10}),
+    ])
+    result = await run_agent(
+        agent(client), "Answer.", context=make_context(), settings=RunSettings(),
+        context_policy=Policy(),
+    )
+    assert result.final_output == "Complete"
+    assert [request["max_tokens"] for request in client.requests] == [3000, 4000]
+    assert result.usage.output_tokens == 3010
+
+
+@pytest.mark.anyio
+async def test_summary_retry_preserves_eight_thousand_token_reserve() -> None:
+    partial = [
+        {"choices": [{"index": 0, "delta": {"content": "Partial"}, "finish_reason": "length"}]},
+        {"choices": [], "usage": {"prompt_tokens": 45000, "completion_tokens": 20000}},
+    ]
+    client = FakeClient.scripted([
+        partial, text_chunks("Complete", usage={"prompt_tokens": 45000, "completion_tokens": 10}),
+    ])
+    context = make_context()
+    context.metadata["paper_summary_document_id"] = "paper-1"
+    candidate = agent(client)
+    candidate.binding = ModelBinding(
+        client=client, model_name="qwen-27b", provider_kind="openai_compatible",
+        context_window_tokens=80000,
+    )
+    result = await run_agent(
+        candidate, "Answer.", context=context, settings=RunSettings(),
+        context_policy=ContextBudgetPolicy(Settings(agent_context_model_summary_enabled=False)),
+    )
+    assert result.final_output == "Complete"
+    assert [request["max_tokens"] for request in client.requests] == [20000, 27000]
 
 
 @pytest.mark.anyio
@@ -419,6 +781,72 @@ async def test_agents_that_disable_parallel_tool_calls_run_tools_sequentially() 
 
 
 @pytest.mark.anyio
+async def test_default_harness_completes_more_than_sixteen_turns(stub_provider) -> None:
+    stub_provider.tool_plans = [
+        ("extended research", "echo", {"text": str(index)}) for index in range(20)
+    ]
+    model = stub_binding(stub_provider)
+    calls: list[str] = []
+    definition = AgentDefinition(
+        id="researcher",
+        name="Researcher",
+        instructions="Research until finished.",
+        binding=model,
+        tools=[echo_tool(calls)],
+    )
+    try:
+        result = await run_agent(
+            definition,
+            "Complete this extended research.",
+            context=make_context(),
+            settings=RunSettings(),
+        )
+    finally:
+        await model.client.close()
+
+    assert result.final_output == stub_provider.reply
+    assert len(calls) == 20
+    assert result.usage.requests == len(stub_provider.requests) == 21
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("surface", ["agent", "streamed", "runner"])
+@pytest.mark.parametrize(
+    ("override", "expected_turns"),
+    [("omitted", 2), ("unlimited", 4), ("finite", 3)],
+)
+async def test_turn_limit_override_preserves_configured_defaults(
+    surface, override, expected_turns,
+) -> None:
+    client = FakeClient.scripted([
+        *(tool_call_chunks("echo", '{"text":"continue"}') for _ in range(3)),
+        text_chunks("Finished."),
+    ])
+    definition = agent(client, tools=[echo_tool([])])
+    context = make_context()
+    settings = RunSettings(max_turns=2)
+    kwargs = {} if override == "omitted" else {
+        "max_turns": None if override == "unlimited" else 3,
+    }
+    if surface == "runner":
+        pending = AgentRunner(definition, context=context, settings=settings).run(
+            "Research.", **kwargs,
+        )
+    else:
+        execute = run_agent if surface == "agent" else run_streamed
+        pending = execute(
+            definition, "Research.", context=context, settings=settings, **kwargs,
+        )
+    if override == "unlimited":
+        assert (await pending).final_output == "Finished."
+    else:
+        with pytest.raises(MaxTurnsExceeded) as raised:
+            await pending
+        assert raised.value.run_data.usage.requests == expected_turns
+    assert len(client.requests) == expected_turns
+
+
+@pytest.mark.anyio
 async def test_max_turns_is_enforced_and_carries_partial_progress() -> None:
     client = FakeClient.scripted([tool_call_chunks("echo", "{}")])
 
@@ -436,7 +864,8 @@ async def test_max_turns_is_enforced_and_carries_partial_progress() -> None:
 
 
 @pytest.mark.anyio
-async def test_run_can_be_cancelled_mid_stream() -> None:
+@pytest.mark.parametrize("max_turns", [None, 2])
+async def test_run_can_be_cancelled_mid_stream(max_turns) -> None:
     started = asyncio.Event()
     client = FakeClient.blocking(started)
     handle = run_streamed(
@@ -444,7 +873,7 @@ async def test_run_can_be_cancelled_mid_stream() -> None:
         "Answer.",
         context=make_context(),
         settings=RunSettings(),
-        max_turns=2,
+        max_turns=max_turns,
     )
 
     await asyncio.wait_for(started.wait(), timeout=5)
@@ -516,7 +945,8 @@ async def test_structured_output_is_validated_locally() -> None:
 
 
 @pytest.mark.anyio
-async def test_delegation_runs_an_isolated_sub_agent() -> None:
+@pytest.mark.parametrize("delegate_request", ["Check the claim.", "Research evidence. " * 1500])
+async def test_delegation_runs_an_isolated_sub_agent(delegate_request: str) -> None:
     delegate_client = FakeClient.scripted([text_chunks("Sub-agent finding.")])
     delegate = agent(delegate_client, id="worker", name="Worker")
     tool = delegation_tool(
@@ -529,7 +959,7 @@ async def test_delegation_runs_an_isolated_sub_agent() -> None:
     )
     owner_client = FakeClient.scripted(
         [
-            tool_call_chunks("focused_worker", '{"request":"Check the claim."}'),
+            tool_call_chunks("focused_worker", json.dumps({"request": delegate_request})),
             text_chunks("Coordinator answer."),
         ]
     )
@@ -546,7 +976,7 @@ async def test_delegation_runs_an_isolated_sub_agent() -> None:
     assert result.generated_items[1]["output"] == "Sub-agent finding."
     delegate_messages = delegate_client.requests[0]["messages"]
     assert [message["content"] for message in delegate_messages if message["role"] == "user"] == [
-        "Check the claim."
+        delegate_request
     ]
     assert "Delegate the check." not in json.dumps(delegate_messages)
 
@@ -1117,9 +1547,10 @@ async def test_parallel_delegations_do_not_contaminate_parent_snapshots_or_usage
     assert all("Finding B." not in snapshot for snapshot in snapshots)
 
     performance = buffered.performance()
-    assert performance["model_calls"] == 2
-    assert performance["input_tokens"] == 24
-    assert performance["output_tokens"] == 10
+    assert performance["model_calls"] == 5
+    assert performance["main_model_calls"] == 2
+    assert performance["input_tokens"] == 36
+    assert performance["output_tokens"] == 15
     assert performance["input_tokens_estimated"] is False
     assert performance["delegated_model_calls"] == 3
     assert performance["delegated_input_tokens"] == 12

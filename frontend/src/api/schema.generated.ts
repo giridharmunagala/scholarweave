@@ -453,23 +453,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/providers/inference/residency": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Residency Status */
-        get: operations["residency_status_api_providers_inference_residency_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/providers/{profile_id}": {
         parameters: {
             query?: never;
@@ -500,57 +483,6 @@ export interface paths {
         get: operations["discover_models_api_providers__profile_id__models_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/{profile_id}/residency": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /** Configure Residency */
-        put: operations["configure_residency_api_providers__profile_id__residency_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/{profile_id}/residency/confirm": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Confirm Residency */
-        post: operations["confirm_residency_api_providers__profile_id__residency_confirm_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/providers/{profile_id}/residency/drain": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Drain Residency */
-        post: operations["drain_residency_api_providers__profile_id__residency_drain_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1081,20 +1013,6 @@ export interface components {
             /** Status */
             status: string;
         };
-        /** InferenceQueueEntry */
-        InferenceQueueEntry: {
-            /** Blocked By Residency */
-            blocked_by_residency: boolean;
-            /** Model */
-            model: string | null;
-            /**
-             * Priority
-             * @enum {string}
-             */
-            priority: "interactive" | "background";
-            /** Profile Id */
-            profile_id: string | null;
-        };
         /** IngestionOptionsResponse */
         IngestionOptionsResponse: {
             /** Embedded Text Pages */
@@ -1326,6 +1244,11 @@ export interface components {
             models?: components["schemas"]["ProviderModel"][];
             /** Name */
             name: string;
+            /**
+             * Serialize Model Switches
+             * @description Prevent overlapping calls to different models on this provider. Defaults on for local providers.
+             */
+            serialize_model_switches?: boolean | null;
         };
         /** ProviderModel */
         ProviderModel: {
@@ -1377,6 +1300,8 @@ export interface components {
             models: components["schemas"]["ProviderModel"][];
             /** Name */
             name: string;
+            /** Serialize Model Switches */
+            serialize_model_switches: boolean;
             /**
              * State
              * @enum {string}
@@ -1400,6 +1325,12 @@ export interface components {
             models?: components["schemas"]["ProviderModel"][] | null;
             /** Name */
             name?: string | null;
+            /**
+             * Serialize Model Switches
+             * @description Allow same-model concurrency, but wait for active calls before switching models.
+             * @default true
+             */
+            serialize_model_switches: boolean;
         };
         /** ProviderVerifyRequest */
         ProviderVerifyRequest: {
@@ -1451,53 +1382,6 @@ export interface components {
              * @default New research
              */
             title: string;
-        };
-        /** ResidencyConfigure */
-        ResidencyConfigure: {
-            /** Enabled */
-            enabled: boolean;
-        };
-        /** ResidencyConfirm */
-        ResidencyConfirm: {
-            /**
-             * Externally Loaded
-             * @constant
-             */
-            externally_loaded: true;
-            /** Model */
-            model: string;
-            /**
-             * Session Mode
-             * @default interactive
-             * @enum {string}
-             */
-            session_mode: "interactive" | "batch";
-        };
-        /** ResidencyResponse */
-        ResidencyResponse: {
-            /** Active Requests */
-            active_requests: number;
-            /** Background Queued */
-            background_queued: number;
-            /** Confirmed */
-            confirmed: boolean;
-            /** Enabled */
-            enabled: boolean;
-            /** Interactive Queued */
-            interactive_queued: number;
-            /** Paused */
-            paused: boolean;
-            /** Profile Id */
-            profile_id: string | null;
-            /** Queue */
-            queue: components["schemas"]["InferenceQueueEntry"][];
-            /** Resident Model */
-            resident_model: string | null;
-            /**
-             * Session Mode
-             * @enum {string}
-             */
-            session_mode: "interactive" | "batch";
         };
         /** RunEpochResponse */
         RunEpochResponse: {
@@ -1628,6 +1512,8 @@ export interface components {
             agent_context_model_summary_enabled: boolean;
             /** Agent Context Response Reserve Tokens */
             agent_context_response_reserve_tokens: number;
+            /** Agent Context Use Model Window */
+            agent_context_use_model_window: boolean;
             /** Agent Context Window Tokens */
             agent_context_window_tokens: number;
             /** Agent Epoch Max Turns */
@@ -1691,6 +1577,8 @@ export interface components {
             agent_context_model_summary_enabled?: boolean | null;
             /** Agent Context Response Reserve Tokens */
             agent_context_response_reserve_tokens?: number | null;
+            /** Agent Context Use Model Window */
+            agent_context_use_model_window?: boolean | null;
             /** Agent Context Window Tokens */
             agent_context_window_tokens?: number | null;
             /** Agent Epoch Max Turns */
@@ -2951,26 +2839,6 @@ export interface operations {
             };
         };
     };
-    residency_status_api_providers_inference_residency_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ResidencyResponse"];
-                };
-            };
-        };
-    };
     get_provider_api_providers__profile_id__get: {
         parameters: {
             query?: never;
@@ -3086,107 +2954,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderModelsResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    configure_residency_api_providers__profile_id__residency_put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ResidencyConfigure"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ResidencyResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    confirm_residency_api_providers__profile_id__residency_confirm_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ResidencyConfirm"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ResidencyResponse"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    drain_residency_api_providers__profile_id__residency_drain_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                profile_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ResidencyResponse"];
                 };
             };
             /** @description Validation Error */

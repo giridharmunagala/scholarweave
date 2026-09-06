@@ -13,7 +13,7 @@ const SECTIONS: { key: SectionKey; label: string; icon: IconName; hint: string }
   { key: 'models', label: 'Models', icon: 'sparkle', hint: 'Defaults per capability' },
   { key: 'providers', label: 'Providers', icon: 'tools', hint: 'Profiles and catalogues' },
   { key: 'documents', label: 'Documents', icon: 'papers', hint: 'OCR and ingestion' },
-  { key: 'runtime', label: 'Runtime', icon: 'sliders', hint: 'Limits and storage' },
+  { key: 'runtime', label: 'Runtime', icon: 'sliders', hint: 'Context and storage' },
 ];
 
 export default function SettingsPage() {
@@ -72,16 +72,10 @@ export default function SettingsPage() {
       const next = await providersApi.updateSettings({
         default_model_references: settings.default_model_references,
         agent_context_window_tokens: settings.agent_context_window_tokens,
-        agent_working_context_tokens: settings.agent_working_context_tokens,
         agent_context_response_reserve_tokens: settings.agent_context_response_reserve_tokens,
         agent_context_model_summary_enabled: settings.agent_context_model_summary_enabled,
         agent_context_high_water_ratio: settings.agent_context_high_water_ratio,
-        agent_context_compaction_target_tokens: settings.agent_context_compaction_target_tokens,
-        tool_result_max_tokens: settings.tool_result_max_tokens,
         agent_epoch_max_turns: settings.agent_epoch_max_turns,
-        agent_max_epochs: settings.agent_max_epochs,
-        agent_run_timeout_seconds: settings.agent_run_timeout_seconds,
-        tool_call_timeout_seconds: settings.tool_call_timeout_seconds,
         tool_read_retry_attempts: settings.tool_read_retry_attempts,
         retrieval_max_context_chars: settings.retrieval_max_context_chars,
         ocr_llm_enhancement_enabled: settings.ocr_llm_enhancement_enabled,

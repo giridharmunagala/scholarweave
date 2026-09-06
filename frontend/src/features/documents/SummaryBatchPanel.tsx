@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import type { components } from '../../api/schema.generated';
 import { request } from '../../api/client';
 import { subscribeToRun } from '../../api/events';
-import { Link } from '../../app/router';
 import { ModelSelect, type ModelSelectValue } from '../../shared/components/ModelSelect';
 import { ErrorNotice, Loading, Panel, StatusPill } from '../../shared/components/Ui';
 import { capabilityOptions } from '../providers/ModelDefaultsPanel';
 import { providersApi, type Provider } from '../providers/api';
+import { reasoningEffortsForModel, ReasoningEffortSelect, type ReasoningEffort } from '../chat/ReasoningEffortSelect';
 import { summaryApi, type SummaryBatch, type SummaryRequest } from './summaryApi';
 
 type Paper = components['schemas']['DocumentSummaryResponse'];
@@ -24,6 +24,7 @@ export function SummaryBatchPanel({ papers }: { papers: Paper[] }) {
   const [selected, setSelected] = useState<string[]>([]);
   const [model, setModel] = useState<ModelSelectValue>({});
   const [mode, setMode] = useState<NonNullable<SummaryRequest['mode']>>('reviewed');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
   const [batch, setBatch] = useState<SummaryBatch | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -62,7 +63,10 @@ export function SummaryBatchPanel({ papers }: { papers: Paper[] }) {
     setBusy(true);
     setError(null);
     try {
-      setBatch(await summaryApi.startBatch(selected, { model_reference: model, mode }));
+      setBatch(await summaryApi.startBatch(selected, {
+        model_reference: model, mode,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      }));
       setSelected([]);
     } catch (nextError) {
       setError(nextError);
@@ -81,18 +85,17 @@ export function SummaryBatchPanel({ papers }: { papers: Paper[] }) {
 
   const activeBatch = batch?.runs.some(({ run }) => !TERMINAL.has(run.status)) ?? false;
   return (
-    <Panel title="Summary batch" description="Queue a collection on one explicitly selected model. No automatic model switching.">
+    <Panel title="Summary batch" description="Queue papers sequentially on one explicitly selected model.">
       {error ? <ErrorNotice error={error} /> : null}
       <p className="muted">
-        For a smaller local model, drain inference and confirm its external load in{' '}
-        <Link to="/settings">Settings</Link> first. Main-model requests wait until you switch back.
-        Compare savings against both model switches, not just generation time.
+        Only one LLM call runs at a time across the app. Chat can take a turn between summary
+        calls; the server handles model switching automatically.
       </p>
       {loading ? <Loading label="Loading summary models..." /> : (
         <ModelSelect
           options={capabilityOptions(providers, 'chat')}
           value={model}
-          onChange={setModel}
+          onChange={(value) => { setModel(value); setReasoningEffort(null); }}
           ariaLabel="Summary batch model"
           disabled={busy || activeBatch}
         />
@@ -109,6 +112,14 @@ export function SummaryBatchPanel({ papers }: { papers: Paper[] }) {
           <option value="overview">Quick overview - explicitly partial</option>
         </select>
       </label>
+      <ReasoningEffortSelect
+        value={reasoningEffort}
+        supportedEfforts={reasoningEffortsForModel(providers, model)}
+        onChange={setReasoningEffort}
+        disabled={busy || activeBatch}
+        defaultLabel="Off by default (when supported)"
+        ariaLabel="Summary batch reasoning"
+      />
       <div className="stack-tight" role="group" aria-label="Papers for summary batch">
         {ready.map((paper) => (
           <label key={paper.id}>

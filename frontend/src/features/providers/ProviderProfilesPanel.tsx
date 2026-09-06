@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../../shared/components/Icons';
 import { Panel, StatusPill } from '../../shared/components/Ui';
-import { ResidencyPanel } from './ResidencyPanel';
 import {
   REASONING_EFFORTS,
   type ReasoningEffort,
@@ -23,6 +22,8 @@ const emptyProvider: ProviderCreate = {
 };
 const modelCapabilities = ['chat', 'tools', 'embedding', 'vision'] as const;
 type ModelCapability = (typeof modelCapabilities)[number];
+const modelSwitchHelp =
+  'One LLM call at a time across all providers, including chat, summaries, and context maintenance. Queued chat calls get priority between responses, with regular turns for background work. Your model server manages hot swaps; no manual confirmation is needed.';
 
 export function ProviderProfilesPanel({
   providers,
@@ -136,6 +137,7 @@ export function ProviderProfilesPanel({
     setBusy(`enable:${key}`);
     try {
       await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
         models: provider.models.map((model) =>
           model.name === modelName ? { ...model, enabled } : model,
         ),
@@ -153,6 +155,7 @@ export function ProviderProfilesPanel({
     setBusy(`enable-visible:${provider.id}`);
     try {
       await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
         models: provider.models.map((model) =>
           visibleNames.has(model.name) ? { ...model, enabled } : model,
         ),
@@ -174,6 +177,7 @@ export function ProviderProfilesPanel({
     setBusy(`configure:${key}`);
     try {
       await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
         models: provider.models.map((model) => {
           if (model.name !== modelName) return model;
           const capabilities = new Set(model.capabilities ?? []);
@@ -199,6 +203,7 @@ export function ProviderProfilesPanel({
     setBusy(`configure:${key}:reasoning`);
     try {
       await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
         models: provider.models.map((model) => {
           if (model.name !== modelName) return model;
           const reasoningEfforts = new Set(model.reasoning_efforts ?? []);
@@ -228,6 +233,7 @@ export function ProviderProfilesPanel({
     setBusy(`configure:${key}:context`);
     try {
       await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
         models: provider.models.map((model) =>
           model.name === modelName
             ? { ...model, context_window_tokens: contextWindowTokens }
@@ -250,6 +256,7 @@ export function ProviderProfilesPanel({
     setBusy(`configure:${key}:preserve-thinking`);
     try {
       await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
         models: provider.models.map((model) =>
           model.name === modelName
             ? { ...model, preserve_thinking: preserveThinking }
@@ -301,16 +308,17 @@ export function ProviderProfilesPanel({
               <input type="password" value={draft.api_key ?? ''} onChange={(event) => setDraft({ ...draft, api_key: event.target.value || null })} />
             </label>
           ) : null}
+          <p>{modelSwitchHelp}</p>
           <div><button className="button" type="button" disabled={busy === 'create'} onClick={() => void create()}>{busy === 'create' ? 'Creating…' : 'Create profile'}</button></div>
         </div>
       ) : null}
-      <ResidencyPanel providers={providers} />
       <div className="card-grid">
         {providers.map((provider) => {
           return (
             <article className="card stack" key={provider.id}>
               <div className="toolbar"><span className="eyebrow">{provider.kind}</span><StatusPill value={provider.state} /></div>
               <div><h2>{provider.name}</h2><code>{provider.base_url}</code></div>
+              <p>{modelSwitchHelp}</p>
               {provider.models.length ? (
                 <button
                   className="provider-model-catalog-trigger"
