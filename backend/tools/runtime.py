@@ -31,6 +31,7 @@ from backend.tools.catalog import APPLICATION_TOOL_HANDLERS
 from backend.tools.failures import classify_tool_error
 from backend.tools.policy import ToolInputError, operation_policy, retry_delay
 from backend.workspace.service import WorkspaceDocument, WorkspaceService
+from backend.workspace.layout import WorkspaceLayout
 
 
 _WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
@@ -1628,7 +1629,7 @@ class ApplicationToolRuntime:
             state.update(revision)
             state["document_id"] = document_id
             state["checkpoint_path"] = (
-                f"papers/{document_id}/evidence/{revision['source_version']}/index.json"
+                f"{self._ensure_paper_workspace({'document_id': document_id}, context)['folder']}/evidence/{revision['source_version']}/index.json"
             )
             if stale_revision:
                 activity = context.metadata.get("paper_activity", [])
@@ -1734,8 +1735,7 @@ class ApplicationToolRuntime:
         tags = result["tags"]
         content = result["content"]
         if not (
-            path.startswith("papers/")
-            and path.endswith("/summary.md")
+            WorkspaceLayout.kind(path) == "paper_summary"
             and isinstance(content, str)
         ):
             return result
@@ -1757,7 +1757,7 @@ class ApplicationToolRuntime:
         if document is not None:
             try:
                 provenance = self._workspace.read_file(
-                    f"papers/{document_id}/summary.provenance.json"
+                    f"{self._workspace.paper_folder(document.id)}/summary.provenance.json"
                 ).content
             except FileNotFoundError:
                 provenance = None

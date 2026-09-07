@@ -9,6 +9,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 from backend.persistence.database import Base, JSONText
 
 
+class WorkspacePaper(Base):
+    __tablename__ = "workspace_papers"
+
+    document_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    folder: Mapped[str] = mapped_column(String(512), unique=True)
+    name: Mapped[str] = mapped_column(String(300))
+
+
 class WorkspaceEntry(Base):
     __tablename__ = "workspace_entries"
     __table_args__ = (

@@ -22,6 +22,7 @@ from backend.documents.summaries import (
     validate_paper_summary_completion,
 )
 from backend.core.errors import NotFoundError, ValidationError
+from backend.workspace.layout import WorkspaceLayout
 from backend.workspace.repository import WorkspaceRepository
 from backend.workspace.service import WorkspaceService
 from backend.tools.catalog import create_tool_catalog
@@ -263,6 +264,7 @@ async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(mo
         return SimpleNamespace(content=receipts[path])
 
     workspace = SimpleNamespace(
+        paper_folder=lambda document_id: WorkspaceLayout.paper_folder(document_id, "Paper"),
         read_file=read_file, write_file=lambda path, content, **kwargs: receipts.update({path: content}),
     )
     service = PaperSummaryService(None, runs, None, workspace, None)
@@ -337,7 +339,10 @@ async def test_summary_job_receipt_failures_do_not_start_untracked_work(monkeypa
         raise OSError("Receipt storage unavailable")
 
     service = PaperSummaryService(
-        None, runs, None, SimpleNamespace(read_file=read_file, write_file=write_file), None,
+        None, runs, None, SimpleNamespace(
+            paper_folder=lambda document_id: WorkspaceLayout.paper_folder(document_id, "Paper"),
+            read_file=read_file, write_file=write_file,
+        ), None,
     )
     compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
         model_name="qwen-27b", provider_kind="openai_compatible",
@@ -1063,18 +1068,18 @@ def test_summary_versions_are_listed_and_promoted_without_touching_notes(test_se
         SafeStorage(test_settings),
         WorkspaceRepository(session_factory),
     )
-    workspace.ensure_paper_folder("paper-1", "A Strong Paper")
+    folder = workspace.ensure_paper_folder("paper-1", "A Strong Paper")["folder"]
     workspace.write_file(
-        "papers/paper-1/summaries/run-1.md",
+        f"{folder}/summaries/run-1.md",
         "# Versioned summary\n\nClaim [p.1]. Another result [p.2].\n",
     )
     workspace.write_file(
-        "papers/paper-1/summaries/run-1.json",
+        f"{folder}/summaries/run-1.json",
         {
             "id": "run-1",
             "document_id": "paper-1",
             "run_id": "run-1",
-            "path": "papers/paper-1/summaries/run-1.md",
+            "path": f"{folder}/summaries/run-1.md",
             "created_at": "2026-09-03T10:00:00+00:00",
             "prompt_revision": "abc",
             "review_summary": "Citations checked.",
@@ -1082,7 +1087,7 @@ def test_summary_versions_are_listed_and_promoted_without_touching_notes(test_se
             "status": "reviewed",
         },
     )
-    workspace.write_file("papers/paper-1/notes.md", "# Notes\n\nKeep me.\n")
+    workspace.write_file(f"{folder}/notes.md", "# Notes\n\nKeep me.\n")
     service = PaperSummaryService(  # type: ignore[arg-type]
         compiler=None,
         runs=None,
@@ -1096,7 +1101,7 @@ def test_summary_versions_are_listed_and_promoted_without_touching_notes(test_se
 
     assert [item["id"] for item in versions] == ["run-1"]
     assert version["prompt_revision"] == "abc"
-    assert path == "papers/paper-1/summary.md"
+    assert path == f"{folder}/summary.md"
     assert workspace.read_file(path).content == content
-    assert workspace.read_file("papers/paper-1/notes.md").content.endswith("Keep me.\n")
+    assert workspace.read_file(f"{folder}/notes.md").content.endswith("Keep me.\n")
     session_factory.kw["bind"].dispose()

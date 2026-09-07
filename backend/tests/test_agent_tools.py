@@ -1128,8 +1128,9 @@ async def test_startup_reconciles_existing_papers_into_workspace(
 ) -> None:
     services = create_services(test_settings)
     document_id = "legacy-paper"
-    summary_path = f"papers/{document_id}/summary.md"
-    notes_path = f"papers/{document_id}/notes.md"
+    folder = services.workspace.paper_folder(document_id, "Legacy Paper")
+    summary_path = f"{folder}/summary.md"
+    notes_path = f"{folder}/notes.md"
     try:
         with services.session_factory() as session:
             session.add(
@@ -1374,8 +1375,8 @@ async def test_research_source_tool_accepts_a_public_pdf(
         await services.close()
 
     assert result["document_id"] == document.id
-    assert result["summary_path"] == f"papers/{document.id}/summary.md"
-    assert result["notes_path"] == f"papers/{document.id}/notes.md"
+    assert result["summary_path"] == f"{services.workspace.paper_folder(document.id)}/summary.md"
+    assert result["notes_path"] == f"{services.workspace.paper_folder(document.id)}/notes.md"
     assert "https://papers.example/research.pdf" in notes
     assert calls == [
         ("https://papers.example/research.pdf", "Research paper", False),
@@ -1441,11 +1442,11 @@ async def test_paper_summary_updates_canonical_summary_only_through_save_tool(
             context,
         )
         canonical = services.workspace.read_file(saved["canonical_path"]).content
-        notes = services.workspace.read_file(f"papers/{document.id}/notes.md").content
+        notes = services.workspace.read_file(f"{services.workspace.paper_folder(document.id)}/notes.md").content
     finally:
         await services.close()
 
-    assert saved["canonical_path"] == f"papers/{document.id}/summary.md"
+    assert saved["canonical_path"] == f"{services.workspace.paper_folder(document.id)}/summary.md"
     assert "deliberately uncited summary" in canonical
     assert saved["citation_count"] == 0
     assert "A durable specialist finding with [p.2]." in notes
@@ -1640,7 +1641,7 @@ async def test_paper_summary_reader_requires_checkpoint_before_next_batch(
     assert first["coverage"]["end"] == 10
     assert len(first["coverage"]["spans"]) == 10
     assert first["next_start"] == 11
-    assert first["checkpoint_path"].startswith("papers/paper-1/evidence/")
+    assert first["checkpoint_path"].startswith(f"{services.workspace.paper_folder('paper-1')}/evidence/")
 
 
 @pytest.mark.anyio

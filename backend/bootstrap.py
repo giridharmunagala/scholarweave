@@ -41,6 +41,7 @@ from backend.tools.catalog import create_tool_catalog
 from backend.tools.runtime import ApplicationToolRuntime
 from backend.workspace.service import WorkspaceService
 from backend.workspace.repository import WorkspaceRepository
+from backend.workspace.upgrade import WorkspaceUpgrade
 from backend.documents.summaries import (
     PAPER_SUMMARY_COMPLETION_POLICY_ID,
     PaperSummaryService,
@@ -82,6 +83,14 @@ class ApplicationServices:
     runtime_version: str = RUNTIME_VERSION
 
     async def start(self) -> None:
+        if WorkspaceUpgrade(self.settings).required():
+            raise RuntimeError(
+                "The research workspace needs an offline layout upgrade. Stop ScholarWeave, "
+                "preview with 'python -m scripts.upgrade_workspace', then apply with "
+                "'python -m scripts.upgrade_workspace --apply --offline'. "
+                "Research files are preserved; old conversations are retired."
+            )
+        await self.runs.start()
         for document in self.documents.list_documents():
             self.workspace.ensure_paper_folder(document.id, document.title)
         await self.runs.recover_incomplete(self.compiler)

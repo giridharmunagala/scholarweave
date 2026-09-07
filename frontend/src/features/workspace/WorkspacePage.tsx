@@ -249,7 +249,8 @@ function WorkspaceFolder({
           <strong title={folder.path}>{folder.displayName ?? folder.name}</strong>
         </span>
         <small>{countFiles(folder)}</small>
-        {folder.path !== 'papers' ? (
+        {!['library', 'library/papers', 'knowledge', 'projects', 'inbox'].includes(folder.path)
+          && !folder.path.startsWith('library/papers/') ? (
           <button
             className="folder-delete-button icon-button danger row-action small"
             type="button"
@@ -308,7 +309,7 @@ function WorkspaceFileRow({
     >
       <span className="file-row-name">
         <Icon name="file" size={14} />
-        <strong>{file.name}</strong>
+        <strong>{file.note_name ?? file.name}</strong>
       </span>
       <small>{formatBytes(file.size_bytes)}</small>
     </button>
@@ -331,15 +332,10 @@ export function buildFileTree(files: WorkspaceFile[]): FileTreeNode {
     }
     if (file.paper_id && file.paper_name) {
       const paperFolder = root.folders
-        .find((folder) => folder.name === 'papers')
-        ?.folders.find((folder) => folder.name === file.paper_id);
+        .find((folder) => folder.name === 'library')
+        ?.folders.find((folder) => folder.name === 'papers')
+        ?.folders.find((folder) => folder.name === parts[2]);
       if (paperFolder) paperFolder.displayName = file.paper_name;
-    }
-    if (file.note_id && file.note_name) {
-      const noteFolder = root.folders
-        .find((folder) => folder.name === 'notes')
-        ?.folders.find((folder) => folder.name === file.note_id);
-      if (noteFolder) noteFolder.displayName = file.note_name;
     }
     parent.files.push(file);
   }
@@ -361,10 +357,10 @@ function isMarkdown(mediaType: string | undefined, path: string): boolean {
   return mediaType === 'text/markdown' || path.toLowerCase().endsWith('.md');
 }
 
-function notePath(value: string): string {
+export function notePath(value: string): string {
   const name = value.trim();
   if (!name) return '';
-  const path = name.includes('/') ? name : `notes/${name}`;
+  const path = name.includes('/') ? name : `knowledge/${name}`;
   return path.toLowerCase().endsWith('.md') ? path : `${path}.md`;
 }
 

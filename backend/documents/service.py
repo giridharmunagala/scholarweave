@@ -45,7 +45,9 @@ class DocumentService:
         upload: Any,
         title: str | None = None,
     ) -> Document:
-        return await self.repository.create_from_upload(upload, title)
+        document = await self.repository.create_from_upload(upload, title)
+        self.workspace.ensure_paper_folder(document.id, document.title)
+        return document
 
     def create_document_from_bytes(
         self,
@@ -55,12 +57,14 @@ class DocumentService:
         title: str,
         metadata: dict[str, Any] | None = None,
     ) -> Document:
-        return self.repository.create_from_bytes(
+        document = self.repository.create_from_bytes(
             content,
             filename=filename,
             title=title,
             metadata=metadata,
         )
+        self.workspace.ensure_paper_folder(document.id, document.title)
+        return document
 
     def create_artifact_record(
         self,
@@ -136,7 +140,7 @@ class DocumentService:
         if not self.repository.delete(document_id):
             return False
         try:
-            self.workspace.delete_folder(f"papers/{document_id}")
+            self.workspace.delete_paper_folder(document_id)
         except FileNotFoundError:
             pass
         return True

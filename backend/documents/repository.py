@@ -16,6 +16,7 @@ from backend.core.errors import DocumentProcessingError
 from backend.utils import clean_filename, utcnow
 from backend.documents.models import Artifact, Document, DocumentChunk, PaperEvidence, PaperFolder
 from backend.persistence.files import SafeStorage, StoredFile
+from backend.workspace.layout import WorkspaceLayout
 
 
 class DocumentRepository:
@@ -30,33 +31,11 @@ class DocumentRepository:
         self.storage = storage
 
     async def create_from_upload(self, upload: Any, title: str | None = None) -> Document:
-        document = Document(
-            id=str(uuid.uuid4()),
+        return self.create_from_bytes(
+            await self.storage.read_upload(upload),
+            filename=upload.filename or "document.pdf",
             title=title or Path(upload.filename or "document.pdf").stem,
-            source_filename=clean_filename(upload.filename or "document.pdf"),
-            content_type=upload.content_type or "application/pdf",
-            status="uploaded",
-            metadata_json={},
         )
-        stored = await self.storage.save_upload(upload, f"{document.id}/source")
-        with self.session_factory() as session:
-            session.add(document)
-            session.flush()
-            session.add(
-                Artifact(
-                    document_id=document.id,
-                    owner_type="document",
-                    kind="source_pdf",
-                    relative_path=stored.relative_path,
-                    media_type=document.content_type,
-                    size_bytes=stored.size_bytes,
-                    sha256=stored.sha256,
-                    metadata_json={"storage_area": "documents"},
-                )
-            )
-            session.commit()
-            session.refresh(document)
-            return document
 
     def create_from_bytes(
         self,
@@ -74,8 +53,9 @@ class DocumentRepository:
             status="uploaded",
             metadata_json=metadata or {},
         )
-        stored = self.storage.write_document_bytes(
-            f"{document.id}/source/{document.source_filename}",
+        folder = WorkspaceLayout.paper_folder(document.id, document.title)
+        stored = self.storage.write_workspace_document(
+            f"{folder}/source.pdf",
             content,
         )
         with self.session_factory() as session:
@@ -90,7 +70,7 @@ class DocumentRepository:
                     media_type=document.content_type,
                     size_bytes=stored.size_bytes,
                     sha256=stored.sha256,
-                    metadata_json={"storage_area": "documents"},
+                    metadata_json={"storage_area": "workspace"},
                 )
             )
             session.commit()
@@ -577,7 +557,10 @@ class DocumentRepository:
             session.commit()
 
     def artifact_bytes(self, artifact: Artifact) -> bytes:
-        return (self._artifact_base(artifact) / artifact.relative_path).read_bytes()
+        return self.artifact_path(artifact).read_bytes()
+
+    def artifact_path(self, artifact: Artifact) -> Path:
+        return self.storage.resolve_path(self._artifact_base(artifact), artifact.relative_path)
 
     def artifact_content(self, artifact: Artifact) -> Any:
         raw = self.artifact_bytes(artifact)
@@ -597,4 +580,8 @@ class DocumentRepository:
         storage_area = (artifact.metadata_json or {}).get("storage_area", "artifacts")
         if storage_area == "documents":
             return self.settings.documents_dir
-        return self.settings.artifacts_dir
+        if storage_area == "workspace":
+            return self.settings.workspace_dir
+        if storage_area == "artifacts":
+            return self.settings.artifacts_dir
+        raise ValueError(f"Unknown artifact storage area: {storage_area}")

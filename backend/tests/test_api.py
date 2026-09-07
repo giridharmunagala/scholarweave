@@ -72,6 +72,21 @@ def test_public_api_is_research_only(test_settings) -> None:
     assert not any(path.startswith("/api/research-agents") for path in paths)
 
 
+def test_old_workspace_is_rejected_before_run_cleanup(test_settings, monkeypatch) -> None:
+    app = create_app(test_settings)
+    storage = app.state.services.storage
+    storage.write_workspace_file("papers/paper-1/notes.md", "Preserve this research")
+    cleanup_calls = []
+    monkeypatch.setattr(app.state.services.runs, "prune_expired", lambda: cleanup_calls.append(True))
+
+    with pytest.raises(RuntimeError, match="offline layout upgrade"):
+        with TestClient(app):
+            pass
+
+    assert cleanup_calls == []
+    assert storage.read_workspace_file("papers/paper-1/notes.md")[1] == "Preserve this research"
+
+
 def test_workspace_discovery_search_and_refresh_api(test_settings) -> None:
     app = create_app(test_settings)
     with TestClient(app) as client:

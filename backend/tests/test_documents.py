@@ -105,7 +105,7 @@ def test_deleting_paper_removes_managed_files_and_workspace_notes(test_settings)
         )
         paper = app.state.services.workspace.ensure_paper_folder(document.id, document.title)
         assert (test_settings.workspace_dir / paper["summary_path"]).exists()
-        assert (test_settings.documents_dir / document.id).exists()
+        assert (test_settings.workspace_dir / paper["folder"] / "source.pdf").is_file()
 
         deleted = client.delete(f"/api/documents/{document.id}")
 
@@ -114,7 +114,7 @@ def test_deleting_paper_removes_managed_files_and_workspace_notes(test_settings)
         assert not (test_settings.workspace_dir / paper["folder"]).exists()
         assert not (test_settings.documents_dir / document.id).exists()
         assert all(
-            not entry.path.startswith(f"papers/{document.id}/")
+            not entry.path.startswith(f"{paper['folder']}/")
             for entry in app.state.services.workspace.list_files()
         )
 

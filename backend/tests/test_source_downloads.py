@@ -123,7 +123,8 @@ async def test_remote_pdf_is_persisted_ingested_and_searchable(
     assert document.metadata_json["source_url"] == "https://papers.test/paper.pdf"
     assert document.metadata_json["source_kind"] == "remote_pdf"
     assert services.retrieval.keyword_search("sparse attention", document.id)[0]["citation"] == "p.1"
-    assert (test_settings.documents_dir / document.id / "source" / "paper.pdf").is_file()
+    folder = services.workspace.paper_folder(document.id)
+    assert (test_settings.workspace_dir / folder / "source.pdf").is_file()
 
 
 @pytest.mark.anyio

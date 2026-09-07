@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import shutil
+import hashlib
+import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +69,81 @@ class SafeStorage:
             raise StorageError("Document exceeds maximum allowed size")
         return self._write_bytes(self.settings.documents_dir, relative_path, content)
 
+    def write_workspace_document(self, relative_path: str, content: bytes) -> StoredFile:
+        if len(content) > self.settings.max_upload_bytes:
+            raise StorageError("Document exceeds maximum allowed size")
+        self._safe_path(self.settings.workspace_dir, relative_path, {".pdf"})
+        return self._write_bytes(self.settings.workspace_dir, relative_path, content)
+
+    def resolve_path(self, base_dir: Path, relative_path: str) -> Path:
+        return self._safe_path(base_dir, relative_path)
+
+    def file_hash(self, base_dir: Path, relative_path: str) -> str:
+        with self._safe_path(base_dir, relative_path).open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+
+    def copy_verified(self, source_base: Path, source_path: str, target_base: Path, target_path: str, expected_hash: str) -> None:
+        source = self._safe_path(source_base, source_path)
+        target = self._safe_path(target_base, target_path)
+        if self.file_hash(source_base, source_path) != expected_hash:
+            raise StorageError(f"Source changed during workspace upgrade: {source_path}")
+        if target.exists():
+            if self.file_hash(target_base, target_path) != expected_hash:
+                raise StorageError(f"Workspace upgrade destination already exists: {target_path}")
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            shutil.copyfile(source, temporary)
+            if self.file_hash(target_base, temporary.relative_to(target_base.resolve()).as_posix()) != expected_hash:
+                raise StorageError(f"Workspace upgrade copy verification failed: {target_path}")
+            with temporary.open("r+b") as copied:
+                os.fsync(copied.fileno())
+            temporary.rename(target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def snapshot_tree(self, source_base: Path, target_base: Path) -> dict[str, str]:
+        if not source_base.is_dir() or source_base.is_symlink():
+            raise StorageError(f"Snapshot source is not a regular directory: {source_base}")
+        target_base.mkdir(parents=True, exist_ok=True)
+        manifest: dict[str, str] = {}
+        for source in sorted(source_base.rglob("*")):
+            if source.is_symlink() or (hasattr(source, "is_junction") and source.is_junction()):
+                raise StorageError("Workspace upgrades do not follow symbolic links or junctions.")
+            if not source.is_file():
+                continue
+            relative = source.relative_to(source_base).as_posix()
+            digest = self.file_hash(source_base, relative)
+            self.copy_verified(source_base, relative, target_base, relative, digest)
+            manifest[relative] = digest
+        return manifest
+
+    def write_upgrade_journal(self, backup_dir: Path, content: Any) -> None:
+        temporary = self.write_json(backup_dir, "journal.pending.json", content)
+        with temporary.absolute_path.open("r+b") as journal:
+            os.fsync(journal.fileno())
+        temporary.absolute_path.replace(self._safe_path(backup_dir, "journal.json"))
+
+    def restore_tree(self, snapshot: Path, destination: Path) -> None:
+        staged = destination.with_name(f"{destination.name}.layout-restore")
+        preserved = destination.with_name(f"{destination.name}.before-layout-restore")
+        if preserved.exists():
+            raise StorageError(f"Preserved restore directory already exists: {preserved}")
+        staged.mkdir(parents=True, exist_ok=True)
+        self.snapshot_tree(snapshot, staged)
+        if destination.exists():
+            destination.rename(preserved)
+        staged.rename(destination)
+
+    async def read_upload(self, upload: UploadFile) -> bytes:
+        content = bytearray()
+        while chunk := await upload.read(min(1024 * 1024, self.settings.max_upload_bytes + 1 - len(content))):
+            content.extend(chunk)
+            if len(content) > self.settings.max_upload_bytes:
+                raise StorageError("Upload exceeds maximum allowed size")
+        return bytes(content)
+
     def _write_bytes(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
         absolute = self._safe_path(base_dir, relative_path)
         absolute.parent.mkdir(parents=True, exist_ok=True)
@@ -103,9 +181,7 @@ class SafeStorage:
 
     async def save_upload(self, upload: UploadFile, relative_dir: str) -> StoredFile:
         filename = clean_filename(upload.filename or "upload.bin")
-        content = await upload.read()
-        if len(content) > self.settings.max_upload_bytes:
-            raise StorageError("Upload exceeds maximum allowed size")
+        content = await self.read_upload(upload)
         relative_path = str(Path(relative_dir) / filename)
         return self.write_document_bytes(relative_path, content)
 
@@ -198,6 +274,8 @@ class SafeStorage:
         relative = absolute.resolve().relative_to(resolved_base)
         if relative.parts and relative.parts[0] == ".scholarweave":
             raise StorageError("Refusing to delete workspace metadata")
+        if relative.as_posix() in {"library", "knowledge", "projects", "inbox"} or relative.parts[:2] == ("library", "papers"):
+            raise StorageError("Managed research folders require an explicit domain deletion")
         shutil.rmtree(absolute)
         self._remove_empty_parents(absolute.parent, self.settings.workspace_dir)
 

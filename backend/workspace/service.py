@@ -7,14 +7,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from backend.utils import clean_filename, dumps_json
+from backend.utils import dumps_json
 from backend.core.errors import ValidationError
 from backend.persistence.files import SafeStorage
 from backend.workspace.models import WorkspaceEntry
 from backend.workspace.repository import WorkspaceRepository
+from backend.workspace.layout import WorkspaceLayout
 
-_TAG_INDEX_PATH = ".scholarweave/tags.json"
-_PAPER_INDEX_PATH = ".scholarweave/papers.json"
 _MAX_TAGS = 32
 _MAX_TAG_LENGTH = 64
 _MAX_PAPER_NAME_LENGTH = 300
@@ -153,8 +152,11 @@ class WorkspaceService:
         normalized_path = Path(path).as_posix().strip("/")
         if not normalized_path or normalized_path == ".":
             raise ValueError("The workspace root cannot be deleted.")
-        if normalized_path == "papers":
-            raise ValueError("The top-level papers folder cannot be deleted.")
+        if normalized_path in {"library", "knowledge", "projects", "inbox"} or (
+            normalized_path == WorkspaceLayout.paper_root
+            or normalized_path.startswith(f"{WorkspaceLayout.paper_root}/")
+        ):
+            raise ValueError("Managed research folders cannot be deleted through workspace tools.")
         with self._index_lock:
             self._storage.delete_workspace_folder(normalized_path)
             self._repository.delete_prefix(normalized_path)
@@ -211,7 +213,7 @@ class WorkspaceService:
     ) -> WorkspaceDocument:
         note_name = self._normalize_note_name(name)
         note_id = str(uuid.uuid4())
-        path = f"notes/{note_id}/note.md"
+        path = WorkspaceLayout.knowledge_note(note_id, note_name)
         body = f"# {note_name}\n"
         if content.strip():
             body += f"\n{content.strip()}\n"
@@ -226,18 +228,22 @@ class WorkspaceService:
             indexed = self._document_from_entry(self._repository.upsert(entry), content=body)
             return replace(indexed, sha256=document.sha256)
 
+    def paper_folder(self, document_id: str, title: str | None = None) -> str:
+        name = self._normalize_paper_name(title) if title is not None else None
+        return self._repository.paper(document_id, name).folder
+
+    def delete_paper_folder(self, document_id: str) -> None:
+        with self._index_lock:
+            folder = self.paper_folder(document_id)
+            self._storage.delete_stored_tree(self._storage.settings.workspace_dir, folder)
+            self._repository.delete_prefix(folder)
+            self._repository.delete_paper(document_id)
+
     def ensure_paper_folder(self, document_id: str, title: str) -> dict[str, Any]:
-        safe_document_id = clean_filename(document_id)
-        folder = f"papers/{safe_document_id}"
+        paper = self._repository.paper(document_id, self._normalize_paper_name(title))
+        folder = paper.folder
         paper_tag = f"paper:{document_id}"
-        paper_name = next(
-            (
-                entry.paper_name
-                for entry in self._repository.list_prefix(folder)
-                if entry.paper_name
-            ),
-            self._normalize_paper_name(title),
-        )
+        paper_name = paper.name
         templates = {
             f"{folder}/summary.md": (
                 f"# {title}\n\n"
@@ -279,13 +285,14 @@ class WorkspaceService:
 
     def set_paper_name(self, document_id: str, name: str) -> dict[str, str]:
         normalized_name = self._normalize_paper_name(name)
-        folder = f"papers/{clean_filename(document_id)}"
+        folder = self.paper_folder(document_id)
         with self._index_lock:
+            self._repository.rename_paper(document_id, normalized_name)
             for entry in self._repository.list_prefix(folder):
                 entry.paper_id = document_id
                 entry.paper_name = normalized_name
                 entry.display_name = normalized_name
-                entry.kind = _kind_from_path(entry.path)
+                entry.kind = WorkspaceLayout.kind(entry.path)
                 self._repository.upsert(entry)
         return {
             "document_id": document_id,
@@ -335,12 +342,17 @@ class WorkspaceService:
         info = self._storage.workspace_file_info(path)
         media_type, content = self._storage.read_workspace_file(info.relative_path)
         searchable_content = content if isinstance(content, str) else dumps_json(content)
-        paper_id = _paper_id_from_path(info.relative_path)
+        paper_id = WorkspaceLayout.paper_id(info.relative_path)
         paper_name = (
             (paper_names or {}).get(paper_id)
             if paper_id is not None
             else None
         ) or (existing.paper_name if existing is not None else None)
+        if paper_id and paper_name is None:
+            try:
+                paper_name = self._repository.paper(paper_id).name
+            except FileNotFoundError:
+                pass
         normalized_tags = tags if tags is not None else list(existing.tags_json if existing else [])
         entry = WorkspaceEntry(
             path=info.relative_path,
@@ -350,7 +362,7 @@ class WorkspaceService:
                 if existing is not None
                 else paper_name
             ),
-            kind=_kind_from_path(info.relative_path),
+            kind=WorkspaceLayout.kind(info.relative_path),
             media_type=media_type,
             size_bytes=info.size_bytes,
             modified_at=info.modified_at,
@@ -365,42 +377,8 @@ class WorkspaceService:
         return entry, content
 
     def _index_existing_files(self) -> None:
-        tag_map = self._read_legacy_tag_map()
-        paper_names = self._read_legacy_paper_names()
         for path in self._storage.list_workspace_files():
-            self._index_file(
-                path,
-                tags=tag_map.get(path, []),
-                paper_names=paper_names,
-            )
-
-    def _read_legacy_tag_map(self) -> dict[str, list[str]]:
-        try:
-            media_type, content = self._storage.read_workspace_file(_TAG_INDEX_PATH)
-        except FileNotFoundError:
-            return {}
-        if media_type != "application/json" or not isinstance(content, dict):
-            raise ValueError("Workspace tag index is invalid.")
-        tag_map: dict[str, list[str]] = {}
-        for path, tags in content.items():
-            if not isinstance(path, str) or not isinstance(tags, list):
-                raise ValueError("Workspace tag index is invalid.")
-            tag_map[path] = self._normalize_tags(tags)
-        return tag_map
-
-    def _read_legacy_paper_names(self) -> dict[str, str]:
-        try:
-            media_type, content = self._storage.read_workspace_file(_PAPER_INDEX_PATH)
-        except FileNotFoundError:
-            return {}
-        if media_type != "application/json" or not isinstance(content, dict):
-            raise ValueError("Workspace paper metadata index is invalid.")
-        paper_names: dict[str, str] = {}
-        for document_id, name in content.items():
-            if not isinstance(document_id, str) or not isinstance(name, str):
-                raise ValueError("Workspace paper metadata index is invalid.")
-            paper_names[document_id] = self._normalize_paper_name(name)
-        return paper_names
+            self._index_file(path)
 
     @staticmethod
     def _document_from_entry(
@@ -465,26 +443,6 @@ class WorkspaceService:
                 f"Note name cannot exceed {_MAX_PAPER_NAME_LENGTH} characters."
             )
         return normalized
-
-
-def _paper_id_from_path(path: str) -> str | None:
-    parts = Path(path).parts
-    if len(parts) >= 3 and parts[0] == "papers":
-        return parts[1]
-    return None
-
-
-def _kind_from_path(path: str) -> str:
-    parts = Path(path).parts
-    if len(parts) >= 3 and parts[0] == "papers":
-        if parts[-1] == "summary.md":
-            return "paper_summary"
-        if parts[-1] == "notes.md":
-            return "paper_notes"
-        return "paper_file"
-    if parts and parts[0] == "notes" and Path(path).suffix.lower() == ".md":
-        return "note"
-    return "file"
 
 
 def _tags_text(tags: list[str]) -> str:

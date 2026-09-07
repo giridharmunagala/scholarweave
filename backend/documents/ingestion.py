@@ -56,7 +56,7 @@ class DocumentIngestion:
         source = next((artifact for artifact in artifacts if artifact.kind == "source_pdf"), None)
         if not source:
             raise ValueError("Document is missing its source PDF")
-        pdf_path = self.settings.documents_dir / source.relative_path
+        pdf_path = self.repository.artifact_path(source)
         enhancement_enabled = (
             self.settings.ocr_llm_enhancement_enabled
             if enhance_with_llm is None
@@ -111,7 +111,7 @@ class DocumentIngestion:
         source = next((artifact for artifact in artifacts if artifact.kind == "source_pdf"), None)
         if not source:
             raise ValueError("Document is missing its source PDF")
-        pdf_path = self.settings.documents_dir / source.relative_path
+        pdf_path = self.repository.artifact_path(source)
         summary = await anyio.to_thread.run_sync(self.ocr.inspect_text_layer, pdf_path)
         return {
             **summary,
@@ -161,7 +161,7 @@ class DocumentIngestion:
             agent_model_defaults=agent_model_defaults,
         )
         quality_model = self.vision.resolve_quality_model(model, triage_model)
-        pdf_path = self.settings.documents_dir / source.relative_path
+        pdf_path = self.repository.artifact_path(source)
         await report_progress(
             progress,
             {

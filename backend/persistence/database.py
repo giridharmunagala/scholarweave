@@ -29,6 +29,7 @@ _RUNTIME_TABLES = (
     "agent_run_items",
     "agent_runs",    "sdk_session_items",
     "sdk_sessions",
+    "code_conversations",
     "conversations",
     "function_tool_revisions",
     "function_tool_definitions",

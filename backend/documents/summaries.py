@@ -59,8 +59,11 @@ def validate_paper_summary_completion(
 ) -> None:
     document_id = context.metadata.get("paper_summary_document_id")
     mode = context.metadata.get("paper_summary_mode", "reviewed")
-    path = f"papers/{document_id}/summaries/{context.run_id}.md"
-    metadata_path = f"papers/{document_id}/summaries/{context.run_id}.json"
+    if not isinstance(document_id, str):
+        raise ValidationError("The summary job is missing its paper identity.")
+    folder = workspace.paper_folder(document_id)
+    path = f"{folder}/summaries/{context.run_id}.md"
+    metadata_path = f"{folder}/summaries/{context.run_id}.json"
     activity = context.metadata.get("paper_activity", [])
     saved = any(
         isinstance(item, dict) and item.get("action") == "summary_saved"
@@ -135,7 +138,7 @@ class PaperSummaryService:
                 context.run_id, mode, effort, metadata.get("paper_summary_source_version"),
                 metadata.get("paper_summary_model"),
             ], sort_keys=True).encode()).hexdigest()
-            job_path = f"papers/{document_id}/summary-jobs/{job_key}.json"
+            job_path = f"{self._workspace.paper_folder(document_id)}/summary-jobs/{job_key}.json"
             run = None
             try:
                 receipt = self._workspace.read_file(job_path).content
@@ -396,12 +399,12 @@ class PaperSummaryService:
             metadata["_paper_summary_checkpoint_states"] = {document_id: {
                 **revision,
                 "document_id": document_id,
-                "checkpoint_path": f"papers/{document_id}/evidence/{revision['source_version']}/index.json",
+                "checkpoint_path": f"{paper['folder']}/evidence/{revision['source_version']}/index.json",
                 "pending_checkpoint": {
                     "id": hashlib.sha256(json.dumps([revision["source_version"], coverage], sort_keys=True).encode()).hexdigest(),
                     "coverage": coverage, "action": "chunks", "start": 0, "offset": 0,
                     "has_more": not source_complete, "next_start": next_start, "next_offset": next_offset,
-                    "checkpoint_path": f"papers/{document_id}/evidence/{revision['source_version']}/index.json",
+                    "checkpoint_path": f"{paper['folder']}/evidence/{revision['source_version']}/index.json",
                 },
             }}
             instruction = (
@@ -427,15 +430,19 @@ class PaperSummaryService:
         return compiled, instruction, metadata, prompt_revision
 
     def versions(self, document_id: str) -> list[dict[str, Any]]:
-        self._require_document(document_id)
-        prefix = f"papers/{document_id}/summaries/"
+        source = self._require_document(document_id)
+        prefix = f"{self._workspace.paper_folder(document_id, source.title)}/summaries/"
         versions: list[dict[str, Any]] = []
         for entry in self._workspace.list_files():
             if not entry.path.startswith(prefix) or not entry.path.endswith(".json"):
                 continue
             document = self._workspace.read_file(entry.path)
             if isinstance(document.content, dict):
-                versions.append(dict(document.content))
+                versions.append({
+                    **document.content,
+                    "path": entry.path.removesuffix(".json") + ".md",
+                    "canonical_path": f"{self._workspace.paper_folder(document_id)}/summary.md",
+                })
         return sorted(versions, key=lambda item: str(item.get("created_at", "")), reverse=True)
 
     def version(self, document_id: str, version_id: str) -> tuple[dict[str, Any], str]:

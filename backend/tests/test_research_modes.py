@@ -523,14 +523,14 @@ def test_default_discusses_existing_summary_without_regenerating_or_writing_note
         document = services.documents.create_document_from_bytes(
             b"%PDF-1.4\n%%EOF", filename="summary-discussion.pdf", title="Sparse Methods",
         )
-        path = f"papers/{document.id}/summary.md"
+        path = f"{services.workspace.paper_folder(document.id)}/summary.md"
         content = (
             ("> Partial summary:\n" if partial else "# Sparse Methods\n")
             + "The saved analysis describes thresholding [p.2] but omits experimental details. " * 5
         )
         services.workspace.write_file(path, content, tags=[f"paper:{document.id}"])
-        services.workspace.write_file(f"papers/{document.id}/notes.md", "My existing notes.")
-        before_notes = services.workspace.read_file(f"papers/{document.id}/notes.md").content
+        services.workspace.write_file(f"{services.workspace.paper_folder(document.id)}/notes.md", "My existing notes.")
+        before_notes = services.workspace.read_file(f"{services.workspace.paper_folder(document.id)}/notes.md").content
         goal = "Explain and critique my existing summary; do not regenerate it."
         stub_provider.tool_plans = [(goal, "read_research_note", {"path": path})]
         stub_provider.reply = (
@@ -555,7 +555,7 @@ def test_default_discusses_existing_summary_without_regenerating_or_writing_note
         check = record.tool_attempts[0].result_json["summary_check"]
         assert check["needs_regeneration"] is partial
         assert services.workspace.read_file(path).content == content
-        assert services.workspace.read_file(f"papers/{document.id}/notes.md").content == before_notes
+        assert services.workspace.read_file(f"{services.workspace.paper_folder(document.id)}/notes.md").content == before_notes
         assert len(stub_provider.requests) == 2
 
 
@@ -629,7 +629,7 @@ def test_default_can_save_requested_paper_questions_without_claiming_source_revi
         assert [item["action"] for item in record.runtime_metadata_json["paper_activity"]] == [
             "notes_saved",
         ]
-        assert question in services.workspace.read_file(f"papers/{document.id}/notes.md").content
+        assert question in services.workspace.read_file(f"{services.workspace.paper_folder(document.id)}/notes.md").content
         assert len(stub_provider.requests) == 2
 
 
@@ -644,7 +644,7 @@ async def test_acquiring_research_candidate_does_not_append_unsolicited_notes(
         document = services.documents.create_document_from_bytes(
             b"%PDF-1.4\n%%EOF", filename="candidate.pdf", title="Candidate",
         )
-        path = f"papers/{document.id}/notes.md"
+        path = f"{services.workspace.paper_folder(document.id)}/notes.md"
         services.workspace.write_file(path, "My existing notes.")
 
         async def download_pdf(*_args, **_kwargs):
@@ -691,7 +691,7 @@ def test_explicit_review_reads_reuses_summary_and_saves_paper_notes(
             "citation": "p.2", "text": "The method preserves sparsity by thresholding.",
         }])
         services.document_repository.mark_ready(document.id, page_count=2, metadata={})
-        path = f"papers/{document.id}/summary.md"
+        path = f"{services.workspace.paper_folder(document.id)}/summary.md"
         summary = "# Reviewed summary\n" + "Thresholding preserves sparsity [p.2]. " * 8
         services.workspace.write_file(path, summary, tags=[f"paper:{document.id}"])
         goal = "Complete explicit review of this paper."
@@ -727,7 +727,7 @@ def test_explicit_review_reads_reuses_summary_and_saves_paper_notes(
         }
         assert services.workspace.read_file(path).content == summary
         assert "Verified thresholding" in services.workspace.read_file(
-            f"papers/{document.id}/notes.md"
+            f"{services.workspace.paper_folder(document.id)}/notes.md"
         ).content
 
 

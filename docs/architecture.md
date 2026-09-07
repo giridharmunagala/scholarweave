@@ -44,8 +44,8 @@ flowchart LR
 - One process and one Uvicorn worker.
 - Bind to `127.0.0.1`; the application has no authentication.
 - SQLite stores metadata and durable run history.
-- `local_data/` stores source documents, generated artifacts, and operational run snapshots.
-- `workspace/` stores user-visible Markdown research files.
+- `local_data/` stores generated extraction artifacts and operational run snapshots.
+- `workspace/` stores source PDFs beside canonical paper notes/summaries, and reusable knowledge notes.
 - Model traffic uses `POST /v1/chat/completions` through the official OpenAI client.
 
 ### Single-researcher product boundary
@@ -582,6 +582,19 @@ erDiagram
 Folder assignment changes document metadata only; it does not move source PDFs or workspace files.
 All user-controlled paths pass through `SafeStorage` or `WorkspaceService`.
 
+`WorkspaceLayout` owns readable, bounded path components. `workspace_papers` stores each paper's
+stable folder and display name separately from the derived search index. Papers live under
+`library/papers/<title--id>/` with `source.pdf`, `notes.md`, `summary.md`, `summaries/` and `evidence/`.
+New standalone notes live under `knowledge/<title--id>.md`. All paths are relative to the workspace
+root; artifact resolution explicitly supports the workspace storage area and validates containment.
+Ingestion resolves source artifacts through the repository instead of assuming a legacy PDF root.
+
+The offline layout upgrade snapshots files and SQLite, verifies copies, updates metadata/index paths
+transactionally, and then removes relocated originals. Its journal permits resuming an interrupted
+upgrade. It retires old conversation/run rows without deleting research records. Server startup
+refuses mixed layouts. Legacy JSON metadata is imported by this explicit upgrade, not by normal reads.
+See [workspace-upgrade.md](workspace-upgrade.md) for restore behavior and operational requirements.
+
 ### Workspace discovery
 
 | API (all under `/api`) | Purpose |
@@ -636,7 +649,7 @@ their transcript or replacing its main-agent context measurements.
 Durable per-paper job receipts let recovered callers reattach to the same child run and replay
 unforwarded telemetry instead of creating duplicate summaries.
 The `paper_evidence` table retains source/extraction-versioned evidence independently of runs, with
-a guarded `papers/<id>/evidence/<source-version>/index.json` workspace mirror. SQLite commits precede
+a guarded `library/papers/<title--id>/evidence/<source-version>/index.json` workspace mirror. SQLite commits precede
 mirror verification and raw-context eviction; interrupted mirrors are repaired from SQLite.
 Records retain exact spans and model/prompt provenance. Only contiguous full coverage is marked
 complete; otherwise saved summaries explicitly report partial coverage. Immutable summary versions

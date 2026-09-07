@@ -54,6 +54,8 @@ original completion policy; prompt changes apply to newly compiled turns.
 
 ## Change workspace discovery or search
 
+- `backend/workspace/layout.py`: canonical paths; never construct paper paths in consumers.
+- `backend/workspace/upgrade.py`: explicit offline changes to existing research-file locations.
 - `backend/workspace/router.py`: notes, canonical summaries, search and index endpoints.
 - `backend/workspace/service.py`: safe files, collection kinds, metadata-preserving refresh.
 - `backend/workspace/repository.py`: persistent FTS5 index and BM25 ordering.

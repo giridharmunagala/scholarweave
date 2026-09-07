@@ -108,7 +108,7 @@ def test_workspace_folder_delete_clears_tags_and_paper_name(test_settings) -> No
         tags=["evidence"],
     )
 
-    workspace.delete_folder(paper["folder"])
+    workspace.delete_paper_folder("paper-1")
 
     assert workspace.list_files() == []
     recreated = workspace.ensure_paper_folder("paper-1", "A New Study")
@@ -120,8 +120,9 @@ def test_workspace_service_refuses_to_delete_papers_root(test_settings) -> None:
     workspace = WorkspaceService(SafeStorage(test_settings))
     workspace.ensure_paper_folder("paper-1", "A Study")
 
-    with pytest.raises(ValueError, match="papers folder"):
-        workspace.delete_folder("papers")
+    for path in ("library", "library/papers", workspace.paper_folder("paper-1")):
+        with pytest.raises(ValueError, match="Managed research"):
+            workspace.delete_folder(path)
 
     assert len(workspace.list_files()) == 2
 
@@ -133,10 +134,10 @@ def test_workspace_paper_folder_is_canonical_and_non_destructive(test_settings) 
     workspace.append_markdown(first["notes_path"], "\nExisting note.")
     second = workspace.ensure_paper_folder("paper-1", "A Study")
 
-    assert first["folder"] == "papers/paper-1"
+    assert first["folder"] == "library/papers/a-study--paper-1"
     assert first["created"] == [
-        "papers/paper-1/summary.md",
-        "papers/paper-1/notes.md",
+        "library/papers/a-study--paper-1/summary.md",
+        "library/papers/a-study--paper-1/notes.md",
     ]
     assert second["created"] == []
     assert first["paper_name"] == "A Study"
@@ -150,6 +151,9 @@ def test_workspace_paper_folder_is_canonical_and_non_destructive(test_settings) 
     renamed = workspace.set_paper_name("paper-1", "A Better Display Name")
 
     assert renamed["paper_name"] == "A Better Display Name"
+    assert renamed["folder"] == first["folder"]
+    restarted = WorkspaceService(SafeStorage(test_settings))
+    assert restarted.ensure_paper_folder("paper-1", "Changed Title")["folder"] == first["folder"]
     assert workspace.read_file(first["summary_path"]).paper_name == (
         "A Better Display Name"
     )
@@ -166,7 +170,7 @@ def test_generic_notes_use_server_generated_uuid_and_are_searchable(test_setting
 
     assert note.note_id is not None
     assert uuid.UUID(note.note_id)
-    assert note.path == f"notes/{note.note_id}/note.md"
+    assert note.path == f"knowledge/kv-cache-experiments--{note.note_id}.md"
     assert note.note_name == "KV cache experiments"
     assert note.kind == "note"
     assert "# KV cache experiments" in note.content
@@ -221,7 +225,7 @@ def test_workspace_discovery_does_not_scan_or_read_files(test_settings, monkeypa
     monkeypatch.setattr(storage, "list_workspace_files", unexpected_disk_read)
     monkeypatch.setattr(storage, "read_workspace_file", unexpected_disk_read)
     assert workspace.search(query="cachedneedle")[0].path == "notes/indexed.md"
-    assert workspace.list_collection("notes")[0].path == "notes/indexed.md"
+    assert workspace.list_collection("files")[0].path == "notes/indexed.md"
     assert workspace.index_status()["indexed_files"] == 1
 
 
@@ -230,11 +234,11 @@ def test_workspace_collections_and_index_updates_survive_restart(test_settings) 
     workspace = WorkspaceService(storage)
     note = workspace.create_note(name="Attention", content="obsolete", tags=["keep"])
     paper = workspace.ensure_paper_folder("paper-1", "Named paper")
-    workspace.write_file("notes/imported.md", "imported")
+    workspace.write_file("knowledge/imported.md", "imported")
     workspace.write_file("data.json", {"finding": "jsonneedle"})
 
     assert {item.path for item in workspace.list_collection("notes")} == {
-        note.path, "notes/imported.md", paper["notes_path"],
+        note.path, "knowledge/imported.md", paper["notes_path"],
     }
     assert [item.path for item in workspace.list_collection("summaries")] == [paper["summary_path"]]
     assert workspace.search(query="jsonneedle")[0].path == "data.json"
@@ -244,7 +248,7 @@ def test_workspace_collections_and_index_updates_survive_restart(test_settings) 
     workspace = WorkspaceService(storage)
     assert workspace.search(query="replacement")[0].note_name == "Attention"
     workspace.delete_file(note.path)
-    workspace.delete_folder(paper["folder"])
+    workspace.delete_paper_folder("paper-1")
     assert workspace.search(query="replacement") == []
     assert workspace.list_collection("summaries") == []
 
@@ -256,7 +260,7 @@ def test_workspace_refresh_reconciles_external_edits_and_preserves_metadata(test
     paper = workspace.ensure_paper_folder("paper-1", "Paper title")
     storage.write_workspace_file(note.path, "afteredit")
     storage.delete_workspace_file(paper["notes_path"])
-    storage.write_workspace_file("notes/external.md", "externalneedle")
+    storage.write_workspace_file("knowledge/external.md", "externalneedle")
     storage.write_workspace_file(".scholarweave/private.json", {"hidden": "privateneedle"})
     before = workspace.index_status()
 
