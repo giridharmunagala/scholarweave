@@ -535,7 +535,8 @@ def test_product_runs_continue_across_epochs_without_repeating_writes(
             },
         )
         assert response.status_code == 202, response.text
-        run = wait_for_run(client, response.json()["run"]["id"])
+        # Twenty real tool calls and more than ten durable epochs exceed the short-run wait.
+        run = wait_for_run(client, response.json()["run"]["id"], timeout=60)
         assert run["status"] == "completed", run["error"]
         content = services.workspace.read_file("notes/checkpoints.md").content
         assert isinstance(content, str)

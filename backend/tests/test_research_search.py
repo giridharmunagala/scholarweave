@@ -10,7 +10,7 @@ import pytest
 from ddgs.exceptions import DDGSException, RatelimitException
 from ddgs.engines.duckduckgo import Duckduckgo
 
-from backend.conversations.turns import RESEARCH_TOOL_IDS, autonomous_blueprint
+from backend.conversations.turns import RESEARCH_TOOL_IDS, WORK_PLAN_TOOL_IDS, autonomous_blueprint
 from backend.prompting.registry import default_prompt_registry
 from backend.bootstrap import create_services
 from backend.core.config import Settings
@@ -405,23 +405,26 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     assert Settings.model_fields["web_search_max_requests_per_session"].default == 100
     definitions = create_tool_catalog().definitions()
     catalog_ids = {definition.catalog_id for definition in definitions}
-    expected = {catalog_id for _, catalog_id in RESEARCH_TOOL_IDS}
+    expected_bindings = dict((*RESEARCH_TOOL_IDS, *WORK_PLAN_TOOL_IDS))
+    summary_writer_tools = {
+        "research.summary.read",
+        "research.summary.checkpoint",
+        "research.summary.save",
+    }
     assert catalog_ids == {
-        *expected,
+        *expected_bindings.values(),
+        *summary_writer_tools,
         "conversation.title.set",
         "tool.results.read",
-        "research.summary.save",
-        "work.plan.create",
-        "work.plan.update",
-        "work.plan.read",
     }
 
     autonomous = autonomous_blueprint({})
-    autonomous_catalog_ids = {tool.catalog_id for tool in autonomous.tools}
-    assert autonomous_catalog_ids == expected
+    assert {tool.id: tool.catalog_id for tool in autonomous.tools} == expected_bindings
+    assert not summary_writer_tools.intersection(tool.catalog_id for tool in autonomous.tools)
     assert autonomous.agents[0].instructions == (
-        default_prompt_registry().render("research") + "\n\nSelected research mode: review."
+        default_prompt_registry().render("research")
+        + "\n\nSelected research mode: research.\nSelected response effort: auto."
     )
     assert {agent.id for agent in autonomous.agents} == {"researcher"}
-    assert {"save-note", "save-summary"}.issubset(autonomous.agents[0].tool_ids)
+    assert set(autonomous.agents[0].tool_ids) == set(expected_bindings)
     assert autonomous.run.max_turns is None

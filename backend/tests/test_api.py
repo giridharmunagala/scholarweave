@@ -40,14 +40,14 @@ def configure_provider(client: TestClient, stub_provider) -> str:
     return profile_id
 
 
-def wait_for_run(client: TestClient, run_id: str) -> dict:
-    deadline = time.monotonic() + 10
+def wait_for_run(client: TestClient, run_id: str, *, timeout: float = 10) -> dict:
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         run = client.get(f"/api/runs/{run_id}").json()
         if run["status"] in {"completed", "failed", "cancelled"}:
             return run
         time.sleep(0.05)
-    raise AssertionError(f"Run {run_id} did not finish.")
+    raise AssertionError(f"Run {run_id} did not finish within {timeout:g} seconds.")
 
 
 @pytest.mark.parametrize("request_type", [ConversationMessageRequest, SteeringMessageRequest])
