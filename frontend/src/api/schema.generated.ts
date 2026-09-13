@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/api/agent/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Upload Attachment */
+        post: operations["upload_attachment_api_agent_attachments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/agent/conversations": {
         parameters: {
             query?: never;
@@ -886,12 +903,30 @@ export interface components {
             /** Size Bytes */
             size_bytes: number;
         };
+        /** Body_upload_attachment_api_agent_attachments_post */
+        Body_upload_attachment_api_agent_attachments_post: {
+            /** File */
+            file: string;
+        };
         /** Body_upload_document_api_documents_post */
         Body_upload_document_api_documents_post: {
             /** File */
             file: string;
             /** Title */
             title?: string | null;
+        };
+        /** ConversationAttachmentResponse */
+        ConversationAttachmentResponse: {
+            /** Document Id */
+            document_id: string | null;
+            /** Media Type */
+            media_type: string;
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Size Bytes */
+            size_bytes: number;
         };
         /** ConversationDetailResponse */
         ConversationDetailResponse: {
@@ -925,13 +960,18 @@ export interface components {
         };
         /** ConversationMessageRequest */
         ConversationMessageRequest: {
+            /**
+             * Attachment Paths
+             * @description Readable workspace paths returned by chat attachment uploads.
+             */
+            attachment_paths?: string[];
             /** Content */
             content: string;
             /** Context Window Tokens */
             context_window_tokens?: number | null;
             /**
              * Deep Work
-             * @description Permanently enable Deep Work for this conversation.
+             * @description Legacy per-message alias for thorough effort; never changes conversation kind.
              * @default false
              */
             deep_work: boolean;
@@ -947,6 +987,11 @@ export interface components {
              * @description research: follow the user's intent without automatic summaries or notes; learn: narrow sourced Q&A; understand: explain a paper and prerequisites; review: require cited summaries and durable paper notes. Omitted selects research, or learn for legacy Fast Answer. All modes are available per turn in Deep Work.
              */
             research_mode?: ("research" | "learn" | "understand" | "review") | null;
+            /**
+             * Response Effort
+             * @description Per-message effort: auto follows intent; quick uses the smallest sufficient local or web evidence; thorough enables focused delegation. Does not imply saved artifacts. Overrides legacy deep_work and fast_answer selectors. Omitted defaults to auto on the chat endpoint.
+             */
+            response_effort?: ("auto" | "quick" | "thorough") | null;
             /**
              * Web Enabled
              * @default true
@@ -1460,7 +1505,7 @@ export interface components {
             model_reference?: components["schemas"]["ModelReferenceSpec"];
             /**
              * Title
-             * @default New research
+             * @default New chat
              */
             title: string;
         };
@@ -1510,6 +1555,11 @@ export interface components {
             agent_name: string;
             /** Cancel Requested */
             cancel_requested: boolean;
+            /**
+             * Context Window Tokens
+             * @description Effective context size selected for this run, including compaction.
+             */
+            context_window_tokens?: number | null;
             /** Conversation Id */
             conversation_id: string | null;
             /**
@@ -1968,6 +2018,39 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    upload_attachment_api_agent_attachments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_attachment_api_agent_attachments_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationAttachmentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_research_conversations_api_agent_conversations_get: {
         parameters: {
             query?: never;

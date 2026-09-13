@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import time
+from datetime import UTC, datetime
 from unittest.mock import Mock
 
 import anyio
@@ -9,6 +11,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError as SchemaValidationError
 
 from backend.agents.context import ScholarWeaveContext
+from backend.agents.compiler import current_system_information
 from backend.agents.context_budget import _request_tokens
 from backend.app import create_app
 from backend.bootstrap import create_services
@@ -19,7 +22,10 @@ from backend.conversations.turns import (
     validate_paper_work_completion,
 )
 from backend.core.errors import ValidationError
+from backend.research.sources import WebSource
 from backend.tests.test_api import configure_provider, wait_for_run
+from backend.tests.stub_provider import _message
+from backend.utils import utcnow
 
 
 def paper_context(mode: str | None, *, citations: list[str] | None = None):
@@ -39,8 +45,197 @@ def paper_context(mode: str | None, *, citations: list[str] | None = None):
     )
 
 
+@pytest.mark.parametrize("kind", ["agent", "deep-work"])
+@pytest.mark.parametrize("title", ["New chat", "My ideas"])
+def test_effort_is_per_message_and_plain_chat_uses_one_model_call(
+    test_settings, stub_provider, kind, title,
+):
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(f"/api/{kind}/conversations", json={
+            "title": title,
+            "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
+        }).json()
+        for index, effort in enumerate(["thorough", "quick", "auto", None], start=1):
+            message = f"Let's brainstorm a weekend project. Idea {index}."
+            response = client.post(
+                f"/api/agent/conversations/{conversation['id']}/messages",
+                json={"content": message, "response_effort": effort, "web_enabled": False},
+            )
+            assert response.status_code == 202, response.text
+            run = wait_for_run(client, response.json()["run"]["id"])
+            assert run["status"] == "completed", run["error"]
+            record = client.app.state.services.runs.get(run["id"])
+            assert len(stub_provider.requests) == index
+            assert not record.tool_attempts
+            assert not record.runtime_metadata_json.get("work_plan")
+            assert record.runtime_metadata_json["response_effort"] == (effort or "auto")
+            assert not record.runtime_metadata_json["paper_require_summary"]
+            assert len(record.blueprint_json["agents"]) == (2 if effort == "thorough" else 1)
+            offered = {tool["id"] for tool in record.blueprint_json["tools"]}
+            assert {"read-paper", "read-note", "create-work-plan"} <= offered
+            assert not {"set-title", "search-sources", "acquire-source"} & offered
+        detail = client.get(f"/api/agent/conversations/{conversation['id']}").json()
+        assert detail["kind"] == conversation["kind"]
+        assert detail["title"] == (
+            "Let's brainstorm a weekend project. Idea 1." if title == "New chat" else title
+        )
+
+
+def test_explicit_effort_overrides_legacy_selectors(test_settings, stub_provider):
+    with TestClient(create_app(test_settings)) as client:
+        configure_provider(client, stub_provider)
+        conversation = client.post("/api/deep-work/conversations", json={}).json()
+        response = client.post(
+            f"/api/deep-work/conversations/{conversation['id']}/messages",
+            json={"content": "Just discuss this.", "response_effort": "quick",
+                  "deep_work": True, "fast_answer": True, "web_enabled": False},
+        )
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        record = client.app.state.services.runs.get(run["id"])
+        assert len(record.blueprint_json["agents"]) == 1
+        assert record.runtime_metadata_json["response_effort"] == "quick"
+        assert not record.runtime_metadata_json.get("fast_answer")
+        assert not record.runtime_metadata_json.get("autonomous_work")
+
+
+@pytest.mark.parametrize("effort", ["auto", "thorough"])
+def test_new_turn_clock_is_appended_without_changing_cached_prefix(
+    test_settings, stub_provider, monkeypatch, effort,
+):
+    test_settings.user_timezone = "Asia/Kolkata"
+    test_settings.user_profile = "A local researcher."
+    clock = datetime(2026, 8, 9, 18, 29, 15, tzinfo=UTC)
+    clock_reads = []
+
+    def information(**kwargs):
+        clock_reads.append(clock)
+        return current_system_information(at=clock, **kwargs)
+
+    monkeypatch.setattr("backend.runs.service.current_system_information", information)
+    messages = ["List my local papers.", "List my local papers again."]
+    library_arguments = {
+        "query": None, "document_id": None, "ignore_document_ids": None, "limit": 3,
+    }
+    stub_provider.tool_plans = [
+        (messages[0], "search_research_library", library_arguments),
+    ]
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post("/api/agent/conversations", json={
+            "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
+        }).json()
+        run_ids = []
+        clocks = []
+        for index, message in enumerate(messages):
+            if index:
+                clock = datetime(2026, 8, 10, 18, 30, 16, tzinfo=UTC)
+                stub_provider.tool_plans.append(
+                    (messages[1], "search_research_library", library_arguments),
+                )
+            response = client.post(
+                f"/api/agent/conversations/{conversation['id']}/messages",
+                json={"content": message, "response_effort": effort, "web_enabled": False},
+            )
+            assert response.status_code == 202, response.text
+            run = wait_for_run(client, response.json()["run"]["id"])
+            assert run["status"] == "completed", run["error"]
+            run_ids.append(run["id"])
+            record = client.app.state.services.runs.get(run["id"])
+            clocks.append(record.runtime_metadata_json["system_information"])
+            assert record.input_json == message
+
+        assert len(clock_reads) == 2
+        assert len(stub_provider.requests) == 4
+        first, first_followup, second, second_followup = stub_provider.requests
+        for request in stub_provider.requests:
+            assert request["messages"][0] == first["messages"][0]
+            assert request["tools"] == first["tools"]
+        assert "Current time:" not in first["messages"][0]["content"]
+        assert "User context: A local researcher." in first["messages"][0]["content"]
+        assert "Current date: 2026-08-09" in clocks[0]
+        assert "Current time: 23:59:15 IST (UTC+05:30)" in clocks[0]
+        assert "Current date: 2026-08-11" in clocks[1]
+        assert "Current time: 00:00:16 IST (UTC+05:30)" in clocks[1]
+        for before, after in (
+            (first, first_followup), (first_followup, second), (second, second_followup),
+        ):
+            assert after["messages"][:len(before["messages"])] == before["messages"]
+        assert first["messages"][-2]["role"] == second["messages"][-2]["role"] == "system"
+        assert first["messages"][-2]["content"].endswith(clocks[0])
+        assert second["messages"][-2]["content"].endswith(clocks[1])
+        assert second["messages"][-1] == {"role": "user", "content": messages[1]}
+        snapshots = [client.app.state.services.runs.prompt_snapshot(run_id) for run_id in run_ids]
+        assert snapshots[0]["agents"] == snapshots[1]["agents"]
+        assert snapshots[0]["tools"] == snapshots[1]["tools"]
+        detail = client.get(f"/api/agent/conversations/{conversation['id']}").json()
+        assert detail["title"] == messages[0]
+        assert [item["text"] for item in detail["items"] if item["role"] == "user"] == messages
+        assert [
+            item["text"] for item in detail["items"] if item["role"] == "developer"
+        ] == [first["messages"][-2]["content"], second["messages"][-2]["content"]]
+
+
+@pytest.mark.parametrize("effort", ["auto", "quick"])
+def test_targeted_web_lookup_reads_source_without_plan_or_summary(
+    test_settings, stub_provider, monkeypatch, effort,
+):
+    source = WebSource(
+        id="release", url="https://example.com/releases", title="Release notes",
+        chunks=("Version 2 adds offline export.",), created_at=utcnow(), expires_at=utcnow(),
+    )
+
+    async def search(query, limit):
+        return {"query": query, "provider": "web", "results": [
+            {"title": source.title, "url": source.url, "snippet": "Release notes"},
+        ]}
+
+    async def download(url):
+        assert url == source.url
+        return source
+
+    async def read(source_id):
+        assert source_id == source.id
+        return source
+
+    with TestClient(create_app(test_settings)) as client:
+        configure_provider(client, stub_provider)
+        services = client.app.state.services
+        monkeypatch.setattr(services.research_search, "search_web", search)
+        monkeypatch.setattr(services.source_downloads, "download_web_page", download)
+        monkeypatch.setattr(services.source_downloads, "get_web_source", read)
+        goal = "What changed in the latest release?"
+        stub_provider.tool_plans = [
+            (goal, "search_research_sources", {"provider": "web", "query": "latest release"}),
+            (goal, "acquire_research_source",
+             {"kind": "web_page", "url": source.url, "title": None}),
+            (goal, "read_research_web_page",
+             {"source_id": source.id, "query": None, "start": 0, "limit": 1}),
+        ]
+        stub_provider.reply = f"Version 2 adds offline export. [Release notes]({source.url})"
+        conversation = client.post("/api/agent/conversations", json={}).json()
+        response = client.post(
+            f"/api/agent/conversations/{conversation['id']}/messages",
+            json={"content": goal, "response_effort": effort},
+        )
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        record = services.runs.get(run["id"])
+        assert len(stub_provider.requests) == 4
+        assert [attempt.catalog_id for attempt in record.tool_attempts] == [
+            "research.sources.search", "research.sources.acquire", "research.web.read",
+        ]
+        assert record.tool_attempts[-1].result_json["chunks"][0]["text"] == source.chunks[0]
+        assert not record.runtime_metadata_json.get("work_plan")
+        assert services.workspace.list_files() == []
+        assert source.url in run["final_output"]
+
+
 @pytest.mark.parametrize("mode", ["research", "learn", "understand"])
-def test_narrow_paper_modes_require_cited_read_but_no_artifact_writes(mode):
+def test_narrow_paper_modes_allow_source_reads_without_artifact_writes(mode):
     context = paper_context(mode)
     validate_paper_work_completion(context)
     assert context.metadata["paper_activity"][0]["action"] == "read"
@@ -59,18 +254,15 @@ def test_review_and_legacy_persisted_runs_keep_full_paper_gate(mode):
     "output",
     ["Uncited assertion.", "The answer is on p.20.", "A fabricated citation (p.3).", None],
 )
-def test_narrow_completion_rejects_missing_or_unread_citations(output):
+def test_narrow_completion_does_not_enforce_answer_citation_format(output):
     context = paper_context("learn")
     context.metadata["completion_output"] = output
-    with pytest.raises(ValidationError, match="cited answer"):
-        validate_paper_work_completion(context)
+    validate_paper_work_completion(context)
 
 
-def test_narrow_completion_rejects_metadata_only_and_empty_evidence():
+def test_narrow_completion_requires_a_source_read_but_not_citation_metadata():
     context = paper_context("understand", citations=[])
-    with pytest.raises(ValidationError) as error:
-        validate_paper_work_completion(context)
-    assert "obtain page or chunk citations" in str(error.value.issues)
+    validate_paper_work_completion(context)
     context.metadata["paper_activity"][0]["action"] = "acquired"
     with pytest.raises(ValidationError) as error:
         validate_paper_work_completion(context)
@@ -90,7 +282,7 @@ def test_explicit_review_gate_cannot_be_disabled_by_metadata_flags():
     validate_paper_work_completion(context)
 
 
-def test_research_does_not_turn_screened_candidates_into_required_reviews():
+def test_research_does_not_enforce_answer_citation_format():
     context = paper_context("research")
     context.metadata["paper_activity"].extend([
         {"document_id": "rejected", "action": "acquired"},
@@ -98,8 +290,7 @@ def test_research_does_not_turn_screened_candidates_into_required_reviews():
     ])
     validate_paper_work_completion(context)
     context.metadata["completion_output"] = "Unsupported p.20."
-    with pytest.raises(ValidationError, match="supplied page or chunk citation"):
-        validate_paper_work_completion(context)
+    validate_paper_work_completion(context)
 
 
 @pytest.mark.parametrize("action", ["acquired", "ingested", "summary_reused"])
@@ -177,6 +368,105 @@ def test_deep_work_blueprint_offers_local_workspace_discovery_to_both_agents():
         assert "BM25" in agent.instructions
         assert "only after external file edits" in agent.instructions
         assert "Selected research mode: research." in agent.instructions
+
+
+def test_deep_work_queues_workers_after_plan_creation_even_if_provider_batches_calls(
+    test_settings, stub_provider, monkeypatch,
+):
+    def call(call_id, name, arguments):
+        return {
+            "id": call_id, "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }
+
+    def responses(payload):
+        stub_provider.requests.append(payload)
+        offered = {tool["function"]["name"] for tool in payload.get("tools", [])}
+        called = {
+            item["function"]["name"]
+            for message in payload["messages"] for item in message.get("tool_calls") or []
+        }
+        if "focused_research_worker" in offered:
+            if "focused_research_worker" not in called:
+                return _message(tool_calls=[
+                    call("plan", "create_work_plan", {"items": [
+                        {"id": "a", "title": "Track A"}, {"id": "b", "title": "Track B"},
+                    ]}),
+                    call("delegate-a", "focused_research_worker", {"request": "Complete track a."}),
+                    call("delegate-b", "focused_research_worker", {"request": "Complete track b."}),
+                ])
+            return _message("Both tracks are complete.")
+        if "update_work_item" not in called:
+            request = next(
+                message["content"] for message in payload["messages"] if message["role"] == "user"
+            )
+            item_id = "a" if "track a" in request else "b"
+            return _message(tool_calls=[call(
+                f"update-{item_id}", "update_work_item",
+                {"id": item_id, "status": "completed", "summary": f"Verified track {item_id}."},
+            )])
+        return _message("Assigned track verified.")
+
+    monkeypatch.setattr(stub_provider, "responses", responses)
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post(
+            "/api/deep-work/conversations",
+            json={"model_reference": {"provider_profile_id": profile_id, "model": "stub-model"}},
+        ).json()
+        response = client.post(
+            f"/api/deep-work/conversations/{conversation['id']}/messages",
+            json={"content": "Execute the two scoped tracks.", "web_enabled": False},
+        )
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        record = client.app.state.services.runs.get(run["id"])
+        assert all(attempt.status == "completed" for attempt in record.tool_attempts)
+        clock = record.runtime_metadata_json["system_information"]
+        worker_requests = [
+            request for request in stub_provider.requests
+            if not any(
+                tool["function"]["name"] == "focused_research_worker"
+                for tool in request["tools"]
+            )
+        ]
+        assert len(worker_requests) == 4
+        for request in worker_requests:
+            assert request["messages"][1]["content"].endswith(clock)
+            assert request["messages"][1]["role"] == "system"
+            assert [
+                message["content"] for message in request["messages"] if message["role"] == "user"
+            ] in (["Complete track a."], ["Complete track b."])
+            assert "Execute the two scoped tracks." not in json.dumps(request["messages"])
+        for before, after in zip(worker_requests[::2], worker_requests[1::2]):
+            assert after["messages"][:len(before["messages"])] == before["messages"]
+        workers = [
+            event.event_type for event in record.events
+            if event.event_type in {"agent.started", "agent.completed"}
+            and event.payload_json.get("agent_name") == "Focused Research Worker"
+        ]
+        assert workers == ["agent.started", "agent.completed", "agent.started", "agent.completed"]
+        traces = [
+            event.payload_json for event in record.events
+            if event.event_type == "agent.stream" and event.payload_json.get("snapshot")
+        ]
+        assert {trace["parent_tool_call_id"] for trace in traces} == {"delegate-a", "delegate-b"}
+        assert len({trace["invocation_id"] for trace in traces}) == 2
+        assert all(trace["delta"] == "Assigned track verified." for trace in traces)
+        assert all(
+            "Assigned track verified." not in event.payload_json.get("delta", "")
+            for event in record.events if event.event_type == "model.stream"
+        )
+        assert record.blueprint_json["run"]["max_tool_concurrency"] == 1
+        assert all(
+            agent["model_settings"]["parallel_tool_calls"] is False
+            for agent in record.blueprint_json["agents"]
+        )
+        updates = [
+            attempt for attempt in record.tool_attempts if attempt.catalog_id == "work.plan.update"
+        ]
+        assert len(updates) == 2
+        assert all(item["status"] == "completed" for item in updates[-1].result_json["items"])
 
 
 @pytest.mark.parametrize("mode", ["research", "learn", "understand", "review", "deep_work", "fast_answer"])
@@ -268,9 +558,6 @@ def test_deep_work_accepts_model_chosen_discussion_and_clarification_without_pla
     test_settings, stub_provider, path,
 ):
     opening = "Before researching papers, explain how Deep Work creates a research plan."
-    stub_provider.tool_plans = [
-        (opening, "set_conversation_title", {"title": "Choosing a research approach"}),
-    ]
     with TestClient(create_app(test_settings)) as client:
         profile_id = configure_provider(client, stub_provider)
         conversation = client.post(
@@ -295,11 +582,8 @@ def test_deep_work_accepts_model_chosen_discussion_and_clarification_without_pla
             assert len(record.epochs) == 1
             assert not record.runtime_metadata_json.get("work_plan")
             assert not record.runtime_metadata_json.get("paper_activity")
-            assert all(
-                attempt.catalog_id == "conversation.title.set"
-                for attempt in record.tool_attempts
-            )
-        assert len(stub_provider.requests) == 3
+            assert not record.tool_attempts
+        assert len(stub_provider.requests) == 2
         assert all(
             request.get("tool_choice") in (None, "auto")
             for request in stub_provider.requests
@@ -310,8 +594,9 @@ def test_deep_work_accepts_model_chosen_discussion_and_clarification_without_pla
 
 
 @pytest.mark.parametrize("terminal_status", ["completed", "blocked"])
+@pytest.mark.parametrize("effort", ["auto", "quick", "thorough"])
 def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
-    test_settings, stub_provider, terminal_status,
+    test_settings, stub_provider, terminal_status, effort,
 ):
     goal = "Go ahead with the agreed investigation."
     stub_provider.tool_plans = [
@@ -334,7 +619,7 @@ def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
         ).json()
         response = client.post(
             f"/api/deep-work/conversations/{conversation['id']}/messages",
-            json={"content": goal, "web_enabled": False},
+            json={"content": goal, "web_enabled": False, "response_effort": effort},
         )
         assert response.status_code == 202, response.text
         run = wait_for_run(client, response.json()["run"]["id"])
@@ -359,6 +644,7 @@ def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
         {"fast_answer": True, "research_mode": "research"},
         {"fast_answer": True, "research_mode": "review"},
         {"research_mode": "unknown"},
+        {"response_effort": "unknown"},
     ],
 )
 def test_incompatible_mode_requests_are_rejected(options):
@@ -467,7 +753,7 @@ def test_paper_completion_checks_evidence_and_explicit_review_artifacts(
         )
         assert response.status_code == 202, response.text
         run_id = response.json()["run"]["id"]
-        accepted = cited and mode != "review"
+        accepted = mode != "review"
         if not accepted:
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
@@ -478,7 +764,7 @@ def test_paper_completion_checks_evidence_and_explicit_review_artifacts(
                     break
                 time.sleep(0.01)
             else:
-                pytest.fail("Completion missing citations or required review artifacts was not rejected.")
+                pytest.fail("Completion missing required review artifacts was not rejected.")
             assert client.post(f"/api/runs/{run_id}/cancel").status_code == 200
         run = wait_for_run(client, run_id)
         assert run["status"] == ("completed" if accepted else "cancelled"), run["error"]
@@ -509,7 +795,7 @@ def test_deep_work_conversation_accepts_research_modes_on_either_endpoint(
         assert run["status"] == "completed", run["error"]
         record = client.app.state.services.runs.get(run["id"])
         assert record.runtime_metadata_json["research_mode"] == "learn"
-        assert record.runtime_metadata_json["autonomous_work"] is True
+        assert bool(record.runtime_metadata_json.get("autonomous_work")) is (path == "deep-work")
 
 
 @pytest.mark.parametrize("deep_work", [False, True])
@@ -592,7 +878,7 @@ def test_deep_research_applies_live_steering_without_creating_artifacts(
         assert len(stub_provider.requests) == 2
         assert steering not in str(stub_provider.requests[0]["messages"])
         assert steering in str(stub_provider.requests[1]["messages"])
-        assert "Follow the latest user steering over older goals." in str(
+        assert "Use the full conversation and latest steering" in str(
             stub_provider.requests[1]["messages"]
         )
 
@@ -760,7 +1046,6 @@ def test_full_workflow_tool_surface_fits_working_context_budget(
             conversation["id"],
             research_mode="review" if mode == "deep_work" else mode,
             deep_work=mode == "deep_work",
-            first_turn=True,
         )
         assert compiled.context_policy is not None
         context = ScholarWeaveContext(

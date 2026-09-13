@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from backend.core.errors import ValidationError
+from backend.conversations.turns import deep_work_blueprint, research_blueprint
 from backend.prompting.registry import PROMPT_DEFINITIONS, PromptRegistry
 from backend.tools.catalog import create_tool_catalog
 
@@ -36,8 +37,8 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
 def test_main_agent_prompts_use_notes_and_dedicated_summary_tools(test_settings) -> None:
     registry = PromptRegistry(test_settings.prompt_config_dir)
 
-    for prompt_id in ("research", "deep-work-coordinator"):
-        prompt = registry.render(prompt_id)
+    for blueprint in (research_blueprint({}, prompts=registry), deep_work_blueprint({}, prompts=registry)):
+        prompt = blueprint.agents[0].instructions
         assert "save_research_note" in prompt
         assert "summarize_research_paper" in prompt
         assert "list_workspace" in prompt
@@ -47,14 +48,16 @@ def test_main_agent_prompts_use_notes_and_dedicated_summary_tools(test_settings)
         assert "research_note_writer" not in prompt
 
 
-def test_main_agent_prompts_name_only_the_first_turn(test_settings) -> None:
+def test_chat_prompts_separate_effort_sources_and_artifacts(test_settings) -> None:
     registry = PromptRegistry(test_settings.prompt_config_dir)
-
-    for prompt_id in ("research", "deep-work-coordinator"):
-        prompt = registry.render(prompt_id)
-        assert "When `set_conversation_title` is available" in prompt
-        assert "call it exactly once" in prompt
-        assert "unavailable after the first turn" in prompt
+    for blueprint in (research_blueprint({}, prompts=registry), deep_work_blueprint({}, prompts=registry)):
+        prompt = blueprint.agents[0].instructions
+        assert "set_conversation_title" not in prompt
+        assert "Answer ordinary chat" in prompt
+        assert "Quick does not mean web-only" in prompt
+        assert "Summaries belong in the conversation unless the user asks to save them" in prompt
+    assert "general conversation" in registry.render("global")
+    assert "cannot execute code" in registry.render("global")
 
 
 def test_prompt_template_variables_are_strict(test_settings) -> None:

@@ -22,6 +22,7 @@ from backend.runs.service import (
     STOP_AND_ANSWER_PROMPT,
     RunService,
     _persisted_stream_text,
+    _resolved_epoch_input,
     _restore_pending_steering,
     _restore_work_plan,
     _work_continuation,
@@ -219,11 +220,12 @@ def test_deep_work_without_a_plan_can_finish_conversation(plan):
 
 
 @pytest.mark.parametrize("status", ["pending", "in_progress", "completed", "blocked"])
-def test_deep_work_continues_only_unfinished_plan_items(status):
+@pytest.mark.parametrize("autonomous_work", [False, True])
+def test_all_efforts_continue_only_unfinished_plan_items(status, autonomous_work):
     context = ScholarWeaveContext(
         run_id="research", tool_runtime=ToolRuntime(),
         metadata={
-            "autonomous_work": True,
+            "autonomous_work": autonomous_work,
             "work_plan": [{"id": "evidence", "title": "Check evidence", "status": status}],
         },
     )
@@ -366,6 +368,13 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
     assert original[0] in stub_provider.requests[-1]["messages"]
     assert original[1] not in stub_provider.requests[-1]["messages"]
     assert "Measured accuracy was 91%" in json.dumps(stub_provider.requests[-1]["messages"])
+    clock_messages = [
+        message["content"] for message in stub_provider.requests[-1]["messages"]
+        if str(message.get("content", "")).startswith("Context recorded when this request")
+    ]
+    assert len(clock_messages) == 2
+    assert clock_messages[0].endswith(first.runtime_metadata_json["system_information"])
+    assert clock_messages[1].endswith(second.runtime_metadata_json["system_information"])
     instructions = stub_provider.requests[-1]["messages"][0]["content"]
     assert "conversations/ survive run cleanup" in instructions
     assert "may expire during run cleanup" in instructions
@@ -375,6 +384,63 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
     await service.close()
     await reopened.close()
     await binding.client.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("started", [False, True])
+@pytest.mark.parametrize("has_clock", [False, True])
+async def test_recovery_reuses_persisted_turn_context_without_reading_clock(
+    test_settings, stub_provider, monkeypatch, started, has_clock,
+) -> None:
+    binding = stub_binding(stub_provider)
+    compiler = AgentCompiler(Resolver(binding), create_tool_catalog(), test_settings)
+    compiled = compiler.compile(AgentBlueprint.model_validate({
+        "name": "Researcher", "entry_agent_id": "researcher",
+        "agents": [{"id": "researcher", "name": "Researcher", "instructions": "Answer."}],
+    }))
+    repository = RunRepository(create_session_factory(test_settings))
+    sessions = ConversationSessionFactory(test_settings.database_path)
+    clock = "System information:\nCurrent date: 2026-08-09\nCurrent time: 23:59:15 IST (UTC+05:30)"
+    record = repository.create(
+        conversation_id="conversation-1",
+        agent_name=compiled.blueprint.name,
+        input_value="Original request.",
+        blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
+        runtime_metadata={"system_information": clock} if has_clock else {},
+    )
+    session = sessions.get("conversation-1", compiled.blueprint.session)
+    if started:
+        repository.mark_running(record.id)
+        repository.begin_epoch(record.id, "Original request.")
+        await _resolved_epoch_input(
+            session, "Original request.", system_information=clock if has_clock else None,
+        )
+
+    def unexpected_clock_read(**_kwargs):
+        pytest.fail("Recovery must reuse persisted context rather than regenerate a clock.")
+
+    monkeypatch.setattr("backend.runs.service.current_system_information", unexpected_clock_read)
+    service = RunService(
+        repository, sessions, ToolRuntime(), EventBroker(), settings=test_settings,
+    )
+    try:
+        await service.recover_incomplete(compiler)
+        await asyncio.wait_for(service._tasks[record.id], timeout=5)
+        recovered = service.get(record.id)
+        assert recovered.status == "completed", recovered.error
+        assert len(stub_provider.requests) == 1
+        messages = stub_provider.requests[0]["messages"]
+        assert sum(clock in str(message.get("content")) for message in messages) == int(has_clock)
+        assert sum(message.get("content") == "Original request." for message in messages) == 1
+        assert messages[0]["content"].startswith(compiled.entry_agent.instructions)
+        assert service.prompt_snapshot(record.id)["agents"][0]["effective_instructions"] == (
+            compiled.entry_agent.instructions
+        )
+        assert sum(item.get("role") == "developer" for item in await session.get_items()) == int(has_clock)
+    finally:
+        await service.close()
+        await sessions.close()
+        await binding.client.close()
 
 
 @pytest.mark.anyio
@@ -503,6 +569,8 @@ def _summary_batch_environment(tmp_path, stub_provider):
 @pytest.mark.anyio
 @pytest.mark.parametrize("metadata, expected", [
     ({}, "interactive"),
+    ({"response_effort": "auto"}, "interactive"),
+    ({"response_effort": "quick"}, "interactive"),
     ({"autonomous_work": True, "work_plan": [{"id": "done", "status": "completed"}]}, "background"),
     ({"paper_summary_document_id": "paper-1"}, "background"),
 ])
@@ -792,6 +860,7 @@ async def test_validation_completion_rejection_starts_corrective_epoch(
         "research_mode": "understand",
         "paper_require_summary": False,
         "paper_require_notes": False,
+        "system_information": run.runtime_metadata_json["system_information"],
     }
     assert len(stub_provider.requests) == 2
     assert "populate notes.md through save_research_note" in str(
@@ -1742,9 +1811,11 @@ async def test_cancel_immediately_propagates_to_active_tool(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("effort", ["auto", "thorough"])
 async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt(
     tmp_path,
     stub_provider,
+    effort,
 ) -> None:
     stub_provider.stream_delay_seconds = 10
     binding = stub_binding(stub_provider)
@@ -1803,6 +1874,11 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
             compiled,
             "Find every relevant source.",
             conversation_id="conversation-1",
+            runtime_metadata={
+                "response_effort": effort,
+                "autonomous_work": effort == "thorough",
+                "work_plan": [{"id": "sources", "status": "pending"}],
+            },
         )
         await asyncio.sleep(0)
         stub_provider.stream_delay_seconds = 0
@@ -1815,6 +1891,7 @@ async def test_stop_and_answer_starts_tool_free_answer_and_hides_internal_prompt
 
     assert stopped.status == "cancelled"
     assert answer.status == "completed", answer.error
+    assert not answer.runtime_metadata_json.get("work_plan")
     assert answer.final_output_json == "Stub answer."
     assert stub_provider.requests[-1].get("tools") in (None, [])
     assert "Find every relevant source." in str(

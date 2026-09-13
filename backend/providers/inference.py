@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -9,6 +10,22 @@ from typing import Iterator, Literal
 
 InferencePriority = Literal["interactive", "background"]
 _priority: ContextVar[InferencePriority] = ContextVar("inference_priority", default="interactive")
+_progress: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar("inference_progress", default=None)
+
+
+@contextmanager
+def inference_progress(callback: Callable[[str], Awaitable[None]]) -> Iterator[None]:
+    token = _progress.set(callback)
+    try:
+        yield
+    finally:
+        _progress.reset(token)
+
+
+async def report_inference_progress(phase: str) -> None:
+    callback = _progress.get()
+    if callback is not None:
+        await callback(phase)
 
 
 @contextmanager

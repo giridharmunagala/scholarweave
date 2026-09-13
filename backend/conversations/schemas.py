@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -13,6 +13,7 @@ from backend.agents.blueprint import (
 from backend.runs.schemas import RunResponse
 
 ResearchMode = Literal["research", "learn", "understand", "review"]
+ResponseEffort = Literal["auto", "quick", "thorough"]
 
 
 class ConversationSchema(BaseModel):
@@ -27,7 +28,7 @@ class SessionItemResponse(ConversationSchema):
 
 
 class ResearchConversationCreateRequest(ConversationSchema):
-    title: str = Field(default="New research", min_length=1, max_length=120)
+    title: str = Field(default="New chat", min_length=1, max_length=120)
     model_reference: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
 
 
@@ -47,13 +48,37 @@ class ConversationDetailResponse(ConversationResponse):
     items: list[SessionItemResponse]
 
 
+class ConversationAttachmentResponse(ConversationSchema):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+
+    path: str
+    name: str
+    media_type: str
+    size_bytes: int
+    document_id: str | None
+
+
 class ConversationMessageRequest(ConversationSchema):
     content: str = Field(min_length=1)
+    attachment_paths: list[Annotated[str, Field(min_length=1, max_length=512)]] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Readable workspace paths returned by chat attachment uploads.",
+    )
     reasoning_effort: ReasoningEffort | None = None
     web_enabled: bool = True
+    response_effort: ResponseEffort | None = Field(
+        default=None,
+        description=(
+            "Per-message effort: auto follows intent; quick uses the smallest sufficient "
+            "local or web evidence; thorough enables focused delegation. Does not imply "
+            "saved artifacts. Overrides legacy deep_work and fast_answer selectors. "
+            "Omitted defaults to auto on the chat endpoint."
+        ),
+    )
     deep_work: bool = Field(
         default=False,
-        description="Permanently enable Deep Work for this conversation.",
+        description="Legacy per-message alias for thorough effort; never changes conversation kind.",
     )
     fast_answer: bool = False
     research_mode: ResearchMode | None = Field(
@@ -71,10 +96,14 @@ class ConversationMessageRequest(ConversationSchema):
 
     @model_validator(mode="after")
     def validate_modes(self) -> "ConversationMessageRequest":
+        if self.response_effort is not None:
+            return self
         if self.deep_work and self.fast_answer:
             raise ValueError("Fast Answer and Deep Work cannot be enabled together.")
         if self.fast_answer and self.research_mode not in {None, "learn"}:
             raise ValueError("Fast Answer requires learn mode.")
+        if self.fast_answer and self.attachment_paths:
+            raise ValueError("Turn off Fast Answer to work with attached files.")
         return self
 
 

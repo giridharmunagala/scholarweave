@@ -47,8 +47,8 @@ describe('application shell', () => {
     const labels = Array.from(container.querySelectorAll('.rail .nav-link .rail-label')).map(
       (node) => node.textContent,
     );
-    expect(labels).toEqual(['Research', 'Library', 'Settings']);
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Research');
+    expect(labels).toEqual(['Chat', 'Library', 'Settings']);
+    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Chat');
 
     // The rail is the only navigation chrome: no top bar, no breadcrumb, no drawer.
     expect(container.querySelector('.topbar')).toBeNull();

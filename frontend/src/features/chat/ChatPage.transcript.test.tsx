@@ -238,6 +238,7 @@ let lastMessageRequest: Record<string, unknown> | null = null;
 let lastSteeringRequest: Record<string, unknown> | null = null;
 let deliverAppliedBeforeSteeringResponse = false;
 let conversationDeleted = false;
+let conversationKind: 'autonomous' | 'deep_work' = 'autonomous';
 
 class FakeEventSource {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
@@ -303,7 +304,7 @@ function conversationSummary() {
   return {
     id: CONVERSATION_ID,
     title: 'Recorded chat',
-    kind: 'autonomous',
+    kind: conversationKind,
     model_reference: SETTINGS.default_model_references.chat,
     session_policy: {},
     status: 'idle',
@@ -328,10 +329,7 @@ function installFetch() {
         lastMessageRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
         const { content } = lastMessageRequest as { content: string };
         return respond({
-          conversation: {
-            ...conversationSummary(),
-            kind: lastMessageRequest.deep_work ? 'deep_work' : 'autonomous',
-          },
+          conversation: conversationSummary(),
           run: server.startRun(content),
         });
       }
@@ -411,6 +409,7 @@ describe('chat transcript detail', () => {
     lastSteeringRequest = null;
     deliverAppliedBeforeSteeringResponse = false;
     conversationDeleted = false;
+    conversationKind = 'autonomous';
     window.localStorage.clear();
     window.history.replaceState({}, '', '/');
     installFetch();
@@ -423,6 +422,7 @@ describe('chat transcript detail', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -490,14 +490,43 @@ describe('chat transcript detail', () => {
     expect(container.querySelector('[aria-label="Delete Recorded chat"]')).toBeNull();
   });
 
-  it('sends the selected reasoning effort, context size, and bounded fast-answer controls', async () => {
+  it.each([30_000, 262_144])('restores the latest chat context %s instead of provider metadata', async (contextWindow) => {
+    const previous = server.startRun('Earlier turn');
+    previous.status = 'completed';
+    previous.context_window_tokens = 16_384;
+    const latest = server.startRun('Latest turn');
+    latest.status = 'completed';
+    latest.context_window_tokens = contextWindow;
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const contextSize = container.querySelector<HTMLSelectElement>('[aria-label="Context size"]')!;
+    expect(contextSize.value).toBe(String(contextWindow));
+    expect(text(container.querySelector('.composer-options-help'))).toContain('overrides provider metadata');
+    await send('Use the same chat budget.');
+    expect(lastMessageRequest).toMatchObject({ context_window_tokens: contextWindow });
+  });
+
+  it.each([null, undefined])('falls back to provider context for a legacy run with %s context', async (contextWindow) => {
+    const latest = server.startRun('Earlier turn');
+    latest.status = 'completed';
+    latest.context_window_tokens = contextWindow;
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Context size"]')!.value).toBe('65536');
+  });
+
+  it.each(['auto', 'quick', 'thorough'])('sends %s effort with reasoning and context controls but no legacy selectors', async (effort) => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
     const reasoning = container.querySelector<HTMLSelectElement>(
       '[aria-label="Reasoning effort"]',
     )!;
-    expect(container.querySelector('[aria-label="Work mode"]')).toBeNull();
+    const responseEffort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
+    expect(responseEffort.value).toBe('auto');
+    expect(Array.from(responseEffort.options, (option) => option.text)).toEqual([
+      'Auto', 'Quick', 'Thorough',
+    ]);
     const contextSize = container.querySelector<HTMLSelectElement>(
       '[aria-label="Context size"]',
     )!;
@@ -508,144 +537,84 @@ describe('chat transcript detail', () => {
       reasoning.dispatchEvent(new Event('change', { bubbles: true }));
       contextSize.value = '131072';
       contextSize.dispatchEvent(new Event('change', { bubbles: true }));
-      container
-        .querySelector('[aria-label="Toggle fast answer"]')!
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    const searchLimit = container.querySelector<HTMLInputElement>(
-      '[aria-label="Fast answer web search limit"]',
-    )!;
-    const inputSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype,
-      'value',
-    )!.set!;
-    await act(async () => {
-      inputSetter.call(searchLimit, '4');
-      searchLimit.dispatchEvent(new Event('input', { bubbles: true }));
+      responseEffort.value = effort;
+      responseEffort.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await send('Investigate this thoroughly');
 
-    expect(lastMessageRequest).toMatchObject({
+    expect(lastMessageRequest).toEqual({
       content: 'Investigate this thoroughly',
       reasoning_effort: 'high',
       web_enabled: true,
-      deep_work: false,
-      fast_answer: true,
-      research_mode: 'learn',
-      web_search_limit: 4,
+      response_effort: effort,
       context_window_tokens: 131072,
     });
-    expect(lastMessageRequest).not.toHaveProperty('work_mode');
-    expect(lastMessageRequest).not.toHaveProperty('work_budget');
+    expect(responseEffort.value).toBe('auto');
+    expect(responseEffort.disabled).toBe(true);
   });
 
-  it('permanently enables Deep Work for a main-chat session without a separate page', async () => {
+  it('resets Thorough to Auto after acceptance without upgrading the conversation', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
-    const deepWork = container.querySelector<HTMLButtonElement>(
-      '[aria-label="Toggle deep work"]',
-    )!;
-    expect(deepWork.getAttribute('aria-pressed')).toBe('false');
-
+    const effort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
     await act(async () => {
-      deepWork.click();
+      effort.value = 'thorough';
+      effort.dispatchEvent(new Event('change', { bubbles: true }));
     });
-
-    expect(deepWork.getAttribute('aria-pressed')).toBe('true');
+    expect(container.querySelector('[aria-label="Toggle deep work"]')).toBeNull();
     expect(container.querySelector('[aria-label="Toggle fast answer"]')).toBeNull();
-    expect(text(container.querySelector('.chat-mode-badge'))).toContain('Deep Work');
-    await send('Investigate this with focused workers');
-
-    expect(lastMessageRequest).toMatchObject({
-      content: 'Investigate this with focused workers',
-      web_enabled: true,
-      deep_work: true,
-      fast_answer: false,
-      research_mode: 'research',
-    });
-    expect(deepWork.disabled).toBe(true);
-    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    expect(mode.value).toBe('research');
-    expect(mode.disabled).toBe(true);
+    expect(container.querySelector('[aria-label="Research mode"]')).toBeNull();
+    await runTurn(0);
+    expect(lastMessageRequest).toMatchObject({ response_effort: 'thorough' });
+    expect(effort.value).toBe('auto');
+    expect(effort.disabled).toBe(false);
+    expect(container.querySelector('.chat-mode-badge')).toBeNull();
+    expect(container.querySelector('.conversation-mode')).toBeNull();
+    await runTurn(1);
+    expect(lastMessageRequest).toMatchObject({ response_effort: 'auto' });
   });
 
-  it('switches from reviewed research to offline sourced paper Q&A without fast-web restrictions', async () => {
+  it.each(['auto', 'quick'])('allows %s in an old Deep Work chat without a badge or lock', async (selected) => {
+    conversationKind = 'deep_work';
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
-    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    expect(mode.value).toBe('research');
-    expect(Array.from(mode.options, (option) => option.value)).toEqual([
-      'research', 'learn', 'understand', 'review',
-    ]);
+    const effort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
+    expect(effort.value).toBe('auto');
+    expect(effort.disabled).toBe(false);
+    expect(container.querySelector('.chat-mode-badge')).toBeNull();
+    expect(container.querySelector('.conversation-mode')).toBeNull();
     await act(async () => {
-      mode.value = 'review';
-      mode.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    expect(mode.title).toContain('require cited summaries plus durable paper notes');
-    await act(async () => {
-      mode.value = 'learn';
-      mode.dispatchEvent(new Event('change', { bubbles: true }));
+      effort.value = selected;
+      effort.dispatchEvent(new Event('change', { bubbles: true }));
       container.querySelector<HTMLButtonElement>('[aria-label="Toggle web access"]')!.click();
     });
-    await send('What does equation 2 mean?');
+    await runTurn(0);
     expect(lastMessageRequest).toMatchObject({
-      research_mode: 'learn',
-      fast_answer: false,
+      response_effort: selected,
       web_enabled: false,
-      deep_work: false,
     });
+    expect(effort.disabled).toBe(false);
+    expect(effort.value).toBe('auto');
   });
 
-  it('selects understanding a paper without requiring a full review', async () => {
+  it('starts a new chat at Auto even after selecting Thorough', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
-    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
+    const effort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
     await act(async () => {
-      mode.value = 'understand';
-      mode.dispatchEvent(new Event('change', { bubbles: true }));
+      effort.value = 'thorough';
+      effort.dispatchEvent(new Event('change', { bubbles: true }));
     });
-
-    await send('Explain the assumptions and prerequisites');
-    expect(lastMessageRequest).toMatchObject({
-      research_mode: 'understand',
-      fast_answer: false,
-      deep_work: false,
-    });
-  });
-
-  it('starts a new chat following intent even after selecting deep work', async () => {
-    const { default: ChatPage } = await import('./ChatPage');
-    await mount(ChatPage as () => JSX.Element);
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="Toggle deep work"]')!.click();
-    });
-    expect(container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!.value)
-      .toBe('research');
+    expect(effort.value).toBe('thorough');
     await act(async () => {
       container.querySelector<HTMLButtonElement>('.new-chat')!.click();
     });
-    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    expect(mode.value).toBe('research');
-    expect(mode.disabled).toBe(false);
-    expect(container.querySelector('[aria-label="Toggle deep work"]')?.getAttribute('aria-pressed'))
-      .toBe('false');
-  });
-
-  it('lets Deep Work explain without implicitly selecting review and saving artifacts', async () => {
-    const { default: ChatPage } = await import('./ChatPage');
-    await mount(ChatPage as () => JSX.Element);
-    const mode = container.querySelector<HTMLSelectElement>('[aria-label="Research mode"]')!;
-    await act(async () => {
-      container.querySelector<HTMLButtonElement>('[aria-label="Toggle deep work"]')!.click();
-    });
-    expect(mode.disabled).toBe(false);
-    await act(async () => {
-      mode.value = 'understand';
-      mode.dispatchEvent(new Event('change', { bubbles: true }));
-    });
-    await send('Explain the assumptions in this summary. Do not write new files.');
-    expect(lastMessageRequest).toMatchObject({ research_mode: 'understand', deep_work: true });
+    expect(effort.value).toBe('auto');
+    expect(effort.disabled).toBe(false);
+    expect(text(container.querySelector('h1'))).toBe('New chat');
+    expect(text(container.querySelector('.chat-welcome'))).toContain('Chat, think through ideas');
+    expect(text(container.querySelector('.chat-welcome'))).toContain('local files and on the web');
   });
 
   it('opens library context as an editable draft without starting work or reopening the last chat', async () => {
@@ -655,7 +624,7 @@ describe('chat transcript detail', () => {
     await mount(ChatPage as () => JSX.Element);
     expect(container.querySelector('textarea')!.value).toBe(draft);
     expect(container.querySelector('textarea')).toBe(document.activeElement);
-    expect(text(container.querySelector('h1'))).toBe('New research');
+    expect(text(container.querySelector('h1'))).toBe('New chat');
     expect(server.runs).toHaveLength(0);
     expect(lastMessageRequest).toBeNull();
     expect(vi.mocked(fetch).mock.calls.some(([url]) =>
@@ -678,10 +647,12 @@ describe('chat transcript detail', () => {
     await mount(ChatPage as () => JSX.Element);
     const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
     expect(options.open).toBe(false);
-    expect(options.querySelector('[aria-label="Toggle fast answer"]')).not.toBeNull();
-    expect(options.querySelector('[aria-label="Toggle web access"]')).not.toBeNull();
-    expect(options.querySelector('[aria-label="Research mode"]')).not.toBeNull();
-    expect(options.querySelector('[aria-label="Toggle deep work"]')).not.toBeNull();
+    expect(options.querySelector('[aria-label="Reasoning effort"]')).not.toBeNull();
+    expect(options.querySelector('[aria-label="Context size"]')).not.toBeNull();
+    expect(options.querySelector('[aria-label="Response effort"]')).toBeNull();
+    expect(options.querySelector('[aria-label="Toggle web access"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Response effort"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Toggle web access"]')).not.toBeNull();
     await act(async () => options.querySelector('summary')!.click());
     expect(options.open).toBe(true);
     await act(async () => options.querySelector('summary')!.click());
@@ -725,6 +696,48 @@ describe('chat transcript detail', () => {
     expect(container.querySelector('.focus-mode')).toBeNull();
   });
 
+  it('dismisses options on outside pointer presses without changing settings or the draft', async () => {
+    const draft = 'Explain the attached proposal.';
+    window.history.replaceState({}, '', `/?research=${encodeURIComponent(draft)}`);
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
+    const summary = options.querySelector('summary')!;
+    const reasoning = options.querySelector<HTMLSelectElement>('[aria-label="Reasoning effort"]')!;
+    const composer = container.querySelector('textarea')!;
+
+    await act(async () => {
+      summary.click();
+      reasoning.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      reasoning.value = 'high';
+      reasoning.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(options.open).toBe(true);
+    await act(async () => {
+      composer.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      composer.focus();
+    });
+    expect(options.open).toBe(false);
+    expect(document.activeElement).toBe(composer);
+    expect(composer.value).toBe(draft);
+    expect(reasoning.value).toBe('high');
+    expect(lastMessageRequest).toBeNull();
+
+    await act(async () => summary.click());
+    expect(options.open).toBe(true);
+    await act(async () => {
+      document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+    });
+    expect(options.open).toBe(false);
+    await act(async () => summary.click());
+    expect(options.open).toBe(true);
+    await act(async () => {
+      summary.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true }));
+      summary.click();
+    });
+    expect(options.open).toBe(false);
+  });
+
   it('supports observability shortcuts and dismisses options without clearing the draft', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
@@ -732,7 +745,8 @@ describe('chat transcript detail', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { code: 'KeyA', altKey: true, shiftKey: true }));
     });
     expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(false);
-    expect(container.querySelector<HTMLDetailsElement>('.session-trace')!.open).toBe(false);
+    expect(container.querySelector('.session-trace')?.tagName).toBe('SECTION');
+    expect(container.querySelector('.session-trace > h3')?.textContent).toContain('Full trace');
     const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
     await act(async () => {
       options.querySelector('summary')!.click();
@@ -773,16 +787,24 @@ describe('chat transcript detail', () => {
     second.usage = { performance: perf(300, 30) };
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
-    expect(text(container.querySelector('.session-status-strip .meter strong'))).toBe('450');
-    expect(text(container.querySelector('.session-status-strip'))).toContain('100 tok/s');
-    expect(text(container.querySelector('.session-status-strip'))).toContain('10 tok/s');
+    expect(container.querySelector('.session-status-strip')).toBeNull();
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(true);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[aria-label="Show run activity"]')!.click();
+    });
+    expect(container.querySelector<HTMLElement>('.activity-sidebar')!.hidden).toBe(false);
+    const totals = container.querySelector('[aria-label="Session totals"]');
+    const totalTokens = () => text(totals!.querySelector('summary'));
+    expect(totalTokens()).toContain('450 tokens');
+    expect(text(totals)).toContain('100 tok/s');
+    expect(text(totals)).toContain('10 tok/s');
     const update = { sequence: 1, event_type: 'usage.updated', payload: { performance: perf(500, 50, 2) } };
     await act(async () => {
       server.listeners.get(second.id)?.deliver(update);
       server.listeners.get(second.id)?.deliver(update);
     });
     await flush(2);
-    expect(text(container.querySelector('.session-status-strip .meter strong'))).toBe('670');
+    expect(totalTokens()).toContain('670 tokens');
   });
 
   it('keeps completed activity out of the transcript as the thread grows', async () => {
@@ -816,6 +838,81 @@ describe('chat transcript detail', () => {
     expect(container.querySelectorAll('.activity-sidebar .turn-timeline')).toHaveLength(TURNS.length);
     expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
     expect(text(container.querySelectorAll('.turn-timeline')[0])).toContain('Searched');
+  });
+
+  it('keeps live headlines docked at the composer over six successive turns', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    for (let turn = 0; turn < 6; turn += 1) {
+      await send(`Follow-up ${turn}`);
+      const id = `run-${turn + 1}`;
+      const source = server.listeners.get(id)!;
+      await act(async () => source.deliver({
+        sequence: 1, event_type: 'tool.started', payload: { tool_name: `read_source_${turn}`, tool_call_id: 'call-0' },
+      }));
+      await flush(2);
+      expect(text(container.querySelector('.composer .live-activity'))).toContain(`Read source ${turn}`);
+      expect(container.querySelector('.message-list .live-activity')).toBeNull();
+      server.completeRun(id, 0);
+      await act(async () => source.deliver({ sequence: 999, event_type: 'run.completed', payload: {} }));
+      await flush();
+      expect(container.querySelector('.live-activity')).toBeNull();
+    }
+  });
+
+  it('recovers missing active tool events from a snapshot after a stream error', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send('Inspect a source');
+    const source = server.listeners.get('run-1')!;
+    const event = { sequence: 1, event_type: 'tool.started', payload: { tool_name: 'read_source', tool_call_id: 'read' } };
+    server.runs[0] = { ...server.runs[0], status: 'running', events: [event] };
+    await act(async () => source.onerror?.());
+    await flush();
+    expect(text(container.querySelector('.composer .live-activity'))).toContain('Read source');
+    await act(async () => server.listeners.get('run-1')!.deliver(event));
+    await flush(2);
+    expect(container.querySelectorAll('.activity-sidebar .kind-tool')).toHaveLength(1);
+  });
+
+  it('repairs a silently stalled stream without requiring an error or a new turn', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    vi.useFakeTimers();
+    server.startRun('Inspect source').status = 'running';
+    root = createRoot(container);
+    await act(async () => root.render(<ChatPage />));
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    expect(server.listeners.has('run-1')).toBe(true);
+    server.runs[0].events = [{
+      sequence: 1, event_type: 'tool.started', payload: { tool_name: 'search_web', tool_call_id: 'a' },
+    }];
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+    expect(text(container.querySelector('.composer .live-activity'))).toContain('Search web');
+    expect(text(container.querySelector('.live-activity-elapsed'))).toContain('elapsed');
+  });
+
+  it('keeps tracking when fetching the final snapshot fails once', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await send('Inspect source');
+    const source = server.listeners.get('run-1')!;
+    server.completeRun('run-1', 0);
+    const original = vi.mocked(fetch).getMockImplementation()!;
+    let fail = true;
+    vi.mocked(fetch).mockImplementation((input, init) => {
+      if (fail && String(input).endsWith('/api/runs/run-1')) {
+        fail = false;
+        return Promise.reject(new Error('Temporary connection loss'));
+      }
+      return original(input, init);
+    });
+    await act(async () => source.deliver({ sequence: 999, event_type: 'run.completed', payload: {} }));
+    await flush(2);
+    expect(container.querySelector('.live-activity')).not.toBeNull();
+    await act(async () => source.onerror?.());
+    await flush();
+    expect(container.querySelector('.live-activity')).toBeNull();
+    expect(text(container.querySelector('.message-list'))).toContain('Here is a long synthesis.');
   });
 
   it('shows estimated request budget in the existing context pill and prioritizes compaction', async () => {
@@ -1172,6 +1269,39 @@ describe('chat transcript detail', () => {
     expect(container.querySelector('.compaction-indicator')).toBeNull();
   });
 
+  it('merges persisted delegation with live worker activity without leaking worker text into chat', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    const run = server.startRun('Inspect the method');
+    run.status = 'running';
+    run.events = [
+      { sequence: 1, event_type: 'agent.started', payload: { agent_name: 'Coordinator', invocation_id: 'root' } },
+      { sequence: 2, event_type: 'model.stream', payload: {
+        raw_type: 'response.reasoning_text.delta', delta: 'Delegate the source check', snapshot: true,
+      } },
+      { sequence: 3, event_type: 'tool.started', payload: { tool_name: 'focused_research_worker', tool_call_id: 'delegate' } },
+    ];
+    await mount(ChatPage as () => JSX.Element);
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Show run activity"]')!.click());
+    await act(async () => {
+      const source = server.listeners.get('run-1')!;
+      source.deliver({ sequence: 4, event_type: 'agent.started', payload: {
+        agent_name: 'Worker', invocation_id: 'worker', delegated: true, parent_tool_call_id: 'delegate',
+      } });
+      source.deliver({ sequence: 5, event_type: 'agent.stream', payload: {
+        invocation_id: 'worker', delegated: true, raw_type: 'response.reasoning_text.delta', delta: 'Worker is inspecting the source',
+      } });
+      source.deliver({ sequence: 6, event_type: 'tool.started', payload: {
+        invocation_id: 'worker', delegated: true, tool_name: 'read_source', tool_call_id: 'read',
+      } });
+    });
+    await flush(2);
+    const worker = container.querySelector('.session-trace .timeline-children .kind-agent')!;
+    expect(text(worker)).toContain('Worker');
+    expect(text(worker)).toContain('Using Read source');
+    expect(worker.querySelector('.turn-timeline .kind-tool')).not.toBeNull();
+    expect(text(container.querySelector('.message-list'))).not.toContain('Worker is inspecting the source');
+  });
+
   it('shows live reasoning in the transcript then moves it to activity', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
@@ -1180,7 +1310,7 @@ describe('chat transcript detail', () => {
     const source = server.listeners.get('run-1');
     expect(container.querySelector('.chat-header .chat-working')).toBeNull();
     expect(container.querySelector('.chat-header .status-pill')).toBeNull();
-    expect(container.querySelector('.message-list .live-activity')).not.toBeNull();
+    expect(container.querySelector('.composer .live-activity')).not.toBeNull();
     await act(async () => {
       source?.deliver({
         sequence: 0,
@@ -1260,7 +1390,7 @@ describe('chat transcript detail', () => {
 
     const textarea = container.querySelector<HTMLTextAreaElement>('.composer-box textarea')!;
     expect(textarea.disabled).toBe(false);
-    expect(textarea.getAttribute('aria-label')).toBe('Guide ongoing research');
+    expect(textarea.getAttribute('aria-label')).toBe('Guide ongoing work');
     expect(textarea.placeholder).toContain('change direction');
     expect(document.activeElement).toBe(textarea);
     const setter = Object.getOwnPropertyDescriptor(

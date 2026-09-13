@@ -217,7 +217,7 @@ async def test_context_budget_retries_truncation_without_dispatching_partial_too
 
     assert result.final_output == "Complete answer."
     assert calls == ['{"text":"execute once"}']
-    assert [request["max_tokens"] for request in client.requests] == [2048, 4096, 4096]
+    assert [request["max_tokens"] for request in client.requests] == [2048, 4096, 2048]
     assert client.requests[0]["messages"] == client.requests[1]["messages"]
     assert "Incomplete answer." not in json.dumps(result.generated_items)
     assert result.usage.requests == 3
@@ -477,6 +477,47 @@ async def test_official_client_preserves_final_timing_only_chunk(stub_provider, 
     assert sink.performance()["generation_tokens_per_second"] == 80
 
 
+@pytest.mark.anyio
+@pytest.mark.parametrize("cache,expected", [
+    ({"prompt_tokens_details": {"cached_tokens": 80}}, 80),
+    ({"prompt_tokens_details": {"cached_tokens": 0}}, 0),
+    ({}, None),
+    ({"prompt_tokens_details": "unsupported"}, None),
+    ({"prompt_tokens_details": {"cached_tokens": -1}}, None),
+])
+async def test_cache_reporting_and_live_phases_are_optional(
+    stub_provider, monkeypatch, cache, expected,
+) -> None:
+    original = stub_provider.stream
+
+    def stream(payload):
+        progress = {"choices": [], "prompt_progress": {"total": 100, "processed": 30}}
+        usage = {"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 5, **cache}}
+        return f"data: {json.dumps(progress)}\n\n" + original(payload).replace(
+            "data: [DONE]\n\n", f"data: {json.dumps(usage)}\n\ndata: [DONE]\n\n",
+        )
+
+    monkeypatch.setattr(stub_provider, "stream", stream)
+    downstream = RecordingSink()
+    sink = BufferedRunEventSink(downstream)
+    binding = stub_binding(stub_provider)
+    try:
+        result = await run_agent(
+            AgentDefinition(id="main", name="Main", instructions="Answer.", binding=binding),
+            "Hello", context=make_context(sink), settings=RunSettings(),
+            hooks=ScholarWeaveRunHooks(),
+        )
+    finally:
+        await binding.client.close()
+    assert result.final_output
+    assert sink.performance().get("cached_input_tokens") == expected
+    assert sink.performance().get("cache_reported_calls") == (None if expected is None else 1)
+    phases = [payload["phase"] for kind, payload in downstream.events if kind == "model.phase"]
+    assert phases == ["waiting", "processing", "writing"]
+    assert "cache_prompt" not in stub_provider.requests[-1]
+    assert "return_progress" not in stub_provider.requests[-1]
+
+
 @pytest.mark.parametrize("model", ["qwen-27b", "org/Qwen-27B"])
 def test_local_qwen_alias_infers_switchable_reasoning_only_for_compatible_provider(model) -> None:
     assert infer_reasoning_efforts("openai_compatible", model) == ["none", "high"]
@@ -669,13 +710,63 @@ async def test_tool_errors_become_model_visible_results() -> None:
 
 
 @pytest.mark.anyio
-async def test_serialized_tool_rejects_a_second_call_in_the_same_turn() -> None:
+async def test_terminal_tool_finishes_after_success_without_dispatching_queued_writes():
+    calls: list[str] = []
+    save = echo_tool(calls, name="save")
+    save.ends_agent = True
+    client = FakeClient.scripted([
+        multi_tool_call_chunks([("save", '{"text":"saved"}'), ("save", '{"text":"overwrite"}')]),
+        text_chunks("Must not request a closing response."),
+    ])
+    result = await run_agent(
+        agent(client, tools=[save]), "Save once.", context=make_context(),
+        settings=RunSettings(max_tool_concurrency=4), max_turns=3,
+    )
+    assert result.final_output == "ok"
+    assert len(client.requests) == 1
+    assert calls == ['{"text":"saved"}']
+    assert "Not executed" in result.generated_items[-1]["output"]
+
+
+@pytest.mark.anyio
+async def test_failed_terminal_tool_allows_correction_before_completing():
+    calls = 0
+
+    async def save(_invocation, _arguments):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("The summary is missing evidence.")
+        return {"status": "saved"}
+
+    tool = FunctionTool("save", "Save validated work.", {"type": "object"}, save, ends_agent=True)
+    client = FakeClient.scripted([
+        tool_call_chunks("save", "{}"), tool_call_chunks("save", "{}"),
+        text_chunks("Must not request a closing response."),
+    ])
+    result = await run_agent(
+        agent(client, tools=[tool]), "Save once.", context=make_context(),
+        settings=RunSettings(), max_turns=3,
+    )
+    assert result.final_output == {"status": "saved"}
+    assert calls == 2
+    assert len(client.requests) == 2
+    assert "missing evidence" in client.requests[1]["messages"][-1]["content"]
+
+
+@pytest.mark.anyio
+async def test_serialized_tool_queues_every_call_in_the_same_turn() -> None:
     started = 0
+    active = 0
+    peak = 0
 
     async def invoke(_invocation, _raw_arguments: str) -> str:
-        nonlocal started
+        nonlocal started, active, peak
         started += 1
+        active += 1
+        peak = max(peak, active)
         await asyncio.sleep(0.01)
+        active -= 1
         return "receipt"
 
     tool = FunctionTool(
@@ -722,14 +813,16 @@ async def test_serialized_tool_rejects_a_second_call_in_the_same_turn() -> None:
         for item in result.generated_items
         if item.get("type") == "function_call_output"
     ]
-    assert started == 1
-    assert outputs[0] == "receipt"
-    assert "one call at a time" in outputs[1]
-    assert "not started" in outputs[1]
+    assert started == 2
+    assert peak == 1
+    assert outputs == ["receipt", "receipt"]
 
 
 @pytest.mark.anyio
-async def test_agents_that_disable_parallel_tool_calls_run_tools_sequentially() -> None:
+@pytest.mark.parametrize("restored_deep_work", [False, True])
+async def test_agents_that_disable_parallel_tool_calls_run_tools_sequentially(
+    restored_deep_work,
+) -> None:
     active = 0
     peak = 0
 
@@ -766,14 +859,17 @@ async def test_agents_that_disable_parallel_tool_calls_run_tools_sequentially() 
         {"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
     ]
 
+    context = make_context()
+    if restored_deep_work:
+        context.metadata["autonomous_work"] = True
     await run_agent(
         agent(
             FakeClient.scripted([chunks, text_chunks("Done.")]),
             tools=[tool],
-            model_settings=ModelSettings(parallel_tool_calls=False),
+            model_settings=ModelSettings(parallel_tool_calls=restored_deep_work),
         ),
         "Call the tool three times.",
-        context=make_context(),
+        context=context,
         settings=RunSettings(max_tool_concurrency=4),
         max_turns=4,
     )
@@ -1119,6 +1215,38 @@ def test_structured_output_falls_back_to_json_object_when_tools_are_offered() ->
     assert without_tools["response_format"]["type"] == "json_schema"
 
 
+@pytest.mark.parametrize(
+    ("provider_kind", "token_parameter"),
+    [
+        ("openai", "max_completion_tokens"),
+        ("azure_openai", "max_completion_tokens"),
+        ("azure_foundry", "max_completion_tokens"),
+        ("openai_compatible", "max_tokens"),
+        ("ollama", "max_tokens"),
+    ],
+)
+def test_request_uses_provider_supported_output_token_parameter(
+    provider_kind: str,
+    token_parameter: str,
+) -> None:
+    definition = agent(
+        FakeClient.scripted([[]]),
+        binding=ModelBinding(
+            client=FakeClient.scripted([[]]),
+            model_name="stub-model",
+            provider_kind=provider_kind,
+        ),
+        model_settings=ModelSettings(max_tokens=2_048),
+    )
+
+    parameters = request_parameters(definition, [], [])
+
+    assert parameters[token_parameter] == 2_048
+    assert ({"max_tokens", "max_completion_tokens"} & parameters.keys()) == {
+        token_parameter
+    }
+
+
 # --- Regression: assistant preamble alongside tool calls (finding 2) ------------
 
 
@@ -1228,7 +1356,7 @@ def test_assistant_preamble_keeps_its_reasoning_when_folded() -> None:
     assert messages[0]["reasoning_content"] == "because"
 
 
-# --- Regression: per-tool single-flight rejection (finding 3) -------------------
+# --- Regression: per-tool serialization ---------------------------------------
 
 
 @pytest.mark.anyio
@@ -1282,8 +1410,11 @@ async def test_fatal_tool_errors_propagate_and_cancel_parallel_siblings(failure_
     error = errors[failure_kind]
     sibling_started = asyncio.Event()
     sibling_cancelled = asyncio.Event()
+    started_calls = 0
 
     async def slow(_invocation, _arguments):
+        nonlocal started_calls
+        started_calls += 1
         sibling_started.set()
         try:
             await asyncio.Event().wait()
@@ -1300,7 +1431,7 @@ async def test_fatal_tool_errors_propagate_and_cancel_parallel_siblings(failure_
         else recoverable_tool_invoker("fatal", fatal, catalog_id="research.notes.write")
     )
     client = FakeClient.scripted([
-        multi_tool_call_chunks([("slow", "{}"), ("fatal", "{}")]),
+        multi_tool_call_chunks([("slow", "{}"), ("slow", "{}"), ("fatal", "{}")]),
         text_chunks("Must never be requested."),
     ])
     context = make_context()
@@ -1308,19 +1439,22 @@ async def test_fatal_tool_errors_propagate_and_cancel_parallel_siblings(failure_
         async with asyncio.timeout(2):
             await run_agent(
                 agent(client, tools=[
-                    FunctionTool("slow", "In-flight work.", {"type": "object"}, slow),
+                    FunctionTool(
+                        "slow", "In-flight work.", {"type": "object"}, slow, serialize_calls=True,
+                    ),
                     FunctionTool("fatal", "Fatal control failure.", {"type": "object"}, handler),
                 ]),
                 "Run tools.", context=context, settings=RunSettings(), max_turns=3,
             )
     assert raised.value is error
     assert sibling_cancelled.is_set()
+    assert started_calls == 1
     assert len(client.requests) == 1
     assert not context.metadata.get("_recoverable_tool_failures")
 
 
 @pytest.mark.anyio
-async def test_distinct_serialized_tools_each_run_once_in_the_same_turn() -> None:
+async def test_distinct_serialized_tools_do_not_drop_queued_calls() -> None:
     started: list[str] = []
 
     def single_flight(name: str) -> FunctionTool:
@@ -1370,11 +1504,10 @@ async def test_distinct_serialized_tools_each_run_once_in_the_same_turn() -> Non
         for item in result.generated_items
         if item.get("type") == "function_call_output"
     ]
-    assert sorted(started) == ["summarize_paper", "write_notes"]
+    assert sorted(started) == ["summarize_paper", "summarize_paper", "write_notes"]
     assert outputs[0] == "summarize_paper receipt"
     assert outputs[1] == "write_notes receipt"
-    assert "one call at a time" in outputs[2]
-    assert "not started" in outputs[2]
+    assert outputs[2] == "summarize_paper receipt"
 
 
 # --- Regression: streamed tool-call reconstruction (finding 4) ------------------
@@ -1546,6 +1679,13 @@ async def test_parallel_delegations_do_not_contaminate_parent_snapshots_or_usage
     assert snapshots[-1] == "Delegating now.Coordinator answer."
     assert all("Finding A." not in snapshot for snapshot in snapshots)
     assert all("Finding B." not in snapshot for snapshot in snapshots)
+    worker_snapshots = {
+        payload["delegate_agent_name"]: payload
+        for event_type, payload in downstream.events
+        if event_type == "agent.stream" and payload.get("snapshot")
+    }
+    assert worker_snapshots["Worker A"]["delta"] == "Finding A."
+    assert worker_snapshots["Worker B"]["delta"] == "Finding B."
 
     performance = buffered.performance()
     assert performance["model_calls"] == 5
@@ -1595,6 +1735,10 @@ async def test_parallel_delegations_do_not_contaminate_parent_snapshots_or_usage
     assert started["Agent"]["assignment"] == "Delegate both tracks."
     assert started["Worker A"]["assignment"] == "A"
     assert started["Worker B"]["assignment"] == "B"
+    for name in ("Worker A", "Worker B"):
+        assert worker_snapshots[name]["invocation_id"] == started[name]["invocation_id"]
+        assert worker_snapshots[name]["parent_invocation_id"] == started["Agent"]["invocation_id"]
+        assert worker_snapshots[name]["parent_tool_call_id"]
     for event_type, payload in downstream.events:
         if event_type in {"model.started", "model.completed", "model.telemetry", "tool.started"}:
             assert payload["invocation_id"] == started[payload["agent_name"]]["invocation_id"]
@@ -1703,14 +1847,22 @@ async def test_nested_delegation_preserves_immediate_owner_and_depth() -> None:
     sink = RecordingSink()
     first = delegated_context(
         make_context(sink), parent_agent_name="Owner", delegate_agent_name="Worker", depth=1,
+        parent_tool_call_id="outer-call",
     )
+    first.agent_invocation = ("Worker", "worker")
     nested = delegated_context(
         first, parent_agent_name="Worker", delegate_agent_name="Helper", depth=2,
+        parent_tool_call_id="inner-call",
     )
     await nested.emit("agent.started", {"agent_name": "Helper", "invocation_id": "helper"})
     assert sink.events[-1][1]["parent_agent_name"] == "Worker"
     assert sink.events[-1][1]["delegate_agent_name"] == "Helper"
     assert sink.events[-1][1]["delegation_depth"] == 2
+    await nested.emit("model.stream", {"raw_type": "response.reasoning_text.delta", "delta": "Checking"})
+    assert sink.events[-1][0] == "agent.stream"
+    assert sink.events[-1][1]["parent_invocation_id"] == "worker"
+    assert sink.events[-1][1]["parent_tool_call_id"] == "inner-call"
+    assert sink.events[-1][1]["invocation_id"] == "helper"
 
 
 @pytest.mark.anyio

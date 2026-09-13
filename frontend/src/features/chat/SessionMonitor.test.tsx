@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { SessionOverview, SessionStatusStrip } from './SessionMonitor';
+import { SessionOverview } from './SessionMonitor';
 import { buildSessionObservability } from './sessionObservability';
 import type { Run } from './api';
 
@@ -24,17 +24,32 @@ describe('Session observability views', () => {
   });
 
   it('reports totals and speeds without offering its own way to open the panel', () => {
-    act(() => root.render(<SessionStatusStrip summary={buildSessionObservability([])} />));
-    expect(container.textContent).toContain('Session tokens');
-    expect(container.textContent).not.toContain('Input');
-    expect(container.textContent).not.toContain('Output');
-    expect(container.textContent).toContain('Prefill');
-    expect(container.textContent).toContain('Generation');
+    act(() => root.render(<SessionOverview summary={buildSessionObservability([])} />));
+    expect(container.querySelector('summary')?.textContent).toBe('Usage · 0 tokens · 0 calls');
+    expect(container.querySelector('details')?.open).toBe(false);
+    expect(container.querySelector('[aria-label="Work plan"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Prompt cache"]')).toBeNull();
+    expect(container.textContent).toContain('Input tokens');
+    expect(container.textContent).toContain('Output tokens');
+    expect(container.textContent).toContain('Average prefill');
+    expect(container.textContent).toContain('Average generation');
     // Observe in the chat header is the only control that opens observability.
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('keeps active workers and blocked task progress visible as plain read-outs', () => {
+  it('shows reported cache reuse without treating missing reports as zero hits', () => {
+    const summary = buildSessionObservability([]);
+    summary.performance.modelCalls = 3;
+    summary.performance.cache = { tokens: 1024, reportedCalls: 2 };
+    act(() => root.render(<SessionOverview summary={summary} />));
+    expect(container.querySelector('[aria-label="Prompt cache"]')?.textContent)
+      .toBe('Prompt cache: 1,024 input tokens reused · 2/3 calls reported.');
+    summary.performance.cache = { tokens: 0, reportedCalls: 1 };
+    act(() => root.render(<SessionOverview summary={{ ...summary }} />));
+    expect(container.querySelector('[aria-label="Prompt cache"]')?.textContent).toContain('0 input tokens reused');
+  });
+
+  it('collapses task detail and does not duplicate workers from the trace', () => {
     const summary = buildSessionObservability([]);
     summary.activeWorkers = 2;
     summary.activeRuns = 1;
@@ -43,11 +58,12 @@ describe('Session observability views', () => {
       { id: 'b', runId: 'r', title: 'Retrieve PDF', status: 'blocked', notes: 'Source unavailable' },
     ];
     summary.workPlanCounts = { completed: 1, blocked: 1, pending: 0, in_progress: 0 };
-    act(() => root.render(<SessionStatusStrip summary={summary} />));
-    expect(container.textContent).toContain('2 workers active');
-    expect(container.textContent).toContain('1/2 tasks');
+    act(() => root.render(<SessionOverview summary={summary} />));
+    expect(container.textContent).not.toContain('active workers');
+    expect(container.textContent).toContain('1/2 completed');
     expect(container.textContent).toContain('1 blocked');
     expect(container.querySelector('button')).toBeNull();
+    expect(container.querySelector<HTMLDetailsElement>('[aria-label="Work plan"]')?.open).toBe(false);
   });
 
   it('labels incomplete and estimated usage and explains server-only coverage', () => {
@@ -55,16 +71,16 @@ describe('Session observability views', () => {
     summary.totals = { inputTokens: 30, outputTokens: null, totalTokens: null, complete: false, estimated: true };
     summary.performance.prefill = { tokens: 30, seconds: 3, tokensPerSecond: 10, timedCalls: 1, complete: false };
     summary.performance.modelCalls = 2;
-    act(() => root.render(<><SessionStatusStrip summary={summary} /><SessionOverview summary={summary} /></>));
+    act(() => root.render(<SessionOverview summary={summary} />));
     expect(container.textContent).toContain('Estimated, incomplete usage');
-    expect(container.textContent).toContain('Partial server timing · 1/2 calls');
-    expect(container.textContent).toContain('Server timing unavailable');
-    expect(container.textContent).toContain('30 tokens / 3s active time');
+    expect(container.textContent).toContain('server active time where available');
+    expect(container.textContent).toContain('tokens unavailable');
+    expect(container.textContent).toContain('10 tok/s');
     expect(container.textContent).not.toContain('NaN');
     expect(container.textContent).not.toContain('Infinity');
   });
 
-  it('shows live worker assignment and elapsed time separately from task completion', () => {
+  it('leaves worker assignments and live progress to the hierarchical trace', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-09-06T12:00:05Z'));
     const summary = buildSessionObservability([]);
@@ -76,13 +92,10 @@ describe('Session observability views', () => {
     }];
     summary.activeWorkers = 1;
     act(() => root.render(<SessionOverview summary={summary} />));
-    expect(container.textContent).toContain('Read the experimental setup');
-    expect(container.textContent).toContain('Assigned request (truncated)');
-    expect(container.textContent).toContain('Tool: read_page · local-model');
-    expect(container.textContent).toContain('5s elapsed · 2 tools completed');
+    expect(container.textContent).not.toContain('Read the experimental setup');
+    expect(container.textContent).not.toContain('Assigned request');
     act(() => vi.advanceTimersByTime(2000));
-    expect(container.textContent).toContain('7s elapsed');
-    expect(container.textContent).toContain('0 worker tasks completed');
+    expect(container.textContent).not.toContain('elapsed');
     expect(container.querySelector('[role="progressbar"]')).toBeNull();
     expect(container.textContent).not.toContain('%');
   });
@@ -93,14 +106,14 @@ describe('Session observability views', () => {
     const summary = buildSessionObservability([]);
     summary.totals = { inputTokens: 100, outputTokens: 20, totalTokens: 120, complete: true, estimated: false };
     summary.performance.prefill = { tokens: 100, seconds: 10, tokensPerSecond: 10, timedCalls: 1, complete: true };
-    act(() => root.render(<SessionStatusStrip summary={summary} />));
+    act(() => root.render(<SessionOverview summary={summary} />));
     expect(container.textContent).toContain('10 tok/s');
     act(() => vi.advanceTimersByTime(1000));
     const updated = {
       ...summary, totals: { ...summary.totals, inputTokens: 200, totalTokens: 220 },
       performance: { ...summary.performance, prefill: { ...summary.performance.prefill, tokensPerSecond: 20 } },
     };
-    act(() => root.render(<SessionStatusStrip summary={updated} />));
+    act(() => root.render(<SessionOverview summary={updated} />));
     expect(container.textContent).toContain('220');
     expect(container.textContent).toContain('10 tok/s');
     expect(container.textContent).not.toContain('20 tok/s');
@@ -119,8 +132,8 @@ describe('Session observability views', () => {
       goal_state: { items: [{ id: 'a', title: 'Read source', status: 'blocked', summary: '<script>bad()</script> unavailable' }] },
     };
     act(() => root.render(<SessionOverview summary={buildSessionObservability([record])} />));
-    expect(container.querySelector('details.session-run-row > summary')?.textContent).toContain('1 errors');
-    expect(container.querySelector('[aria-label="Run errors"]')?.textContent).toBe('Provider failed');
+    expect(container.querySelector('details.session-observability-error > summary')?.textContent).toBe('Errors · 1');
+    expect(container.querySelector('[aria-label="Run errors"]')?.textContent).toContain('Provider failed');
     expect(container.textContent).toContain('Read source');
     expect(container.textContent).toContain('<script>bad()</script> unavailable');
     expect(container.querySelector('script')).toBeNull();

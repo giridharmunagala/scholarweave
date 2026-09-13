@@ -13,7 +13,7 @@ from typing import Any
 
 from stop_words import get_stop_words
 
-from backend.core.errors import NotFoundError
+from backend.core.errors import NotFoundError, ValidationError
 from backend.core.config import Settings
 from backend.conversations.service import ConversationService
 from backend.documents import DocumentService
@@ -191,24 +191,25 @@ def create_work_plan(
     arguments: dict[str, Any],
     context: ScholarWeaveContext,
 ) -> dict[str, Any]:
-    """Create the run's immutable set of work-item identities and initial states."""
-    if context.metadata.get(PLAN_KEY):
-        raise ValueError("This run already has a work plan.")
+    """Create stable identities, or reconcile an exact replay without resetting progress."""
     raw_items = arguments.get("items")
     if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 10:
-        raise ValueError("A work plan must contain between 1 and 10 items.")
+        raise ToolInputError("A work plan must contain between 1 and 10 items.")
 
     items: list[dict[str, str]] = []
     seen: set[str] = set()
     for raw_item in raw_items:
         if not isinstance(raw_item, dict):
-            raise ValueError("Each work item must be an object.")
-        item_id = str(raw_item.get("id") or "").strip()
-        title = str(raw_item.get("title") or "").strip()
-        if not item_id or not title:
-            raise ValueError("Each work item requires a non-empty id and title.")
+            raise ToolInputError("Each work item must be an object.")
+        item_id = raw_item.get("id")
+        title = raw_item.get("title")
+        if not isinstance(item_id, str) or not isinstance(title, str):
+            raise ToolInputError("Each work item requires a string id and title.")
+        item_id, title = item_id.strip(), title.strip()
+        if not 1 <= len(item_id) <= 80 or not 1 <= len(title) <= 300:
+            raise ToolInputError("Each work item requires an id of 1-80 and title of 1-300 characters.")
         if item_id in seen:
-            raise ValueError(f"Duplicate work item id '{item_id}'.")
+            raise ToolInputError(f"Duplicate work item id '{item_id}'.")
         seen.add(item_id)
         items.append(
             {
@@ -218,6 +219,17 @@ def create_work_plan(
                 "summary": "",
             }
         )
+    if context.metadata.get(PLAN_KEY):
+        existing = _work_items(context)
+        if {item["id"]: item["title"] for item in existing} != {
+            item["id"]: item["title"] for item in items
+        }:
+            raise ToolInputError(
+                "This run already has a different work plan; it was not replaced. "
+                "Use read_work_plan and update_work_item with its existing IDs: "
+                + ", ".join(item["id"] for item in existing)
+            )
+        return work_plan(context)
     context.metadata[PLAN_KEY] = items
     return work_plan(context)
 
@@ -228,16 +240,23 @@ def update_work_item(
 ) -> dict[str, Any]:
     """Update one work item's state while enforcing terminal-state summaries."""
     items = _work_items(context)
-    item_id = str(arguments.get("id") or "").strip()
-    status = str(arguments.get("status") or "").strip()
-    summary = str(arguments.get("summary") or "").strip()
-    if status not in {"in_progress", "completed", "blocked"}:
-        raise ValueError("Work item status must be in_progress, completed, or blocked.")
+    if any(not isinstance(arguments.get(key), str) for key in ("id", "status", "summary")):
+        raise ToolInputError("Work item id, status, and summary must be strings.")
+    item_id = arguments["id"].strip()
+    status = arguments["status"].strip()
+    summary = arguments["summary"].strip()
+    if not 1 <= len(item_id) <= 80 or len(summary) > 4000:
+        raise ToolInputError("Work item id must contain 1-80 characters and summary at most 4000.")
+    if status not in {"pending", "in_progress", "completed", "blocked"}:
+        raise ToolInputError("Work item status must be pending, in_progress, completed, or blocked.")
     item = next((candidate for candidate in items if candidate["id"] == item_id), None)
     if item is None:
-        raise ValueError(f"Unknown work item '{item_id}'.")
+        raise ToolInputError(
+            f"Unknown work item '{item_id}'; no item was changed. "
+            "Use read_work_plan for the exact IDs: " + ", ".join(item["id"] for item in items)
+        )
     if status in {"completed", "blocked"} and not summary:
-        raise ValueError("Completed or blocked work items require a summary.")
+        raise ToolInputError("Completed or blocked work items require a summary.")
     item["status"] = status
     item["summary"] = summary
     return work_plan(context)
@@ -261,7 +280,7 @@ def work_plan(context: ScholarWeaveContext) -> dict[str, Any]:
 def _work_items(context: ScholarWeaveContext) -> list[dict[str, str]]:
     items = context.metadata.get(PLAN_KEY)
     if not isinstance(items, list) or not items:
-        raise ValueError("Create a work plan before reading or updating it.")
+        raise ToolInputError("Create a work plan before reading or updating it.")
     return items
 
 
@@ -581,6 +600,54 @@ class ApplicationToolRuntime:
         document = self._documents.get_document(document_id)
         if document is None:
             raise ValueError("Paper was not found.")
+        paper = self._workspace.ensure_paper_folder(document.id, document.title)
+        version_id = context.run_id
+        path = f"{paper['folder']}/summaries/{version_id}.md"
+        metadata_path = f"{paper['folder']}/summaries/{version_id}.json"
+        partial_notice = (
+            "> Partial summary: full source coverage was not completed. "
+            "Unread material may change these conclusions.\n\n"
+        )
+        try:
+            previous = self._workspace.read_file(path)
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            if previous.content not in {content + "\n", partial_notice + content + "\n"}:
+                raise ToolInputError(
+                    "This run already saved a different immutable summary version. "
+                    f"The saved version is {path}; finish with that receipt instead of rewriting it."
+                )
+            try:
+                existing_metadata = self._workspace.read_file(metadata_path).content
+            except FileNotFoundError:
+                existing_metadata = None
+            if isinstance(existing_metadata, dict):
+                if (
+                    existing_metadata.get("id") != version_id
+                    or existing_metadata.get("run_id") != context.run_id
+                    or existing_metadata.get("document_id") != document_id
+                    or existing_metadata.get("path") != path
+                    or existing_metadata.get("mode") != mode
+                    or existing_metadata.get("content_hash")
+                    != hashlib.sha256(previous.content.encode()).hexdigest()
+                ):
+                    raise ToolInputError("The immutable summary receipt does not match its saved content.")
+                if existing_metadata.get("source_version") != self._documents.source_revision(document_id)["source_version"]:
+                    raise ToolInputError("Paper extraction changed; start a new summary job for the new source.")
+                canonical = self._workspace.read_file(str(paper["summary_path"]))
+                if existing_metadata.get("canonical_updated") and canonical.content == previous.content:
+                    self._workspace.write_file(
+                        f"{paper['folder']}/summary.provenance.json", existing_metadata,
+                        tags=["paper", f"paper:{document_id}", "summary-provenance"],
+                    )
+                self._record_paper_activity(
+                    context, document, "summary_saved",
+                    path=existing_metadata.get("canonical_path"), version_path=path,
+                    coverage_complete=existing_metadata.get("coverage_complete", False),
+                    review_complete=existing_metadata.get("review_complete", False),
+                )
+                return existing_metadata
         self._require_paper_read(context, document_id)
         state = self._paper_summary_state(context, document_id)
         if state.get("pending_checkpoint"):
@@ -589,35 +656,11 @@ class ApplicationToolRuntime:
         complete = bool(evidence.get("complete"))
         reviewed = complete and mode == "reviewed"
         if not complete:
-            content = (
-                "> Partial summary: full source coverage was not completed. "
-                "Unread material may change these conclusions.\n\n" + content
-            )
-        paper = self._workspace.ensure_paper_folder(document.id, document.title)
+            content = partial_notice + content
         revision = self._prompts.revision if self._prompts is not None else None
         created_at = datetime.now(timezone.utc).isoformat()
-        version_id = context.run_id
-        path = f"{paper['folder']}/summaries/{version_id}.md"
-        metadata_path = f"{paper['folder']}/summaries/{version_id}.json"
-        try:
-            previous = self._workspace.read_file(path)
-        except FileNotFoundError:
-            previous = None
-        if previous is not None:
-            if previous.content != content + "\n":
-                raise ValueError("This run already saved a different immutable summary version.")
-            try:
-                existing_metadata = self._workspace.read_file(metadata_path).content
-            except FileNotFoundError:
-                existing_metadata = None
-            if isinstance(existing_metadata, dict):
-                self._record_paper_activity(
-                    context, document, "summary_saved",
-                    path=existing_metadata.get("canonical_path"), version_path=path,
-                    coverage_complete=existing_metadata.get("coverage_complete", False),
-                    review_complete=existing_metadata.get("review_complete", existing_metadata.get("coverage_complete", False)),
-                )
-                return existing_metadata
+        if previous is not None and previous.content != content + "\n":
+            raise ValueError("The interrupted summary version no longer matches its evidence coverage.")
         metadata = {
             "id": version_id,
             "document_id": document_id,
@@ -650,9 +693,11 @@ class ApplicationToolRuntime:
         )
         canonical = self._workspace.read_file(str(paper["summary_path"]))
         original_hash = context.metadata.get("paper_summary_canonical_hash")
-        canonical_updated = mode != "overview" and (original_hash is None or (
-            hashlib.sha256(str(canonical.content).encode()).hexdigest() == original_hash
-        ))
+        canonical_updated = mode != "overview" and (
+            original_hash is None
+            or hashlib.sha256(str(canonical.content).encode()).hexdigest() == original_hash
+            or (previous is not None and canonical.content == previous.content)
+        )
         if canonical_updated:
             canonical = self._workspace.write_file(
                 str(paper["summary_path"]), content + "\n",
@@ -2437,6 +2482,19 @@ class ApplicationToolRuntime:
         if action == "refresh":
             return self._workspace.refresh_index()
         raise ValueError("Workspace index action must be status or refresh.")
+
+    def _organize_workspace(
+        self, arguments: dict[str, Any], _context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        try:
+            return self._workspace.organize_file(
+                action=arguments["action"],
+                path=arguments["path"],
+                destination=arguments.get("destination"),
+                tags=arguments.get("tags"),
+            )
+        except ValidationError as error:
+            raise ToolInputError(str(error)) from error
 
     @staticmethod
     def _workspace_discovery_result(document: WorkspaceDocument) -> dict[str, Any]:

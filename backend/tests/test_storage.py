@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from backend.core.errors import ValidationError
 from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.service import WorkspaceService
 
@@ -125,6 +126,84 @@ def test_workspace_service_refuses_to_delete_papers_root(test_settings) -> None:
             workspace.delete_folder(path)
 
     assert len(workspace.list_files()) == 2
+
+
+def test_workspace_organization_preserves_note_identity_and_search_on_move(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Move me", content="movingneedle", tags=["keep"])
+
+    workspace.organize_file(
+        action="move_file", path=note.path, destination="projects/topic/moved.md",
+    )
+
+    assert not storage.resolve_path(test_settings.workspace_dir, note.path).exists()
+    restarted = WorkspaceService(storage)
+    restarted.refresh_index()
+    moved = restarted.search(query="movingneedle")[0]
+    assert moved.path == "projects/topic/moved.md"
+    assert moved.note_id == note.note_id
+    assert moved.note_name == note.note_name
+    assert moved.kind == "note"
+    assert moved.tags == ("note", "keep")
+
+
+@pytest.mark.parametrize("path", [
+    "../escape.md", "/absolute.md", "C:\\outside.md", ".", "knowledge",
+    ".scholarweave/config.json", "library/papers/managed--paper-1/notes.md",
+    "inbox/attachments/upload/source.md", "knowledge/*.md",
+    "knowledge/unindexed.md", "library/../.scholarweave/config.json",
+], ids=[
+    "escape", "absolute", "windows-drive", "root", "folder", "metadata", "paper",
+    "attachment", "wildcard", "unindexed", "metadata-alias",
+])
+def test_workspace_organization_rejects_unsafe_or_unmanaged_targets(test_settings, path) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Keep", content="safe")
+    storage.write_workspace_file(".scholarweave/config.json", {"keep": True})
+    storage.write_workspace_file("knowledge/unindexed.md", "not discovered")
+    workspace.ensure_paper_folder("paper-1", "Managed")
+    workspace.write_file("inbox/attachments/upload/source.md", "attachment")
+
+    with pytest.raises((ValidationError, ValueError, FileNotFoundError)):
+        workspace.organize_file(action="delete_file", path=path)
+    assert workspace.read_file(note.path).content == note.content
+    assert storage.read_workspace_file(".scholarweave/config.json")[1] == {"keep": True}
+    assert len(workspace.list_collection("summaries")) == 1
+
+
+def test_workspace_organization_refuses_overwrite_and_rolls_back_failed_move(test_settings, monkeypatch) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Source", content="original")
+    workspace.write_file("projects/occupied.md", "keep")
+    with pytest.raises(ValidationError, match="exists"):
+        workspace.organize_file(action="move_file", path=note.path, destination="projects/occupied.md")
+    assert workspace.read_file("projects/occupied.md").content == "keep"
+
+    def fail_index(*args, **kwargs):
+        raise RuntimeError("Index unavailable")
+
+    monkeypatch.setattr(workspace._repository, "upsert", fail_index)
+    with pytest.raises(RuntimeError, match="Index unavailable"):
+        workspace.organize_file(action="move_file", path=note.path, destination="projects/moved.md")
+    assert workspace.read_file(note.path).content == note.content
+    assert not storage.resolve_path(test_settings.workspace_dir, "projects/moved.md").exists()
+    assert workspace.search(query="original")[0].path == note.path
+
+
+@pytest.mark.parametrize("destination", [
+    "../escaped.md", ".scholarweave/moved.md", "library/papers/managed--paper-1/notes.md",
+    "inbox/attachments/upload/moved.md", "projects/moved.json", "projects/../moved.md",
+], ids=["escape", "metadata", "paper", "attachment", "extension", "traversal"])
+def test_workspace_organization_rejects_invalid_move_destinations(test_settings, destination) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    note = workspace.create_note(name="Keep", content="original")
+    with pytest.raises(ValidationError):
+        workspace.organize_file(action="move_file", path=note.path, destination=destination)
+    assert workspace.read_file(note.path).content == note.content
+    assert workspace.search(query="original")[0].path == note.path
 
 
 def test_workspace_paper_folder_is_canonical_and_non_destructive(test_settings) -> None:

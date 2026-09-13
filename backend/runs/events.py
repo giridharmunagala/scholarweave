@@ -292,6 +292,8 @@ class ModelTelemetry:
         self._generation_seconds = 0.0
         self._prompt_timed_calls = 0
         self._generation_timed_calls = 0
+        self._cached_input_tokens = 0
+        self._cache_reported_calls = 0
 
     def performance(self) -> dict[str, Any]:
         prompt_rate = (
@@ -305,6 +307,10 @@ class ModelTelemetry:
             else None
         )
         return {
+            **({
+                "cached_input_tokens": self._cached_input_tokens,
+                "cache_reported_calls": self._cache_reported_calls,
+            } if self._cache_reported_calls else {}),
             "model_calls": self._model_calls,
             "main_model_calls": self._main_model_calls,
             "input_tokens": self._input_tokens,
@@ -352,6 +358,11 @@ class ModelTelemetry:
             self._main_model_calls += 1
         timings = payload.get("timings")
         timings = timings if isinstance(timings, dict) else {}
+        cached = payload.get("cached_input_tokens", timings.get("cache_n"))
+        if type(cached) in (int, float) and math.isfinite(cached) and cached >= 0 and int(cached) == cached:
+            if payload.get("usage_complete") is not True or cached <= input_tokens:
+                self._cached_input_tokens += int(cached)
+                self._cache_reported_calls += 1
         prompt = _server_phase(timings, "prompt_n", "prompt_ms")
         generation = _server_phase(timings, "predicted_n", "predicted_ms")
         if prompt is not None:
@@ -376,6 +387,8 @@ class BufferedRunEventSink:
         clock: Callable[[], float] = time.monotonic,
         initial_reasoning: str = "",
         initial_assistant: str = "",
+        stream_event_type: str = "model.stream",
+        stream_metadata: dict[str, Any] | None = None,
     ) -> None:
         self._downstream = downstream
         self._max_delta_chars = max_delta_chars
@@ -391,6 +404,9 @@ class BufferedRunEventSink:
         self._assistant_parts: list[str] = [initial_assistant] if initial_assistant else []
         self._snapshot_dirty = False
         self._telemetry = ModelTelemetry()
+        self._stream_event_type = stream_event_type
+        self._stream_metadata = stream_metadata or {}
+        self._delegated_streams: dict[str, BufferedRunEventSink] = {}
 
     def current_lease(self) -> RunLease | None:
         current_lease = getattr(self._downstream, "current_lease", None)
@@ -402,6 +418,8 @@ class BufferedRunEventSink:
 
     async def flush(self) -> None:
         async with self._lock:
+            for stream in self._delegated_streams.values():
+                await stream.flush()
             await self._flush_live()
             await self._emit_snapshot()
 
@@ -413,6 +431,25 @@ class BufferedRunEventSink:
         delta = payload.get("delta")
         usage_updated = False
         delegated = payload.get("delegated") is True
+        invocation_id = str(payload.get("invocation_id") or payload.get("delegate_agent_name") or "")
+        if event_type == "agent.stream":
+            if invocation_id not in self._delegated_streams:
+                self._delegated_streams[invocation_id] = BufferedRunEventSink(
+                    self._downstream,
+                    max_delta_chars=self._max_delta_chars,
+                    max_delay_seconds=self._max_delay_seconds,
+                    clock=self._clock,
+                    stream_event_type="agent.stream",
+                    stream_metadata={
+                        key: value for key, value in payload.items()
+                        if key not in {"raw_type", "delta", "snapshot"}
+                    },
+                )
+            await self._delegated_streams[invocation_id].emit("model.stream", payload)
+            return
+        if event_type == "model.retry" and invocation_id in self._delegated_streams:
+            await self._delegated_streams[invocation_id].emit(event_type, payload)
+            return
         is_delta = (
             event_type == "model.stream"
             and raw_type.endswith(".delta")
@@ -427,7 +464,9 @@ class BufferedRunEventSink:
                 await self._flush_live()
                 await self._emit_snapshot()
                 self._seen_delta_types.clear()
-                await self._downstream.emit_transient(event_type, payload)
+                await self._downstream.emit_transient(
+                    self._stream_event_type, {**self._stream_metadata, **payload},
+                )
                 return
             if is_delta:
                 self._append_snapshot_delta(raw_type, delta)
@@ -436,13 +475,19 @@ class BufferedRunEventSink:
             await self._flush_live()
             if raw_type == "response.completed":
                 await self._emit_snapshot()
-            await self._downstream.emit_transient(event_type, payload)
+            await self._downstream.emit_transient(
+                self._stream_event_type, {**self._stream_metadata, **payload},
+            )
             return
 
+        for stream in self._delegated_streams.values():
+            await stream.flush()
+        if event_type in {"agent.completed", "agent.failed", "agent.superseded"}:
+            self._delegated_streams.pop(invocation_id, None)
         await self._flush_live()
         await self._emit_snapshot()
         await self._downstream.emit(event_type, payload)
-        if event_type == "model.retry" and not delegated:
+        if event_type == "model.retry" and (not delegated or self._stream_event_type == "agent.stream"):
             discarded = payload.get("discarded_text_characters")
             if isinstance(discarded, int) and discarded > 0:
                 self._assistant_parts = ["".join(self._assistant_parts)[:-discarded]]
@@ -459,8 +504,8 @@ class BufferedRunEventSink:
             await self._flush_live()
             self._seen_delta_types.add(raw_type)
             await self._downstream.emit_transient(
-                "model.stream",
-                {"raw_type": raw_type, "delta": delta},
+                self._stream_event_type,
+                {**self._stream_metadata, "raw_type": raw_type, "delta": delta},
             )
             return
 
@@ -487,8 +532,8 @@ class BufferedRunEventSink:
         self._pending_chars = 0
         self._pending_since = 0.0
         await self._downstream.emit_transient(
-            "model.stream",
-            {"raw_type": raw_type, "delta": delta},
+            self._stream_event_type,
+            {**self._stream_metadata, "raw_type": raw_type, "delta": delta},
         )
 
     def _append_snapshot_delta(self, raw_type: str, delta: str) -> None:
@@ -509,8 +554,9 @@ class BufferedRunEventSink:
         if self._reasoning_parts:
             events.append(
                 (
-                    "model.stream",
+                    self._stream_event_type,
                     {
+                        **self._stream_metadata,
                         "raw_type": "response.reasoning_summary_text.delta",
                         "delta": "".join(self._reasoning_parts),
                         "snapshot": True,
@@ -520,8 +566,9 @@ class BufferedRunEventSink:
         if self._assistant_parts:
             events.append(
                 (
-                    "model.stream",
+                    self._stream_event_type,
                     {
+                        **self._stream_metadata,
                         "raw_type": "response.output_text.delta",
                         "delta": "".join(self._assistant_parts),
                         "snapshot": True,

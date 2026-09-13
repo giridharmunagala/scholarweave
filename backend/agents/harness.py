@@ -89,6 +89,8 @@ class ToolInvocation:
 
 ToolHandler = Callable[[ToolInvocation, str], Awaitable[Any]]
 
+_MAX_COMPLETION_TOKEN_KINDS = {"openai", "azure_openai", "azure_foundry"}
+
 
 @dataclass(slots=True)
 class FunctionTool:
@@ -100,6 +102,7 @@ class FunctionTool:
     is_enabled: Callable[[ScholarWeaveContext], bool] | None = None
     serialize_calls: bool = False
     is_delegation: bool = False
+    ends_agent: bool = False
 
     def enabled_for(self, context: ScholarWeaveContext) -> bool:
         return self.is_enabled is None or bool(self.is_enabled(context))
@@ -624,6 +627,14 @@ def usage_from_payload(payload: Any) -> Usage:
     )
 
 
+def cached_tokens_from_usage(payload: Any) -> int | None:
+    if not isinstance(payload, dict):
+        return None
+    details = payload.get("prompt_tokens_details") or payload.get("input_tokens_details")
+    value = details.get("cached_tokens") if isinstance(details, dict) else None
+    return value if type(value) is int and value >= 0 else None
+
+
 def request_parameters(
     agent: AgentDefinition,
     messages: list[dict[str, Any]],
@@ -648,7 +659,12 @@ def request_parameters(
     if settings.presence_penalty is not None:
         parameters["presence_penalty"] = settings.presence_penalty
     if settings.max_tokens is not None:
-        parameters["max_tokens"] = settings.max_tokens
+        token_parameter = (
+            "max_completion_tokens"
+            if agent.binding.provider_kind in _MAX_COMPLETION_TOKEN_KINDS
+            else "max_tokens"
+        )
+        parameters[token_parameter] = settings.max_tokens
     if settings.reasoning_effort is not None:
         parameters["reasoning_effort"] = settings.reasoning_effort
     if settings.verbosity is not None:
@@ -704,25 +720,45 @@ async def stream_model_turn(
     context: ScholarWeaveContext,
 ) -> ModelTurn:
     """Stream one Chat Completions response, emitting normalized model events."""
+    from backend.providers.inference import inference_progress
+
     parameters = request_parameters(agent, messages, tools)
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     calls = ToolCallAccumulator()
     usage = Usage(requests=1)
     usage_complete = False
+    cached_tokens: int | None = None
     timings: dict[str, float] = {}
     model_call_id = str(uuid.uuid4())
+    phase: str | None = None
+
+    async def progress(next_phase: str) -> None:
+        nonlocal phase
+        if next_phase == phase:
+            return
+        phase = next_phase
+        await context.emit("model.phase", {
+            "phase": phase, "model_call_id": model_call_id, "agent_name": agent.name,
+            "invocation_id": context.agent_invocation[1] if context.agent_invocation else None,
+        })
+
     finish_reason: str | None = None
     await context.emit("model.stream", {"raw_type": "response.created"})
     stream = None
     completed = False
     try:
-        stream = await agent.binding.client.chat.completions.create(**parameters)
+        await progress("waiting")
+        with inference_progress(progress):
+            stream = await agent.binding.client.chat.completions.create(**parameters)
         async for chunk in stream:
             raw = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)
             if raw.get("usage"):
                 usage = usage_from_payload(raw["usage"])
                 raw_usage = raw["usage"]
+                reported_cache = cached_tokens_from_usage(raw_usage)
+                if reported_cache is not None:
+                    cached_tokens = reported_cache
                 usage_complete = isinstance(raw_usage, dict) and all(
                     type(value) is int and value >= 0
                     for value in (
@@ -734,7 +770,7 @@ async def stream_model_turn(
             if isinstance(raw_timings, dict):
                 # llama.cpp sends cumulative server measurements, sometimes only on
                 # a final chunk with no choices. Replace, never sum, chunk values.
-                for key in ("prompt_n", "prompt_ms", "predicted_n", "predicted_ms"):
+                for key in ("prompt_n", "prompt_ms", "predicted_n", "predicted_ms", "cache_n"):
                     value = raw_timings.get(key)
                     if (
                         isinstance(value, (int, float))
@@ -745,11 +781,19 @@ async def stream_model_turn(
                         timings[key] = value
                     elif key in raw_timings:
                         timings.pop(key, None)
+            prompt_progress = raw.get("prompt_progress")
+            if isinstance(prompt_progress, dict) and all(
+                type(prompt_progress.get(key)) in (int, float)
+                and math.isfinite(prompt_progress[key]) and prompt_progress[key] >= 0
+                for key in ("total", "processed")
+            ):
+                await progress("processing")
             for choice in raw.get("choices") or []:
                 finish_reason = choice.get("finish_reason") or finish_reason
                 delta = choice.get("delta") or {}
                 reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                 if isinstance(reasoning, str) and reasoning:
+                    await progress("thinking")
                     reasoning_parts.append(reasoning)
                     await context.emit(
                         "model.stream",
@@ -760,12 +804,14 @@ async def stream_model_turn(
                     )
                 content = delta.get("content")
                 if isinstance(content, str) and content:
+                    await progress("writing")
                     text_parts.append(content)
                     await context.emit(
                         "model.stream",
                         {"raw_type": "response.output_text.delta", "delta": content},
                     )
                 for raw_call in delta.get("tool_calls") or []:
+                    await progress("tool")
                     calls.add(raw_call)
                     arguments = (raw_call.get("function") or {}).get("arguments")
                     if isinstance(arguments, str) and arguments:
@@ -793,6 +839,7 @@ async def stream_model_turn(
                 "context_scope": "compaction" if agent.id.endswith(":compaction") else "main",
                 "usage": usage.to_dict(),
                 "usage_complete": usage_complete,
+                **({"cached_input_tokens": cached_tokens} if cached_tokens is not None else {}),
                 "timings": timings,
                 "completed": completed,
                 "finish_reason": finish_reason,
@@ -828,6 +875,11 @@ class AgentRunner:
         context_policy: ContextPolicy | None = None,
         depth: int = 0,
     ) -> None:
+        if context.metadata.get("autonomous_work") is True:
+            # Recovered Deep Work blueprints may still advertise parallel calls.
+            agent = replace(
+                agent, model_settings=replace(agent.model_settings, parallel_tool_calls=False),
+            )
         self._agent = agent
         self._context = context
         self._settings = settings
@@ -836,7 +888,7 @@ class AgentRunner:
         self._depth = depth
         self._working_snapshot: RunInputItems | None = None
         self._snapshot_generated_count = 0
-        self._response_max_tokens: int | None = None
+        self._terminal_tool_call_id: str | None = None
 
     async def run(
         self,
@@ -915,8 +967,14 @@ class AgentRunner:
             generated.extend(call_items)
             generated.extend(output_items)
             new_items.extend(projected_items)
-            if self._agent.stop_on_first_tool and output_items:
-                output = output_items[0].get("output")
+            if self._terminal_tool_call_id is not None or (
+                self._agent.stop_on_first_tool and output_items
+            ):
+                terminal_item = next(
+                    (item for item in output_items if item["call_id"] == self._terminal_tool_call_id),
+                    output_items[0],
+                )
+                output = terminal_item.get("output")
                 if self._hooks is not None:
                     await self._hooks.on_agent_end(self._context, self._agent, output)
                 return RunResult(
@@ -974,13 +1032,6 @@ class AgentRunner:
         usage: Usage,
     ) -> ModelTurn:
         request_agent = self._agent
-        if self._response_max_tokens is not None:
-            request_agent = replace(
-                request_agent,
-                model_settings=replace(
-                    request_agent.model_settings, max_tokens=self._response_max_tokens,
-                ),
-            )
         tools = self._agent.enabled_tools(self._context)
         attempt = 0
         rejected_request: dict[str, Any] | None = None
@@ -1109,7 +1160,6 @@ class AgentRunner:
                 },
             )
             # Recompute the uncommitted turn, not any previously executed tools.
-            self._response_max_tokens = next_budget
             request_agent = replace(
                 request_agent,
                 model_settings=replace(request_agent.model_settings, max_tokens=next_budget),
@@ -1139,6 +1189,7 @@ class AgentRunner:
         self,
         calls: list[StreamedToolCall],
     ) -> tuple[RunInputItems, RunInputItems, list[dict[str, Any]]]:
+        self._terminal_tool_call_id = None
         tools = {tool.name: tool for tool in self._agent.enabled_tools(self._context)}
         call_items: RunInputItems = []
         projected: list[dict[str, Any]] = []
@@ -1161,36 +1212,43 @@ class AgentRunner:
             )
 
         limit = self._settings.max_tool_concurrency
-        if self._agent.model_settings.parallel_tool_calls is False:
+        if self._agent.model_settings.parallel_tool_calls is False or any(
+            tools[call.name].ends_agent for call in calls if call.name in tools
+        ):
             # Honour the agent's own policy even when the provider ignores the
             # `parallel_tool_calls` request field.
             limit = 1
         semaphore = asyncio.Semaphore(limit) if limit and limit > 0 else None
-        runnable: list[StreamedToolCall] = []
-        rejected: list[StreamedToolCall] = []
-        started_serialized: set[str] = set()
-        for call in calls:
-            tool = tools.get(call.name)
-            if tool is None or not tool.serialize_calls:
-                runnable.append(call)
-                continue
-            # A single-flight tool runs once per turn, but a different single-flight
-            # tool in the same turn is unrelated and still gets its first call.
-            if call.name in started_serialized:
-                rejected.append(call)
-            else:
-                started_serialized.add(call.name)
-                runnable.append(call)
+        tool_locks = {
+            name: asyncio.Lock() for name, tool in tools.items() if tool.serialize_calls
+        }
 
-        async def run_one(call: StreamedToolCall) -> Any:
+        async def invoke(call: StreamedToolCall) -> Any:
             if semaphore is None:
                 return await self._invoke_tool(call, tools.get(call.name))
             async with semaphore:
                 return await self._invoke_tool(call, tools.get(call.name))
 
+        async def run_one(call: StreamedToolCall) -> Any:
+            lock = tool_locks.get(call.name)
+            if lock is None:
+                return await invoke(call)
+            # Wait outside the concurrency gate so queued calls do not starve other tools.
+            async with lock:
+                return await invoke(call)
+
         results: dict[str, Any] = {}
-        if runnable:
-            tasks = [asyncio.create_task(run_one(call)) for call in runnable]
+        if limit == 1:
+            for call in calls:
+                if self._terminal_tool_call_id is not None:
+                    results[call.id] = (
+                        "Not executed: a successful terminal tool already completed this agent. "
+                        "This queued call made no changes."
+                    )
+                else:
+                    results[call.id] = await run_one(call)
+        elif calls:
+            tasks = [asyncio.create_task(run_one(call)) for call in calls]
             try:
                 outcomes = await asyncio.gather(*tasks)
             except BaseException:
@@ -1199,16 +1257,8 @@ class AgentRunner:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 raise
-            for call, outcome in zip(runnable, outcomes):
+            for call, outcome in zip(calls, outcomes):
                 results[call.id] = outcome
-        for call in rejected:
-            results[call.id] = (
-                f"Rejected: {call.name} already has a call in progress and runs exactly "
-                "one call at a time. This call was not started, so nothing was read, "
-                "written, or saved for it. Never place two of these calls in the same "
-                "turn: wait for the in-flight receipt, then issue this call again on "
-                "its own."
-            )
 
         output_items: RunInputItems = []
         for call in calls:
@@ -1266,6 +1316,9 @@ class AgentRunner:
                 raise
             except Exception as exc:
                 result = f"Error: {type(exc).__name__}: {exc}"
+            else:
+                if tool.ends_agent:
+                    self._terminal_tool_call_id = call.id
             if self._hooks is not None:
                 await self._hooks.on_tool_end(
                     self._context, self._agent, call.name, call.id, result,
@@ -1303,18 +1356,7 @@ class AgentRunner:
 
 
 class DelegatedEventSink:
-    """Keeps a sub-agent's model stream out of its parent's transcript.
-
-    A delegated run shares the parent's context (metadata, receipts, tool runtime),
-    so it must not share the parent's *narrative*. Model deltas and the sub-agent's
-    own message items are dropped, because they would otherwise be folded into the
-    parent's assistant/reasoning snapshots. Model-call lifecycle events are marked
-    ``delegated`` so usage stays visible without being charged to the parent's turn
-    accounting, and every forwarded event is namespaced with its delegation depth
-    and owning agent.
-    """
-
-    _DROPPED_EVENTS = frozenset({"model.stream"})
+    """Namespace worker traces without adding their text to the chat transcript."""
 
     def __init__(
         self,
@@ -1323,11 +1365,16 @@ class DelegatedEventSink:
         parent_agent_name: str,
         delegate_agent_name: str,
         depth: int,
+        parent_invocation_id: str | None = None,
+        parent_tool_call_id: str | None = None,
     ) -> None:
         self._downstream = downstream
         self._parent_agent_name = parent_agent_name
         self._delegate_agent_name = delegate_agent_name
         self._depth = depth
+        self._parent_invocation_id = parent_invocation_id
+        self._parent_tool_call_id = parent_tool_call_id
+        self._invocation_id: str | None = None
 
     def current_lease(self) -> Any:
         current_lease = getattr(self._downstream, "current_lease", None)
@@ -1337,7 +1384,7 @@ class DelegatedEventSink:
         namespaced = self._namespaced(event_type, payload)
         if namespaced is None:
             return
-        await self._downstream.emit(event_type, namespaced)
+        await self._downstream.emit(self._event_type(event_type), namespaced)
 
     async def emit_transient(self, event_type: str, payload: dict[str, Any]) -> None:
         namespaced = self._namespaced(event_type, payload)
@@ -1345,13 +1392,13 @@ class DelegatedEventSink:
             return
         emit_transient = getattr(self._downstream, "emit_transient", None)
         if emit_transient is None:
-            await self._downstream.emit(event_type, namespaced)
+            await self._downstream.emit(self._event_type(event_type), namespaced)
             return
-        await emit_transient(event_type, namespaced)
+        await emit_transient(self._event_type(event_type), namespaced)
 
     async def emit_batch(self, events: list[tuple[str, dict[str, Any]]]) -> None:
         forwarded = [
-            (event_type, namespaced)
+            (self._event_type(event_type), namespaced)
             for event_type, payload in events
             if (namespaced := self._namespaced(event_type, payload)) is not None
         ]
@@ -1369,11 +1416,14 @@ class DelegatedEventSink:
         event_type: str,
         payload: dict[str, Any],
     ) -> dict[str, Any] | None:
-        if event_type in self._DROPPED_EVENTS:
-            return None
         if event_type == "run.item" and _is_message_item(payload):
             return None
+        if event_type == "agent.started" and not payload.get("delegated"):
+            self._invocation_id = payload.get("invocation_id")
         return {
+            "invocation_id": self._invocation_id,
+            "parent_invocation_id": self._parent_invocation_id,
+            "parent_tool_call_id": self._parent_tool_call_id,
             "delegation_depth": self._depth,
             "parent_agent_name": self._parent_agent_name,
             "delegate_agent_name": self._delegate_agent_name,
@@ -1383,6 +1433,10 @@ class DelegatedEventSink:
                 "compaction" if payload.get("context_scope") == "compaction" else "delegate"
             ),
         }
+
+    @staticmethod
+    def _event_type(event_type: str) -> str:
+        return "agent.stream" if event_type == "model.stream" else event_type
 
 
 def _is_message_item(payload: dict[str, Any]) -> bool:
@@ -1396,6 +1450,7 @@ def delegated_context(
     parent_agent_name: str,
     delegate_agent_name: str,
     depth: int,
+    parent_tool_call_id: str | None = None,
 ) -> ScholarWeaveContext:
     """Share run state with a sub-agent while isolating its event stream."""
     if context.event_sink is None:
@@ -1409,6 +1464,8 @@ def delegated_context(
             parent_agent_name=parent_agent_name,
             delegate_agent_name=delegate_agent_name,
             depth=depth,
+            parent_invocation_id=context.agent_invocation[1] if context.agent_invocation else None,
+            parent_tool_call_id=parent_tool_call_id,
         ),
     )
 
@@ -1427,8 +1484,8 @@ def delegation_tool(
 ) -> FunctionTool:
     """Expose one isolated sub-agent as an explicit tool on its owner.
 
-    The sub-agent receives only the request text, never the owner's transcript, and
-    an agent already at :data:`MAX_DELEGATION_DEPTH` cannot itself delegate.
+    The sub-agent receives the request and recorded run context, never the owner's
+    transcript. An agent at :data:`MAX_DELEGATION_DEPTH` cannot itself delegate.
     """
     delegate_depth = owner_depth + 1
     if delegate_depth > MAX_DELEGATION_DEPTH:
@@ -1457,6 +1514,7 @@ def delegation_tool(
             parent_agent_name=invocation.agent_name,
             delegate_agent_name=delegate.name,
             depth=delegate_depth,
+            parent_tool_call_id=invocation.tool_call_id,
         )
         runner = AgentRunner(
             delegate,
@@ -1466,8 +1524,21 @@ def delegation_tool(
             context_policy=context_policy,
             depth=delegate_depth,
         )
+        input_value: RunInput = request
+        system_information = context.metadata.get("system_information")
+        if isinstance(system_information, str) and system_information:
+            input_value = [
+                {
+                    "role": "developer",
+                    "content": (
+                        "Context recorded when this request was submitted:\n"
+                        + system_information
+                    ),
+                },
+                {"role": "user", "content": request},
+            ]
         try:
-            result = await runner.run(request, max_turns=max_turns)
+            result = await runner.run(input_value, max_turns=max_turns)
         except asyncio.CancelledError as exc:
             if on_error := getattr(hooks, "on_agent_error", None):
                 await on_error(context, delegate, exc)

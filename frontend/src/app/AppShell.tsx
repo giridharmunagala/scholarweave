@@ -15,7 +15,7 @@ interface NavEntry {
  * every place you can go, labelled, in one column.
  */
 const NAV_ITEMS: NavEntry[] = [
-  { to: '/', label: 'Research', icon: 'search' },
+  { to: '/', label: 'Chat', icon: 'chat' },
   { to: '/library', label: 'Library', icon: 'papers' },
   { to: '/settings', label: 'Settings', icon: 'settings' },
 ];

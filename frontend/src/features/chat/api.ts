@@ -1,9 +1,9 @@
 import { json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
-import type { ReasoningEffort } from './ReasoningEffortSelect';
 
 export type Conversation = components['schemas']['ConversationResponse'];
 export type ConversationDetail = components['schemas']['ConversationDetailResponse'];
+export type ConversationAttachment = components['schemas']['ConversationAttachmentResponse'];
 export type SessionItem = components['schemas']['SessionItemResponse'];
 export type Run = components['schemas']['RunResponse'];
 export type PromptSnapshot = components['schemas']['PromptSnapshotResponse'];
@@ -11,7 +11,10 @@ export type StopAndAnswerResponse = components['schemas']['StopAndAnswerResponse
 export type SteeringMessage = components['schemas']['SteeringMessageResponse'];
 export type ModelReference = components['schemas']['ModelReferenceSpec'];
 type ConversationMessageRequest = components['schemas']['ConversationMessageRequest'];
-export type ResearchMode = NonNullable<ConversationMessageRequest['research_mode']>;
+export type ResponseEffort = NonNullable<ConversationMessageRequest['response_effort']>;
+type SendMessageOptions = Partial<Pick<ConversationMessageRequest,
+  'reasoning_effort' | 'web_enabled' | 'response_effort' | 'context_window_tokens' | 'attachment_paths'
+>>;
 
 function conversationApi(basePath: string) {
   return {
@@ -26,26 +29,17 @@ function conversationApi(basePath: string) {
   send: (
     id: string,
     content: string,
-    reasoningEffort: ReasoningEffort | null = null,
-    webEnabled = true,
-    deepWork = false,
-    fastAnswer = false,
-    webSearchLimit = 1,
-    contextWindowTokens?: number,
-    researchMode?: ResearchMode,
+    options: SendMessageOptions = {},
   ) =>
     request<components['schemas']['ConversationMessageResponse']>(
       `${basePath}/${encodeURIComponent(id)}/messages`,
       json('POST', {
         content,
-        reasoning_effort: reasoningEffort ?? undefined,
-        web_enabled: webEnabled,
-        deep_work: deepWork,
-        fast_answer: fastAnswer,
-        web_search_limit: webSearchLimit,
-        context_window_tokens: contextWindowTokens,
-        research_mode: researchMode,
-      } satisfies ConversationMessageRequest),
+        ...options,
+        web_enabled: options.web_enabled ?? true,
+        response_effort: options.response_effort ?? 'auto',
+        attachment_paths: options.attachment_paths?.length ? options.attachment_paths : undefined,
+      } satisfies Pick<ConversationMessageRequest, 'content' | keyof SendMessageOptions>),
     ),
   remove: (id: string) =>
     request<void>(`/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -66,4 +60,15 @@ function conversationApi(basePath: string) {
     ),
   };
 }
-export const chatApi = conversationApi('/agent/conversations');
+export const chatApi = {
+  ...conversationApi('/agent/conversations'),
+  uploadAttachment: (file: File, signal?: AbortSignal) => {
+    const body = new FormData();
+    body.append('file', file);
+    return request<ConversationAttachment>('/agent/attachments', {
+      method: 'POST',
+      body,
+      signal,
+    });
+  },
+};

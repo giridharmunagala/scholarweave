@@ -159,12 +159,18 @@ class WorkspaceRepository:
             session.execute(text(_FTS_INSERT))
             session.commit()
 
-    def upsert(self, entry: WorkspaceEntry) -> WorkspaceEntry:
+    def upsert(self, entry: WorkspaceEntry, *, previous_path: str | None = None) -> WorkspaceEntry:
         values = {
             column.name: getattr(entry, column.name)
             for column in WorkspaceEntry.__table__.columns
         }
         with self._session_factory() as session:
+            if previous_path is not None and previous_path != entry.path:
+                session.execute(delete(WorkspaceEntry).where(WorkspaceEntry.path == previous_path))
+                session.execute(
+                    text("DELETE FROM workspace_entries_fts WHERE path = :path"),
+                    {"path": previous_path},
+                )
             statement = sqlite_insert(WorkspaceEntry).values(**values)
             statement = statement.on_conflict_do_update(
                 index_elements=[WorkspaceEntry.path],

@@ -53,6 +53,8 @@ class ConversationRepository:
             record = session.get(ConversationRecord, conversation_id)
             if record is None:
                 raise NotFoundError("Conversation was not found.")
+            if not record.last_message_preview and record.title in {"New chat", "New research"}:
+                record.title = " ".join(preview.split())[:120] or record.title
             record.last_message_preview = preview[:500]
             record.updated_at = utcnow()
             session.commit()
@@ -68,20 +70,6 @@ class ConversationRepository:
             record.updated_at = utcnow()
             session.commit()
             session.refresh(record)
-            return record
-
-    def promote_to_deep_work(self, conversation_id: str) -> ConversationRecord:
-        with self._sessions() as session:
-            record = session.get(ConversationRecord, conversation_id)
-            if record is None:
-                raise NotFoundError("Conversation was not found.")
-            if record.kind not in {"autonomous", "deep_work"}:
-                raise ValueError("Conversation cannot be promoted to Deep Work.")
-            if record.kind == "autonomous":
-                record.kind = "deep_work"
-                record.updated_at = utcnow()
-                session.commit()
-                session.refresh(record)
             return record
 
     def delete(self, conversation_id: str) -> None:

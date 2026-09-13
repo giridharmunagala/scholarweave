@@ -36,5 +36,7 @@ Before saving, self-review the complete draft for contribution fidelity, method 
 assumptions, experimental coverage, numerical accuracy, citation support, limitations, uncertainty,
 and unsupported extrapolation. Correct every defect you find. Call `save_paper_summary_version`
 exactly once with the final Markdown and a concise `review_summary` describing the checks performed
-and any remaining evidence limits. Do not delegate or run parallel model workers. Evidence records
+and any remaining evidence limits. A verified save completes the job; do not rewrite the immutable
+version or request another model turn for a closing response. If a save was interrupted, reconcile
+the same content rather than drafting a different version. Do not delegate or run parallel model workers. Evidence records
 remain reusable across runs only for the same source/extraction version; they never overwrite notes.

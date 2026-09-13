@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, File, Response, UploadFile, status
 
 from backend.agents.blueprint import ModelReferenceSpec, SessionPolicySpec
 from backend.core.http import services
 from backend.conversations.schemas import (
+    ConversationAttachmentResponse,
     ConversationDetailResponse,
     ConversationMessageRequest,
     ConversationMessageResponse,
@@ -14,6 +15,20 @@ from backend.conversations.schemas import (
 from backend.runs.schemas import run_response
 
 router = APIRouter(tags=["research conversations"])
+
+
+@router.post(
+    "/agent/attachments",
+    response_model=ConversationAttachmentResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_attachment(
+    file: UploadFile = File(...),
+    container=Depends(services),
+) -> ConversationAttachmentResponse:
+    return ConversationAttachmentResponse.model_validate(
+        await container.conversation_attachments.upload(file)
+    )
 
 
 @router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -75,11 +90,13 @@ async def send_research_message(
         payload.content,
         reasoning_effort=payload.reasoning_effort,
         web_enabled=payload.web_enabled,
+        response_effort=payload.response_effort,
         deep_work=payload.deep_work,
         fast_answer=payload.fast_answer,
         research_mode=payload.research_mode,
         web_search_limit=payload.web_search_limit,
         context_window_tokens=payload.context_window_tokens,
+        attachment_paths=payload.attachment_paths,
     )
     return ConversationMessageResponse(
         conversation=_response(container.conversation_turns.get_conversation(conversation_id)),
@@ -140,9 +157,11 @@ async def send_deep_work_message(
         payload.content,
         reasoning_effort=payload.reasoning_effort,
         web_enabled=payload.web_enabled,
+        response_effort=payload.response_effort,
         research_mode=payload.research_mode,
         fast_answer=payload.fast_answer,
         context_window_tokens=payload.context_window_tokens,
+        attachment_paths=payload.attachment_paths,
     )
     return ConversationMessageResponse(
         conversation=_response(

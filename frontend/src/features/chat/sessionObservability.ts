@@ -28,6 +28,7 @@ export interface SessionPerformance {
   delegatedModelCalls: number | null;
   prefill: SessionRate;
   generation: SessionRate;
+  cache: { tokens: number; reportedCalls: number } | null;
 }
 
 export interface SessionWorker {
@@ -139,6 +140,12 @@ function telemetrySnapshot(calls: SessionModelCall[]): Json | null {
     if (call.raw.delegated === true || call.scope === 'delegate') add('delegated_model_calls', 1);
     else if (call.scope === 'main') add('main_model_calls', 1);
     const timings = object(call.raw.timings);
+    const cached = number(call.raw.cached_input_tokens) ?? number(timings.cache_n);
+    if (cached !== null && Number.isInteger(cached)
+      && (call.raw.usage_complete !== true || cached <= (number(usage.input_tokens) ?? 0))) {
+      result.cached_input_tokens = Number(result.cached_input_tokens ?? 0) + cached;
+      result.cache_reported_calls = Number(result.cache_reported_calls ?? 0) + 1;
+    }
     for (const [tokensKey, millisKey, tokensTotal, secondsTotal, countKey] of [
       ['prompt_n', 'prompt_ms', 'timed_prompt_tokens', 'prompt_seconds', 'prompt_timed_calls'],
       ['predicted_n', 'predicted_ms', 'timed_output_tokens', 'generation_seconds', 'generation_timed_calls'],
@@ -219,6 +226,8 @@ function metrics(run: Run, events: RunStreamEvent[], calls: SessionModelCall[]) 
       delegatedModelCalls: number(performance.delegated_model_calls),
       prefill: rate(timingPerformance, 'prompt', callsComplete ? modelCalls : null),
       generation: rate(timingPerformance, 'generation', callsComplete ? modelCalls : null),
+      cache: number(performance.cached_input_tokens) !== null && (number(performance.cache_reported_calls) ?? 0) > 0
+        ? { tokens: Number(performance.cached_input_tokens), reportedCalls: Number(performance.cache_reported_calls) } : null,
     },
   };
 }
@@ -451,6 +460,7 @@ export function buildSessionObservability(runs: readonly Run[]): SessionObservab
   const workers = summaries.flatMap((run) => run.workers);
   const workPlan = summaries.flatMap((run) => run.workPlan);
   const modelCalls = sumKnown(summaries.map((run) => run.performance.modelCalls));
+  const caches = summaries.flatMap((run) => run.performance.cache ? [run.performance.cache] : []);
   const workPlanCounts: Record<WorkItemStatus, number> = { pending: 0, in_progress: 0, completed: 0, blocked: 0 };
   for (const item of workPlan) workPlanCounts[item.status] += 1;
   return {
@@ -468,6 +478,10 @@ export function buildSessionObservability(runs: readonly Run[]): SessionObservab
       delegatedModelCalls: sumKnown(summaries.map((run) => run.performance.delegatedModelCalls)),
       prefill: sumRates(summaries.map((run) => run.performance.prefill), modelCalls),
       generation: sumRates(summaries.map((run) => run.performance.generation), modelCalls),
+      cache: caches.length ? {
+        tokens: caches.reduce((total, cache) => total + cache.tokens, 0),
+        reportedCalls: caches.reduce((total, cache) => total + cache.reportedCalls, 0),
+      } : null,
     },
     runs: summaries, workers,
     completedWorkers: workers.filter((worker) => worker.delegated && worker.status === 'completed').length,

@@ -20,10 +20,11 @@ import {
 import {
   chatApi,
   type Conversation,
+  type ConversationAttachment,
   type ConversationDetail,
   type ModelReference,
   type PromptSnapshot,
-  type ResearchMode,
+  type ResponseEffort,
   type Run,
   type SteeringMessage,
 } from './api';
@@ -40,6 +41,7 @@ import {
 import {
   applyChatStreamEvent,
   emptyChatStream,
+  mergeStreamEvents,
   restoreChatStream,
   type ChatStreamState,
 } from './chatStream';
@@ -47,6 +49,7 @@ import {
   buildTurnTimeline,
   describeLiveActivity,
   emptyTurnTimeline,
+  traceSteps,
   type TimelineSource,
   type TurnTimeline,
 } from './chatTimeline';
@@ -60,36 +63,32 @@ import {
 import './chat.css';
 import { useThrottledRates } from './useThrottledRates';
 import { buildSessionObservability } from './sessionObservability';
-import { SessionOverview, SessionStatusStrip } from './SessionMonitor';
+import { SessionOverview } from './SessionMonitor';
 
 const SUGGESTIONS = [
-  'Help me understand an existing paper summary, one concept at a time.',
-  'Compare the methods used in the two most recent papers I added.',
-  'Analyze the evidence, assumptions, and gaps in my research notes.',
-  'Investigate an open research question and discuss the findings with me.',
+  'Help me think through an idea.',
+  'Explain a concept in simple terms.',
+  'Compare the evidence in my local files.',
+  'Look up a question on the web and discuss what you find.',
 ];
 const COMMON_CONTEXT_WINDOWS = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
+const MAX_ATTACHMENTS = 10;
 const OVERLAY_WIDTH = 1_100;
-const RESEARCH_MODES: { value: ResearchMode; label: string; description: string }[] = [
+const RESPONSE_EFFORTS: { value: ResponseEffort; label: string; description: string }[] = [
   {
-    value: 'research',
-    label: 'Follow my request',
-    description: 'Discuss, explain, compare, or investigate. Save summaries and notes only when requested.',
+    value: 'auto',
+    label: 'Auto',
+    description: 'Match the effort to your request: chat, look up sources, or plan substantial work.',
   },
   {
-    value: 'learn',
-    label: 'Learn / ask',
-    description: 'Narrow sourced Q&A from papers, notes, or the web. No mandatory full summary or notes.',
+    value: 'quick',
+    label: 'Quick',
+    description: 'Keep the scope small, using local files, attachments, or the web as needed.',
   },
   {
-    value: 'understand',
-    label: 'Explain in depth',
-    description: 'Explain relevant passages and prerequisites with citations, without a full review.',
-  },
-  {
-    value: 'review',
-    label: 'Review + save',
-    description: 'Read paper evidence and require cited summaries plus durable paper notes.',
+    value: 'thorough',
+    label: 'Thorough',
+    description: 'Take more time and use focused workers when helpful. Discussion need not become a project.',
   },
 ];
 
@@ -214,10 +213,7 @@ export function ResearchChatPage() {
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [contextWindowTokens, setContextWindowTokens] = useState(32_768);
   const [webEnabled, setWebEnabled] = useState(true);
-  const [deepWork, setDeepWork] = useState(false);
-  const [fastAnswer, setFastAnswer] = useState(false);
-  const [researchMode, setResearchMode] = useState<ResearchMode>('research');
-  const [webSearchLimit, setWebSearchLimit] = useState(1);
+  const [responseEffort, setResponseEffort] = useState<ResponseEffort>('auto');
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [historyState, setHistoryState] = useState<'ready' | 'loading' | 'unavailable'>('ready');
@@ -227,6 +223,9 @@ export function ResearchChatPage() {
     (Omit<SteeringMessage, 'status'> & { status: 'queued' | 'applied' })[]
   >([]);
   const [content, setContent] = useState(initialDraft);
+  const [attachments, setAttachments] = useState<ConversationAttachment[]>([]);
+  const [uploadingNames, setUploadingNames] = useState<string[]>([]);
+  const [attachmentError, setAttachmentError] = useState<unknown>(null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
@@ -247,6 +246,9 @@ export function ResearchChatPage() {
   const pageRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const optionsRef = useRef<HTMLDetailsElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const uploadControllerRef = useRef<AbortController | null>(null);
   const activityToggleRef = useRef<HTMLButtonElement>(null);
   const openRequestRef = useRef(0);
   const runLifecycleRef = useRef(0);
@@ -260,8 +262,78 @@ export function ResearchChatPage() {
   );
   const [reasoningEffort, selectReasoningEffort] =
     useModelReasoningEffort(effectiveModelReference, supportedReasoningEfforts);
-  const deepWorkLocked = current?.kind === 'deep_work';
   const showSidebar = sidebarOpen && !focusMode;
+  const uploading = uploadingNames.length > 0;
+
+  const clearAttachments = () => {
+    uploadControllerRef.current?.abort();
+    uploadControllerRef.current = null;
+    setAttachments([]);
+    setUploadingNames([]);
+    setAttachmentError(null);
+  };
+
+  useEffect(() => () => {
+    uploadControllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    const dismissOptions = (event: PointerEvent) => {
+      const options = optionsRef.current;
+      if (options?.open && event.target instanceof Node && !options.contains(event.target)) {
+        options.open = false;
+      }
+    };
+    document.addEventListener('pointerdown', dismissOptions, true);
+    return () => document.removeEventListener('pointerdown', dismissOptions, true);
+  }, []);
+
+  const uploadAttachments = async (files: File[]) => {
+    if (
+      !files.length || uploadControllerRef.current || sending
+      || (run && !isTerminalRun(run)) || historyState === 'loading'
+    ) return;
+    setAttachmentError(null);
+    if (attachments.length + files.length > MAX_ATTACHMENTS) {
+      setAttachmentError(new Error(`Attach up to ${MAX_ATTACHMENTS} files per message.`));
+      return;
+    }
+    const unsupported = files.find((file) => !/\.(md|txt|pdf)$/i.test(file.name));
+    if (unsupported) {
+      setAttachmentError(new Error(`${unsupported.name}: choose a .md, .txt, or .pdf file.`));
+      return;
+    }
+    const request = openRequestRef.current;
+    const controller = new AbortController();
+    uploadControllerRef.current = controller;
+    const isCurrent = () => (
+      request === openRequestRef.current
+      && uploadControllerRef.current === controller
+      && !controller.signal.aborted
+    );
+    setUploadingNames(files.map((file) => file.name));
+    const errors: string[] = [];
+    try {
+      for (const file of files) {
+        try {
+          const attachment = await chatApi.uploadAttachment(file, controller.signal);
+          if (!isCurrent()) return;
+          setAttachments((previous) => [...previous, attachment]);
+        } catch (nextError) {
+          if (!isCurrent()) return;
+          errors.push(`${file.name}: ${nextError instanceof Error ? nextError.message : 'Upload failed'}`);
+        }
+        if (!isCurrent()) return;
+        setUploadingNames((names) => names.slice(1));
+      }
+    } finally {
+      if (isCurrent()) {
+        uploadControllerRef.current = null;
+        setUploadingNames([]);
+        if (errors.length) setAttachmentError(new Error(errors.join('\n')));
+      }
+    }
+  };
 
   const closeActivity = () => {
     setActivityOpen(false);
@@ -291,6 +363,8 @@ export function ResearchChatPage() {
     contextSettings: Settings | null = settings,
   ) => {
     const request = ++openRequestRef.current;
+    clearAttachments();
+    setResponseEffort('auto');
     setHistoryState('loading');
     setRun(null);
     setRuns([]);
@@ -316,12 +390,9 @@ export function ResearchChatPage() {
     const conversationRuns = runsForConversation(allRuns, id);
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
     setCurrent(conversation);
-    setDeepWork(conversation.kind === 'deep_work');
-    setResearchMode('research');
-    setFastAnswer(false);
     setModelReference(conversation.model_reference);
     setContextWindowTokens(
-      configuredContextWindow(
+      latestRun?.context_window_tokens ?? configuredContextWindow(
         contextProviders,
         resolveModelReference(conversation.model_reference, contextSettings),
         contextSettings?.agent_context_window_tokens ?? 32_768,
@@ -423,6 +494,7 @@ export function ResearchChatPage() {
     let cancelled = false;
     let finalizing = false;
     let polling = false;
+    let lastEventAt = Date.now();
     let flushTimer: number | undefined;
     let pendingEvents: RunStreamEvent[] = [];
     const conversationId = run.conversation_id ?? current?.id ?? null;
@@ -448,6 +520,7 @@ export function ResearchChatPage() {
     const finish = async (knownRun?: Run) => {
       if (finalizing || cancelled) return;
       finalizing = true;
+      let completed = false;
       if (flushTimer !== undefined) {
         window.clearTimeout(flushTimer);
         flushTimer = undefined;
@@ -463,6 +536,11 @@ export function ResearchChatPage() {
           conversationId ? chatApi.get(conversationId) : Promise.resolve(null),
         ]);
         if (cancelled || lifecycle !== runLifecycleRef.current) return;
+        if (!isTerminalRun(nextRun)) {
+          setRun(nextRun);
+          return;
+        }
+        completed = true;
         setRun(nextRun);
         setRuns((previous) => mergeRun(previous, nextRun));
         if (nextConversation) setCurrent(nextConversation);
@@ -473,7 +551,8 @@ export function ResearchChatPage() {
       } catch (nextError) {
         if (!cancelled && lifecycle === runLifecycleRef.current) setError(nextError);
       } finally {
-        if (!cancelled && lifecycle === runLifecycleRef.current) {
+        finalizing = false;
+        if (completed && !cancelled && lifecycle === runLifecycleRef.current) {
           setSending(false);
           window.setTimeout(() => composerRef.current?.focus(), 0);
         }
@@ -485,7 +564,13 @@ export function ResearchChatPage() {
       polling = true;
       try {
         const nextRun = await chatApi.run(run.id);
+        if (cancelled || lifecycle !== runLifecycleRef.current) return;
         if (isTerminalRun(nextRun)) await finish(nextRun);
+        else {
+          setRun(nextRun);
+          setRuns((previous) => mergeRun(previous, nextRun));
+          setStream((previous) => restoreChatStream(mergeStreamEvents(nextRun.events, previous.events)));
+        }
       } catch (nextError) {
         if (!cancelled) setError(nextError);
       } finally {
@@ -505,6 +590,7 @@ export function ResearchChatPage() {
       run.id,
       lastSequence,
       (event) => {
+        lastEventAt = Date.now();
         if (
           event.event_type === 'steering.queued'
           || event.event_type === 'steering.applied'
@@ -535,16 +621,25 @@ export function ResearchChatPage() {
       },
       () => void inspectRun(),
     );
+    const watchdog = window.setInterval(() => {
+      if (Date.now() - lastEventAt < 10_000) return;
+      lastEventAt = Date.now();
+      void inspectRun();
+    }, 5000);
 
     return () => {
+      if (flushTimer !== undefined) window.clearTimeout(flushTimer);
+      flushEvents();
       cancelled = true;
       unsubscribe();
-      if (flushTimer !== undefined) window.clearTimeout(flushTimer);
+      window.clearInterval(watchdog);
     };
   }, [run?.id, run?.status, current?.id, sending, stopping]);
 
   const resetThread = () => {
     openRequestRef.current += 1;
+    clearAttachments();
+    setResponseEffort('auto');
     setRun(null);
     setRuns([]);
     setHistoryState('ready');
@@ -558,9 +653,6 @@ export function ResearchChatPage() {
 
   const create = () => {
     setCurrent(null);
-    setResearchMode('research');
-    setDeepWork(false);
-    setFastAnswer(false);
     setModelReference(preferredModelReference);
     setContextWindowTokens(
       configuredContextWindow(
@@ -649,13 +741,15 @@ export function ResearchChatPage() {
   };
 
   const send = async (override?: string) => {
-    const submitted = (override ?? content).trim();
-    if (!submitted) return;
+    const draft = override ?? content;
+    const submitted = draft.trim();
+    if (!submitted || uploadControllerRef.current || historyState === 'loading') return;
     if (sending) {
       if (
         !run
         || !['pending', 'running'].includes(run.status)
         || queueingSteering
+        || attachments.length
       ) return;
       setQueueingSteering(true);
       setError(null);
@@ -669,7 +763,7 @@ export function ResearchChatPage() {
         );
         setPinnedToBottom(true);
       } catch (nextError) {
-        setContent(submitted);
+        setContent(draft);
         setError(nextError);
       } finally {
         setQueueingSteering(false);
@@ -678,6 +772,7 @@ export function ResearchChatPage() {
       return;
     }
     const request = openRequestRef.current;
+    const attachmentPaths = attachments.map((attachment) => attachment.path);
     setSending(true);
     setError(null);
     setContent('');
@@ -699,15 +794,18 @@ export function ResearchChatPage() {
       const response = await chatApi.send(
         conversation.id,
         submitted,
-        reasoningEffort,
-        webEnabled,
-        deepWork,
-        !deepWork && fastAnswer,
-        webSearchLimit,
-        contextWindowTokens,
-        researchMode,
+        {
+          reasoning_effort: reasoningEffort ?? undefined,
+          web_enabled: webEnabled,
+          response_effort: responseEffort,
+          context_window_tokens: contextWindowTokens,
+          attachment_paths: attachmentPaths,
+        },
       );
       if (request !== openRequestRef.current) return;
+      setResponseEffort('auto');
+      setAttachments([]);
+      setAttachmentError(null);
       setCurrent((active) => (
         active
           ? { ...active, ...response.conversation }
@@ -720,7 +818,7 @@ export function ResearchChatPage() {
       window.setTimeout(() => composerRef.current?.focus(), 0);
     } catch (nextError) {
       if (request !== openRequestRef.current) return;
-      setContent(submitted);
+      setContent(draft);
       setOptimisticUser(null);
       setSending(false);
       setError(nextError);
@@ -737,34 +835,31 @@ export function ResearchChatPage() {
     );
   }, [conversations, query]);
 
-  // Every run keeps its own trace, so an older turn never borrows the newest turn's activity.
-  const persistedTimelines = useMemo(() => {
+  const observedRuns = useMemo(() => {
+    const candidates = run ? mergeRun(runs, run) : runs;
+    return candidates.map((candidate) => {
+      if (candidate.id !== run?.id) return candidate;
+      return { ...candidate, events: mergeStreamEvents(candidate.events, stream.events) };
+    });
+  }, [runs, run, stream.events]);
+  // Replay and live events share one trace; root row counts cannot measure nested progress.
+  const timelinesByRun = useMemo(() => {
     const timelines = new Map<string, TurnTimeline>();
-    for (const candidate of runs) {
+    for (const candidate of observedRuns) {
       timelines.set(
         candidate.id,
         buildTurnTimeline(candidate.events, { settled: isTerminalRun(candidate) }),
       );
     }
     return timelines;
-  }, [runs]);
-
-  // The active run is rebuilt from the events seen so far so the trace grows as it happens.
-  const liveTimeline = useMemo(
-    () => buildTurnTimeline(stream.events, { settled: Boolean(run && isTerminalRun(run)) }),
-    [stream.events, run?.status],
-  );
-
-  const timelineFor = (candidate: Run): TurnTimeline => {
-    const persisted = persistedTimelines.get(candidate.id) ?? emptyTurnTimeline;
-    if (candidate.id !== run?.id) return persisted;
-    return liveTimeline.steps.length >= persisted.steps.length ? liveTimeline : persisted;
-  };
-  const activityTimelines = runs
+  }, [observedRuns]);
+  const timelineFor = (candidate: Run): TurnTimeline => timelinesByRun.get(candidate.id) ?? emptyTurnTimeline;
+  const liveTimeline = run ? timelineFor(run) : emptyTurnTimeline;
+  const activityTimelines = observedRuns
     .map((candidate, index) => ({
       id: candidate.id,
       label: `Run ${index + 1}`,
-      timeline: activityTimeline(timelineFor(candidate)),
+      timeline: timelineFor(candidate),
       snapshot: promptSnapshotFromRun(candidate),
     }))
     .filter(({ timeline, snapshot }) => timeline.steps.length > 0 || snapshot != null);
@@ -792,20 +887,6 @@ export function ResearchChatPage() {
   }, [runs, run, stream.events]);
   const metricsByRun = useThrottledRates(rawMetrics);
   const liveMetrics = run ? metricsByRun.get(run.id) ?? null : null;
-  const observedRuns = useMemo(() => {
-    const candidates = run ? mergeRun(runs, run) : runs;
-    return candidates.map((candidate) => {
-      if (candidate.id !== run?.id) return candidate;
-      const events = new Map(candidate.events.map((event) => [event.sequence, event]));
-      for (const event of stream.events) {
-        events.set(event.sequence, {
-          ...event,
-          created_at: event.created_at ?? events.get(event.sequence)?.created_at ?? '',
-        });
-      }
-      return { ...candidate, events: [...events.values()].sort((a, b) => a.sequence - b.sequence) };
-    });
-  }, [runs, run, stream.events]);
   const sessionSummary = useMemo(() => buildSessionObservability(observedRuns), [observedRuns]);
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
@@ -818,7 +899,7 @@ export function ResearchChatPage() {
     [current?.items, runs],
   );
 
-  if (loading || !settings) return <Loading label="Loading agent conversations…" />;
+  if (loading || !settings) return <Loading label="Loading chats…" />;
 
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
@@ -897,12 +978,6 @@ export function ResearchChatPage() {
                   }}
                 >
                   <strong>{conversation.title}</strong>
-                  {conversation.kind === 'deep_work' ? (
-                    <span className="conversation-mode">
-                      <Icon name="agents" size={11} />
-                      Deep Work
-                    </span>
-                  ) : null}
                   <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
                 </button>
                 <IconButton
@@ -955,13 +1030,7 @@ export function ResearchChatPage() {
                 <Icon name="plus" size={16} />
               </button>
             ) : null}
-            <h1>{current?.title ?? (deepWork ? 'New deep work' : 'New research')}</h1>
-            {deepWork ? (
-              <span className="chat-mode-badge">
-                <Icon name="agents" size={12} />
-                Deep Work
-              </span>
-            ) : null}
+            <h1>{current?.title ?? 'New chat'}</h1>
             {compaction ? (
               <span
                 className={`compaction-indicator ${compaction.state}`}
@@ -1005,9 +1074,7 @@ export function ResearchChatPage() {
               {activityCount ? <span className="count-badge">{activityCount}</span> : null}
             </button>
           </header>
-          {historyState === 'ready' ? (
-            <SessionStatusStrip summary={sessionSummary} />
-          ) : (
+          {historyState !== 'ready' ? (
             <div className="session-status-strip" role="status">
               {historyState === 'loading' ? 'Loading session activity...' : 'Session metrics unavailable. History could not be loaded.'}
               {historyState === 'unavailable' && current ? (
@@ -1017,7 +1084,7 @@ export function ResearchChatPage() {
                 }}>Retry history</button>
               ) : null}
             </div>
-          )}
+          ) : null}
 
           <div className="chat-thread">
             <div
@@ -1031,11 +1098,10 @@ export function ResearchChatPage() {
             >
               {!hasTranscript ? (
                 <div className="chat-welcome">
-                  <h2>{deepWork ? 'Give your research a direction' : 'Think through your research'}</h2>
+                  <h2>What would you like to explore?</h2>
                   <p>
-                    {deepWork
-                      ? 'Set a goal for unattended work, or discuss it first. You can steer the next step while it runs.'
-                      : 'Understand a paper, question a summary, or explore an idea. You decide what gets saved.'}
+                    Chat, think through ideas, or look things up in your local files and on the web.
+                    Ask when you want papers or notes saved.
                   </p>
                   <div className="suggestion-grid">
                     {SUGGESTIONS.map((suggestion) => (
@@ -1043,7 +1109,7 @@ export function ResearchChatPage() {
                         type="button"
                         className="suggestion"
                         key={suggestion}
-                        disabled={sending}
+                        disabled={sending || uploading}
                         onClick={() => {
                           setContent(suggestion);
                           composerRef.current?.focus();
@@ -1070,7 +1136,7 @@ export function ResearchChatPage() {
                       metrics={responseRun ? metricsByRun.get(responseRun.id) ?? null : null}
                       sources={responseRun ? timelineFor(responseRun).sources : null}
                       onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
-                      canRetry={!sending}
+                      canRetry={!sending && !uploading}
                     />
                     {recoveredResponses.map((text, responseIndex) => (
                       <Message
@@ -1087,7 +1153,7 @@ export function ResearchChatPage() {
                             : null
                         }
                         onRetry={() => retry(item.text ?? '')}
-                        canRetry={!sending}
+                        canRetry={!sending && !uploading}
                         key={`${recoveredRun?.id ?? index}-recovered-${responseIndex}`}
                       />
                     ))}
@@ -1124,14 +1190,6 @@ export function ResearchChatPage() {
               {runActive && !stream.assistant && liveMetrics ? (
                 <TurnMetadata metrics={liveMetrics} />
               ) : null}
-              {liveActivity ? (
-                <LiveActivityBar
-                  key={run?.id ?? 'pending-run'}
-                  activity={liveActivity}
-                  startedAt={run?.started_at ?? run?.created_at}
-                  onOpenActivity={activityOpen ? undefined : () => setActivityOpen(true)}
-                />
-              ) : null}
               {run?.error ? (
                 <div className="notice error chat-run-error" role="alert">
                   <strong>This run needs attention.</strong>
@@ -1163,16 +1221,50 @@ export function ResearchChatPage() {
 
             <div className="composer">
               <div className="composer-inner">
-                {sending || researchMode === 'review' ? <div className="composer-intent" role="status">
-                  {sending
-                    ? 'Keep guiding the work here. Your message applies before the next model call.'
-                    : 'Review + save: each reviewed paper requires a cited summary and durable notes.'}
+                {liveActivity ? (
+                  <LiveActivityBar
+                    key={run?.id ?? 'pending-run'}
+                    activity={liveActivity}
+                    startedAt={run?.created_at}
+                    headlines={traceSteps(liveTimeline).filter((step) => step.kind !== 'reasoning').slice(-3)
+                      .map((step) => step.kind === 'tool' ? step.label : step.kind === 'agent' ? step.name : '')}
+                    onOpenActivity={activityOpen ? undefined : () => setActivityOpen(true)}
+                  />
+                ) : null}
+                {sending ? <div className="composer-intent" role="status">
+                  Keep guiding the work here. Your message applies before the next model call.
                 </div> : null}
                 {/* One control surface: what you type, what answers, and how you send it. */}
                 <div className="composer-box">
+                  {attachments.length ? (
+                    <ul className="composer-attachments" aria-label="Attached files">
+                      {attachments.map((attachment, index) => (
+                        <li key={`${attachment.path}-${index}`} className="composer-attachment">
+                          <Icon name="file" size={14} />
+                          <span title={attachment.name}>{attachment.name}</span>
+                          <button
+                            type="button"
+                            aria-label={`Remove ${attachment.name}`}
+                            title="Detach from this message; the uploaded file stays in your workspace"
+                            disabled={sending}
+                            onClick={() => setAttachments((previous) => previous.filter((_, itemIndex) => itemIndex !== index))}
+                          >
+                            <Icon name="close" size={13} />
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {uploading ? (
+                    <div className="composer-upload-status" role="status">
+                      <span className="spinner tiny" aria-hidden="true" />
+                      Uploading / preparing: {uploadingNames.join(', ')}. PDFs may need text extraction or OCR.
+                    </div>
+                  ) : null}
+                  {attachmentError ? <ErrorNotice error={attachmentError} /> : null}
                   <textarea
                     ref={composerRef}
-                    aria-label={sending ? 'Guide ongoing research' : 'Research question'}
+                    aria-label={sending ? 'Guide ongoing work' : 'Message'}
                     title="Enter to send; Shift+Enter for a new line"
                     rows={1}
                     value={content}
@@ -1186,11 +1278,38 @@ export function ResearchChatPage() {
                     placeholder={
                       sending
                         ? 'Add a constraint, change direction, or ask it to focus...'
-                        : 'Ask, explain, compare, analyze...'
+                        : attachments.length
+                          ? 'Type what you want to do with these files...'
+                          : 'Ask a question, explore an idea, or look something up...'
                     }
                   />
                   <div className="composer-bar">
-                    <div className="composer-controls" role="group" aria-label="Research controls">
+                    <div className="composer-controls" role="group" aria-label="Message controls">
+                      <input
+                        ref={attachmentInputRef}
+                        type="file"
+                        hidden
+                        accept=".md,.txt,.pdf"
+                        multiple
+                        aria-label="Choose attachments"
+                        disabled={runActive || uploading || historyState === 'loading' || attachments.length >= MAX_ATTACHMENTS}
+                        onChange={(event) => {
+                          const files = Array.from(event.currentTarget.files ?? []);
+                          event.currentTarget.value = '';
+                          void uploadAttachments(files);
+                        }}
+                      />
+                      <button
+                        className="composer-icon"
+                        type="button"
+                        aria-label="Attach file"
+                        aria-describedby="chat-attachment-help"
+                        title={runActive ? 'Attachments are available after this run finishes; steering accepts text only' : 'Attach files'}
+                        disabled={runActive || uploading || historyState === 'loading' || attachments.length >= MAX_ATTACHMENTS}
+                        onClick={() => attachmentInputRef.current?.click()}
+                      >
+                        <Icon name="upload" size={16} />
+                      </button>
                       <ChatModelPicker
                         providers={providers}
                         settings={settings}
@@ -1198,14 +1317,41 @@ export function ResearchChatPage() {
                         disabled={sending}
                         onChange={selectModel}
                       />
-                      <details className="composer-options">
-                        <summary title={`Research options: ${RESEARCH_MODES.find((mode) => mode.value === researchMode)?.label}; ${webEnabled ? 'web enabled' : 'offline'}`}>
+                      <label className="response-effort-control">
+                        <span>Effort</span>
+                        <select
+                          aria-label="Response effort"
+                          value={responseEffort}
+                          disabled={sending || historyState === 'loading'}
+                          title={RESPONSE_EFFORTS.find((effort) => effort.value === responseEffort)?.description}
+                          onChange={(event) => {
+                            const selected = RESPONSE_EFFORTS.find(
+                              (effort) => effort.value === event.target.value,
+                            );
+                            if (selected) setResponseEffort(selected.value);
+                          }}
+                        >
+                          {RESPONSE_EFFORTS.map((effort) => (
+                            <option key={effort.value} value={effort.value}>{effort.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <button
+                        className={`composer-capability${webEnabled ? ' active' : ''}`}
+                        type="button"
+                        aria-label="Toggle web access"
+                        aria-pressed={webEnabled}
+                        title={webEnabled ? 'Web access enabled' : 'Web access disabled'}
+                        disabled={sending}
+                        onClick={() => setWebEnabled((enabled) => !enabled)}
+                      >
+                        <Icon name="globe" size={13} />
+                        Web
+                      </button>
+                      <details className="composer-options" ref={optionsRef}>
+                        <summary title="Advanced options: reasoning effort and context size">
                           <Icon name="settings" size={13} />
-                          Options{deepWork ? ' · Deep work' : ''}{!webEnabled ? ' · Offline' : ''}
-                          {researchMode === 'review' ? ' · Review + save' : ''}
-                          {researchMode === 'learn' && !fastAnswer ? ' · Learn' : ''}
-                          {researchMode === 'understand' ? ' · Explain' : ''}
-                          {fastAnswer ? ' · Fast web' : ''}
+                          Options
                         </summary>
                         <div className="composer-options-popover">
                           <ReasoningEffortSelect
@@ -1235,110 +1381,10 @@ export function ResearchChatPage() {
                             </select>
                           </label>
                           <p className="composer-options-help">
-                            Larger context uses more memory and prompt-processing time. Start with your model's configured size.
+                            This chat's context size controls compaction, including its helper model,
+                            and overrides provider metadata. Larger context uses more memory; your
+                            model server must support the selected size.
                           </p>
-                          {!deepWork ? (
-                            <div className={`fast-answer-control${fastAnswer ? ' active' : ''}`}>
-                              <button
-                                className="composer-capability"
-                                type="button"
-                                aria-label="Toggle fast answer"
-                                aria-pressed={fastAnswer}
-                                title="Web-only shortcut. Use Learn / ask for quick paper Q&A."
-                                disabled={sending}
-                                onClick={() => {
-                                  setFastAnswer((enabled) => {
-                                    if (!enabled) {
-                                      setWebEnabled(true);
-                                      setResearchMode('learn');
-                                    }
-                                    return !enabled;
-                                  });
-                                }}
-                              >
-                                <Icon name="bulb" size={13} />
-                                Fast web answer
-                              </button>
-                              {fastAnswer ? (
-                                <input
-                                  type="number"
-                                  min={1}
-                                  max={100}
-                                  step={1}
-                                  value={webSearchLimit}
-                                  aria-label="Fast answer web search limit"
-                                  title="Maximum web searches"
-                                  disabled={sending}
-                                  onChange={(event) => {
-                                    const value = Number.parseInt(event.target.value, 10);
-                                    if (Number.isFinite(value)) {
-                                      setWebSearchLimit(Math.min(100, Math.max(1, value)));
-                                    }
-                                  }}
-                                />
-                              ) : null}
-                          </div>
-                        ) : null}
-                          <button
-                            className={`composer-capability${webEnabled ? ' active' : ''}`}
-                            type="button"
-                            aria-label="Toggle web access"
-                            aria-pressed={webEnabled}
-                            title={webEnabled ? 'Web access enabled' : 'Web access disabled'}
-                            disabled={sending}
-                            onClick={() => {
-                              setWebEnabled((enabled) => {
-                                if (enabled) setFastAnswer(false);
-                                return !enabled;
-                              });
-                            }}
-                          >
-                            <Icon name="globe" size={13} />
-                            Web
-                          </button>
-                          <label className="research-mode-control">
-                            <span>Response</span>
-                            <select
-                              aria-label="Research mode"
-                              value={researchMode}
-                              disabled={sending}
-                              title={RESEARCH_MODES.find((mode) => mode.value === researchMode)?.description}
-                              onChange={(event) => {
-                                const selected = RESEARCH_MODES.find(
-                                  (mode) => mode.value === event.target.value,
-                                );
-                                if (selected) {
-                                  setResearchMode(selected.value);
-                                  setFastAnswer(false);
-                                }
-                              }}
-                            >
-                              {RESEARCH_MODES.map((mode) => (
-                                <option key={mode.value} value={mode.value}>{mode.label}</option>
-                              ))}
-                            </select>
-                          </label>
-                          <button
-                            className={`composer-capability${deepWork ? ' active' : ''}`}
-                            type="button"
-                            aria-label="Toggle deep work"
-                            aria-pressed={deepWork}
-                            title={
-                              deepWorkLocked
-                                ? 'Deep Work is permanently enabled for this conversation'
-                                : 'Permanently upgrade this conversation to use a coordinator and focused worker'
-                            }
-                            disabled={sending || deepWorkLocked}
-                            onClick={() => {
-                              setDeepWork((enabled) => {
-                                if (!enabled) setFastAnswer(false);
-                                return !enabled;
-                              });
-                            }}
-                          >
-                            <Icon name="agents" size={13} />
-                            Deep work
-                          </button>
                         </div>
                       </details>
                     </div>
@@ -1374,7 +1420,7 @@ export function ResearchChatPage() {
                           className="composer-icon composer-send"
                           type="button"
                           aria-label="Queue steering message"
-                          disabled={queueingSteering || !content.trim()}
+                          disabled={queueingSteering || uploading || attachments.length > 0 || !content.trim()}
                           onClick={() => void send()}
                         >
                           {queueingSteering
@@ -1387,7 +1433,7 @@ export function ResearchChatPage() {
                         className="composer-icon composer-send"
                         type="button"
                         aria-label="Send message"
-                        disabled={sending || !content.trim()}
+                        disabled={sending || uploading || historyState === 'loading' || !content.trim()}
                         onClick={() => void send()}
                       >
                         <Icon name="arrowRight" size={16} />
@@ -1395,6 +1441,11 @@ export function ResearchChatPage() {
                     )}
                   </div>
                 </div>
+                <p className="composer-attachment-help" id="chat-attachment-help">
+                  .md / .txt (default 2 MiB), .pdf (default 40 MiB). Up to 10 files.
+                  {' '}Files are saved and indexed before sending. Type a request to start.
+                  {attachments.length ? ' Removing an attachment keeps the uploaded file in your workspace.' : ''}
+                </p>
               </div>
             </div>
           </div>
@@ -1730,15 +1781,6 @@ function liveReasoningTimeline(timeline: TurnTimeline): TurnTimeline | null {
     toolCount: 0,
     agentCount: 0,
     running: true,
-  };
-}
-
-function activityTimeline(timeline: TurnTimeline): TurnTimeline {
-  return {
-    ...timeline,
-    steps: timeline.steps.filter(
-      (step) => step.kind !== 'reasoning' || !step.streaming,
-    ),
   };
 }
 

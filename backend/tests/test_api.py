@@ -6,9 +6,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from backend.app import create_app
+from backend.agents.blueprint import SessionPolicySpec
 from backend.agents.context import ScholarWeaveContext
 from backend.conversations.schemas import ConversationMessageRequest
-from backend.conversations.turns import RESEARCH_TOOL_IDS
+from backend.conversations.turns import RESEARCH_TOOL_IDS, WORK_PLAN_TOOL_IDS
 from backend.runs.schemas import SteeringMessageRequest
 
 
@@ -56,6 +57,68 @@ def test_conversation_inputs_have_no_character_ceiling(request_type) -> None:
     assert request_type(content=content).content == content
     with pytest.raises(ValueError):
         request_type(content="")
+
+
+@pytest.mark.parametrize("chat_window", [30_000, 262_144])
+@pytest.mark.parametrize("deep_work", [False, True])
+def test_chat_context_controls_compaction_and_survives_reload(
+    test_settings, stub_provider, chat_window, deep_work,
+) -> None:
+    test_settings.agent_context_high_water_ratio = 0.5
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        provider = client.post("/api/providers", json={
+            "name": "Context override",
+            "kind": "openai_compatible",
+            "base_url": f"{stub_provider.base_url}/v1",
+            "models": [
+                {"name": "stub-model", "capabilities": ["chat", "tools"], "context_window_tokens": 131_072},
+                {"name": "summary-helper", "capabilities": ["chat"], "context_window_tokens": 32_768},
+            ],
+        })
+        assert provider.status_code == 201, provider.text
+        profile_id = provider.json()["id"]
+        configured = client.put("/api/settings", json={"default_model_references": {
+            "compaction": {"provider_profile_id": profile_id, "model": "summary-helper"},
+        }})
+        assert configured.status_code == 200, configured.text
+        conversation = client.post("/api/agent/conversations", json={
+            "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
+        }).json()
+        history = [
+            {"role": "user", "content": "Explain the existing research."},
+            {"role": "assistant", "content": "x" * (chat_window * 2)},
+            {"role": "user", "content": "Keep the evidence available."},
+            {"role": "assistant", "content": "I will retain the evidence."},
+            {"role": "user", "content": "Keep the research scope unchanged."},
+            {"role": "assistant", "content": "I will use the original scope."},
+        ]
+        session = app.state.services.conversation_sessions.get(conversation["id"], SessionPolicySpec())
+        client.portal.call(session.add_items, history)
+        response = client.post(f"/api/agent/conversations/{conversation['id']}/messages", json={
+            "content": "Continue explaining.", "deep_work": deep_work,
+            "web_enabled": False, "context_window_tokens": chat_window,
+        })
+        assert response.status_code == 202, response.text
+        assert response.json()["run"]["context_window_tokens"] == chat_window
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        assert run["context_window_tokens"] == chat_window
+        compacted = [event["payload"] for event in run["events"] if event["event_type"] == "context.compacted"]
+        assert compacted
+        assert compacted[0]["context_window_tokens"] == chat_window
+        assert compacted[0]["summary_model_role"] == "helper"
+        assert any(request["model"] == "summary-helper" for request in stub_provider.requests)
+        prepared = [event["payload"] for event in run["events"] if event["event_type"] == "context.prepared"]
+        assert prepared
+        assert all(payload["context_window_tokens"] == chat_window for payload in prepared)
+        assert client.get(
+            "/api/runs", params={"conversation_id": conversation["id"]},
+        ).json()[0]["context_window_tokens"] == chat_window
+    with TestClient(create_app(test_settings)) as client:
+        persisted = client.get(f"/api/runs/{run['id']}")
+        assert persisted.status_code == 200, persisted.text
+        assert persisted.json()["context_window_tokens"] == chat_window
 
 
 def test_public_api_is_research_only(test_settings) -> None:
@@ -318,12 +381,15 @@ def test_research_agent_uses_only_the_lean_tool_surface(
 
         assert run["status"] == "completed", run
         assert set(stub_provider.tools_offered) == {
-            "set_conversation_title",
+            "create_work_plan",
+            "read_work_plan",
+            "update_work_item",
             "search_research_sources",
             "acquire_research_source",
             "search_research_library",
             "organize_research_library",
             "list_workspace",
+            "organize_workspace",
             "workspace_index",
             "read_research_paper",
             "read_research_web_page",
@@ -338,7 +404,7 @@ def test_research_agent_uses_only_the_lean_tool_surface(
             "research.workspace.list", "research.workspace.index", "research.notes.search",
         }
         assert all(attempt.status == "completed" for attempt in record.tool_attempts)
-        assert len(record.blueprint_json["tools"]) == len(RESEARCH_TOOL_IDS) + 1
+        assert len(record.blueprint_json["tools"]) == len(RESEARCH_TOOL_IDS) + len(WORK_PLAN_TOOL_IDS)
         snapshot_response = client.get(f"/api/runs/{run['id']}/prompt-snapshot")
         assert snapshot_response.status_code == 200, snapshot_response.text
         snapshot = snapshot_response.json()
@@ -387,7 +453,6 @@ def test_fast_answer_message_uses_bounded_web_blueprint(
         entry = record.blueprint_json["agents"][0]
         assert "Make at most 3 external" in entry["instructions"]
         assert set(entry["tool_ids"]) == {
-            "set-title",
             "search-sources",
             "acquire-source",
             "read-web-page",
@@ -460,10 +525,10 @@ def test_legacy_deep_work_endpoint_is_listed_in_unified_chat_and_has_bounded_wor
         ]
         assert blueprint["agent_tools"][0]["max_turns"] is None
         assert blueprint["run"]["max_turns"] is None
-        assert blueprint["run"]["max_tool_concurrency"] == 4
+        assert blueprint["run"]["max_tool_concurrency"] == 1
 
 
-def test_main_chat_message_can_enable_deep_work(
+def test_main_chat_deep_work_is_per_message_not_a_permanent_upgrade(
     test_settings,
     stub_provider,
 ) -> None:
@@ -502,7 +567,7 @@ def test_main_chat_message_can_enable_deep_work(
         )
 
         assert response.status_code == 202, response.text
-        assert response.json()["conversation"]["kind"] == "deep_work"
+        assert response.json()["conversation"]["kind"] == "autonomous"
         run = wait_for_run(client, response.json()["run"]["id"])
         assert run["status"] == "completed", run
         stored_run = app.state.services.runs.get(run["id"])
@@ -510,19 +575,19 @@ def test_main_chat_message_can_enable_deep_work(
         assert stored_run.runtime_metadata_json["autonomous_work"] is True
         assert client.get(
             f"/api/agent/conversations/{conversation['id']}"
-        ).json()["kind"] == "deep_work"
+        ).json()["kind"] == "autonomous"
         assert app.state.services.conversation_turns.compile_conversation(
             conversation["id"]
-        ).blueprint.name == "ScholarWeave deep work"
-        incompatible = client.post(
+        ).blueprint.name == "ScholarWeave chat"
+        quick = client.post(
             f"/api/agent/conversations/{conversation['id']}/messages",
             json={
                 "content": "Try fast mode.",
-                "fast_answer": True,
+                "response_effort": "quick",
             },
         )
-        assert incompatible.status_code == 400
-        assert "Fast Answer is unavailable" in incompatible.text
+        assert quick.status_code == 202
+        assert wait_for_run(client, quick.json()["run"]["id"])["status"] == "completed"
 
 
 def test_main_chat_rejects_fast_answer_with_deep_work(test_settings) -> None:

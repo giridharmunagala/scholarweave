@@ -25,7 +25,19 @@ export function applyChatStreamEvent(
   state: ChatStreamState,
   event: RunStreamEvent,
 ): ChatStreamState {
+  if (event.sequence <= (state.events[state.events.length - 1]?.sequence ?? -1)) {
+    if (state.events.some((previous) => previous.sequence === event.sequence)) return state;
+    return restoreChatStream([...state.events, event]);
+  }
   return { ...applyStreamText(state, event), events: [...state.events, event] };
+}
+
+export function mergeStreamEvents(saved: readonly RunStreamEvent[], live: readonly RunStreamEvent[]) {
+  const events = new Map(saved.map((event) => [event.sequence, { ...event, created_at: event.created_at ?? '' }]));
+  for (const event of live) events.set(event.sequence, {
+    ...event, created_at: event.created_at ?? events.get(event.sequence)?.created_at ?? '',
+  });
+  return [...events.values()].sort((a, b) => a.sequence - b.sequence);
 }
 
 function applyStreamText(
@@ -111,7 +123,6 @@ function applyStreamText(
 }
 
 export function restoreChatStream(events: RunStreamEvent[]): ChatStreamState {
-  return [...events]
-    .sort((left, right) => left.sequence - right.sequence)
+  return mergeStreamEvents([], events)
     .reduce(applyChatStreamEvent, emptyChatStream);
 }

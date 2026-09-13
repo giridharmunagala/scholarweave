@@ -10,6 +10,7 @@ import pytest
 import httpx
 
 from backend.agents.blueprint import FunctionToolSpec, ModelReferenceSpec, SessionPolicySpec
+from backend.agents.harness import AgentDefinition, RunSettings, run_agent
 from backend.conversations.turns import (
     RESEARCH_TOOL_IDS,
     deep_work_blueprint,
@@ -23,6 +24,8 @@ from backend.research.sources import WebSourceUnavailable
 from backend.agents.context import ScholarWeaveContext
 from backend.persistence.files import StorageError
 from backend.tools.catalog import APPLICATION_TOOLS, _factory, create_tool_catalog
+from backend.tools.policy import ToolInputError
+from backend.tests.harness_support import stub_binding
 from backend.tools.runtime import (
     ApplicationToolRuntime,
     _paper_model_provenance,
@@ -784,15 +787,9 @@ async def test_conversation_title_tool_is_first_turn_only(test_settings) -> None
         await services.close()
 
 
-def test_only_main_agent_receives_title_tool_on_first_turn() -> None:
-    first_research = research_blueprint({}, first_turn=True)
-    later_research = research_blueprint({}, first_turn=False)
-    first_deep_work = deep_work_blueprint({}, first_turn=True)
-
-    assert "set-title" in first_research.agents[0].tool_ids
-    assert "set-title" not in later_research.agents[0].tool_ids
-    assert "set-title" in first_deep_work.agents[0].tool_ids
-    assert "set-title" not in first_deep_work.agents[1].tool_ids
+def test_new_chat_blueprints_do_not_spend_model_calls_on_titles() -> None:
+    for blueprint in (research_blueprint({}), deep_work_blueprint({})):
+        assert all("set-title" not in agent.tool_ids for agent in blueprint.agents)
 
 
 @pytest.mark.anyio
@@ -1304,6 +1301,160 @@ def test_work_plan_tracks_pending_items() -> None:
         context,
     )
     assert finished["complete"] is True
+
+
+def test_work_plan_recreation_preserves_progress_and_rejects_replacement() -> None:
+    context = ScholarWeaveContext(run_id="work-run", tool_runtime=Runtime())
+    arguments = {"items": [{"id": "DSP", "title": "Inspect DSP evidence"}]}
+    create_work_plan(arguments, context)
+    completed = update_work_item(
+        {"id": "DSP", "status": "completed", "summary": "Read source pages."}, context,
+    )
+
+    assert create_work_plan(arguments, context) == completed
+    with pytest.raises(ToolInputError, match="read_work_plan"):
+        create_work_plan({"items": [{"id": "different", "title": "Replace plan"}]}, context)
+    assert work_plan(context) == completed
+
+
+@pytest.mark.anyio
+async def test_work_plan_invalid_updates_are_known_failures_and_can_be_corrected(test_settings) -> None:
+    services = create_services(test_settings)
+    try:
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="work-validation", tool_runtime=runtime)
+        catalog = create_tool_catalog()
+
+        async def invoke(catalog_id, arguments):
+            tool = catalog.build_function_tool(FunctionToolSpec(id="plan", catalog_id=catalog_id))
+            return await tool.on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=catalog_id), json.dumps(arguments),
+            )
+
+        initial = await invoke("work.plan.create", {
+            "items": [{"id": "sources", "title": "Inspect sources"}],
+        })
+        for arguments in (
+            {"id": "DSP", "status": "completed", "summary": "Done"},
+            {"id": "sources", "status": "completed", "summary": "   "},
+        ):
+            with pytest.raises(RuntimeError) as error:
+                await invoke("work.plan.update", arguments)
+            payload = json.loads(str(error.value))
+            assert payload["category"] == "invalid_input"
+            assert payload["unknown_outcome"] is False
+            if arguments["id"] == "DSP":
+                assert "sources" in payload["message"]
+                assert "read_work_plan" in payload["message"]
+            assert work_plan(context) == initial
+        await invoke("work.plan.update", {
+            "id": "sources", "status": "in_progress", "summary": "Reading source pages.",
+        })
+        deferred = await invoke("work.plan.update", {
+            "id": "sources", "status": "pending", "summary": "Resume after clarification.",
+        })
+        assert deferred["pending"][0]["id"] == "sources"
+        assert deferred["pending"][0]["status"] == "pending"
+        assert deferred["complete"] is False
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_workspace_organization_tool_mutates_only_the_selected_file(test_settings) -> None:
+    services = create_services(test_settings)
+    try:
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="organize", tool_runtime=runtime)
+        tool = create_tool_catalog().build_function_tool(
+            FunctionToolSpec(id="organize", catalog_id="research.workspace.organize"),
+        )
+        note = services.workspace.create_note(name="Draft", content="uniqueneedle", tags=["keep"])
+        untouched = services.workspace.create_note(name="Keep", content="other evidence")
+
+        async def invoke(action, path, *, destination=None, tags=None):
+            return await tool.on_invoke_tool(
+                SimpleNamespace(context=context, tool_call_id=action),
+                json.dumps({"action": action, "path": path, "destination": destination, "tags": tags}),
+            )
+
+        tagged = await invoke("set_tags", note.path, tags=["review", "keep"])
+        assert tagged["tags"] == ["review", "keep"]
+        moved = await invoke("move_file", note.path, destination="projects/topic/draft.md")
+        assert moved["path"] == "projects/topic/draft.md"
+        assert services.workspace.search(query="uniqueneedle")[0].note_id == note.note_id
+        deleted = await invoke("delete_file", moved["path"])
+        assert deleted["deleted"] is True
+        assert services.workspace.search(query="uniqueneedle") == []
+        assert services.workspace.read_file(untouched.path).content == untouched.content
+        with pytest.raises(RuntimeError) as error:
+            await invoke("delete_file", "projects")
+        assert json.loads(str(error.value))["unknown_outcome"] is False
+        assert services.workspace.read_file(untouched.path).content == untouched.content
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_native_work_tools_recover_from_wrong_ids_without_replacing_the_plan(
+    test_settings, stub_provider,
+) -> None:
+    services = create_services(test_settings)
+    binding = stub_binding(stub_provider)
+    try:
+        note = services.workspace.create_note(name="Discard draft", content="obsolete")
+        keep = services.workspace.create_note(name="Keep evidence", content="verified")
+        goal = "Delete only the selected draft and track the work."
+        plan = {"items": [{"id": "DSP", "title": "Remove selected draft"}]}
+        stub_provider.tool_plans = [
+            (goal, "create_work_plan", plan),
+            (goal, "update_work_item", {"id": "wrong", "status": "completed", "summary": "Not done"}),
+            (goal, "create_work_plan", {"items": [{"id": "wrong", "title": "Replace tracker"}]}),
+            (goal, "read_work_plan", {}),
+            (goal, "update_work_item", {"id": "DSP", "status": "in_progress", "summary": ""}),
+            (goal, "create_work_plan", plan),
+            (goal, "organize_workspace", {
+                "action": "delete_file", "path": note.path, "destination": None, "tags": None,
+            }),
+            (goal, "update_work_item", {
+                "id": "DSP", "status": "completed", "summary": "Deleted only the selected draft.",
+            }),
+        ]
+        catalog = create_tool_catalog()
+        definition = AgentDefinition(
+            id="worker", name="Worker", instructions="Use the work plan and selected file tools.",
+            binding=binding,
+            tools=[
+                catalog.build_function_tool(FunctionToolSpec(
+                    id=catalog_id.replace(".", "-"), catalog_id=catalog_id,
+                ))
+                for catalog_id in (
+                    "work.plan.create", "work.plan.update", "work.plan.read", "research.workspace.organize",
+                )
+            ],
+        )
+        record = services.runs._repository.create(
+            conversation_id=None, agent_name="Work tools", input_value=goal, blueprint={},
+        )
+        context = ScholarWeaveContext(run_id=record.id, tool_runtime=services.runs._tool_runtime)
+        result = await run_agent(definition, goal, context=context, settings=RunSettings())
+
+        assert result.final_output == stub_provider.reply
+        assert len(stub_provider.requests) == len(stub_provider.tool_plans) + 1
+        assert work_plan(context)["items"] == [{
+            "id": "DSP", "title": "Remove selected draft", "status": "completed",
+            "summary": "Deleted only the selected draft.",
+        }]
+        attempts = services.runs.get(record.id).tool_attempts
+        assert [attempt.status for attempt in attempts] == [
+            "completed", "failed", "failed", "completed", "completed", "completed", "completed", "completed",
+        ]
+        assert attempts[5].result_json["items"][0]["status"] == "in_progress"
+        assert services.workspace.search(query="obsolete") == []
+        assert services.workspace.read_file(keep.path).content == keep.content
+    finally:
+        await binding.client.close()
+        await services.close()
 
 
 @pytest.mark.anyio

@@ -45,6 +45,10 @@ def operation_policy(
     if catalog_id in {"research.sources.search", "research.web.read"}:
         return _NETWORK_READ
     action = arguments.get("action")
+    if catalog_id == "research.workspace.organize":
+        return _WRITE
+    if catalog_id == "research.library.organize":
+        return _LOCAL_READ if action == "list" else _WRITE
     if catalog_id == "research.workspace.index":
         return _LOCAL_READ if action == "status" else _WRITE
     if catalog_id == "research.paper.read":

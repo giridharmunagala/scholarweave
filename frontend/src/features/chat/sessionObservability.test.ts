@@ -36,6 +36,22 @@ function telemetry(id: string, overrides: Record<string, unknown> = {}) {
 }
 
 describe('buildSessionObservability', () => {
+  it('adds only reported cache hits, including zero, and preserves partial coverage on replay', () => {
+    const events = [
+      event(1, 'model.telemetry', telemetry('a', { cached_input_tokens: 80 })),
+      event(2, 'model.telemetry', telemetry('b', { timings: { cache_n: 0 } })),
+      event(3, 'model.telemetry', telemetry('c')),
+      event(4, 'model.telemetry', telemetry('a', { cached_input_tokens: 80 })),
+      event(5, 'model.telemetry', telemetry('bad', { cached_input_tokens: 'invalid' })),
+    ];
+    const summary = buildSessionObservability([run({ events }), run({ id: 'unknown' })]);
+    expect(summary.performance.cache).toEqual({ tokens: 80, reportedCalls: 2 });
+    expect(buildSessionObservability([run()]).performance.cache).toBeNull();
+    expect(buildSessionObservability([run({ events: [
+      event(1, 'model.telemetry', telemetry('bad', { cached_input_tokens: -3 })),
+    ] })]).performance.cache).toBeNull();
+  });
+
   it('identifies the coordinator separately from the blueprint name and early delegated events', () => {
     const summary = buildSessionObservability([run({
       agent_name: 'Research blueprint', status: 'running', finished_at: null,

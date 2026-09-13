@@ -1,7 +1,7 @@
 # ScholarWeave coding guide
 
-Local-first research for **one researcher on one machine**: sourced chat, intent-led Deep Work,
-papers, notes, summaries, native PDF extraction and OCR. No accounts, teams, sharing, permissions,
+Local-first assistance for **one researcher on one machine**: general chat, web/local lookup,
+intent-led research, papers, notes, optional summaries, native PDF extraction and OCR. No accounts, teams, sharing, permissions,
 or collaboration. Prefer reusing local evidence over acquiring or generating duplicate artifacts.
 
 ## Fast coding loop
@@ -56,10 +56,13 @@ colocated tests. Avoid reading all of the large tool runtime or run state machin
 
 ## Research behavior
 
-- Deep Work is a capability, not a command to execute on every turn. The **LLM** judges intent from
-  conversation context; no keyword triggers. Clarification/discussion can finish without a plan.
+- Auto/Quick/Thorough effort is per-message, never a permanent conversation upgrade. Quick retains
+  local sources and attachments. The **LLM** judges intent directly; no classifier calls or keyword
+  triggers. General chat, clarification, and narrow lookups can finish without a plan.
   Once research is requested and scoped, create a small plan; pending/in-progress items keep the run
-  going. Completed/blocked items need an honest outcome. Do not bypass an active plan.
+  going at any effort. Completed/blocked items need an honest outcome. Do not bypass an active plan.
+- Summaries belong in chat unless saving is requested; legacy explicit `review` retains its artifact
+  contract. Code execution and computational data analysis remain unsupported.
 - Delegation is explicit through `agent_tools`; workers see only the request, not the coordinator
   transcript. Maximum depth: coordinator -> sub-agent -> nested helper.
 - Canonical paper `notes.md` and `summary.md` are workspace files; summary versions are immutable.

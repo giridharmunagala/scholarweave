@@ -64,14 +64,8 @@ def validate_paper_summary_completion(
     folder = workspace.paper_folder(document_id)
     path = f"{folder}/summaries/{context.run_id}.md"
     metadata_path = f"{folder}/summaries/{context.run_id}.json"
-    activity = context.metadata.get("paper_activity", [])
-    saved = any(
-        isinstance(item, dict) and item.get("action") == "summary_saved"
-        and item.get("document_id") == document_id and item.get("version_path") == path
-        for item in (activity if isinstance(activity, list) else [])
-    )
     valid = False
-    if document_id and saved:
+    if document_id:
         try:
             content = workspace.read_file(path).content
             metadata = workspace.read_file(metadata_path).content
@@ -86,6 +80,10 @@ def validate_paper_summary_completion(
                 and metadata.get("document_id") == document_id
                 and metadata.get("path") == path
                 and metadata.get("mode") == mode
+                and (
+                    context.metadata.get("paper_summary_source_version") is None
+                    or metadata.get("source_version") == context.metadata["paper_summary_source_version"]
+                )
                 and metadata.get("content_hash") == hashlib.sha256(content.encode()).hexdigest()
                 and metadata.get("status") in ({"overview"} if mode == "overview" else {"reviewed", "partial"})
             )
@@ -99,6 +97,22 @@ def validate_paper_summary_completion(
                 f"The expected immutable version is {path}. Do not claim it exists without saving it.",
             ],
         )
+    # The immutable files can commit before the run's activity snapshot is persisted.
+    activity = context.metadata.get("paper_activity")
+    if not isinstance(activity, list):
+        activity = []
+        context.metadata["paper_activity"] = activity
+    if not any(
+        isinstance(item, dict) and item.get("action") == "summary_saved"
+        and item.get("document_id") == document_id and item.get("version_path") == path
+        for item in activity
+    ):
+        activity.append({
+            "action": "summary_saved", "document_id": document_id,
+            "path": metadata.get("canonical_path"), "version_path": path,
+            "coverage_complete": metadata.get("coverage_complete", False),
+            "review_complete": metadata.get("review_complete", False),
+        })
 
 
 class PaperSummaryService:
@@ -211,14 +225,27 @@ class PaperSummaryService:
                 run = self._runs.get(run.id)
                 await forward_telemetry()
                 raise
+            child_context = ScholarWeaveContext(
+                run_id=run.id, tool_runtime=context.tool_runtime,
+                metadata=dict(run.runtime_metadata_json or {}),
+            )
             if run.status != "completed":
-                raise ValidationError(run.error or f"Dedicated summary job {run.id} was {run.status}.")
+                try:
+                    validate_paper_summary_completion(child_context, workspace=self._workspace)
+                except ValidationError:
+                    raise ValidationError(
+                        run.error or f"Dedicated summary job {run.id} was {run.status}.",
+                    ) from None
             version, content = self.version(document_id, run.id)
             activity = context.metadata.setdefault("paper_activity", [])
-            for item in (run.runtime_metadata_json or {}).get("paper_activity", []):
+            for item in child_context.metadata.get("paper_activity", []):
                 if item.get("document_id") == document_id and item not in activity:
                     activity.append(item)
-            return {**version, "content": content, "summary_run_id": run.id}
+            return {
+                **version, "content": content, "summary_run_id": run.id,
+                "summary_run_status": run.status, "summary_run_error": run.error,
+                "recovered_saved_version": run.status != "completed",
+            }
 
     def start(
         self,
@@ -338,8 +365,9 @@ class PaperSummaryService:
             "Read existing evidence when available and resume at its exact cursor; otherwise read "
             "the first adaptive batch. Draft and self-check the "
             "citation-grounded summary, then call save_paper_summary_version exactly once. The save "
-            "updates summary.md and retains an immutable version. Finish with the saved version path "
-            "and material evidence limits. If the remaining turn budget cannot cover the paper, "
+            "updates summary.md and retains an immutable version. Its verified receipt completes "
+            "the job; no separate closing response or second save is needed. Include material "
+            "evidence limits in the summary. If the remaining turn budget cannot cover the paper, "
             "save an explicitly partial summary rather than claiming complete coverage."
         )
         source_complete = True
@@ -508,7 +536,7 @@ def paper_summary_blueprint(
                     ),
                     "model": model,
                     "model_settings": {"parallel_tool_calls": False},
-                    "tool_use_behavior": "stop_on_first_tool" if mode == "overview" else "run_llm_again",
+                    "tool_use_behavior": "run_llm_again",
                     "tool_ids": (
                         ["summary-save"] if mode == "overview"
                         else ["summary-read", "summary-checkpoint", "summary-save"]

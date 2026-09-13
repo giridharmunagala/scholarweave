@@ -25,6 +25,24 @@ class WorkspaceLayout:
     def knowledge_note(cls, note_id: str, title: str) -> str:
         return f"{cls.knowledge_root}/{cls.named_component(title, note_id)}.md"
 
+    @staticmethod
+    def chat_upload(filename: str, identifier: str) -> str:
+        return f"inbox/attachments/{identifier}/{filename}"
+
+    @staticmethod
+    def chat_pdf_text(paper_folder: str) -> str:
+        return f"{paper_folder}/attachments/source.md"
+
+    @classmethod
+    def is_chat_pdf_text(cls, path: str) -> bool:
+        parts = PurePosixPath(path).parts
+        return (
+            cls.paper_id(path) is not None
+            and len(parts) == 5
+            and parts[-2] == "attachments"
+            and PurePosixPath(path).suffix.lower() == ".md"
+        )
+
     @classmethod
     def paper_id(cls, path: str) -> str | None:
         parts = PurePosixPath(path).parts

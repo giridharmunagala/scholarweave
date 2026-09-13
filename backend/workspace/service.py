@@ -9,7 +9,7 @@ from typing import Any
 
 from backend.utils import dumps_json
 from backend.core.errors import ValidationError
-from backend.persistence.files import SafeStorage
+from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.models import WorkspaceEntry
 from backend.workspace.repository import WorkspaceRepository
 from backend.workspace.layout import WorkspaceLayout
@@ -145,8 +145,90 @@ class WorkspaceService:
 
     def delete_file(self, path: str) -> None:
         with self._index_lock:
-            self._storage.delete_workspace_file(path)
-            self._repository.delete_path(Path(path).as_posix())
+            normalized_path = self._storage.workspace_file_info(path).relative_path
+            self._storage.delete_workspace_file(normalized_path)
+            self._repository.delete_path(normalized_path)
+
+    def organize_file(
+        self,
+        *,
+        action: str,
+        path: str,
+        destination: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Apply an explicit, single-file agent operation without touching managed artifacts."""
+        if action not in {"move_file", "set_tags", "delete_file"}:
+            raise ValidationError("Workspace action must be move_file, set_tags, or delete_file.")
+        if action != "move_file" and destination is not None:
+            raise ValidationError("destination must be null except for move_file.")
+        if action != "set_tags" and tags is not None:
+            raise ValidationError("tags must be null except for set_tags.")
+        with self._index_lock:
+            normalized_path = self._organizable_path(path)
+            existing = self._repository.get(normalized_path)
+            if existing is None:
+                raise ValidationError(
+                    "Select an indexed file from list_workspace or search_research_notes; "
+                    "refresh the workspace index first for external files."
+                )
+            if not self._storage.resolve_path(
+                self._storage.settings.workspace_dir, normalized_path,
+            ).is_file():
+                raise ValidationError("The selected workspace file no longer exists.")
+            if action == "delete_file":
+                self.delete_file(normalized_path)
+                return {"path": normalized_path, "deleted": True}
+            if action == "set_tags":
+                if not isinstance(tags, list):
+                    raise ValidationError("set_tags requires a tags array; use [] to clear tags.")
+                try:
+                    normalized_tags = self._normalize_tags(tags)
+                except ValueError as error:
+                    raise ValidationError(str(error)) from error
+                document = self.set_tags(normalized_path, normalized_tags)
+                return {"path": document.path, "tags": list(document.tags)}
+            target = self._organizable_path(destination)
+            if self._repository.get(target) is not None:
+                raise ValidationError("Workspace destination already exists in the index.")
+            try:
+                self._storage.move_workspace_file(normalized_path, target)
+            except StorageError as error:
+                raise ValidationError(str(error)) from error
+            indexed = False
+            try:
+                entry, _ = self._entry_from_file(target, existing=existing)
+                self._repository.upsert(entry, previous_path=normalized_path)
+                indexed = True
+            finally:
+                if not indexed:
+                    self._storage.move_workspace_file(target, normalized_path)
+            return {"path": target, "previous_path": normalized_path, "tags": list(entry.tags_json)}
+
+    def _organizable_path(self, path: str | None) -> str:
+        if not isinstance(path, str) or not path.strip():
+            raise ValidationError("Select one explicit workspace-relative file path.")
+        parts = path.replace("\\", "/").split("/")
+        if any(not part or part.endswith((".", " ")) for part in parts) or any(
+            char in path for char in ':*?<>|\x00'
+        ):
+            raise ValidationError("Absolute paths, traversal, and wildcard patterns are not allowed.")
+        normalized = "/".join(parts)
+        try:
+            absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, normalized)
+        except StorageError as error:
+            raise ValidationError(str(error)) from error
+        resolved = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix()
+        if resolved.casefold() != normalized.casefold():
+            raise ValidationError("Workspace organization does not follow symbolic links.")
+        lowered = resolved.casefold().split("/")
+        if lowered[0] == ".scholarweave" or lowered[:2] in [
+            ["library", "papers"], ["inbox", "attachments"],
+        ]:
+            raise ValidationError("Managed paper files, attachments, and workspace metadata are protected.")
+        if absolute.suffix.lower() not in {".md", ".txt", ".json"}:
+            raise ValidationError("Select one standalone .md, .txt, or .json file, not a folder.")
+        return resolved
 
     def delete_folder(self, path: str) -> None:
         normalized_path = Path(path).as_posix().strip("/")
@@ -362,7 +444,7 @@ class WorkspaceService:
                 if existing is not None
                 else paper_name
             ),
-            kind=WorkspaceLayout.kind(info.relative_path),
+            kind="note" if existing is not None and existing.kind == "note" else WorkspaceLayout.kind(info.relative_path),
             media_type=media_type,
             size_bytes=info.size_bytes,
             modified_at=info.modified_at,

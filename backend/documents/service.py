@@ -109,6 +109,9 @@ class DocumentService:
     def get_document(self, document_id: str) -> Document | None:
         return self.repository.get(document_id)
 
+    def find_by_source_hash(self, sha256: str) -> Document | None:
+        return self.repository.find_by_source_hash(sha256)
+
     def get_document_artifacts(self, document_id: str) -> list[Artifact]:
         return self.repository.get_artifacts(document_id)
 

@@ -11,6 +11,7 @@ from backend.agents.catalog import FunctionToolDefinition, ToolCatalog
 from backend.agents.compiler import (
     GLOBAL_AGENT_INSTRUCTIONS,
     AgentCompiler,
+    current_system_information,
     with_global_agent_instructions,
     with_reasoning_effort,
 )
@@ -137,8 +138,8 @@ def test_compiler_builds_native_agent_topology() -> None:
         compiled.agents_by_id["researcher"].instructions
     )
     assert '"required":["answer"]' in compiled.agents_by_id["researcher"].instructions
-    assert "System information:\nCurrent date:" in compiled.entry_agent.instructions
-    assert "\nCurrent time:" in compiled.entry_agent.instructions
+    assert "Current date:" not in compiled.entry_agent.instructions
+    assert "Current time:" not in compiled.entry_agent.instructions
     assert compiled.max_turns is None
     assert compiled.run_settings.max_turns is None
 
@@ -269,9 +270,10 @@ def test_blueprint_rejects_nonpositive_turn_limits(max_turns, target) -> None:
         AgentBlueprint.model_validate(payload)
 
 
-def test_compiler_applies_explicit_context_window_to_every_agent() -> None:
+@pytest.mark.parametrize("context_window", [30_000, 262_144])
+def test_compiler_applies_explicit_context_window_to_every_agent(context_window) -> None:
     compiler = AgentCompiler(
-        Resolver(),
+        Resolver(context_window=131_072),
         tool_catalog(),
         settings=SimpleNamespace(
             user_timezone=None,
@@ -290,21 +292,21 @@ def test_compiler_applies_explicit_context_window_to_every_agent() -> None:
 
     compiled = compiler.compile(
         AgentBlueprint.model_validate(payload),
-        context_window_tokens=65_536,
+        context_window_tokens=context_window,
     )
 
     assert compiled.context_policy is not None
     assert (
         compiled.context_policy.context_window_tokens(compiled.agents_by_id["triage"])
-        == 65_536
+        == context_window
     )
     assert (
         compiled.context_policy.context_window_tokens(
             compiled.agents_by_id["researcher"]
         )
-        == 65_536
+        == context_window
     )
-    assert compiled.context_window_tokens == 65_536
+    assert compiled.context_window_tokens == context_window
     assert all(not agent.tools for agent in compiled.agents_by_id.values())
 
 
@@ -422,14 +424,58 @@ def test_parallel_tool_calls_only_reach_providers_that_support_them() -> None:
     )
 
 
-def test_global_instructions_include_current_date_and_time() -> None:
-    instructions = with_global_agent_instructions(
-        "Research carefully.",
+def test_system_information_includes_current_date_and_time() -> None:
+    information = current_system_information(
         at=datetime(2026, 8, 9, 1, 29, 15, tzinfo=UTC),
     )
 
-    assert "Current date: 2026-08-09" in instructions
-    assert "Current time: 01:29:15 UTC (UTC+00:00)" in instructions
+    assert "Current date: 2026-08-09" in information
+    assert "Current time: 01:29:15 UTC (UTC+00:00)" in information
+
+
+def test_system_information_uses_configured_local_timezone() -> None:
+    information = current_system_information(
+        at=datetime(2026, 8, 9, 22, 29, 15, tzinfo=UTC),
+        timezone_name="Asia/Kolkata",
+        user_profile="  Researcher in India.  ",
+    )
+    assert "Current date: 2026-08-10" in information
+    assert "Current time: 03:59:15 IST (UTC+05:30)" in information
+    assert "User context: Researcher in India." in information
+
+
+def test_compiled_instructions_and_tool_schemas_do_not_depend_on_clock(
+    test_settings, monkeypatch,
+) -> None:
+    clock = datetime(2026, 8, 9, 1, 29, 15, tzinfo=UTC)
+
+    class Clock:
+        @staticmethod
+        def now():
+            return clock
+
+    monkeypatch.setattr("backend.agents.compiler.datetime", Clock)
+    test_settings.user_profile = "Researcher in India."
+    compiler = AgentCompiler(Resolver(), create_tool_catalog(), test_settings)
+    source = deep_work_blueprint(
+        {"provider_profile_id": "local", "model": "stub-model"}, web_enabled=False,
+    )
+    first = compiler.compile(source)
+    clock = datetime(2026, 8, 10, 3, 59, 15, tzinfo=UTC)
+    second = compiler.compile(source)
+
+    for agent_id, first_agent in first.agents_by_id.items():
+        second_agent = second.agents_by_id[agent_id]
+        assert first_agent.instructions == second_agent.instructions
+        assert "User context: Researcher in India." in first_agent.instructions
+        assert "Current time:" not in first_agent.instructions
+        assert request_parameters(first_agent, [], first_agent.tools)["tools"] == (
+            request_parameters(second_agent, [], second_agent.tools)["tools"]
+        )
+
+    assert with_global_agent_instructions(
+        "Work.", global_instructions="Shared policy.", user_profile="  Researcher.  ",
+    ) == "Work.\n\nShared policy.\n\nUser context: Researcher."
 
 
 def test_compiler_rejects_missing_references() -> None:

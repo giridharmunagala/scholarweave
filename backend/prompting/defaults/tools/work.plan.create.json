@@ -1,7 +1,7 @@
 {
   "label": "Create work plan",
-  "description": "Create one concise plan for the autonomous run before starting research.",
+  "description": "For a substantial, scoped investigation or multi-step assignment, create one concise plan using stable IDs. Ordinary chat and targeted lookups need no plan. Items start pending. If a plan exists, continue it; never replace unfinished work. Repeating the same IDs and titles returns current progress without resetting it; a different plan is rejected.",
   "parameter_descriptions": {
-    "items": "One to ten concrete work items, each with a stable short ID and an outcome-focused title."
+    "items": "One to ten concrete work items with unique short string IDs and outcome-focused titles. Use these exact IDs for later updates; do not assume numbered or server-generated IDs."
   }
 }

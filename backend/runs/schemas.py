@@ -87,6 +87,10 @@ class RunResponse(RunSchema):
     conversation_id: str | None
     agent_name: str
     status: Literal["pending", "running", "completed", "failed", "cancelled"]
+    context_window_tokens: int | None = Field(
+        default=None,
+        description="Effective context size selected for this run, including compaction.",
+    )
     input: Any
     final_output: Any | None
     last_agent_name: str | None
@@ -132,6 +136,7 @@ def run_response(record) -> RunResponse:
         conversation_id=record.conversation_id,
         agent_name=record.agent_name,
         status=record.status,
+        context_window_tokens=record.context_window_tokens,
         input=record.input_json,
         final_output=record.final_output_json,
         last_agent_name=record.last_agent_name,

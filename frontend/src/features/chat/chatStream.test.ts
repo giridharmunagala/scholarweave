@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { RunStreamEvent } from '../../api/events';
-import { applyChatStreamEvent, emptyChatStream, restoreChatStream } from './chatStream';
+import { applyChatStreamEvent, emptyChatStream, mergeStreamEvents, restoreChatStream } from './chatStream';
 
 function event(
   sequence: number,
@@ -12,6 +12,40 @@ function event(
 }
 
 describe('builder chat streaming', () => {
+  it('does not duplicate text or tools when a restarted subscription replays live events', () => {
+    const events = [
+      event(1, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'Hello ' }),
+      event(2, 'tool.started', { tool_name: 'read', tool_call_id: 'a' }),
+      event(3, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'again' }),
+    ];
+    const state = [...events, ...events].reduce(applyChatStreamEvent, emptyChatStream);
+    expect(state.assistant).toBe('Hello again');
+    expect(state.tools).toHaveLength(1);
+    expect(state.events).toHaveLength(3);
+    const saved = [...events, event(4, 'tool.completed', { tool_name: 'read', tool_call_id: 'a' })];
+    const recovered = restoreChatStream(mergeStreamEvents(saved, state.events));
+    expect(recovered.assistant).toBe('Hello again');
+    expect(recovered.tools[0].status).toBe('completed');
+  });
+
+  it('retains worker traces without showing their text as the main answer or reasoning', () => {
+    const events = [
+      event(1, 'model.stream', { raw_type: 'response.reasoning_text.delta', delta: 'Main thought' }),
+      event(2, 'agent.stream', {
+        invocation_id: 'worker', delegated: true, raw_type: 'response.reasoning_text.delta',
+        delta: 'Worker thought', snapshot: true,
+      }),
+      event(3, 'agent.stream', {
+        invocation_id: 'worker', delegated: true, raw_type: 'response.output_text.delta',
+        delta: 'Worker handoff', snapshot: true,
+      }),
+      event(4, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'Main answer' }),
+    ];
+    const stream = restoreChatStream(events);
+    expect(stream.assistant).toBe('Main answer');
+    expect(stream.reasoning).toBe('Main thought');
+    expect(stream.events).toHaveLength(4);
+  });
   it('retracts only a retried response, including Unicode, identically on replay', () => {
     const events = [
       event(1, 'model.stream', { raw_type: 'response.output_text.delta', delta: 'Earlier. ' }),

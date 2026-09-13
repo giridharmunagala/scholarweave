@@ -20,6 +20,7 @@ export interface ReasoningStep {
   text: string;
   seconds: number | null;
   streaming: boolean;
+  startedAt?: number | null;
 }
 
 export interface ToolStep {
@@ -32,9 +33,12 @@ export interface ToolStep {
   detail: string | null;
   args: unknown;
   result: unknown;
-  status: 'running' | 'completed' | 'failed';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
   seconds: number | null;
   sources: TimelineSource[];
+  startedAt?: number | null;
+  callId?: string | null;
+  children?: AgentStep[];
 }
 
 export interface AgentStep {
@@ -44,8 +48,12 @@ export interface AgentStep {
   completedSequence: number | null;
   name: string;
   output: unknown;
-  status: 'running' | 'completed' | 'failed' | 'superseded';
+  status: 'running' | 'completed' | 'failed' | 'superseded' | 'cancelled' | 'interrupted';
   seconds: number | null;
+  startedAt?: number | null;
+  request?: string | null;
+  requestTruncated?: boolean;
+  children?: TurnTimeline;
 }
 
 export type TurnStep = ReasoningStep | ToolStep | AgentStep;
@@ -57,6 +65,7 @@ export interface TurnTimeline {
   agentCount: number;
   reasoningSeconds: number | null;
   running: boolean;
+  activity?: Omit<LiveActivity, 'completedSteps'> & { sequence: number };
 }
 
 export const emptyTurnTimeline: TurnTimeline = {
@@ -88,6 +97,109 @@ export function buildTurnTimeline(
   events: readonly RunStreamEvent[],
   options: { settled?: boolean } = {},
 ): TurnTimeline {
+  type Scope = {
+    id: string; name: string; parent: Scope | null; callId: string | null;
+    events: RunStreamEvent[]; settled: boolean; activeCalls: Set<string>; output: string;
+  };
+  const root: Scope = {
+    id: '', name: '', parent: null, callId: null, events: [],
+    settled: Boolean(options.settled), activeCalls: new Set(), output: '',
+  };
+  const scopes = new Map<string, Scope>();
+  const active: Scope[] = [];
+  const namedScope = (name: string | null) => [...active].reverse().find((scope) => scope.name === name);
+  for (const event of [...events].sort((a, b) => a.sequence - b.sequence)) {
+    const payload = event.payload;
+    const name = stringOr(payload.agent_name) ?? stringOr(payload.delegate_agent_name)
+      ?? (isRecord(payload.item) ? stringOr(payload.item.agent_name) : null);
+    const invocation = stringOr(payload.invocation_id);
+    let scope = invocation ? scopes.get(invocation)
+      : payload.delegated !== true && name === root.name ? undefined : namedScope(name);
+    if (event.event_type === 'agent.started' && name) {
+      if (payload.delegated !== true && !payload.parent_agent_name && (!root.name || name === root.name)) {
+        root.name = name;
+        root.events.push(event);
+        continue;
+      }
+      const parent = (stringOr(payload.parent_invocation_id)
+        ? scopes.get(String(payload.parent_invocation_id)) : undefined)
+        ?? namedScope(stringOr(payload.parent_agent_name)) ?? root;
+      scope = {
+        id: invocation ?? `agent-${event.sequence}`, name, parent,
+        callId: stringOr(payload.parent_tool_call_id)
+          ?? (parent.activeCalls.size === 1 ? [...parent.activeCalls][0] : null),
+        events: [], settled: false, activeCalls: new Set(), output: '',
+      };
+      scopes.set(scope.id, scope);
+      active.push(scope);
+      parent.events.push({ ...event, payload: { ...payload, invocation_id: scope.id, delegated: true } });
+      scope.events.push({ ...event, event_type: 'model.started' });
+      continue;
+    }
+    if (scope && ['agent.completed', 'agent.failed', 'agent.superseded'].includes(event.event_type)) {
+      scope.parent?.events.push({ ...event, payload: { ...payload, invocation_id: scope.id } });
+      scope.events.push({ ...event, event_type: event.event_type === 'agent.completed' ? 'run.completed' : 'run.failed' });
+      scope.settled = true;
+      const index = active.indexOf(scope);
+      if (index >= 0) active.splice(index, 1);
+      continue;
+    }
+    const owner = scope ?? root;
+    if (scope && event.event_type === 'agent.stream'
+      && payload.raw_type === 'response.output_text.delta' && typeof payload.delta === 'string') {
+      scope.output = payload.snapshot === true ? payload.delta : scope.output + payload.delta;
+    }
+    if (scope && event.event_type === 'model.retry'
+      && typeof payload.discarded_text_characters === 'number' && payload.discarded_text_characters > 0) {
+      scope.output = scope.output.slice(0, -payload.discarded_text_characters);
+    }
+    const callId = stringOr(payload.tool_call_id);
+    if (callId && event.event_type === 'tool.started') owner.activeCalls.add(callId);
+    if (callId && ['tool.completed', 'tool.failed'].includes(event.event_type)) owner.activeCalls.delete(callId);
+    owner.events.push(
+      event.event_type === 'agent.stream' ? { ...event, event_type: 'model.stream' } : event,
+    );
+    if (TERMINAL_EVENTS.has(event.event_type)) {
+      for (const pending of active) {
+        pending.events.push(event);
+        pending.settled = true;
+      }
+    }
+  }
+
+  const build = (scope: Scope): TurnTimeline => {
+    const timeline = buildScopeTimeline(scope.events, { settled: scope.settled || root.settled });
+    const nested: TurnTimeline[] = [];
+    for (const step of [...timeline.steps]) {
+      if (step.kind !== 'agent') continue;
+      const child = scopes.get(step.id);
+      if (!child) continue;
+      step.children = build(child);
+      step.output ??= child.output || null;
+      nested.push(step.children);
+      const tool = child.callId
+        ? [...timeline.steps].reverse().find((candidate): candidate is ToolStep =>
+          candidate.kind === 'tool' && candidate.callId === child.callId && candidate.sequence < step.sequence)
+        : null;
+      if (tool) {
+        (tool.children ??= []).push(step);
+        timeline.steps = timeline.steps.filter((candidate) => candidate !== step);
+      }
+    }
+    return {
+      ...timeline,
+      sources: dedupeSources([...timeline.sources, ...nested.flatMap((child) => child.sources)]),
+      toolCount: timeline.toolCount + nested.reduce((sum, child) => sum + child.toolCount, 0),
+      agentCount: timeline.agentCount + nested.reduce((sum, child) => sum + child.agentCount, 0),
+    };
+  };
+  return build(root);
+}
+
+function buildScopeTimeline(
+  events: readonly RunStreamEvent[],
+  options: { settled?: boolean } = {},
+): TurnTimeline {
   const sorted = [...events].sort((left, right) => left.sequence - right.sequence);
   const steps: MutableStep[] = [];
   let reasoningSoFar = '';
@@ -95,7 +207,9 @@ export function buildTurnTimeline(
   let phaseStart: number | null = null;
   let lastAt: number | null = null;
   let settled = options.settled === true;
+  let unfinishedStatus: 'failed' | 'cancelled' | 'interrupted' = 'interrupted';
   let rootAgent: { id: string | null; name: string } | null = null;
+  let activity: TurnTimeline['activity'];
 
   const closeReasoning = (at: number | null) => {
     if (!openReasoning) return;
@@ -112,10 +226,38 @@ export function buildTurnTimeline(
       if (phaseStart === null) phaseStart = at;
     }
 
+    if (event.event_type === 'model.phase' || event.event_type === 'model.started' || event.event_type === 'model.retry') {
+      const phase = event.event_type === 'model.phase' ? String(event.payload.phase) : 'waiting';
+      const labels: Record<string, string> = {
+        queued: 'Waiting in queue', waiting: 'Waiting for model', processing: 'Processing context',
+        thinking: 'Thinking', tool: 'Preparing tool call', writing: 'Writing the answer',
+      };
+      if (labels[phase]) activity = {
+        phase: phase === 'tool' ? 'preparing' : phase as LiveActivity['phase'],
+        label: event.event_type === 'model.retry' ? 'Retrying model response' : labels[phase],
+        detail: null, sequence: event.sequence, startedAt: at,
+      };
+    }
+    if (event.event_type === 'context.compaction_started') activity = {
+      phase: 'processing', label: 'Shortening conversation context',
+      detail: null, sequence: event.sequence, startedAt: at,
+    };
+    if (event.event_type === 'tool.started' || event.event_type === 'tool.completed'
+      || event.event_type === 'tool.failed') activity = undefined;
+
     if (event.event_type === 'model.stream') {
       const rawType = String(event.payload.raw_type ?? '');
       const delta = event.payload.delta;
       if (typeof delta !== 'string') continue;
+      if (delta && event.payload.snapshot !== true) {
+        const phase = REASONING_DELTAS.has(rawType) ? 'thinking'
+          : rawType === 'response.output_text.delta' ? 'writing'
+            : rawType === 'response.function_call_arguments.delta' ? 'preparing' : null;
+        if (phase && activity?.phase !== phase) activity = {
+          phase, label: phase === 'thinking' ? 'Thinking' : phase === 'writing' ? 'Writing the answer' : 'Preparing tool call',
+          detail: null, sequence: event.sequence, startedAt: at,
+        };
+      }
       if (REASONING_DELTAS.has(rawType)) {
         const full = event.payload.snapshot === true ? delta : reasoningSoFar + delta;
         const addition = full.startsWith(reasoningSoFar)
@@ -148,7 +290,7 @@ export function buildTurnTimeline(
       const name = stringOr(event.payload.agent_name);
       if (!name) continue;
       const invocationId = stringOr(event.payload.invocation_id);
-      if (rootAgent === null) {
+      if (event.payload.delegated !== true && (rootAgent === null || rootAgent.name === name)) {
         rootAgent = { id: invocationId, name };
         continue;
       }
@@ -162,6 +304,8 @@ export function buildTurnTimeline(
         status: 'running',
         seconds: null,
         startedAt: at,
+        request: stringOr(event.payload.assignment),
+        requestTruncated: event.payload.assignment_truncated === true,
       });
       continue;
     }
@@ -274,15 +418,27 @@ export function buildTurnTimeline(
     if (TERMINAL_EVENTS.has(event.event_type)) {
       closeReasoning(at);
       settled = true;
+      unfinishedStatus = event.event_type === 'run.failed' ? 'failed'
+        : event.event_type === 'run.cancelled' ? 'cancelled' : 'interrupted';
     }
   }
 
-  if (settled) closeReasoning(lastAt);
+  if (settled) {
+    activity = undefined;
+    closeReasoning(lastAt);
+    for (const step of steps) {
+      if (step.kind !== 'reasoning' && step.status === 'running') {
+        step.status = unfinishedStatus;
+        step.seconds = duration(step.startedAt, lastAt);
+      }
+    }
+  }
 
   const running =
     !settled
     && (
       Boolean(openReasoning)
+      || Boolean(activity)
       || steps.some(
         (step) => (step.kind === 'tool' || step.kind === 'agent') && step.status === 'running',
       )
@@ -295,6 +451,7 @@ export function buildTurnTimeline(
     agentCount: steps.filter((step) => step.kind === 'agent').length,
     reasoningSeconds: totalReasoningSeconds(steps),
     running,
+    activity,
   };
 }
 
@@ -315,7 +472,7 @@ function applyRunItem(
     const args = parseArguments(raw?.arguments);
     const callId = stringOr(raw?.call_id) ?? stringOr(raw?.id);
     const existing =
-      (callId ? findTool(steps, (tool) => tool.callId === callId) : null)
+      (callId ? findTool(steps, (tool) => tool.callId === callId && !tool.settled) : null)
       ?? findTool(
         steps,
         (tool) => tool.name === name && !tool.settled && tool.args === null,
@@ -397,16 +554,8 @@ function findAgent(
 }
 
 function freezeStep(step: MutableStep): TurnStep {
-  if (step.kind === 'reasoning') {
-    const { startedAt: _startedAt, ...rest } = step;
-    return rest;
-  }
   if (step.kind === 'tool') {
-    const { startedAt: _startedAt, callId: _callId, settled: _settled, ...rest } = step as MutableTool;
-    return rest;
-  }
-  if (step.kind === 'agent') {
-    const { startedAt: _startedAt, ...rest } = step;
+    const { settled: _settled, ...rest } = step;
     return rest;
   }
   return step;
@@ -587,10 +736,19 @@ export function dedupeSources(sources: TimelineSource[]): TimelineSource[] {
 /* ---------------------------------------------------------- live status --- */
 
 export interface LiveActivity {
-  phase: 'starting' | 'thinking' | 'tool' | 'agent' | 'writing';
+  phase: 'starting' | 'thinking' | 'tool' | 'agent' | 'writing' | 'queued' | 'waiting' | 'processing' | 'preparing';
   label: string;
   detail: string | null;
   completedSteps: number;
+  startedAt?: number | null;
+}
+
+export function traceSteps(timeline: TurnTimeline): TurnStep[] {
+  return timeline.steps.flatMap(function flatten(step): TurnStep[] {
+    if (step.kind === 'tool') return [step, ...(step.children ?? []).flatMap(flatten)];
+    if (step.kind === 'agent') return [step, ...(step.children?.steps ?? []).flatMap(flatten)];
+    return [step];
+  }).sort((left, right) => left.sequence - right.sequence);
 }
 
 /**
@@ -601,34 +759,42 @@ export function describeLiveActivity(
   timeline: TurnTimeline,
   options: { writing?: boolean } = {},
 ): LiveActivity {
-  const completedSteps = timeline.steps.filter(
+  const steps = traceSteps(timeline);
+  const modelActivity = [timeline.activity, ...steps.flatMap((step) =>
+    step.kind === 'agent' && step.children?.activity ? [{ ...step.children.activity, detail: step.name }] : [])]
+    .filter((value) => value !== undefined).sort((a, b) => b.sequence - a.sequence)[0];
+  const completedSteps = steps.filter(
     (step) => !(step.kind === 'reasoning' && step.streaming)
       && !((step.kind === 'tool' || step.kind === 'agent') && step.status === 'running'),
   ).length;
 
-  for (let index = timeline.steps.length - 1; index >= 0; index -= 1) {
-    const step = timeline.steps[index];
+  for (let index = steps.length - 1; index >= 0; index -= 1) {
+    const step = steps[index];
+    if (modelActivity && modelActivity.sequence > step.sequence) return { ...modelActivity, completedSteps };
     if (step.kind === 'tool' && step.status === 'running') {
       return {
         phase: 'tool',
         label: `Using ${humanizeToolName(step.name)}`,
         detail: step.query ? truncate(prettyTarget(step.query), 90) : step.detail,
         completedSteps,
+        startedAt: step.startedAt,
       };
     }
     if (step.kind === 'agent' && step.status === 'running') {
       return {
         phase: 'agent',
-        label: `Running agent ${step.name}`,
+        label: step.output ? `${step.name} is writing` : `Running agent ${step.name}`,
         detail: null,
         completedSteps,
+        startedAt: step.startedAt,
       };
     }
     if (step.kind === 'reasoning' && step.streaming) {
-      return { phase: 'thinking', label: 'Thinking', detail: null, completedSteps };
+      return { phase: 'thinking', label: 'Thinking', detail: null, completedSteps, startedAt: step.startedAt };
     }
   }
 
+  if (modelActivity) return { ...modelActivity, completedSteps };
   if (options.writing) {
     return { phase: 'writing', label: 'Writing the answer', detail: null, completedSteps };
   }

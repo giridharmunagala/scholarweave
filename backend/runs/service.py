@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents.blueprint import AgentBlueprint
-from backend.agents.compiler import AgentCompiler, CompiledAgent, with_reasoning_effort
+from backend.agents.compiler import (
+    AgentCompiler,
+    CompiledAgent,
+    current_system_information,
+    with_reasoning_effort,
+)
 from backend.agents.context import ScholarWeaveContext, ToolRuntime
 from backend.agents.harness import (
     ConversationItem,
@@ -333,6 +338,12 @@ class RunService:
     ):
         compiled = with_reasoning_effort(compiled, reasoning_effort)
         _validate_completion_policy(compiled)
+        runtime_metadata = {
+            **dict(runtime_metadata or {}),
+            "system_information": current_system_information(
+                timezone_name=self._settings.user_timezone,
+            ),
+        }
         record = self._repository.create(
             conversation_id=conversation_id,
             agent_name=compiled.blueprint.name,
@@ -440,6 +451,11 @@ class RunService:
         conversation_id: str | None = None,
     ):
         _validate_completion_policy(compiled)
+        runtime_metadata = {
+            "system_information": current_system_information(
+                timezone_name=self._settings.user_timezone,
+            ),
+        }
         record = self._repository.create(
             conversation_id=conversation_id,
             agent_name=compiled.blueprint.name,
@@ -447,6 +463,7 @@ class RunService:
             blueprint=compiled.blueprint.model_dump(mode="json", by_alias=True),
             context_window_tokens=compiled.context_window_tokens,
             completion_policy_id=compiled.completion_policy_id,
+            runtime_metadata=runtime_metadata,
         )
         if conversation_id is not None:
             self._steering_inboxes[record.id] = SteeringInbox()
@@ -455,6 +472,7 @@ class RunService:
             compiled,
             input_value,
             conversation_id=conversation_id,
+            runtime_metadata=runtime_metadata,
         )
         return self._repository.get(record.id)
 
@@ -1223,7 +1241,14 @@ class RunService:
                             await emit_steering_applied(context, deferred_steering)
                             deferred_steering = []
                         epoch_items = await _resolved_epoch_input(
-                            session, epoch_input, internal=not first_epoch
+                            session,
+                            epoch_input,
+                            internal=not first_epoch,
+                            system_information=(
+                                context.metadata.get("system_information")
+                                if first_epoch and not recovered
+                                else None
+                            ),
                         )
                         context.metadata["_working_base_cursor"] = await session.checkpoint()
                         if session_checkpoint is None:
@@ -1628,6 +1653,7 @@ async def _resolved_epoch_input(
     epoch_input: RunInput,
     *,
     internal: bool = False,
+    system_information: str | None = None,
 ) -> list[ConversationItem]:
     """Build one epoch's model input from durable history plus the new items."""
     read_working = getattr(session, "get_working_items", session.get_items)
@@ -1638,6 +1664,11 @@ async def _resolved_epoch_input(
             new_items[0]["_scholarweave_internal_continuation"] = True
     else:
         new_items = [dict(item) for item in epoch_input if isinstance(item, dict)]
+    if new_items and isinstance(system_information, str) and system_information:
+        new_items.insert(0, {
+            "role": "developer",
+            "content": "Context recorded when this request was submitted:\n" + system_information,
+        })
     if new_items:
         await session.add_items(new_items)
     return [*history, *new_items]
@@ -1923,8 +1954,6 @@ def _recovery_instruction(run_id: str) -> str:
 
 
 def _work_continuation(context: ScholarWeaveContext) -> str | None:
-    if context.metadata.get("autonomous_work") is not True:
-        return None
     plan = context.metadata.get("work_plan")
     if not isinstance(plan, list) or not plan:
         return None

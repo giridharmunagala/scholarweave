@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.agents.compiler import AgentCompiler
+from backend.conversations.attachments import ConversationAttachmentService
 from backend.conversations.turns import (
     ConversationTurnService,
     PAPER_WORK_COMPLETION_POLICY_ID,
@@ -79,6 +80,7 @@ class ApplicationServices:
     inference_scheduler: InferenceScheduler
     runs: RunService
     conversation_turns: ConversationTurnService
+    conversation_attachments: ConversationAttachmentService
     summaries: PaperSummaryService
     runtime_version: str = RUNTIME_VERSION
 
@@ -212,10 +214,12 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
             ),
         },
     )
+    conversation_attachments = ConversationAttachmentService(storage, workspace, documents)
     conversation_turns = ConversationTurnService(
         compiler,
         conversations,
         runs,
+        conversation_attachments,
         prompts,
     )
     summaries = PaperSummaryService(
@@ -262,5 +266,6 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         inference_scheduler=inference_scheduler,
         runs=runs,
         conversation_turns=conversation_turns,
+        conversation_attachments=conversation_attachments,
         summaries=summaries,
     )

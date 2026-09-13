@@ -2,8 +2,8 @@
   "label": "Update work item",
   "description": "Keep the autonomous work tracker accurate as each item starts, completes, or becomes blocked.",
   "parameter_descriptions": {
-    "id": "The stable ID of an existing work item.",
-    "status": "The item's current status.",
-    "summary": "A concise result or blocker; required when completing or blocking an item."
+    "id": "The exact stable ID returned by create_work_plan or read_work_plan. Unknown IDs do not create items; read the plan and correct the ID instead.",
+    "status": "pending to defer or reopen work, in_progress when working, completed for finished work, or blocked for work that cannot proceed. Pending and in_progress items keep the run going.",
+    "summary": "A concise honest result, progress update, or blocker. Completed and blocked require a nonblank outcome; pending and in_progress may use an empty string."
   }
 }

@@ -49,7 +49,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "work.plan.create",
         "create_work_plan",
-        "Create the tracked work items for an autonomous run.",
+        "Create a tracked work plan with your own stable IDs; never replace an existing plan.",
         _object_schema(
             {
                 "items": {
@@ -81,7 +81,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
                 "id": {"type": "string", "minLength": 1, "maxLength": 80},
                 "status": {
                     "type": "string",
-                    "enum": ["in_progress", "completed", "blocked"],
+                    "enum": ["pending", "in_progress", "completed", "blocked"],
                 },
                 "summary": {"type": "string", "maxLength": 4000},
             },
@@ -220,6 +220,26 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
         ),
         True,
         "_list_workspace",
+    ),
+    (
+        "research.workspace.organize",
+        "organize_workspace",
+        "Move, tag, or explicitly delete one discovered standalone workspace text file.",
+        _object_schema(
+            {
+                "action": {"type": "string", "enum": ["move_file", "set_tags", "delete_file"]},
+                "path": {"type": "string", "minLength": 1, "maxLength": 1024},
+                "destination": {"type": ["string", "null"], "minLength": 1, "maxLength": 1024},
+                "tags": {
+                    "type": ["array", "null"],
+                    "maxItems": 32,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                },
+            },
+            required=["action", "path", "destination", "tags"],
+        ),
+        True,
+        "_organize_workspace",
     ),
     (
         "research.workspace.index",
@@ -508,6 +528,7 @@ def _factory(
             ),
             strict_json_schema=strict_json_schema,
             is_enabled=tool_enabled_after_failures(catalog_id),
+            ends_agent=catalog_id == "research.summary.save",
         )
 
     return build

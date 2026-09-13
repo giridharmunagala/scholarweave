@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import anyio
+from backend.providers.inference import report_inference_progress
 
 if TYPE_CHECKING:
     from backend.core.config import Settings
@@ -238,9 +239,11 @@ class ScheduledTransport(httpx.AsyncBaseTransport):
             profile_id=self._profile_id, model=model, server_url=server_url,
         )
         queued = perf_counter()
+        await report_inference_progress("queued")
         await lease.__aenter__()
         request.extensions["scholarweave_queue_wait_seconds"] = perf_counter() - queued
         try:
+            await report_inference_progress("waiting")
             response = await self._transport.handle_async_request(request)
         except BaseException:
             await lease.release()

@@ -1,6 +1,6 @@
 # ScholarWeave Architecture
 
-ScholarWeave is a local-first research workspace for one researcher on one local machine. One
+ScholarWeave is a local-first conversational assistant for one researcher on one local machine. One
 FastAPI process serves the API and built React application, runs a native agent harness, and stores
 state in SQLite plus guarded local files.
 
@@ -11,7 +11,7 @@ state in SQLite plus guarded local files.
 
 ```mermaid
 flowchart LR
-    Researcher[Researcher] -->|Research chat<br/>Deep Work<br/>Library and runs| SPA[React SPA]
+    Researcher[Researcher] -->|Chat, sources,<br/>and requested work| SPA[React SPA]
 
     subgraph Process["Single Uvicorn process"]
         API[FastAPI routers]
@@ -47,6 +47,57 @@ flowchart LR
 - `local_data/` stores generated extraction artifacts and operational run snapshots.
 - `workspace/` stores source PDFs beside canonical paper notes/summaries, and reusable knowledge notes.
 - Model traffic uses `POST /v1/chat/completions` through the official OpenAI client.
+
+### Terminal client
+
+`scholarweave_tui/` is an optional Textual presentation layer, installed with the `tui` extra and
+launched with `scholarweave` or `python -m scholarweave_tui`. It connects to the loopback
+HTTP API using `httpx` and the shared Pydantic wire models. The UI does not import application services,
+construct a service container, access SQLite, or write research files. The single-worker backend
+remains the only owner of inference, run lifecycle, persistence, and workspace indexing.
+
+The launcher checks backend health and library identity before reusing a server. If absent, it
+reserves an IPv4 loopback socket **before** spawning a separate backend process, passing the socket
+through Python multiprocessing (including on Windows). Concurrent launchers cannot initialize a
+second backend on that port. Readiness is bounded, startup logs are retained on failure, and closing
+the launcher requests graceful shutdown of only its own child. The child also watches its parent
+so an unexpectedly terminated TUI does not leave an owned backend behind. Pre-existing servers
+are never stopped. `--connect-only` disables autostart.
+
+`install-windows-launcher.ps1` at the repository root installs desktop/Start Menu shortcuts pointing to the small
+`scripts/launch-scholarweave.ps1` wrapper in this checkout. It runs the same Python entry point with
+`--build-frontend`; no custom executable or bundled runtime is built. Frontend build failures stop
+startup and remain visible rather than opening a success-shaped TUI.
+
+Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
+only: `/model` saves `last_chat_model_reference` through `PUT /api/settings` and applies it when a
+conversation is created, `/reasoning` sends a per-message `reasoning_effort` limited to the levels a
+`ProviderModel` declares, and `/effort` and `/web` set existing per-message request fields. Focus
+mode, the theme, the web toggle, and the per-model reasoning level live in
+`local_data/tui-preferences.json`; no research behaviour is stored there. The terminal observatory
+projects SSE events, resumes after the last received sequence, and reconciles the durable run after
+stream closure. The run line above the composer shows the live phase, elapsed time, and a Stop button
+that uses the existing run cancel route. Each turn retains a neutral stage ledger between the user
+message and assistant response, with completed and active work plus elapsed time. The assistant's
+muted usage line reports turn input, output, and cached tokens, cumulative conversation tokens, and
+the latest main-model context size against its window when the run reports those values. Short turns
+use a centered reading measure, while long answers expand across the available transcript width.
+Normal startup shows the conversation rail,
+keeps the optional observatory closed, and restores the most recently updated conversation; focus
+mode remains an explicit remembered choice after the presentation-default migration. The composer
+shows three lines by default, grows with wrapped or explicit lines to a bounded height, and then
+scrolls internally so a long draft does not consume the transcript.
+Leaving a screen does not cancel backend runs; quitting an owning launcher shuts its backend down.
+Notes are read and saved through
+the workspace API; a pre-save read catches already-visible external edits, but is not an atomic
+concurrency guarantee. The paper reader displays existing extracted chunks and citations rather than
+starting another extraction pipeline. Provider settings, paper acquisition, and PDF rendering remain
+in the web client.
+
+Presentation is theme-driven: `scholarweave_tui/themes.py` registers the shipped Textual themes and
+`app.tcss` styles everything from theme variables, so no colour is hard-coded in widgets.
+`scholarweave_tui/preferences.py` persists only the chosen theme in `local_data/tui-preferences.json`;
+research behaviour stays in backend settings, and a read-only data directory degrades silently.
 
 ### Single-researcher product boundary
 
@@ -102,15 +153,16 @@ not load every document or create a new service graph for a chat.
 
 ## 3. Product surfaces and workflows
 
-The HTTP surface selects a product workflow; it does not dynamically route among arbitrary agents.
+Each message selects an effort, not a permanent conversation workflow. The main model interprets
+intent directly; there is no separate classifier call or keyword router.
 
 ```mermaid
 flowchart TD
-    ResearchUI[Research Chat] -->|message + session capabilities| ResearchRoute[Conversation message route]
+    ResearchUI[Chat] -->|message + response effort| ResearchRoute[Conversation message route]
     ResearchRoute --> TurnService[ConversationTurnService]
 
-    TurnService -->|standard turn| ResearchFlow[Research blueprint]
-    TurnService -->|conversation promoted to Deep Work| DeepFlow[Deep Work blueprint]
+    TurnService -->|Auto or Quick| ResearchFlow[Single-agent chat blueprint]
+    TurnService -->|Thorough| DeepFlow[Deep Work blueprint]
 
     ResearchFlow --> Researcher[Researcher<br/>entry agent]
     DeepFlow --> Coordinator[Coordinator<br/>entry agent]
@@ -120,26 +172,46 @@ flowchart TD
 `ConversationTurnService` owns the application use case:
 
 1. Validate the conversation.
-2. Detect the first turn.
-3. Select the Research or Deep Work blueprint from the conversation's persistent capability.
-4. Apply feature flags such as web access and fast-answer mode.
+2. Resolve per-message `response_effort` (`auto`, `quick`, or `thorough`).
+3. Select the single-agent chat or Thorough blueprint independently of conversation kind.
+4. Apply web access and explicit legacy response-style contracts.
 5. Compile the blueprint.
 6. Attach the paper-work completion policy.
-7. Touch the conversation and create a run.
+7. Touch the conversation and create a run. Default titles are derived locally from the first
+   message; new blueprints do not require a title tool/model round trip.
 
 It does not execute model turns. `RunService` supervises execution, and `AgentRunner` owns the
 model/tool loop.
 
-Deep Work enables execution but does not require it on every turn. The coordinator model judges
-intent from the conversation, clarifies material ambiguity, and can answer discussion without a
-plan. Once it creates a plan for requested research, pending/in-progress items enforce continuation
-across epochs and recovery. There is no keyword classifier or missing-plan completion gate.
+Auto and Quick use one agent with local/web tools and optional work-plan tools. Narrow lookups and
+discussion can finish without a plan; the model plans only substantial scoped assignments. Thorough
+adds an optional focused worker and sequential execution, sharing the main instructions instead of
+duplicating them. A plan's pending/in-progress items enforce continuation across epochs and recovery
+at every effort, not only Deep Work. No plan is required merely to finish a conversation.
+
+Auto/Quick stay on the interactive inference lane; Thorough and dedicated saved-summary runs use
+background priority. The existing scheduler protects local capacity and cannot preempt an active
+model response. Independent Auto/Quick tool reads can overlap; Thorough workers remain sequential.
+
+Work plans accept stable model-chosen IDs and preserve them verbatim. Replaying the same plan
+returns its current progress without resetting it; replacing a different plan is rejected with the
+existing IDs. Items can return to pending or advance to in-progress/completed/blocked, with an
+honest summary required for terminal states. Invalid updates are known input failures, not uncertain
+write outcomes.
 
 Response style is independent of this execution capability. The default `research` style follows
 the requested outcome without requiring saved paper artifacts. `review` explicitly opts into a
 reviewed summary and durable notes; `learn` and `understand` retain their narrower evidence checks.
 The selected style is passed through Deep Work compilation and run metadata instead of being
-coerced to review.
+coerced to review. Summarizing in chat is distinct from requesting a saved summary. General chat,
+brainstorming, drafting, and explanation do not require paper acquisition or citations.
+
+Compatibility: persisted `kind="deep_work"` does not lock future chat messages. The old Deep Work
+message endpoint defaults to Thorough but accepts an explicit effort. Legacy `deep_work=True` is
+per-message only; `fast_answer=True` retains its old bounded-web contract for older API callers.
+Explicit `response_effort` overrides both flags. Legacy response-style fields remain API-only;
+the UI uses Auto/Quick/Thorough and resets effort after sending or switching chats. Previously saved
+run blueprints and completion policies remain available for recovery without a database migration.
 
 ## 4. Blueprint compilation
 
@@ -183,7 +255,7 @@ sequenceDiagram
 
     User->>UI: Send message
     UI->>API: POST conversation message
-    API->>Turns: Start Research or Deep Work turn
+    API->>Turns: Start turn with selected effort
     Turns->>Turns: Build and compile blueprint
     Turns->>Runs: Create run
     Runs->>DB: Persist input, blueprint, metadata
@@ -277,7 +349,7 @@ flowchart TD
     Middleware --> Sources[Web, arXiv,<br/>Wikipedia]
     Middleware --> Documents[PDF acquisition,<br/>OCR, reading, retrieval]
     Middleware --> Workspace[Notes, summaries,<br/>workspace search and writes]
-    Middleware --> Plans[Deep Work plan state]
+    Middleware --> Plans[Optional work-plan state]
     Middleware --> Results[Large-result storage<br/>and targeted reads]
 
     Documents --> Storage[SafeStorage]
@@ -331,24 +403,56 @@ flowchart LR
     DelegateTool --> Parent
 ```
 
-The worker cannot see the parent's transcript. Its lifecycle and usage remain visible, but its
-token stream and assistant messages are filtered so they do not become the parent's answer.
+The worker cannot see the parent's transcript. Its token stream is buffered independently as
+`agent.stream`, retaining invocation, parent invocation, and delegation tool-call IDs. The UI
+nests worker reasoning, tools, and responses under that call, including nested helpers. Worker
+assistant messages never become the parent's answer; durable snapshots preserve the trace on replay.
 Delegation is currently a nested, synchronous tool call rather than an independently scheduled
 child run.
+
+Deep Work executes tools and delegated tracks sequentially in provider call order. The coordinator
+creates the shared plan; workers can read it and update assigned items, but cannot create another
+plan. Runtime enforcement also applies to recovered Deep Work blueprints that previously enabled
+parallel calls. A serialized tool queues additional calls rather than rejecting or dropping them;
+cancelled runs never start queued work. Ordinary research can still parallelize independent tools.
 
 ## 9. Events and frontend reconstruction
 
 Events are the execution-to-UI contract, not merely logs.
 
-The default research surface prioritizes the answer and editable composer. A session status strip
-exposes cumulative token usage, weighted prefill/generation rates, and task progress. Observe opens
-an overview of usage and workers, with the full trace behind a disclosure. Focus hides the chat list
-and closes the panel while retaining the status strip and access to observability. Live reasoning
-and per-turn performance use collapsed disclosures. Response style, execution capabilities, model
-context/reasoning controls, and the fast-web shortcut sit under Options. Library
+Chat prioritizes the answer and editable composer. Observe opens the full hierarchical trace directly;
+usage and the optional work plan are compact, collapsed disclosures instead of a second worker dashboard.
+Running workers expand to show their current activity; assignments and handoffs remain expandable.
+The compact activity line is docked above the composer, outside transcript scrolling. It shows
+current-phase and total elapsed time, plus recent trace headlines. Active tools never join a
+collapsed group of completed calls. Repeated provider tool-call IDs create distinct steps across
+model iterations. Event reducers deduplicate replay across subscription restarts; after a stream
+error or ten seconds without events, a run snapshot repairs missing activity without discarding
+already-received live deltas.
+Focus hides the chat list and closes the panel while
+retaining access to observability. Live reasoning and per-turn performance use collapsed disclosures.
+Per-message effort replaces the overlapping research styles, permanent Deep Work toggle, and
+fast-web shortcut. Web access and model context/reasoning controls remain available. Library
 handoffs carry only a draft prompt identifying a paper or workspace path in `/?research=...`;
 opening one starts no run and does not reopen an unrelated conversation. The shared Markdown
 viewer memoizes unchanged content to avoid reparsing historical answers on each stream update.
+
+Chat uploads use `POST /agent/attachments` before a message is sent. `ConversationAttachmentService`
+validates bounded UTF-8 Markdown/text or PDF input, stores text through `WorkspaceService`, and reuses
+the existing document ingestion/OCR pipeline for PDFs. Text uploads live under
+`inbox/attachments/<content-key>/<filename>`; PDF originals remain in their canonical paper folders,
+with derived text under `attachments/` for workspace discovery. Each write updates FTS immediately; no
+whole-workspace refresh or model call is needed. Identical PDF bytes reuse the existing library
+document; text re-uploads do not overwrite external edits. Failed PDF preparation is surfaced to the
+user, retaining the source for retry rather than presenting an unreadable attachment as ready.
+
+Message requests carry bounded `attachment_paths`. The turn service validates these paths through
+safe storage, then persists readable file references and PDF document IDs with the user input, so
+follow-ups and recovered runs retain the same context without a separate attachment database.
+The model reads those paths using existing note/paper tools, interprets requested tasks within
+supported chat/research capabilities, asks about material ambiguity, and declines unsupported execution
+requests. File contents never override the user's scope or higher-priority instructions. Draft
+attachment removal only detaches the file; deleting a chat does not delete durable research files.
 
 ```mermaid
 flowchart LR
@@ -377,9 +481,14 @@ The same event list reconstructs:
 
 - streamed answer text and reasoning;
 - tool calls, results, failures, and durations;
-- delegated-agent lifecycle;
+- delegated-agent lifecycle and isolated worker reasoning/response streams;
 - context compaction;
 - usage and run terminal state.
+
+`model.phase` reports queue waiting, waiting for the provider, thinking, tool-argument preparation,
+and answer generation. A request-local callback connects the shared inference lane to the owning
+agent's events without adding provider request fields. Processing-context status is shown only
+when the provider supplies valid prompt-progress data; silence alone is not evidence of prefill.
 
 Each model attempt emits `model.telemetry` with a unique call ID. Overall usage includes main,
 delegated, dedicated-summary, retry, and compaction calls; replay and forwarded child events
@@ -387,6 +496,17 @@ are deduplicated by call ID. Missing provider usage is marked incomplete rather 
 from output characters. Main-agent context is tracked separately: estimated request input before
 generation, then provider-reported input plus output for the latest successful main-agent call.
 Delegate and compaction measurements cannot replace that context indicator.
+
+Prompt-cache reuse is optional: native usage `prompt_tokens_details.cached_tokens` (or
+`input_tokens_details.cached_tokens`) and llama.cpp `timings.cache_n` feed per-call telemetry.
+Cumulative cache totals deduplicate call IDs and report coverage separately, so missing reports
+never become zero-hit measurements. The usage disclosure hides cache information when unavailable.
+No cache/progress extension parameters are sent to generic OpenAI-compatible APIs.
+Static compiled instructions retain the user profile but not a freshly generated clock.
+Each new run persists one timezone-aware request-time context alongside its appended input.
+Delegates receive that same clock context without the parent transcript; tool rounds and recovery
+reuse it rather than regenerating time before the history. Existing compiled runs retain their
+original instructions. Stable prefixes enable server-side reuse but cannot guarantee cache hits.
 
 Prefill and generation speeds use llama.cpp response `timings` (`prompt_n`/`prompt_ms` and
 `predicted_n`/`predicted_ms`), including timing-only terminal stream chunks. Each average is total
@@ -443,7 +563,7 @@ erDiagram
 - **Items:** transcript-oriented projections.
 - **Epochs:** bounded execution segments and continuation points.
 - **Tool attempts:** retries, failures, result references, and uncertain writes.
-- **Goal state:** Deep Work plan.
+- **Goal state:** optional work plan at any effort.
 - **Claim:** current execution task and lease expiry for interruption recovery, not user ownership.
 - **Session items:** canonical cross-turn conversation history.
 
@@ -479,7 +599,12 @@ conversation ordering and steering.
 Legacy lossy working snapshots are rebuilt from canonical session history on their next read;
 versioned cache-backed snapshots then take over without deleting the original transcript.
 
-The selected model's context window, minus response capacity, determines the input ceiling.
+The chat's selected context window, minus response capacity, determines the input ceiling.
+An explicit chat selection takes precedence over provider metadata in either direction: a 30,000-token
+chat stays within that budget even for a 128K model, and a 256K selection is not clamped to a provider
+entry advertising 128K. Provider metadata and the application default only seed an unspecified window.
+The effective size is persisted with the run and returned in run responses; reopening a conversation
+restores its latest run's size instead of resetting the chat selector to the provider default.
 Legacy manual working-input, tool-output, and compaction-target settings no longer constrain
 execution. Context preparation derives a proportional retention target instead of collapsing an
 80k-token window to an 8k-token checkpoint.
@@ -504,9 +629,15 @@ Model-assisted summarization is a last resort for the older prefix. The determin
 avoids its model call but retains excerpts rather than a semantic summary. Neither writing a cache
 file nor provider KV caching reduces active context unless the request itself replaces or omits
 the original text.
+Soft-threshold compaction runs only when protected context fits below the high-water mark and
+reclaimable history is at least 5% of the input budget (or 256 tokens for small windows). This avoids
+repeated low-value compaction when fixed instructions and recent rounds dominate the request.
+Hard-limit pressure still forces safe paging/compaction or an explicit budget error.
 An optional `default_model_references.compaction` selects a helper through the normal provider
-resolver. It uses its own known context window, not the coordinator's capacity or reasoning setting.
-Insufficient capacity or an unusable helper response emits a compaction failure/fallback event and
+resolver. Its compaction request budget follows the active chat/agent context window, not the helper's
+provider-level context metadata. Helper reasoning settings remain independent. The selected size is an
+application budget, not a way to enlarge the model server's actual capacity. A provider rejection,
+history exceeding the selected budget, or an unusable helper response emits a compaction failure/fallback event and
 retries the main model before using the existing explicit deterministic fallback. Provider model
 switches use the shared inference scheduler.
 
@@ -519,6 +650,8 @@ Explicit custom blueprint turn limits remain opt-in; stop-and-answer requests on
 
 For automatic response allowances, `finish_reason=length` recomputes only the uncommitted model
 turn with a doubled allowance, bounded by remaining context rather than a fixed output ceiling.
+That larger allowance is local to the retried turn; later turns return to the configured default
+instead of needlessly reserving the largest earlier output budget and forcing compaction.
 Every attempt contributes to usage. No partial tool calls enter execution or durable conversation
 history. `model.retry` retracts partial assistant text in both live and persisted stream projections;
 completed tool operations and prior assistant messages remain intact. Cancellation interrupts
@@ -627,6 +760,12 @@ Agents share these services through `list_workspace` (bounded pages and `next_of
 summaries can be incomplete or stale: agents read selected artifacts and verify source citations.
 Immutable summary history remains at `/documents/{id}/summaries`, separate from canonical discovery.
 
+`organize_workspace` exposes single-file move/rename, tag replacement, and user-authorized deletion
+to research agents. It accepts exact indexed standalone text paths, refuses overwrites, traversal,
+folders, managed paper artifacts, attachments, and internal metadata, and preserves note IDs/tags
+on moves. Moves and deletions update the existing FTS index immediately; failed move indexing rolls
+the file back. Cleanup authorization is scoped by the conversation, not inferred from organization.
+
 Paper content search uses SQLite FTS5 with transactional chunk-index triggers, not an embedding or
 model call. Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses honor explicit
 item/character continuation cursors without a hidden global output cap.
@@ -655,6 +794,11 @@ Records retain exact spans and model/prompt provenance. Only contiguous full cov
 complete; otherwise saved summaries explicitly report partial coverage. Immutable summary versions
 are replay-safe, and a late job does not replace a canonical summary changed since that job started.
 Evidence never overwrites user notes; source changes invalidate generated summary/evidence reuse.
+The summary-save tool is terminal only after successful execution; reads, checkpoints, and failed
+saves do not end the job. The run completion validator verifies the immutable content hash and
+source identity before declaring success. No closing model call or duplicate save is needed.
+Recovery can reconstruct lost activity from a verified immutable receipt and reuse a saved version
+even when an older child run failed after saving, without generating a duplicate artifact.
 
 ## 13. Deterministic safety and completion controls
 
@@ -672,10 +816,10 @@ flowchart LR
 
 A model saying “done” is not sufficient when a completion policy applies. Review mode requires
 read/extraction, a complete cited summary, and durable notes. The default Research mode permits
-discussion of saved work and screening acquired candidates without forcing those artifacts; actual
-paper reads require a supplied citation in the answer. Learn/Understand modes permit targeted paper
-Q&A without full-review side effects, but enforce citations against observed paper reads.
-Deep Work must also close or block every tracked work item. Artifact intent outside explicit review
+discussion of saved work and screening acquired candidates without forcing those artifacts.
+Learn/Understand modes require targeted source reads without full-review side effects. Citation
+fidelity is instructed rather than checked by answer-format matching.
+Every effort must close or block its current run's tracked work items. Artifact intent outside explicit review
 is model-guided, not a keyword classifier or a hard write-permission gate.
 
 Tool retry policy is action-aware: paper preparation and summary coverage advancement are writes,

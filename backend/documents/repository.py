@@ -208,6 +208,14 @@ class DocumentRepository:
         with self.session_factory() as session:
             return session.get(Document, document_id)
 
+    def find_by_source_hash(self, sha256: str) -> Document | None:
+        with self.session_factory() as session:
+            return session.scalar(
+                select(Document).join(Artifact, Artifact.document_id == Document.id)
+                .where(Artifact.kind == "source_pdf", Artifact.sha256 == sha256)
+                .order_by(Document.created_at.asc()).limit(1)
+            )
+
     def get_artifacts(self, document_id: str) -> list[Artifact]:
         with self.session_factory() as session:
             return list(session.scalars(

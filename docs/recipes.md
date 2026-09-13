@@ -30,7 +30,7 @@ Never hand-edit generated contracts.
 Strict schemas must set `additionalProperties: false` and list every property in `required`.
 Represent optional values with a nullable type.
 
-## Change chat or Deep Work behavior
+## Change chat effort or research behavior
 
 - Main research prompt: `backend/prompting/defaults/prompts/research.md`
 - Deep Work coordinator: `backend/prompting/defaults/prompts/deep-work-coordinator.md`
@@ -42,13 +42,16 @@ Represent optional values with a nullable type.
 Use the local stub provider for behavior tests. Script real tool calls through it rather than
 mocking the compiler or the harness.
 
-Deep Work should answer discussion or clarify intent without a work plan. Let the model decide when
-the user has requested execution; never add keyword routing. Test both no-plan completion and
-continuation of an existing pending plan.
+Auto, Quick, and Thorough are per-message effort settings; never infer them from persistent
+conversation kind. Quick retains local files, attachments, and optional web access. Let the main
+model judge intent; do not add a classifier call or keyword routing. Test one-model-call discussion,
+switching effort in an old Deep Work chat, and continuation of pending plans at every effort.
+New chat titles are derived from the first message without a model/tool call.
 
 `research` is the default response style in both chat and Deep Work. Keep execution capability
 separate from per-turn response style: only explicit `review` requires saved paper summaries and
-notes. Test saved-summary discussion, candidate screening, requested writes, supplied citations,
+notes. Response styles and the old bounded-web shortcut are legacy API controls, not UI modes.
+Summaries requested in chat need not be saved. Test saved-summary discussion, candidate screening, requested writes, supplied citations,
 and steering as well as explicit review enforcement. Persisted older run snapshots retain their
 original completion policy; prompt changes apply to newly compiled turns.
 

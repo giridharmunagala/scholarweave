@@ -133,15 +133,6 @@
   white-space: normal;
 }
 .conversation.active .conversation-open strong { color: var(--accent-strong); font-weight: 600; }
-.conversation-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: .25rem;
-  width: fit-content;
-  color: var(--accent-strong);
-  font-size: .65rem;
-  font-weight: 650;
-}
 .conversation-time {
   flex: none;
   margin-top: .08rem;
@@ -191,26 +182,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chat-mode-badge,
-.delegate-status {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: .3rem;
-  padding: .2rem .48rem;
-  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--divider));
-  border-radius: var(--radius-pill);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  font-size: var(--text-xs);
-  font-weight: 650;
-  white-space: nowrap;
-}
-.delegate-status {
-  border-color: color-mix(in srgb, var(--accent) 35%, var(--divider));
-  cursor: pointer;
-}
-.delegate-status:hover { border-color: var(--accent); }
 .chat-list-toggle {
   display: grid;
   flex: none;
@@ -282,26 +253,17 @@
 }
 .spinner.tiny { width: 13px; height: 13px; border-width: 2px; }
 
-/*
- * The live read-out under the header. Its numbers are the buttons that open the
- * matching section of the Observe panel, so nothing here repeats a control that
- * already exists in the header.
- */
 .session-status-strip {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: .25rem;
+  gap: var(--space-2);
   min-width: 0;
   min-height: 40px;
-  padding: .3rem calc(var(--space-4) - .5rem);
+  padding: .3rem var(--space-4);
   border-bottom: 1px solid var(--divider);
   background: var(--surface);
   font-size: var(--text-xs);
-}
-.session-status-strip:not(.meter-row) {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  padding-left: var(--space-4);
   color: var(--muted);
 }
 .session-status-open {
@@ -315,49 +277,25 @@
   cursor: pointer;
 }
 .session-status-open:hover { border-color: var(--accent); background: var(--accent-soft); }
-/*
- * Run state is signalled with colour and a pulse, never with a button shape —
- * it reports what the session is doing, it does not open anything.
- */
-.session-status-state.active { align-items: center; gap: .4rem; }
-.session-status-state.active > strong { color: var(--accent-strong); }
-.session-status-state.active::before {
-  content: '';
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  animation: pulse-dot 1.6s var(--ease) infinite;
-}
-.session-worker-history > summary { margin: .2rem 0 .5rem; font-size: var(--text-xs); color: var(--muted); cursor: pointer; }
-.session-observability { display: grid; gap: var(--space-4); min-width: 0; }
-.session-observability-section { display: grid; gap: var(--space-2); min-width: 0; }
-.session-observability-section + .session-observability-section {
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--divider);
-}
-.session-observability-section h3 {
-  margin: 0;
-  color: var(--text-strong);
-  font-size: var(--text-sm);
-  font-weight: 650;
-}
+.session-observability { display: grid; gap: var(--space-2); min-width: 0; }
+.session-observability-section { min-width: 0; }
+.session-observability-section > summary { cursor: pointer; font-size: var(--text-xs); }
+.session-observability-section[open] > summary { margin-bottom: var(--space-2); }
 .session-metrics-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: .5rem;
   margin: 0;
 }
-.session-metric {
+.session-metrics-grid > div {
   min-width: 0;
   padding: .55rem .6rem;
   border: 1px solid var(--divider);
   border-radius: var(--radius-md);
   background: var(--surface);
 }
-.session-metric dt { color: var(--muted); font-size: var(--text-xs); }
-.session-metric dd {
+.session-metrics-grid dt { color: var(--muted); font-size: var(--text-xs); }
+.session-metrics-grid dd {
   margin: .15rem 0 0;
   color: var(--text-strong);
   font-size: var(--text-sm);
@@ -365,14 +303,14 @@
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
-.session-observability-note, .session-metric dd.session-observability-note {
+.session-observability-note {
   margin: 0;
   color: var(--muted);
   font-size: var(--text-xs);
   font-weight: 400;
   line-height: 1.5;
 }
-.session-run-list, .session-worker-list, .session-work-plan {
+.session-work-plan {
   display: grid;
   gap: var(--space-2);
   margin: 0;
@@ -380,27 +318,13 @@
   list-style: none;
   min-width: 0;
 }
-.session-worker-row, .session-work-item, .session-run-row {
+.session-work-item {
   min-width: 0;
   border: 1px solid var(--divider);
   border-radius: var(--radius-md);
   background: var(--surface);
   padding: var(--space-2);
 }
-.session-worker-heading { display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; }
-.session-worker-heading > strong { flex: 1; color: var(--text-strong); font-size: var(--text-sm); }
-.session-worker-heading > small { color: var(--muted); font-size: var(--text-xs); }
-.session-worker-request {
-  margin: .4rem 0;
-  max-height: 8rem;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: var(--text-sm);
-  line-height: 1.5;
-}
-.session-worker-phase { margin: .4rem 0; color: var(--accent-strong); font-size: var(--text-xs); overflow-wrap: anywhere; }
-.session-worker-row[data-status="running"] { border-left: 3px solid var(--accent); }
 .session-status-badge {
   display: inline-flex;
   padding: .12rem .4rem;
@@ -421,26 +345,9 @@
 .session-observability-error { font-size: var(--text-xs); overflow-wrap: anywhere; }
 .session-work-item { display: grid; gap: .3rem; font-size: var(--text-sm); }
 .session-work-item > .session-status-badge { justify-self: start; }
-.session-run-row > summary, .session-call-details > summary {
-  padding: .2rem 0;
-  cursor: pointer;
-  color: var(--text-strong);
-  font-size: var(--text-xs);
-}
-.session-run-row[open] > summary { margin-bottom: var(--space-2); }
-.session-call-details { margin-top: var(--space-2); }
-.session-call-details pre {
-  max-height: 22rem;
-  overflow: auto;
-  padding: var(--space-2);
-  background: var(--surface-2);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
 
 .chat-thread {
+  grid-row: 3;
   position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -581,6 +488,7 @@
    so waiting never looks like nothing happening. */
 .live-activity {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
   padding: .5rem .7rem;
@@ -590,6 +498,15 @@
   background: var(--accent-soft);
 }
 .live-activity-body { display: grid; gap: 1px; min-width: 0; margin-right: auto; }
+.composer-inner > .live-activity { margin-bottom: var(--space-2); }
+.live-activity-recent {
+  flex-basis: 100%;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .live-activity-body strong {
   overflow: hidden;
   color: var(--text-strong);
@@ -606,6 +523,8 @@
   white-space: nowrap;
 }
 .live-activity-elapsed {
+  display: grid;
+  text-align: right;
   flex: none;
   color: var(--muted);
   font-size: var(--text-xs);
@@ -821,6 +740,15 @@
   border-color: color-mix(in srgb, var(--accent) 42%, var(--divider));
 }
 .timeline-detail.agent .markdown-viewer { max-width: none; margin: 0; font-size: var(--text-sm); }
+.timeline-children {
+  margin-left: .8rem;
+  padding-left: .5rem;
+  border-left: 1px solid var(--divider);
+  min-width: 0;
+}
+.timeline-detail.agent { padding-left: .5rem; }
+.timeline-detail.agent > details > summary { cursor: pointer; font-size: var(--text-xs); color: var(--muted); }
+.timeline-detail.agent > details > p { white-space: pre-wrap; overflow-wrap: anywhere; }
 .timeline-detail.group { gap: 0; padding: 0 0 .3rem 1.6rem; }
 .timeline-detail h4 {
   margin: 0 0 .25rem;
@@ -901,14 +829,14 @@
   padding-top: var(--space-3);
   min-width: 0;
 }
-.session-trace > summary {
+.session-trace > h3 {
+  margin: 0;
   padding: .35rem 0;
   color: var(--text-strong);
   font-size: var(--text-sm);
   font-weight: 650;
-  cursor: pointer;
 }
-.session-trace > summary > span {
+.session-trace > h3 > span {
   float: right;
   color: var(--muted);
   font-size: var(--text-xs);
@@ -1120,6 +1048,58 @@
   overflow-y: auto;
 }
 .composer-box textarea:focus { box-shadow: none; }
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: 0;
+  padding: .3rem .4rem;
+  list-style: none;
+}
+.composer-attachment {
+  display: flex;
+  align-items: center;
+  gap: .35rem;
+  min-width: 0;
+  max-width: 100%;
+  padding: .2rem .35rem .2rem .5rem;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+  font-size: var(--text-xs);
+}
+.composer-attachment > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer-attachment > svg { flex-shrink: 0; }
+.composer-attachment button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  padding: .25rem;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.composer-attachment button:hover:not(:disabled) { color: var(--text); background: var(--surface-3); }
+.composer-attachment button:disabled { cursor: not-allowed; opacity: .5; }
+.composer-upload-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: .3rem .4rem;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+.composer-upload-status .spinner { flex-shrink: 0; }
+.composer-attachment-help {
+  margin: 0;
+  padding-inline: var(--space-1);
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
 .message.steering-queued { opacity: .72; }
 .message.steering-queued::after {
   content: 'Queued for the next model call';
@@ -1174,15 +1154,7 @@
   box-shadow: var(--shadow-lg);
 }
 .composer-options-popover .composer-reasoning,
-.composer-options-popover .composer-context,
-.composer-options-popover .research-mode-control { justify-content: space-between; }
-.composer-options-popover > .composer-capability { justify-self: start; }
-.composer-options-popover .research-mode-control {
-  display: flex;
-  width: 100%;
-  gap: var(--space-2);
-}
-.composer-options-popover .research-mode-control > span { display: inline; }
+.composer-options-popover .composer-context { justify-content: space-between; }
 .composer-options-help { margin: 0; font-size: var(--text-xs); color: var(--muted); line-height: 1.5; }
 
 .chat-model-picker {
@@ -1243,17 +1215,6 @@
   font-size: var(--text-xs);
 }
 .composer-context select:hover { background-color: var(--surface-2); color: var(--text); }
-.composer-work-controls { display: flex; align-items: center; gap: 2px; }
-.composer-work-controls select {
-  width: auto;
-  min-width: 0;
-  padding: .3rem 1.4rem .3rem .45rem;
-  border-color: transparent;
-  background-color: transparent;
-  color: var(--muted);
-  font-size: var(--text-xs);
-}
-.composer-work-controls select:hover { background-color: var(--surface-2); color: var(--text); }
 .composer-capability {
   display: inline-flex;
   align-items: center;
@@ -1269,15 +1230,14 @@
   cursor: pointer;
 }
 .composer-capability:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
-.composer-capability.active,
-.fast-answer-control.active .composer-capability {
+.composer-capability.active {
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
 .composer-capability:disabled { cursor: not-allowed; opacity: .5; }
 
-.research-mode-control {
+.response-effort-control {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1285,29 +1245,14 @@
   color: var(--muted);
   flex: none;
 }
-.research-mode-control > span { display: none; }
-
-.research-mode-control select {
-  max-width: 165px;
+.response-effort-control select {
+  width: auto;
   padding: 4px 6px;
   border: 1px solid var(--border);
   border-radius: 6px;
   background: var(--surface);
   color: var(--text);
   font: inherit;
-}
-.fast-answer-control { display: inline-flex; align-items: center; }
-.fast-answer-control input {
-  width: 2.8rem;
-  height: 1.8rem;
-  margin-left: 2px;
-  padding: .2rem .25rem;
-  border-color: var(--divider);
-  border-radius: var(--radius-md);
-  background: var(--surface-1);
-  color: var(--text);
-  font-size: var(--text-xs);
-  text-align: center;
 }
 
 .composer-icon {
@@ -1401,7 +1346,6 @@
   .suggestion-grid { grid-template-columns: minmax(0, 1fr); }
   .source-images { grid-auto-columns: 88%; }
   .focus-toggle > span, .activity-toggle > span:not(.count-badge) { display: none; }
-  .chat-mode-badge { display: none; }
   .composer-bar { flex-wrap: wrap; }
   .composer-controls { flex-basis: calc(100% - 2.5rem); }
   .composer-run-actions { margin-left: auto; }

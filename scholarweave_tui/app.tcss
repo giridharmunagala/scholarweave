@@ -1,0 +1,583 @@
+/* ScholarWeave cockpit.
+   Every colour comes from the active theme (see themes.py), so the whole
+   surface re-dresses itself when the researcher picks a different one. */
+
+Screen {
+    background: $background;
+    color: $foreground;
+    scrollbar-background: $background;
+}
+LoadingIndicator {
+    background: transparent;
+    color: $primary;
+}
+Tooltip {
+    background: $panel;
+    color: $foreground;
+    border: round $sw-line;
+    padding: 0 1;
+}
+
+/* --- top bar ----------------------------------------------------------- */
+#topbar {
+    height: 3;
+    background: $surface;
+    border-bottom: solid $sw-line;
+    padding-left: 1;
+}
+Masthead {
+    width: auto;
+    min-width: 6;
+    height: 3;
+    padding-right: 2;
+    content-align: left middle;
+}
+.tab {
+    width: 11;
+    min-width: 7;
+    height: 3;
+    background: $surface;
+    color: $text-muted;
+    border: none;
+    text-style: none;
+    padding: 0;
+}
+.tab:hover {
+    background: $sw-glow;
+    color: $foreground;
+}
+.tab.active {
+    background: $sw-glow;
+    color: $primary;
+    text-style: bold;
+}
+.tab:focus {
+    background: $primary-muted;
+    text-style: bold;
+}
+#busy {
+    width: auto;
+    min-width: 0;
+    height: 3;
+    padding: 0 2;
+    content-align: right middle;
+}
+#connection {
+    width: 1fr;
+    height: 3;
+    content-align: right middle;
+    padding-right: 2;
+    color: $success;
+}
+#connection.offline { color: $error; }
+
+/* --- shared furniture --------------------------------------------------- */
+#body { height: 1fr; }
+.eyebrow {
+    height: auto;
+    color: $text-muted;
+    text-style: bold;
+}
+.centered { text-align: center; }
+Button {
+    height: 3;
+    min-width: 8;
+    background: $panel;
+    color: $foreground;
+    border: none;
+    text-style: none;
+    padding: 0 1;
+}
+Button:hover { background: $primary-muted; }
+Button:focus { background: $primary-muted; text-style: bold; }
+Button.-primary {
+    background: $primary;
+    color: $background;
+    text-style: bold;
+}
+Button.-primary:hover, Button.-primary:focus { background: $primary-lighten-1; }
+Button.-error {
+    background: $panel;
+    color: $text-error;
+}
+Button.-error:hover, Button.-error:focus { background: $error-muted; color: $foreground; }
+Button:disabled { color: $text-disabled; }
+Input {
+    background: $background;
+    color: $foreground;
+    border: round $sw-line;
+}
+Input:focus { border: round $primary; }
+TextArea {
+    background: $background;
+    color: $foreground;
+    border: none;
+}
+Markdown {
+    background: transparent;
+    margin: 0;
+    padding: 0 1;
+}
+MarkdownH1 {
+    background: transparent;
+    color: $primary;
+    text-align: left;
+    text-style: bold;
+    border: none;
+    padding: 0;
+    margin-bottom: 1;
+}
+MarkdownH2, MarkdownH3, MarkdownH4 {
+    background: transparent;
+    color: $foreground;
+    text-align: left;
+    border: none;
+    padding: 0;
+}
+Rule {
+    height: 1;
+    margin: 1 0;
+    color: $sw-line;
+}
+OptionList {
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+OptionList > .option-list--option { padding: 1 1; }
+OptionList > .option-list--option-highlighted { background: $sw-glow; }
+OptionList:focus > .option-list--option-highlighted {
+    background: $primary-muted;
+    color: $foreground;
+    text-style: bold;
+}
+
+/* --- library rail ------------------------------------------------------- */
+#sidebar {
+    width: 30;
+    min-width: 24;
+    background: $surface;
+    border-right: solid $sw-line;
+    padding: 1 1 0 2;
+}
+#catalog-title { margin-bottom: 1; }
+#search { margin-bottom: 1; }
+#new {
+    width: 100%;
+    margin-bottom: 1;
+}
+#catalog { height: 1fr; }
+#catalog-empty {
+    height: 1fr;
+    color: $text-muted;
+    padding: 1 0;
+}
+#sidebar-hint {
+    height: auto;
+    color: $text-muted;
+    border-top: solid $sw-line;
+    padding: 1 0;
+}
+
+/* --- stage -------------------------------------------------------------- */
+#stage {
+    width: 1fr;
+    min-width: 30;
+    background: $background;
+}
+#section-title {
+    height: 3;
+    padding: 0 2;
+    content-align: left middle;
+    text-style: bold;
+    border-bottom: solid $sw-line;
+}
+#pages, #chat-pane, #paper-pane, #notes-pane { height: 1fr; }
+#transcript {
+    height: 1fr;
+    padding: 1 2;
+    align-horizontal: center;
+    scrollbar-gutter: stable;
+    scrollbar-size: 1 1;
+}
+
+/* --- welcome ------------------------------------------------------------ */
+Welcome {
+    width: 100%;
+    max-width: 120;
+    height: auto;
+    padding: 1 0;
+}
+#welcome-title {
+    height: 2;
+    text-align: center;
+    text-style: bold;
+    color: $primary;
+}
+#welcome-copy {
+    height: auto;
+    text-align: center;
+    color: $text-muted;
+}
+#welcome-starters {
+    height: auto;
+    margin-top: 1;
+    align-horizontal: center;
+}
+.starter {
+    width: auto;
+    height: 1;
+    padding: 0 1;
+}
+#welcome-hint {
+    height: auto;
+    margin-top: 1;
+    text-align: center;
+    color: $text-accent;
+}
+
+/* --- transcript --------------------------------------------------------- */
+ChatMessage, TranscriptNote {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+.message-body {
+    width: 100%;
+    max-width: 120;
+    height: auto;
+    padding: 1 2;
+    border-left: tall $sw-line;
+}
+.message.long .message-body {
+    max-width: 160;
+}
+.message.user .message-body {
+    background: $primary 8%;
+    border-left: tall $primary;
+}
+.message.assistant .message-body {
+    background: $surface;
+    border-left: tall $success;
+}
+.message-role {
+    padding: 0 1;
+    color: $primary;
+    text-style: bold;
+}
+.assistant .message-role { color: $success; }
+.message-spinner { padding: 0 1; }
+.note-body {
+    width: 100%;
+    max-width: 120;
+    height: auto;
+    color: $text-muted;
+}
+.turn-metadata .note-body {
+    padding: 0 3;
+    background: transparent;
+    border-left: tall $sw-line;
+}
+.message-usage {
+    height: auto;
+    margin-top: 1;
+    padding: 0 1;
+    color: $text-muted;
+    border-top: solid $sw-line;
+}
+.run-note .note-body {
+    padding: 0 1;
+}
+.run-note.failed .note-body { color: $text-error; }
+
+/* --- run line and composer ----------------------------------------------- */
+#runline-shell, #composer-shell {
+    width: 100%;
+    height: auto;
+}
+#runline {
+    width: 100%;
+    max-width: 128;
+    height: 1;
+    margin-bottom: 1;
+    align-vertical: middle;
+}
+#run-spinner {
+    width: 1fr;
+    height: 1;
+}
+#run-elapsed {
+    width: auto;
+    height: 1;
+    padding-right: 2;
+    color: $text-accent;
+}
+#composer-box {
+    width: 100%;
+    max-width: 128;
+    height: auto;
+    margin-bottom: 1;
+    padding: 0 1;
+    background: $surface;
+    border: round $sw-line;
+    border-title-color: $text-muted;
+    border-title-style: bold;
+    border-title-align: left;
+}
+#composer-box:focus-within {
+    border: round $primary;
+    border-title-color: $primary;
+}
+#composer {
+    height: 3;
+    background: transparent;
+}
+#composer .text-area--cursor-line { background: transparent; }
+#slash {
+    height: auto;
+    max-height: 8;
+    margin-bottom: 1;
+    background: $panel;
+    border-left: tall $primary;
+}
+#slash > .option-list--option { padding: 0 1; }
+#composer-controls {
+    height: 4;
+    align-vertical: middle;
+    border-top: solid $sw-line;
+}
+#statusline {
+    width: 1fr;
+    height: 3;
+    content-align: left middle;
+    color: $text-muted;
+}
+#stop {
+    width: 8;
+    height: 1;
+    min-width: 6;
+    background: $error-muted;
+    color: $foreground;
+    padding: 0 1;
+}
+#stop:hover, #stop:focus { background: $error; }
+#send { width: 14; }
+#composer-hint {
+    height: 1;
+    color: $text-muted;
+}
+#chat-pane {
+    align-horizontal: center;
+}
+
+/* --- papers and notes ---------------------------------------------------- */
+#paper-scroll {
+    height: 1fr;
+    padding: 1 2;
+}
+#paper-actions, #note-actions {
+    height: 3;
+    padding: 0 2;
+    margin-bottom: 1;
+    align-horizontal: right;
+}
+#paper-actions Button, #note-actions Button { margin-left: 1; }
+#paper-hint {
+    width: 1fr;
+    height: 3;
+    content-align: left middle;
+    color: $text-muted;
+}
+#note-path {
+    height: auto;
+    max-height: 2;
+    padding: 1 2 0 2;
+    color: $text-muted;
+}
+#note-content { height: 1fr; }
+#note-scroll {
+    height: 1fr;
+    padding: 1 2;
+}
+#note-editor {
+    height: 1fr;
+    margin: 1 2;
+    padding: 0 1;
+    background: $surface;
+    border: round $sw-line;
+}
+#note-editor:focus { border: round $primary; }
+#note-state {
+    width: 1fr;
+    height: 3;
+    content-align: left middle;
+    color: $text-muted;
+}
+#note-state.dirty { color: $warning; }
+
+/* --- observatory --------------------------------------------------------- */
+#observatory {
+    width: 34;
+    min-width: 28;
+    background: $surface;
+    border-left: solid $sw-line;
+    padding: 1 2;
+}
+#observatory Static { height: auto; }
+#observatory Rule { margin: 1 0; }
+#run-status {
+    color: $text-muted;
+    text-style: bold;
+}
+#run-status.active { color: $primary; }
+#run-progress {
+    width: 1fr;
+    height: 1;
+    margin-top: 1;
+}
+#run-progress Bar {
+    width: 1fr;
+    height: 1;
+}
+#run-progress Bar > .bar--indeterminate {
+    color: $primary;
+    background: $sw-glow;
+}
+#run-progress Bar > .bar--bar {
+    color: $primary;
+    background: $sw-glow;
+}
+#run-agent, #run-model {
+    color: $text-muted;
+    margin-top: 1;
+}
+#usage { color: $foreground; }
+#plan {
+    height: auto;
+    max-height: 14;
+    overflow-y: auto;
+    padding: 0;
+}
+#activity {
+    height: 1fr;
+    min-height: 4;
+    background: transparent;
+    color: $text-muted;
+    padding: 0;
+}
+#stream-status {
+    height: auto;
+    margin-top: 1;
+    color: $text-accent;
+}
+
+/* --- dialogs -------------------------------------------------------------- */
+ConfirmDiscard, NoteName, ThemePicker, ChoicePicker, ShortcutHelp {
+    align: center middle;
+    background: $background 70%;
+}
+.dialog {
+    width: 62;
+    height: auto;
+    max-height: 90%;
+    padding: 1 2;
+    background: $surface;
+    border: round $primary;
+}
+.dialog.wide { width: 72; }
+.dialog-title {
+    height: auto;
+    margin-bottom: 1;
+    color: $primary;
+    text-style: bold;
+}
+.dialog-body {
+    height: auto;
+    margin-bottom: 1;
+    color: $text-muted;
+}
+.dialog-actions {
+    height: 3;
+    margin-top: 1;
+    align-horizontal: right;
+}
+.dialog-actions Button { margin-left: 1; }
+.dialog-hint {
+    height: 1;
+    color: $text-muted;
+    text-align: right;
+}
+#theme-list, #choices {
+    height: auto;
+    max-height: 18;
+}
+#theme-list > .option-list--option, #choices > .option-list--option { padding: 0 1; }
+#choices-empty { margin-top: 1; }
+#shortcut-scroll {
+    height: auto;
+    max-height: 24;
+}
+#shortcuts { height: auto; }
+
+/* --- footer ---------------------------------------------------------------- */
+Footer {
+    background: $surface;
+    color: $text-muted;
+}
+FooterKey {
+    background: $surface;
+    color: $text-muted;
+}
+FooterKey:hover { background: $sw-glow; }
+
+/* --- focus mode ------------------------------------------------------------ */
+/* One column, quiet edges: the thread and the composer, nothing competing. */
+.focused #topbar {
+    height: 1;
+    border-bottom: none;
+    padding-left: 2;
+}
+.focused Masthead {
+    height: 1;
+    padding-right: 2;
+}
+.focused .tab { display: none; }
+.focused #busy {
+    height: 1;
+    padding: 0 2;
+}
+.focused #connection { height: 1; }
+.focused #section-title {
+    height: 1;
+    padding: 0 3;
+    color: $text-muted;
+    text-style: none;
+    text-align: center;
+    border-bottom: none;
+}
+.focused #transcript { padding: 0 3 1 3; }
+.focused Welcome {
+    height: 1fr;
+    align: center middle;
+}
+.focused #composer-box { margin: 0 2 1 2; }
+.focused #paper-scroll, .focused #note-scroll { padding: 1 3; }
+
+/* --- responsive ------------------------------------------------------------ */
+.compact #sidebar { width: 26; }
+.compact #observatory { width: 30; }
+.narrow .tab { width: 10; }
+.narrow #connection { padding-right: 0; }
+.narrow #transcript { padding: 0 1; }
+.narrow #composer-hint { display: none; }
+.narrow #send { width: 10; }
+.narrow #paper-hint { display: none; }
+.narrow.focused #transcript { padding: 0 1 1 1; }
+.narrow.focused #composer-box { margin: 0 1 1 1; }
+.short Welcome { padding: 0; }
+.short #welcome-starters { display: none; }
+.short #composer-hint { display: none; }
+.short #slash { max-height: 5; }
+.short #observatory Rule { margin: 0; }
+.short #plan { max-height: 8; }
+.short #shortcut-scroll { max-height: 14; }

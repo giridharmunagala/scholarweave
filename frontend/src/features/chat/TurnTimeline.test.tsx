@@ -3,6 +3,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActivitySidebar, LiveActivityBar, TurnTimelineView } from './TurnTimeline';
+import { buildTurnTimeline } from './chatTimeline';
 
 describe('TurnTimelineView', () => {
   let container: HTMLDivElement;
@@ -32,13 +33,42 @@ describe('TurnTimelineView', () => {
         onOpenActivity={open}
       />);
     });
-    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('2m 30s');
+    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('2m 30s elapsed');
     await act(async () => {
       container.querySelector<HTMLButtonElement>('.live-activity-open')!.click();
       vi.advanceTimersByTime(1000);
     });
     expect(open).toHaveBeenCalledOnce();
-    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('2m 31s');
+    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('2m 31s elapsed');
+  });
+
+  it('keeps a new active tool outside collapsed groups after many completed calls', () => {
+    const events = Array.from({ length: 12 }, (_, index) => ([
+      { sequence: index * 2, event_type: 'tool.started', payload: { tool_name: 'read_source', tool_call_id: `${index}` } },
+      { sequence: index * 2 + 1, event_type: 'tool.completed', payload: { tool_name: 'read_source', tool_call_id: `${index}` } },
+    ])).flat();
+    events.push({ sequence: 25, event_type: 'tool.started', payload: { tool_name: 'search_web', tool_call_id: 'new' } });
+    act(() => root.render(<TurnTimelineView timeline={buildTurnTimeline(events)} />));
+    expect(container.querySelector('.turn-timeline > .kind-tool.live')?.textContent).toContain('Search web');
+    expect(container.querySelector('.timeline-row.group')?.textContent).toContain('12 tool calls');
+  });
+
+  it('ticks the current phase and total timer independently while preserving trace headlines', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-06T10:00:10Z'));
+    const activity = {
+      phase: 'waiting' as const, label: 'Waiting for model', detail: null,
+      completedSteps: 2, startedAt: Date.parse('2026-09-06T10:00:08Z'),
+    };
+    act(() => root.render(<LiveActivityBar activity={activity} startedAt="2026-09-06T10:00:00Z" headlines={['Read paper', 'Search web']} />));
+    act(() => vi.advanceTimersByTime(3000));
+    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('5s on this step13s elapsed');
+    expect(container.querySelector('[aria-label="Recent trace steps"]')?.textContent).toContain('Read paper');
+    act(() => root.render(<LiveActivityBar activity={{
+      ...activity, phase: 'writing', label: 'Writing the answer', startedAt: Date.now(),
+    }} startedAt="2026-09-06T10:00:00Z" />));
+    expect(container.querySelector('.live-activity-elapsed')?.textContent).toBe('0s on this step13s elapsed');
+    expect(container.querySelector('[role="status"]')?.textContent).not.toContain('13s');
   });
 
   it('marks only the failed tool call red inside a mixed group', async () => {
@@ -162,5 +192,31 @@ describe('TurnTimelineView', () => {
     expect(container.textContent).toContain('Focused Research Worker');
     await act(async () => container.querySelector<HTMLButtonElement>('.kind-agent .timeline-head')!.click());
     expect(container.innerHTML).toContain('<strong>Evidence handoff:</strong>');
+  });
+
+  it('opens directly to the full trace and shows live worker tools inside the delegation', async () => {
+    const timeline = buildTurnTimeline([
+      { sequence: 1, event_type: 'agent.started', payload: { agent_name: 'Coordinator', invocation_id: 'root' } },
+      { sequence: 2, event_type: 'tool.started', payload: { tool_name: 'focused_research_worker', tool_call_id: 'delegate' } },
+      { sequence: 3, event_type: 'agent.started', payload: {
+        agent_name: 'Worker', invocation_id: 'worker', delegated: true, parent_tool_call_id: 'delegate',
+        assignment: 'Inspect the method', assignment_truncated: true,
+      } },
+      { sequence: 4, event_type: 'tool.started', payload: {
+        agent_name: 'Worker', invocation_id: 'worker', tool_name: 'read_paper', tool_call_id: 'read',
+      } },
+    ]);
+    await act(async () => root.render(<ActivitySidebar
+      open onClose={() => undefined}
+      overview={<details><summary>Usage</summary>Metrics</details>}
+      timelines={[{ id: 'run', label: 'Run 1', timeline }]}
+    />));
+    expect(container.querySelector('.session-trace')?.tagName).toBe('SECTION');
+    const delegation = container.querySelector('.session-trace .turn-timeline > .kind-tool')!;
+    const worker = delegation.querySelector('.timeline-children > .kind-agent')!;
+    expect(worker.querySelector<HTMLButtonElement>(':scope > button')?.getAttribute('aria-expanded')).toBe('true');
+    expect(worker.querySelector('.turn-timeline .kind-tool')?.textContent).toContain('Read paper');
+    expect(worker.textContent).toContain('Using Read paper');
+    expect(worker.querySelector('details > summary')?.textContent).toBe('Assignment (truncated)');
   });
 });

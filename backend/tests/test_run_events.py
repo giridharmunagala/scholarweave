@@ -45,6 +45,62 @@ class RecordingSink:
 
 
 @pytest.mark.anyio
+async def test_worker_streams_are_batched_persisted_and_retried_independently() -> None:
+    downstream = RecordingSink()
+    sink = BufferedRunEventSink(downstream, max_delta_chars=1000, max_delay_seconds=10)
+    root = {"raw_type": "response.output_text.delta", "delta": "Main answer"}
+    await sink.emit("model.stream", root)
+    for worker in ("a", "b"):
+        metadata = {
+            "invocation_id": worker, "delegated": True,
+            "parent_invocation_id": "root", "parent_tool_call_id": f"delegate-{worker}",
+        }
+        for text in ("Worker ", worker, " result"):
+            await sink.emit("agent.stream", {
+                **metadata, "raw_type": "response.output_text.delta", "delta": text,
+            })
+        await sink.emit("agent.stream", {**metadata, "raw_type": "response.completed"})
+    await sink.emit("model.retry", {
+        "invocation_id": "a", "delegated": True, "discarded_text_characters": len(" result"),
+    })
+    await sink.emit("agent.stream", {
+        "invocation_id": "a", "delegated": True,
+        "raw_type": "response.output_text.delta", "delta": " corrected",
+    })
+    await sink.emit("agent.failed", {"invocation_id": "a", "delegated": True})
+    await sink.flush()
+    snapshots = [
+        (kind, payload) for mode, kind, payload in downstream.timeline
+        if mode == "persisted" and payload.get("snapshot")
+    ]
+    assert [p["delta"] for k, p in snapshots if k == "model.stream"] == ["Main answer"]
+    for worker, expected in (("a", "Worker a corrected"), ("b", "Worker b result")):
+        payload = [p for k, p in snapshots if k == "agent.stream" and p["invocation_id"] == worker][-1]
+        assert payload["delta"] == expected
+        assert payload["parent_tool_call_id"] == f"delegate-{worker}"
+        assert payload["parent_invocation_id"] == "root"
+    live_a = [
+        p for mode, kind, p in downstream.timeline
+        if mode == "live" and kind == "agent.stream" and p["invocation_id"] == "a" and p.get("delta")
+    ]
+    assert [p["delta"] for p in live_a] == ["Worker ", "a result", " corrected"]
+    assert "a" not in sink._delegated_streams
+
+
+@pytest.mark.anyio
+async def test_cache_totals_include_zero_hits_ignore_missing_and_deduplicate_calls() -> None:
+    sink = BufferedRunEventSink(RecordingSink())
+    for call_id, cached in [("a", 80), ("a", 80), ("b", 0), ("c", None), ("d", -1), ("e", True), ("f", 101)]:
+        await sink.emit("model.telemetry", {
+            "model_call_id": call_id, "usage": {"input_tokens": 100, "output_tokens": 5},
+            "usage_complete": True, "timings": {"cache_n": cached},
+        })
+    assert sink.performance()["cached_input_tokens"] == 80
+    assert sink.performance()["cache_reported_calls"] == 2
+    assert sink.performance()["model_calls"] == 6
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("prefix", ["", "Earlier answer. "])
 async def test_retry_retracts_partial_answer_from_persistent_snapshots(prefix: str) -> None:
     downstream = RecordingSink()
@@ -115,6 +171,7 @@ def test_run_response_marks_sqlite_timestamps_as_utc() -> None:
         conversation_id="conversation-1",
         agent_name="Researcher",
         status="running",
+        context_window_tokens=32768,
         input_json="question",
         final_output_json=None,
         last_agent_name=None,

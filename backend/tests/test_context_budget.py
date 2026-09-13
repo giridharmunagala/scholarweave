@@ -11,6 +11,7 @@ from backend.agents.context import ScholarWeaveContext, ToolReceipt
 from backend.agents.context_budget import (
     CHECKPOINT_MESSAGE_PREFIX,
     ContextBudgetPolicy,
+    _request_tokens,
     _replace_checkpointed_paper_reads,
     model_context_budget,
 )
@@ -141,7 +142,7 @@ async def test_summary_uses_full_input_allowance_without_second_high_water_reduc
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("outcome", ["timed", "untimed", "failed", "cancelled"])
+@pytest.mark.parametrize("outcome", ["timed", "cached", "untimed", "failed", "cancelled"])
 async def test_compaction_reports_one_telemetry_attempt_without_narrative(tmp_path, outcome):
     import asyncio
     from openai import OpenAIError
@@ -150,9 +151,12 @@ async def test_compaction_reports_one_telemetry_attempt_without_narrative(tmp_pa
         def model_dump(self):
             payload = super().model_dump()
             payload["usage"] = {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150}
+            if outcome == "cached":
+                payload["usage"]["prompt_tokens_details"] = {"cached_tokens": 40}
             if outcome == "timed":
                 payload["timings"] = {
                     "prompt_n": 80, "prompt_ms": 100, "predicted_n": 30, "predicted_ms": 200,
+                    "cache_n": 40,
                 }
             return payload
 
@@ -189,6 +193,8 @@ async def test_compaction_reports_one_telemetry_attempt_without_narrative(tmp_pa
         assert payload["usage"]["input_tokens"] == 120
         assert payload["usage"]["output_tokens"] == 30
     assert bool(payload["timings"]) == (outcome == "timed")
+    assert payload.get("cached_input_tokens") == (40 if outcome == "cached" else None)
+    assert payload["timings"].get("cache_n") == (40 if outcome == "timed" else None)
 
 
 class Session:
@@ -248,6 +254,17 @@ def agent(
             read_history,
         )],
     )
+
+
+@pytest.mark.parametrize("provider", ["openai", "azure_openai", "azure_foundry", "ollama"])
+def test_input_estimate_excludes_response_allowance(provider):
+    definition = agent()
+    definition.binding = replace(definition.binding, provider_kind=provider)
+    context = ScholarWeaveContext(run_id="input-accounting", tool_runtime=Runtime())
+    items = [{"role": "user", "content": "Read the evidence."}]
+    baseline = _request_tokens(definition, items, definition.instructions, context)
+    definition.model_settings = ModelSettings(max_tokens=65536)
+    assert _request_tokens(definition, items, definition.instructions, context) == baseline
 
 
 def policy(settings: Settings, **overrides: Any) -> ContextBudgetPolicy:
@@ -1218,6 +1235,29 @@ async def test_explicit_high_water_ratio_is_honored_in_model_window_mode(tmp_pat
 
 
 @pytest.mark.anyio
+async def test_soft_pressure_does_not_recompact_small_history_above_protected_floor(tmp_path):
+    settings = Settings(data_dir=tmp_path, agent_context_window_tokens=32768)
+    runtime = Runtime()
+    definition = agent()
+    sink = Sink()
+    context = ScholarWeaveContext(run_id="protected-floor", tool_runtime=runtime, event_sink=sink)
+    items = [
+        {"role": "user", "content": "Keep this exact requirement. " + "x" * 103000},
+        {"role": "assistant", "content": "Earlier finding. " * 100},
+        *recent_rounds(),
+    ]
+    for turn in range(4):
+        result = await prepare(settings, definition, items, context, turn_index=turn)
+        metrics = sink.events[-1][1]
+        assert metrics["input_budget_tokens"] * 0.85 < metrics["estimated_input_tokens"]
+        assert metrics["estimated_input_tokens"] < metrics["input_budget_tokens"]
+        assert result.items == items
+        items.append({"role": "assistant", "content": "Another scoped finding. " * 50})
+    assert not runtime.histories
+    assert not definition.binding.client.requests
+
+
+@pytest.mark.anyio
 async def test_tiny_legacy_target_does_not_remove_recent_rounds(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
@@ -1576,7 +1616,7 @@ async def test_hard_pressure_pages_tool_payloads_before_archiving_user_constrain
     context = ScholarWeaveContext(run_id="run", tool_runtime=runtime)
     first = {"role": "user", "content": "Preserve the original objective."}
     older = {"role": "user", "content": "Older research material: " + "x" * 36000}
-    recent = [*research_round(2, 11000), *research_round(3, 11000)]
+    recent = [*research_round(2, 20000), *research_round(3, 20000)]
     items = [
         first, {"role": "assistant", "content": "Starting."},
         older, {"role": "assistant", "content": "Earlier task completed."},
@@ -1725,7 +1765,7 @@ async def test_archive_manifest_failure_does_not_adopt_a_partial_checkpoint(tmp_
 @pytest.mark.parametrize(("model", "effort"), [
     ("gemma-4-12b", "none"), ("gemma4-12b", None), ("unknown-helper", None),
 ])
-async def test_optional_helper_uses_its_own_budget_and_reasoning(tmp_path, model, effort) -> None:
+async def test_optional_helper_uses_chat_budget_and_its_own_reasoning(tmp_path, model, effort) -> None:
     settings = Settings(
         data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
         agent_context_window_tokens=16000, agent_context_use_model_window=False,
@@ -1813,7 +1853,7 @@ async def test_helper_failure_retries_main_with_exact_history(tmp_path, failure)
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("helper_window", [16000, None])
-async def test_small_helper_never_inherits_main_window_or_receives_oversized_history(
+async def test_helper_metadata_does_not_limit_the_selected_chat_window(
     tmp_path, helper_window,
 ) -> None:
     settings = Settings(
@@ -1832,18 +1872,67 @@ async def test_small_helper_never_inherits_main_window_or_receives_oversized_his
         settings, main, [older, *recent_rounds()], context, compaction_model=helper,
         context_window_tokens_by_agent={main.id: 80000},
     )
-    assert not helper_client.requests
-    request = main.binding.client.requests[0]
+    assert not main.binding.client.requests
+    request = helper_client.requests[0]
     assert json.loads(request["messages"][-1]["content"])["history"] == [older]
-    failure = next(payload for name, payload in sink.events if name == "context.compaction_failed")
-    assert failure["summary_context_window_tokens"] == helper_window
-    assert failure["retrying_with_main_model"] is True
-    assert "No sampled summary" in failure["error"]
+    assert not any(name == "context.compaction_failed" for name, _ in sink.events)
     checkpoint = context.metadata["context_checkpoints"][0]
+    assert checkpoint["summary_context_window_tokens"] == 80000
+    assert checkpoint["summary_model_role"] == "helper"
     assert checkpoint["summary_method"] == "model"
     assert not checkpoint.get("summary_input_truncated")
     assert runtime.histories[checkpoint["history_archives"][0]["result_ref"]] == [older]
     assert result.items[-2:] == recent_rounds()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("chat_window", "helper_window"), [
+    (30_000, 131_072),
+    (262_144, 32_768),
+])
+async def test_compaction_threshold_and_helper_follow_chat_context(
+    tmp_path, chat_window, helper_window,
+) -> None:
+    settings = Settings(
+        data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
+        agent_context_window_tokens=32_768, agent_context_high_water_ratio=0.5,
+    )
+    main = agent()
+    main.binding = replace(main.binding, context_window_tokens=131_072)
+    helper_client = summarizing_client()
+    helper = replace(main.binding, client=helper_client, model_name="helper",
+                     context_window_tokens=helper_window)
+    below_context = ScholarWeaveContext(run_id="below-threshold", tool_runtime=Runtime())
+    below = await prepare(
+        settings, main,
+        [{"role": "assistant", "content": "x" * chat_window}, *recent_rounds()],
+        below_context, compaction_model=helper,
+        context_window_tokens_by_agent={main.id: chat_window},
+    )
+    assert below.context_window_tokens == chat_window
+    assert not below_context.metadata.get("context_checkpoints")
+    assert not helper_client.requests
+    sink = Sink()
+    context = ScholarWeaveContext(run_id="chat-window", tool_runtime=Runtime(), event_sink=sink)
+    older = {"role": "assistant", "content": "x" * (chat_window * 2)}
+    prepared = await prepare(
+        settings, main, [older, *recent_rounds()], context,
+        compaction_model=helper, context_window_tokens_by_agent={main.id: chat_window},
+    )
+    checkpoint = context.metadata["context_checkpoints"][0]
+    assert prepared.context_window_tokens == chat_window
+    assert checkpoint["summary_context_window_tokens"] == chat_window
+    assert checkpoint["summary_model_role"] == "helper"
+    assert len(helper_client.requests) == 1
+    assert not main.binding.client.requests
+    assert json.loads(helper_client.requests[0]["messages"][-1]["content"])["history"] == [older]
+    metrics = next(payload for name, payload in sink.events if name == "context.prepared")
+    assert metrics["context_window_tokens"] == chat_window
+    assert metrics["input_budget_tokens"] == chat_window - settings.agent_context_response_reserve_tokens
+    assert metrics["estimated_tokens_before"] > int(
+        metrics["input_budget_tokens"] * settings.agent_context_high_water_ratio
+    )
+    assert metrics["compacted"] is True
 
 
 @pytest.mark.anyio
@@ -2127,7 +2216,7 @@ async def test_latest_output_is_not_changed_without_a_readable_archive(tmp_path,
 
 
 @pytest.mark.anyio
-async def test_larger_helper_can_summarize_main_prefix_without_legacy_input_cap(tmp_path) -> None:
+async def test_larger_helper_respects_chat_window_without_legacy_input_cap(tmp_path) -> None:
     settings = Settings(
         data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
         agent_context_window_tokens=80000, agent_context_high_water_ratio=0.5,
@@ -2143,7 +2232,7 @@ async def test_larger_helper_can_summarize_main_prefix_without_legacy_input_cap(
     assert not main.binding.client.requests
     request = helper_client.requests[0]
     assert json.loads(request["messages"][-1]["content"])["history"] == [older]
-    assert context.metadata["context_checkpoints"][0]["summary_context_window_tokens"] == 131072
+    assert context.metadata["context_checkpoints"][0]["summary_context_window_tokens"] == 80000
 
 
 @pytest.mark.anyio

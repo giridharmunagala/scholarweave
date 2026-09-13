@@ -31,12 +31,19 @@ dependencies = [
 dev = [
   "pytest>=8.3,<9"
 ]
+tui = [
+  "textual>=1.0,<2"
+]
+
+[project.scripts]
+scholarweave = "scholarweave_tui.__main__:main"
 
 [tool.setuptools.packages.find]
-include = ["backend*"]
+include = ["backend*", "scholarweave_tui*"]
 
 [tool.setuptools.package-data]
 "backend.prompting" = ["defaults/**/*.md", "defaults/**/*.json"]
+"scholarweave_tui" = ["*.tcss"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

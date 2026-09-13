@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-import re
 from typing import Any
 
 from backend.agents.blueprint import (
@@ -11,8 +10,9 @@ from backend.agents.blueprint import (
     SessionPolicySpec,
 )
 from backend.agents.compiler import AgentCompiler
+from backend.conversations.attachments import ConversationAttachmentService
 from backend.conversations.service import ConversationService
-from backend.conversations.schemas import ResearchMode
+from backend.conversations.schemas import ResearchMode, ResponseEffort
 from backend.core.errors import ConflictError, ValidationError
 from backend.runs.service import RunService
 from backend.prompting.registry import PromptRegistry, default_prompt_registry
@@ -26,6 +26,7 @@ RESEARCH_TOOL_IDS = (
     ("search-library", "research.library.search"),
     ("organize-library", "research.library.organize"),
     ("list-workspace", "research.workspace.list"),
+    ("organize-workspace", "research.workspace.organize"),
     ("workspace-index", "research.workspace.index"),
     ("read-paper", "research.paper.read"),
     ("read-web-page", "research.web.read"),
@@ -34,7 +35,6 @@ RESEARCH_TOOL_IDS = (
     ("save-note", "research.notes.save"),
     ("summarize-paper", "research.summary.run"),
 )
-CONVERSATION_TITLE_TOOL = ("set-title", "conversation.title.set")
 WORK_PLAN_TOOL_IDS = (
     ("create-work-plan", "work.plan.create"),
     ("update-work-item", "work.plan.update"),
@@ -68,6 +68,22 @@ def _research_mode_metadata(research_mode: ResearchMode) -> dict[str, Any]:
     }
 
 
+def _turn_options(
+    response_effort: ResponseEffort | None,
+    research_mode: ResearchMode | None,
+    deep_work: bool,
+    fast_answer: bool,
+) -> tuple[ResponseEffort, ResearchMode, bool]:
+    effort = response_effort or ("thorough" if deep_work else "quick" if fast_answer else "auto")
+    if effort not in {"auto", "quick", "thorough"}:
+        raise ValidationError("Unknown response effort.")
+    legacy_fast = response_effort is None and fast_answer
+    mode = _resolve_research_mode(
+        research_mode, deep_work=effort == "thorough", fast_answer=legacy_fast,
+    )
+    return effort, mode, legacy_fast
+
+
 def _resolve_prompts(prompts: PromptRegistry | None) -> PromptRegistry:
     """Agent instructions live only in the prompt registry defaults, never duplicated in code."""
     return prompts if prompts is not None else default_prompt_registry()
@@ -79,12 +95,14 @@ class ConversationTurnService:
         compiler: AgentCompiler,
         conversations: ConversationService,
         runs: RunService,
+        attachments: ConversationAttachmentService,
         prompts: PromptRegistry | None = None,
     ) -> None:
         self._compiler = compiler
         self._conversations = conversations
         self._runs = runs
         self._prompts = prompts
+        self._attachments = attachments
         self._deleting_conversations: set[str] = set()
 
     def create_conversation(
@@ -159,23 +177,16 @@ class ConversationTurnService:
         conversation_id: str,
         *,
         web_enabled: bool = True,
+        response_effort: ResponseEffort | None = None,
         deep_work: bool = False,
         fast_answer: bool = False,
         research_mode: ResearchMode | None = None,
         web_search_limit: int = 1,
-        message: str = "",
         context_window_tokens: int | None = None,
-        first_turn: bool | None = None,
     ):
         record = self.get_conversation(conversation_id)
-        deep_work = deep_work or record.kind == "deep_work"
-        research_mode = _resolve_research_mode(
-            research_mode, deep_work=deep_work, fast_answer=fast_answer,
-        )
-        first_turn = (
-            not record.last_message_preview.strip()
-            if first_turn is None
-            else first_turn
+        effort, research_mode, fast_answer = _turn_options(
+            response_effort, research_mode, deep_work, fast_answer,
         )
         blueprint = (
             deep_work_blueprint(
@@ -183,17 +194,16 @@ class ConversationTurnService:
                 web_enabled=web_enabled,
                 research_mode=research_mode,
                 prompts=self._prompts,
-                first_turn=first_turn,
             )
-            if deep_work
+            if effort == "thorough"
             else research_blueprint(
                 record.model_reference_json,
                 web_enabled=web_enabled,
                 fast_answer=fast_answer,
                 research_mode=research_mode,
                 web_search_limit=web_search_limit,
+                response_effort=effort,
                 prompts=self._prompts,
-                first_turn=first_turn,
             )
         )
         compiled = self._compiler.compile(
@@ -206,27 +216,6 @@ class ConversationTurnService:
             completion_policy_id=PAPER_WORK_COMPLETION_POLICY_ID,
         )
 
-    def compile_deep_work_conversation(
-        self,
-        conversation_id: str,
-        *,
-        web_enabled: bool = True,
-        research_mode: ResearchMode | None = None,
-        message: str = "",
-        context_window_tokens: int | None = None,
-        first_turn: bool | None = None,
-    ):
-        self.get_deep_work_conversation(conversation_id)
-        return self.compile_conversation(
-            conversation_id,
-            web_enabled=web_enabled,
-            deep_work=True,
-            research_mode=research_mode,
-            message=message,
-            context_window_tokens=context_window_tokens,
-            first_turn=first_turn,
-        )
-
     async def conversation_items(self, conversation_id: str):
         return await self._conversations.items(conversation_id)
 
@@ -237,48 +226,45 @@ class ConversationTurnService:
         *,
         reasoning_effort: ReasoningEffort | None = None,
         web_enabled: bool = True,
+        response_effort: ResponseEffort | None = None,
         deep_work: bool = False,
         fast_answer: bool = False,
         research_mode: ResearchMode | None = None,
         web_search_limit: int = 1,
         context_window_tokens: int | None = None,
+        attachment_paths: list[str] | None = None,
     ):
-        record = self.get_conversation(conversation_id)
-        first_turn = not record.last_message_preview.strip()
-        deep_work = deep_work or record.kind == "deep_work"
-        research_mode = _resolve_research_mode(
-            research_mode, deep_work=deep_work, fast_answer=fast_answer,
+        effort, mode, legacy_fast = _turn_options(
+            response_effort, research_mode, deep_work, fast_answer,
         )
+        message = self._attach_files(message, attachment_paths, fast_answer=legacy_fast)
         compiled = self.compile_conversation(
             conversation_id,
             web_enabled=web_enabled,
+            response_effort=response_effort,
             deep_work=deep_work,
             fast_answer=fast_answer,
             research_mode=research_mode,
             web_search_limit=web_search_limit,
-            message=message,
             context_window_tokens=context_window_tokens,
-            first_turn=first_turn,
         )
-        if deep_work and record.kind == "autonomous":
-            self._conversations.promote_to_deep_work(conversation_id)
         return self._start_message(
             conversation_id,
             message,
             compiled=compiled,
             reasoning_effort=reasoning_effort,
             runtime_metadata={
-                **_research_mode_metadata(research_mode),
-                **({"autonomous_work": True} if deep_work else {}),
+                **_research_mode_metadata(mode),
+                "response_effort": effort,
+                **({"autonomous_work": True} if effort == "thorough" else {}),
                 **(
                     {
                         "fast_answer": True,
                         "web_search_limit": web_search_limit,
                     }
-                    if fast_answer and not deep_work
+                    if legacy_fast
                     else {}
                 ),
-                "allow_conversation_title_update": first_turn,
             },
         )
 
@@ -289,34 +275,36 @@ class ConversationTurnService:
         *,
         reasoning_effort: ReasoningEffort | None = None,
         web_enabled: bool = True,
+        response_effort: ResponseEffort | None = None,
         research_mode: ResearchMode | None = None,
         fast_answer: bool = False,
         context_window_tokens: int | None = None,
+        attachment_paths: list[str] | None = None,
     ):
-        research_mode = _resolve_research_mode(
-            research_mode, deep_work=True, fast_answer=fast_answer,
-        )
-        first_turn = not self.get_deep_work_conversation(
-            conversation_id
-        ).last_message_preview.strip()
-        return self._start_message(
+        self.get_deep_work_conversation(conversation_id)
+        return self.start_message(
             conversation_id,
             message,
-            compiled=self.compile_deep_work_conversation(
-                conversation_id,
-                web_enabled=web_enabled,
-                research_mode=research_mode,
-                message=message,
-                context_window_tokens=context_window_tokens,
-                first_turn=first_turn,
-            ),
             reasoning_effort=reasoning_effort,
-            runtime_metadata={
-                **_research_mode_metadata(research_mode),
-                "autonomous_work": True,
-                "allow_conversation_title_update": first_turn,
-            },
+            web_enabled=web_enabled,
+            response_effort=response_effort,
+            deep_work=True,
+            fast_answer=fast_answer,
+            research_mode=research_mode,
+            context_window_tokens=context_window_tokens,
+            attachment_paths=attachment_paths,
         )
+
+    def _attach_files(
+        self, message: str, paths: list[str] | None, *, fast_answer: bool,
+    ) -> str:
+        if not paths:
+            return message
+        if fast_answer:
+            raise ValidationError("Turn off Fast Answer to work with attached files.")
+        if not message.strip():
+            raise ValidationError("Describe what you want to do with the attached files.")
+        return self._attachments.message_with_attachments(message, paths)
 
     def _start_message(
         self,
@@ -342,21 +330,16 @@ class ConversationTurnService:
 def _application_tools(
     *,
     web_enabled: bool = True,
-    first_turn: bool = False,
 ) -> list[dict[str, str]]:
-    tools = [
+    return [
         {
             "id": tool_id,
             "kind": "function",
             "catalog_id": catalog_id,
         }
-        for tool_id, catalog_id in RESEARCH_TOOL_IDS
+        for tool_id, catalog_id in (*RESEARCH_TOOL_IDS, *WORK_PLAN_TOOL_IDS)
         if web_enabled or tool_id not in EXTERNAL_TOOL_IDS
     ]
-    if first_turn:
-        tool_id, catalog_id = CONVERSATION_TITLE_TOOL
-        tools.append({"id": tool_id, "kind": "function", "catalog_id": catalog_id})
-    return tools
 
 
 def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
@@ -373,7 +356,6 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
     if not activity:
         return
     if context.metadata.get("research_mode") == "research":
-        _validate_research_evidence(context, activity)
         return
     if context.metadata.get("research_mode") in {"learn", "understand"}:
         _validate_sourced_paper_answer(context, activity)
@@ -430,33 +412,6 @@ def validate_paper_work_completion(context: ScholarWeaveContext) -> None:
         )
 
 
-def _validate_research_evidence(
-    context: ScholarWeaveContext,
-    activity: list[dict[str, Any]],
-) -> None:
-    # Acquisition and summary discussion are not commitments to review each paper.
-    reads = [item for item in activity if item.get("action") == "read"]
-    if not reads:
-        return
-    citations = {
-        citation
-        for item in reads
-        for citation in (
-            item["citations"] if isinstance(item.get("citations"), list) else []
-        )
-        if isinstance(citation, str) and citation.strip()
-    }
-    output = context.metadata.get("completion_output")
-    if not isinstance(output, str) or not any(
-        re.search(r"(?<!\w)" + re.escape(citation) + r"(?!\w)", output)
-        for citation in citations
-    ):
-        raise ValidationError(
-            "Paper evidence was read: preserve a supplied page or chunk citation in the answer "
-            "and distinguish supported findings from limitations. No summary or notes are required.",
-        )
-
-
 def _validate_sourced_paper_answer(
     context: ScholarWeaveContext,
     activity: list[dict[str, Any]],
@@ -464,36 +419,15 @@ def _validate_sourced_paper_answer(
     documents: dict[str, list[dict[str, Any]]] = {}
     for item in activity:
         documents.setdefault(str(item["document_id"]), []).append(item)
-    output = context.metadata.get("completion_output")
     issues: list[str] = []
     for document_id, items in documents.items():
         reads = [item for item in items if item.get("action") == "read"]
         title = str(items[-1].get("title") or document_id)
         if not reads:
             issues.append(f"{title} ({document_id}): read relevant paper passages")
-            continue
-        citations = {
-            citation
-            for item in reads
-            for citation in (
-                item["citations"] if isinstance(item.get("citations"), list) else []
-            )
-            if isinstance(citation, str) and citation.strip()
-        }
-        if not citations:
-            issues.append(
-                f"{title} ({document_id}): obtain page or chunk citations from a source read"
-            )
-        elif not isinstance(output, str) or not any(
-            re.search(r"(?<!\w)" + re.escape(citation) + r"(?!\w)", output)
-            for citation in citations
-        ):
-            issues.append(
-                f"{title} ({document_id}): cite a supplied page or chunk in the final answer"
-            )
     if issues:
         raise ValidationError(
-            "Paper Q&A requires source reading and a cited answer, not a full summary or notes.",
+            "Paper Q&A requires source reading, not a full summary or notes.",
             issues=issues,
         )
 
@@ -505,39 +439,36 @@ def research_blueprint(
     fast_answer: bool = False,
     research_mode: ResearchMode | None = None,
     web_search_limit: int = 1,
+    response_effort: ResponseEffort = "auto",
     prompts: PromptRegistry | None = None,
-    first_turn: bool = False,
 ) -> AgentBlueprint:
     model = ModelReferenceSpec.model_validate(model_reference or {})
     research_mode = _resolve_research_mode(research_mode, fast_answer=fast_answer)
     if fast_answer and not web_enabled:
         raise ValueError("Fast-answer mode requires web access.")
     prompts = _resolve_prompts(prompts)
-    tools = _application_tools(web_enabled=web_enabled, first_turn=first_turn)
+    tools = _application_tools(web_enabled=web_enabled)
     instructions = (
         f"{prompts.render('research')}\n\n"
         f"Selected research mode: {research_mode}."
+        f"\nSelected response effort: {response_effort}."
     )
     if fast_answer:
-        allowed_tool_ids = {
-            *FAST_ANSWER_TOOL_IDS,
-            *(["set-title"] if first_turn else []),
-        }
-        tools = [tool for tool in tools if tool["id"] in allowed_tool_ids]
+        tools = [tool for tool in tools if tool["id"] in FAST_ANSWER_TOOL_IDS]
         instructions = (
             f"{instructions}\n\n"
             f"{prompts.render('fast-answer', web_search_limit=web_search_limit)}"
         )
     return AgentBlueprint.model_validate(
         {
-            "name": "ScholarWeave research",
-            "description": "Fast, evidence-backed research over papers, the web, and notes.",
+            "name": "ScholarWeave chat",
+            "description": "Conversation and proportionate work with local files and the web.",
             "entry_agent_id": "researcher",
             "agents": [
                 {
                     "id": "researcher",
-                    "name": "ScholarWeave Researcher",
-                    "description": "Answers research questions with the smallest sufficient evidence set.",
+                    "name": "ScholarWeave",
+                    "description": "Follows the user's intent with the smallest sufficient evidence set.",
                     "instructions": instructions,
                     "model": model,
                     "model_settings": {"parallel_tool_calls": True},
@@ -556,25 +487,15 @@ def deep_work_blueprint(
     web_enabled: bool = True,
     research_mode: ResearchMode | None = None,
     prompts: PromptRegistry | None = None,
-    first_turn: bool = False,
 ) -> AgentBlueprint:
     model = ModelReferenceSpec.model_validate(model_reference or {})
     research_mode = _resolve_research_mode(research_mode, deep_work=True)
     prompts = _resolve_prompts(prompts)
-    tools = [
-        *_application_tools(web_enabled=web_enabled, first_turn=first_turn),
-        *(
-            {
-                "id": tool_id,
-                "kind": "function",
-                "catalog_id": catalog_id,
-            }
-            for tool_id, catalog_id in WORK_PLAN_TOOL_IDS
-        ),
-    ]
+    tools = _application_tools(web_enabled=web_enabled)
     coordinator_tool_ids = [tool["id"] for tool in tools]
     worker_tool_ids = [
-        tool_id for tool_id in coordinator_tool_ids if tool_id != "set-title"
+        tool_id for tool_id in coordinator_tool_ids
+        if tool_id != "create-work-plan"
     ]
     return AgentBlueprint.model_validate(
         {
@@ -587,11 +508,13 @@ def deep_work_blueprint(
                     "name": "Deep Work Coordinator",
                     "description": "Clarifies intent, answers discussion, and executes research when requested.",
                     "instructions": (
+                        f"{prompts.render('research')}\n\n"
                         f"{prompts.render('deep-work-coordinator')}\n\n"
                         f"Selected research mode: {research_mode}."
+                        "\nSelected response effort: thorough."
                     ),
                     "model": model,
-                    "model_settings": {"parallel_tool_calls": True},
+                    "model_settings": {"parallel_tool_calls": False},
                     "tool_ids": coordinator_tool_ids,
                 },
                 {
@@ -603,7 +526,7 @@ def deep_work_blueprint(
                         f"Selected research mode: {research_mode}."
                     ),
                     "model": model,
-                    "model_settings": {"parallel_tool_calls": True},
+                    "model_settings": {"parallel_tool_calls": False},
                     "tool_ids": worker_tool_ids,
                 },
             ],
@@ -615,11 +538,13 @@ def deep_work_blueprint(
                     "delegate_agent_id": "worker",
                     "tool_name": "focused_research_worker",
                     "tool_description": (
-                        "Delegate one self-contained research track and receive a compact evidence handoff."
+                        "Delegate one self-contained research track and wait for its evidence handoff "
+                        "before starting the next track."
                     ),
+                    "serialize_calls": True,
                 },
             ],
-            "run": {"max_tool_concurrency": 4},
+            "run": {"max_tool_concurrency": 1},
         }
     )
 

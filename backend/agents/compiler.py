@@ -73,19 +73,16 @@ def with_global_agent_instructions(
     instructions: str,
     *,
     global_instructions: str = GLOBAL_AGENT_INSTRUCTIONS,
-    at: datetime | None = None,
-    timezone_name: str | None = None,
     user_profile: str | None = None,
 ) -> str:
-    """Append shared policy and current system information to agent instructions."""
+    """Append stable shared policy and user context to agent instructions."""
     combined = instructions.rstrip()
     global_instructions = global_instructions.strip()
     if global_instructions and global_instructions not in combined:
         combined = f"{combined}\n\n{global_instructions}"
-    return (
-        f"{combined}\n\n"
-        f"{current_system_information(at, timezone_name=timezone_name, user_profile=user_profile)}"
-    )
+    if user_profile and user_profile.strip():
+        combined += f"\n\nUser context: {user_profile.strip()}"
+    return combined
 
 
 def with_json_schema_output_instructions(
@@ -179,7 +176,6 @@ class AgentCompiler:
                     if self._prompts is not None
                     else GLOBAL_AGENT_INSTRUCTIONS
                 ),
-                timezone_name=self._settings.user_timezone if self._settings else None,
                 user_profile=self._settings.user_profile if self._settings else None,
             )
             if spec.output is not None:

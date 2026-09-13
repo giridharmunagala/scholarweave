@@ -4,6 +4,7 @@ import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import type { PromptSnapshot } from './api';
 import {
   formatStepDuration,
+  describeLiveActivity,
   humanizeToolName,
   type AgentStep,
   type LiveActivity,
@@ -51,10 +52,12 @@ export function LiveActivityBar({
   activity,
   onOpenActivity,
   startedAt,
+  headlines = [],
 }: {
   activity: LiveActivity;
   onOpenActivity?: () => void;
   startedAt?: string | null;
+  headlines?: string[];
 }) {
   const [now, setNow] = useState(Date.now);
   const mountedAt = useRef(now);
@@ -67,21 +70,30 @@ export function LiveActivityBar({
   const start = startedAt ? Date.parse(startedAt) : mountedAt.current;
   const seconds = Math.max(0, (now - (Number.isFinite(start) ? start : mountedAt.current)) / 1000);
   const elapsed = formatStepDuration(seconds);
+  const phaseSeconds = activity.startedAt == null ? null : Math.max(0, Math.floor((now - activity.startedAt) / 1000));
 
   return (
-    <div className={`live-activity phase-${activity.phase}`} role="status" aria-live="polite">
+    <div className={`live-activity phase-${activity.phase}`}>
       <span className="spinner tiny" aria-hidden="true" />
-      <span className="live-activity-body">
+      <span className="live-activity-body" role="status" aria-live="polite">
         <strong>{activity.label}</strong>
         {activity.detail ? <small>{activity.detail}</small> : null}
       </span>
-      {elapsed ? <span className="live-activity-elapsed">{elapsed}</span> : null}
+      <span className="live-activity-elapsed" aria-live="off">
+        {phaseSeconds !== null ? <span>{phaseSeconds}s on this step</span> : null}
+        <span>{seconds < 1 ? '0s' : elapsed} elapsed</span>
+      </span>
       {onOpenActivity ? (
         <button type="button" className="live-activity-open" onClick={onOpenActivity}>
           {activity.completedSteps
             ? `${activity.completedSteps} step${activity.completedSteps === 1 ? '' : 's'}`
             : 'Details'}
         </button>
+      ) : null}
+      {headlines.length > 0 ? (
+        <div className="live-activity-recent" aria-label="Recent trace steps" title={headlines.join(' · ')}>
+          {headlines.join(' · ')}
+        </div>
       ) : null}
     </div>
   );
@@ -115,8 +127,8 @@ export function ActivitySidebar({
       {resizer}
       <header className="activity-sidebar-head">
         <div>
-          <strong>Session observability</strong>
-          <span>Usage, task progress, and execution details</span>
+          <strong>Activity</strong>
+          <span>Tools and delegated work</span>
         </div>
         <button ref={closeRef} type="button" aria-label="Close activity" onClick={onClose}>
           <Icon name="close" size={15} />
@@ -124,18 +136,18 @@ export function ActivitySidebar({
       </header>
       <div className="activity-sidebar-scroll">
         {overview}
-        <details className="session-trace">
-          <summary>Full trace <span>{timelines.length} run{timelines.length === 1 ? '' : 's'}</span></summary>
-        {timelines.length ? timelines.map(({ id, label, timeline, snapshot }) => (
-          <section className="activity-turn" key={id}>
-            <h2>{label}</h2>
-            {snapshot ? <PromptSnapshotRow snapshot={snapshot} /> : null}
-            <TurnTimelineView timeline={timeline} />
-          </section>
-        )) : (
-          <p className="activity-sidebar-empty">Delegated workers, tool calls, and reasoning will appear here.</p>
-        )}
-        </details>
+        <section className="session-trace" aria-label="Full trace">
+          <h3>Full trace <span>{timelines.length} run{timelines.length === 1 ? '' : 's'}</span></h3>
+          {timelines.length ? timelines.map(({ id, label, timeline, snapshot }) => (
+            <section className="activity-turn" key={id}>
+              <h2>{label}</h2>
+              {snapshot ? <PromptSnapshotRow snapshot={snapshot} /> : null}
+              <TurnTimelineView timeline={timeline} />
+            </section>
+          )) : (
+            <p className="activity-sidebar-empty">Delegated workers, tool calls, and reasoning will appear here.</p>
+          )}
+        </section>
       </div>
     </aside>
   );
@@ -196,7 +208,8 @@ function groupSteps(steps: TurnStep[]): TimelineRow[] {
   for (const step of steps) {
     if (step.kind === 'tool') {
       const last = rows[rows.length - 1];
-      if (last?.kind === 'tools') last.steps.push(step);
+      if (last?.kind === 'tools' && step.status !== 'running' && !step.children?.length
+        && !last.steps.some((tool) => tool.children?.length || tool.status === 'running')) last.steps.push(step);
       else rows.push({ kind: 'tools', steps: [step] });
       continue;
     }
@@ -213,10 +226,12 @@ function groupSteps(steps: TurnStep[]): TimelineRow[] {
 }
 
 function AgentRow({ step }: { step: AgentStep }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(step.status === 'running');
   const running = step.status === 'running';
   const elapsed = formatStepDuration(step.seconds);
   const detail = step.output == null ? null : formatPayload(step.output);
+  const expandable = Boolean(detail || step.children?.steps.length || step.request || running);
+  const activity = running && step.children ? describeLiveActivity(step.children, { writing: Boolean(detail) }) : null;
 
   return (
     <div
@@ -225,9 +240,9 @@ function AgentRow({ step }: { step: AgentStep }) {
       <button
         type="button"
         className="timeline-head"
-        aria-expanded={detail ? open : undefined}
+        aria-expanded={expandable ? open : undefined}
         onClick={() => {
-          if (detail) setOpen((value) => !value);
+          if (expandable) setOpen((value) => !value);
         }}
       >
         {running
@@ -236,15 +251,21 @@ function AgentRow({ step }: { step: AgentStep }) {
         <span className="timeline-label">
           <span className="timeline-lead">{running ? 'Delegated to' : 'Delegated worker'}</span>
           <strong>{step.name}</strong>
+          {activity ? <small>{activity.phase === 'starting' ? 'Thinking' : activity.label}</small> : null}
           {elapsed ? <small>{elapsed}</small> : null}
           {step.status === 'failed' ? <em className="timeline-failed">failed</em> : null}
           {step.status === 'superseded' ? <em>restarted</em> : null}
+          {['cancelled', 'interrupted'].includes(step.status) ? <em>{step.status}</em> : null}
         </span>
-        {detail ? <Icon className="timeline-chevron" name="arrowRight" size={13} /> : null}
+        {expandable ? <Icon className="timeline-chevron" name="arrowRight" size={13} /> : null}
       </button>
-      {open && detail ? (
+      {open && expandable ? (
         <div className="timeline-detail agent">
-          <MarkdownViewer content={detail} />
+          {step.request ? (
+            <details><summary>Assignment{step.requestTruncated ? ' (truncated)' : ''}</summary><p>{step.request}</p></details>
+          ) : null}
+          {step.children ? <TurnTimelineView timeline={step.children} /> : null}
+          {detail ? <details><summary>{running ? 'Response' : 'Handoff'}</summary><MarkdownViewer content={detail} /></details> : null}
         </div>
       ) : null}
     </div>
@@ -316,10 +337,16 @@ function ToolRow({ step }: { step: ToolStep }) {
           <strong>{step.label}</strong>
           {elapsed ? <small>{elapsed}</small> : null}
           {step.status === 'failed' ? <em className="timeline-failed">failed</em> : null}
+          {['cancelled', 'interrupted'].includes(step.status) ? <em>{step.status}</em> : null}
         </span>
         <Icon className="timeline-chevron" name="arrowRight" size={13} />
       </button>
       {open ? <ToolDetail step={step} /> : null}
+      {step.children?.length ? (
+        <div className="timeline-children" aria-label="Delegated work">
+          {step.children.map((child) => <AgentRow key={child.id} step={child} />)}
+        </div>
+      ) : null}
     </div>
   );
 }

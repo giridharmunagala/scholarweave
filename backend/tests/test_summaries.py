@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from dataclasses import dataclass
 from typing import Any
 import asyncio
+import hashlib
 import pytest
 from openai import AsyncOpenAI
 
@@ -40,6 +41,67 @@ class FakeCompiled:
     entry_agent: Any
     completion_validator: Any = None
     completion_policy_id: str | None = None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("batched", [False, True])
+async def test_reviewed_summary_finishes_at_verified_save_without_another_model_call(
+    test_settings, stub_provider, monkeypatch, batched,
+):
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="terminal-summary.pdf", title="Terminal summary",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [
+        {"text": "The measured result is 42 units.", "citation": "p.1"},
+    ])
+    client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
+    binding = ModelBinding(
+        client=client, model_name="stub-model", provider_kind="openai_compatible",
+        context_window_tokens=80000,
+    )
+    compiler = AgentCompiler(
+        SimpleNamespace(resolve_agent_model=lambda *args, **kwargs: binding),
+        create_tool_catalog(), settings=test_settings,
+    )
+    monkeypatch.setattr(services.summaries, "_compiler", compiler)
+    arguments = {
+        "document_id": document.id,
+        "content": "# Summary\n\n" + "The measured result is 42 units [p.1]. " * 7,
+        "review_summary": "Checked the result against the supplied source and its citation.",
+    }
+    if batched:
+        monkeypatch.setattr(services.documents, "summary_source", lambda *args: None)
+        stub_provider.tool_plans = [
+            (document.id, "read_paper_summary_batch", {
+                "document_id": document.id, "action": "chunks", "start": None, "offset": None,
+            }),
+            (document.id, "paper_summary_checkpoint", {
+                "document_id": document.id, "action": "append",
+                "content": "The measured result is 42 units [p.1].", "offset": None, "limit": None,
+            }),
+        ]
+    stub_provider.tool_plans.extend([
+        (document.id, "save_paper_summary_version", arguments),
+        (document.id, "save_paper_summary_version", {
+            **arguments, "content": arguments["content"] + "\nA rewritten final paragraph.",
+        }),
+    ])
+    try:
+        run, _ = services.summaries.start(document.id, model_reference=ModelReferenceSpec())
+        await asyncio.wait_for(services.runs._tasks[run.id], timeout=30)
+        finished = services.runs.get(run.id)
+        assert finished.status == "completed", finished.error
+        assert len(stub_provider.requests) == (3 if batched else 1)
+        assert [attempt.catalog_id for attempt in finished.tool_attempts].count("research.summary.save") == 1
+        versions = services.summaries.versions(document.id)
+        assert len(versions) == 1
+        assert versions[0]["coverage_complete"] is True
+        assert services.workspace.read_file(versions[0]["path"]).content == arguments["content"].strip() + "\n"
+    finally:
+        await services.close()
+        await client.close()
 
 
 @pytest.mark.anyio
@@ -123,7 +185,8 @@ async def test_main_agent_summary_call_uses_runtime_owned_model_and_reasoning(
                 else:
                     assert request["reasoning_effort"] == expected
             assert request["model"] == model
-        assert len(main_requests) == len(summary_requests) == 2
+        assert len(main_requests) == 2
+        assert len(summary_requests) == 1
         versions = services.summaries.versions(document.id)
         assert len(versions) == 1
         assert versions[0]["model"]["provider_profile_id"] == reference.provider_profile_id
@@ -137,8 +200,9 @@ async def test_main_agent_summary_call_uses_runtime_owned_model_and_reasoning(
 @pytest.mark.parametrize(("declared", "expected"), [
     (("none", "high"), "none"), (("high",), None), ((), None),
 ])
+@pytest.mark.parametrize("recovered_status", ["failed", "cancelled"])
 async def test_research_summary_tool_uses_serial_isolated_writer(
-    test_settings, stub_provider, declared, expected, monkeypatch,
+    test_settings, stub_provider, declared, expected, recovered_status, monkeypatch,
 ):
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
@@ -185,6 +249,9 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
                 }, context) for mode in ("reviewed", "overview")
             ))
         runs = [services.runs.get(result["summary_run_id"]) for result in results]
+        assert all(result["summary_run_status"] == "completed" for result in results)
+        assert all(result["recovered_saved_version"] is False for result in results)
+        assert all(result["summary_run_error"] is None for result in results)
         assert all(run.completion_policy_id == PAPER_SUMMARY_COMPLETION_POLICY_ID for run in runs)
         assert runs[0].finished_at <= runs[1].started_at
         assert runs[0].finished_at <= runs[1].created_at
@@ -223,17 +290,54 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
             assert not {"research.summary.read", "research.summary.checkpoint", "research.summary.save"} & {
                 tool.catalog_id for tool in blueprint.tools
             }
+        request_count = len(stub_provider.requests)
+        if recovered_status == "failed":
+            services.runs._repository.fail(runs[0].id, "Context budget exhausted after saving.")
+        else:
+            services.runs._repository.cancel(runs[0].id)
+        interrupted = services.runs.get(runs[0].id)
+        services.runs._repository.update_runtime_metadata(runs[0].id, {
+            key: value for key, value in runs[0].runtime_metadata_json.items() if key != "paper_activity"
+        })
+        recovered_context = ScholarWeaveContext(
+            run_id=parent.id, tool_runtime=runtime, event_sink=SimpleNamespace(emit=emit),
+        )
+        recovered = await services.summaries.run_for_agent({
+            "document_id": document.id, "mode": "reviewed",
+        }, recovered_context)
+        assert recovered == {
+            **results[0], "summary_run_status": recovered_status,
+            "summary_run_error": interrupted.error, "recovered_saved_version": True,
+        }
+        unchanged = services.runs.get(runs[0].id)
+        assert unchanged.status == interrupted.status == recovered_status
+        assert unchanged.error == interrupted.error
+        assert unchanged.finished_at == interrupted.finished_at
+        assert len(stub_provider.requests) == request_count
+        assert any(item["action"] == "summary_saved" for item in recovered_context.metadata["paper_activity"])
+        services.workspace.write_file(results[0]["path"], "An incomplete or corrupted version.")
+        with pytest.raises(
+            ValidationError,
+            match="Context budget exhausted" if recovered_status == "failed" else "was cancelled",
+        ):
+            await services.summaries.run_for_agent({
+                "document_id": document.id, "mode": "reviewed",
+            }, recovered_context)
+        assert len(stub_provider.requests) == request_count
     finally:
         await client.close()
         await services.close()
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "parent_cancel"])
+@pytest.mark.parametrize("status", [
+    "completed", "failed", "cancelled", "parent_cancel", "parent_cancel_saved",
+])
 async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(monkeypatch, status):
+    parent_cancelled = status.startswith("parent_cancel")
     payload = {"model_call_id": "child-compaction-call", "context_scope": "compaction", "usage_complete": True}
     child = SimpleNamespace(
-        id="child", status="running" if status == "parent_cancel" else status, error="Child failed.",
+        id="child", status="running" if parent_cancelled else status, error="Child failed.",
         runtime_metadata_json={
             "paper_summary_parent_run_id": "parent", "paper_summary_document_id": "paper",
             "paper_summary_mode": "reviewed",
@@ -267,6 +371,14 @@ async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(mo
         paper_folder=lambda document_id: WorkspaceLayout.paper_folder(document_id, "Paper"),
         read_file=read_file, write_file=lambda path, content, **kwargs: receipts.update({path: content}),
     )
+    if status == "parent_cancel_saved":
+        version_path = f"{workspace.paper_folder('paper')}/summaries/child.md"
+        receipts[version_path] = "Saved summary."
+        receipts[version_path.removesuffix(".md") + ".json"] = {
+            "id": "child", "run_id": "child", "document_id": "paper", "path": version_path,
+            "mode": "reviewed", "status": "reviewed",
+            "content_hash": hashlib.sha256(b"Saved summary.").hexdigest(),
+        }
     service = PaperSummaryService(None, runs, None, workspace, None)
     compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
         model_name="qwen-27b", provider_kind="openai_compatible",
@@ -285,7 +397,7 @@ async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(mo
         run_id="parent", tool_runtime=None, event_sink=SimpleNamespace(emit=emit),
     )
     call = service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
-    if status == "parent_cancel":
+    if parent_cancelled:
         task = asyncio.create_task(call)
         await asyncio.wait_for(forwarded_event.wait(), timeout=2)
         task.cancel()
@@ -296,7 +408,7 @@ async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(mo
     else:
         with pytest.raises(ValidationError):
             await call
-    expected_events = 2 if status == "parent_cancel" else 1
+    expected_events = 2 if parent_cancelled else 1
     assert len(events) == expected_events
     assert events[0][0] == "model.telemetry"
     forwarded = events[0][1]
@@ -307,6 +419,11 @@ async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(mo
     replay = service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
     if status == "completed":
         await replay
+    elif status == "parent_cancel_saved":
+        recovered = await replay
+        assert recovered["recovered_saved_version"] is True
+        assert recovered["summary_run_status"] == child.status == "cancelled"
+        assert recovered["summary_run_error"] == child.error == "Child failed."
     else:
         with pytest.raises(ValidationError):
             await replay
@@ -700,7 +817,7 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
             assert result.status == "completed"
             assert len(versions) == 1
             assert versions[0]["mode"] == mode
-            assert len(stub_provider.requests) == repair_after + (1 if mode == "overview" else 2)
+            assert len(stub_provider.requests) == repair_after + 1
             saves = [
                 attempt for attempt in result.tool_attempts
                 if attempt.catalog_id == "research.summary.save"
@@ -912,10 +1029,79 @@ async def test_short_paper_direct_summary_is_complete_immutable_and_preserves_la
         assert services.workspace.read_file(str(paper["notes_path"])).content.endswith("Keep user notes.")
         repeated = services.runs._tool_runtime._save_paper_summary_version(arguments, context)
         assert repeated == saved
-        with pytest.raises(ValueError, match="immutable"):
+        recovered = ScholarWeaveContext(
+            run_id=context.run_id, tool_runtime=context.tool_runtime,
+            metadata={key: value for key, value in context.metadata.items() if key != "paper_activity"},
+        )
+        validate_paper_summary_completion(recovered, workspace=services.workspace)
+        assert any(item["action"] == "summary_saved" for item in recovered.metadata["paper_activity"])
+        with pytest.raises(ToolInputError, match="immutable"):
             services.runs._tool_runtime._save_paper_summary_version(
                 {**arguments, "content": "# Changed result"}, context,
             )
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failed_write", ["metadata", "provenance"])
+@pytest.mark.parametrize("late_edit", [False, True])
+async def test_interrupted_summary_save_reconciles_receipts_without_losing_manual_edits(
+    test_settings, monkeypatch, failed_write, late_edit,
+):
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="interrupted.pdf", title="Interrupted",
+    )
+    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+    services.retrieval.replace_document_chunks(document.id, [{"text": "Result 42.", "citation": "p.1"}])
+    paper = services.workspace.ensure_paper_folder(document.id, document.title)
+    canonical_path = str(paper["summary_path"])
+    provenance_path = f"{paper['folder']}/summary.provenance.json"
+    runtime = services.runs._tool_runtime
+    context = ScholarWeaveContext(
+        run_id="interrupted-version", tool_runtime=runtime, metadata={
+            "paper_summary_document_id": document.id, "paper_summary_mode": "reviewed",
+            "paper_summary_source_version": services.documents.source_revision(document.id)["source_version"],
+            "paper_summary_canonical_hash": hashlib.sha256(
+                str(services.workspace.read_file(canonical_path).content).encode(),
+            ).hexdigest(),
+        },
+    )
+    metadata_path = f"{paper['folder']}/summaries/{context.run_id}.json"
+    failure_path = metadata_path if failed_write == "metadata" else provenance_path
+    write_file = services.workspace.write_file
+
+    def interrupted_write(path, content, **kwargs):
+        if path == failure_path:
+            raise OSError("Interrupted summary receipt write.")
+        return write_file(path, content, **kwargs)
+
+    arguments = {
+        "document_id": document.id, "content": "# Summary\n\nThe exact result is 42 [p.1].",
+        "review_summary": "Checked the result and its source citation.",
+    }
+    try:
+        await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "chunks", "start": 0}, context,
+        )
+        monkeypatch.setattr(services.workspace, "write_file", interrupted_write)
+        with pytest.raises(OSError, match="Interrupted"):
+            runtime._save_paper_summary_version(arguments, context)
+        monkeypatch.setattr(services.workspace, "write_file", write_file)
+        if late_edit:
+            write_file(canonical_path, "# A later manual summary")
+            write_file(provenance_path, {"manual": True})
+        saved = runtime._save_paper_summary_version(arguments, context)
+        validate_paper_summary_completion(context, workspace=services.workspace)
+        assert services.workspace.read_file(saved["path"]).content == arguments["content"] + "\n"
+        if late_edit:
+            assert services.workspace.read_file(canonical_path).content == "# A later manual summary"
+            assert services.workspace.read_file(provenance_path).content == {"manual": True}
+        else:
+            assert saved["canonical_updated"] is True
+            assert services.workspace.read_file(canonical_path).content == arguments["content"] + "\n"
+            assert services.workspace.read_file(provenance_path).content == saved
     finally:
         await services.close()
 
@@ -946,6 +1132,21 @@ async def test_summary_save_marks_noncontiguous_coverage_partial(test_settings) 
         assert services.workspace.read_file(saved["path"]).content.startswith("> Partial summary:")
         reread = runtime._read_research_note({"path": saved["canonical_path"]}, context)
         assert reread["summary_check"]["needs_regeneration"] is True
+        arguments = {
+            "document_id": document.id, "content": "# Results\n\nEvidence 2 [p.3].",
+            "review_summary": "Only checked the last page.",
+        }
+        await runtime._read_paper_summary_batch(
+            {"document_id": document.id, "action": "chunks", "start": 0}, context,
+        )
+        state = runtime._paper_summary_state(context, document.id)
+        pending = dict(state["pending_checkpoint"])
+        assert runtime._save_paper_summary_version(arguments, context) == saved
+        assert state["pending_checkpoint"] == pending
+        runtime._append_summary_evidence(context, document.id, "All three results [p.1] [p.2] [p.3].")
+        assert runtime._load_summary_evidence(state)["complete"] is True
+        assert runtime._save_paper_summary_version(arguments, context) == saved
+        assert services.workspace.read_file(saved["path"]).content.startswith("> Partial summary:")
     finally:
         await services.close()
 

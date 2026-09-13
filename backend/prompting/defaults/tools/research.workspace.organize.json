@@ -1,0 +1,10 @@
+{
+  "label": "Organize workspace file",
+  "description": "Organize one standalone note or text file already returned by workspace discovery. Move/rename without overwriting, replace tags, or delete within the user's explicitly authorized deletion or cleanup scope. Resolve and inspect each exact path first; scoped cleanup can proceed file by file without repeated approval. A request to organize alone does not authorize deletion. Never use wildcard or folder deletion. Managed paper files, source attachments, and internal metadata are protected; organize library papers with organize_research_library instead.",
+  "parameter_descriptions": {
+    "action": "move_file moves or renames one file, set_tags replaces its tags, and delete_file permanently removes one explicitly selected file and its search entry.",
+    "path": "Exact existing workspace-relative path from list_workspace or search_research_notes. Only indexed standalone .md, .txt, or .json files; no absolute paths, traversal, wildcard patterns, or directories.",
+    "destination": "For move_file, a new workspace-relative path with the same extension. Parent folders are created, existing destinations are never overwritten, and note identity and tags are preserved. Null for other actions.",
+    "tags": "For set_tags, the complete replacement tag list, or [] to clear tags. Null for other actions."
+  }
+}

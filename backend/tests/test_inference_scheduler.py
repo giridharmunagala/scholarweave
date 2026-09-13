@@ -5,8 +5,35 @@ import asyncio
 import httpx
 import pytest
 
-from backend.providers.inference import InferenceScheduler, inference_priority
+from backend.providers.inference import InferenceScheduler, inference_priority, inference_progress
 from backend.providers.logging import ScheduledTransport
+
+
+@pytest.mark.anyio
+async def test_request_progress_is_scoped_and_reports_queue_before_provider() -> None:
+    scheduler = InferenceScheduler()
+    first = await scheduler.request().__aenter__()
+    phases = []
+    queued = asyncio.Event()
+
+    async def progress(phase):
+        phases.append(phase)
+        queued.set()
+
+    async def request():
+        with inference_progress(progress):
+            async with httpx.AsyncClient(transport=ScheduledTransport(
+                httpx.MockTransport(lambda _request: httpx.Response(200, json={})), scheduler,
+            )) as client:
+                await client.post("http://local/v1/chat/completions", json={"model": "main"})
+
+    task = asyncio.create_task(request())
+    await asyncio.wait_for(queued.wait(), 1)
+    assert phases == ["queued"]
+    await first.release()
+    await asyncio.wait_for(task, 1)
+    assert phases == ["queued", "waiting"]
+    assert scheduler.snapshot()["active_requests"] == 0
 
 
 @pytest.mark.anyio

@@ -136,12 +136,13 @@ class SafeStorage:
             destination.rename(preserved)
         staged.rename(destination)
 
-    async def read_upload(self, upload: UploadFile) -> bytes:
+    async def read_upload(self, upload: UploadFile, *, max_bytes: int | None = None) -> bytes:
+        limit = self.settings.max_upload_bytes if max_bytes is None else max_bytes
         content = bytearray()
-        while chunk := await upload.read(min(1024 * 1024, self.settings.max_upload_bytes + 1 - len(content))):
+        while chunk := await upload.read(min(1024 * 1024, limit + 1 - len(content))):
             content.extend(chunk)
-            if len(content) > self.settings.max_upload_bytes:
-                raise StorageError("Upload exceeds maximum allowed size")
+            if len(content) > limit:
+                raise StorageError(f"Upload exceeds maximum allowed size ({limit} bytes)")
         return bytes(content)
 
     def _write_bytes(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
@@ -261,6 +262,20 @@ class SafeStorage:
             raise StorageError("Workspace path is not a file")
         absolute.unlink()
         self._remove_empty_parents(absolute.parent, self.settings.workspace_dir)
+
+    def move_workspace_file(self, relative_path: str, destination: str) -> None:
+        allowed = {".txt", ".md", ".json"}
+        source = self._safe_path(self.settings.workspace_dir, relative_path, allowed)
+        target = self._safe_path(self.settings.workspace_dir, destination, allowed)
+        if not source.is_file():
+            raise StorageError("Workspace source is not an existing file.")
+        if source.suffix.lower() != target.suffix.lower():
+            raise StorageError("Moving a workspace file must preserve its extension.")
+        if target.exists():
+            raise StorageError("Workspace destination already exists; it will not be overwritten.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.rename(target)
+        self._remove_empty_parents(source.parent, self.settings.workspace_dir)
 
     def delete_workspace_folder(self, relative_path: str) -> None:
         absolute = self._safe_path(self.settings.workspace_dir, relative_path)

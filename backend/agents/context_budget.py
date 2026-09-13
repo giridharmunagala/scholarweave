@@ -28,6 +28,7 @@ from backend.agents.harness import (
     PreparedInput,
     RunPolicyViolation,
     RunInputItems,
+    cached_tokens_from_usage,
     request_parameters,
     serialized_characters,
     to_chat_messages,
@@ -235,9 +236,14 @@ class ContextBudgetPolicy:
         compacted = prepared
         did_compact = False
         tool_payload_evictions = hard_limit_evictions
-        needs_reduction = before_tokens > high_water_tokens and any(
-            not _is_verbatim_constraint(item)
-            for item in prepared
+        # Soft compaction must buy useful headroom; a large protected floor would
+        # otherwise cause another lossy summary on almost every model turn.
+        needs_reduction = before_tokens > high_water_tokens and (
+            before_tokens > request_limit
+            or (
+                mandatory_tokens < high_water_tokens
+                and before_tokens - mandatory_tokens >= max(256, int(request_limit * 0.05))
+            )
         )
         if needs_reduction:
             fixed_tokens = _request_tokens(agent, steering_delta, instructions, context)
@@ -721,10 +727,7 @@ class ContextBudgetPolicy:
             await self._summary_failure(agent, checkpoint, context, failure, retry=True)
         for index, binding in enumerate(bindings):
             is_helper = len(bindings) > 1 and index == 0
-            window = (
-                binding.context_window_tokens
-                if is_helper else self.context_window_tokens(agent)
-            )
+            window = self.context_window_tokens(agent)
             details = {
                 "model_name": binding.model_name,
                 "provider_kind": binding.provider_kind,
@@ -742,12 +745,6 @@ class ContextBudgetPolicy:
             checkpoint["summary_model_role"] = details["summary_model_role"]
             checkpoint["summary_context_window_tokens"] = window
             try:
-                if window is None:
-                    raise _SummaryInputLimitError(
-                        f"Model '{binding.model_name}' has no known context window. "
-                        "The helper cannot safely receive exact history without its own input "
-                        "budget. No sampled summary was requested."
-                    )
                 summary = await self._request_summary(
                     agent, binding, discarded, checkpoint,
                     context_window_tokens=window, max_tokens=max_tokens, context=context,
@@ -871,6 +868,7 @@ class ContextBudgetPolicy:
         # would deadlock model hot-swaps on a serialized local provider.
         usage = Usage(requests=1)
         usage_complete = False
+        cached_tokens: int | None = None
         timings: dict[str, float] = {}
         completed = False
         model_call_id = str(uuid.uuid4())
@@ -880,6 +878,7 @@ class ContextBudgetPolicy:
             completed = True
             raw = response.model_dump() if hasattr(response, "model_dump") else dict(response)
             raw_usage = raw.get("usage") or {}
+            cached_tokens = cached_tokens_from_usage(raw_usage)
             usage = usage_from_payload(raw_usage)
             usage_complete = isinstance(raw_usage, dict) and all(
                 type(value) is int and value >= 0
@@ -891,7 +890,7 @@ class ContextBudgetPolicy:
             if isinstance(raw.get("timings"), dict):
                 timings = {
                     key: value for key, value in raw["timings"].items()
-                    if key in {"prompt_n", "prompt_ms", "predicted_n", "predicted_ms"}
+                    if key in {"prompt_n", "prompt_ms", "predicted_n", "predicted_ms", "cache_n"}
                     and isinstance(value, (int, float)) and not isinstance(value, bool)
                     and math.isfinite(value) and value >= 0
                 }
@@ -904,6 +903,7 @@ class ContextBudgetPolicy:
                 "context_scope": "compaction",
                 "usage": usage.to_dict(),
                 "usage_complete": usage_complete,
+                **({"cached_input_tokens": cached_tokens} if cached_tokens is not None else {}),
                 "timings": timings,
                 "completed": completed,
             })
@@ -973,6 +973,7 @@ def _request_tokens(
     # Output limits are not prompt tokens; counting them changes the calibrated
     # input estimate when a truncated response is retried with a larger limit.
     parameters.pop("max_tokens", None)
+    parameters.pop("max_completion_tokens", None)
     return math.ceil(
         (_estimated_tokens(parameters) + 8 * len(messages)) * _token_estimate_ratio(agent, context)
     )
