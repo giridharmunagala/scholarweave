@@ -167,6 +167,33 @@ backend it owns, so finish important work first; another TUI or browser using th
 server loses its connection too. A reused server is never stopped. An existing server started
 without frontend assets may need a manual restart before it can serve the newly built web app.
 
+**Linux shell launcher:** with Python 3.12+ and Node.js 20+ installed, run this setup once
+from the repository root:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e ".[tui]"
+(cd frontend && npm ci)
+```
+
+Then launch with:
+
+```sh
+sh scripts/launch-scholarweave.sh
+```
+
+Like the Windows shortcut, this builds the frontend, starts or reuses the local backend, and opens
+the TUI. No virtual-environment activation is needed. You can invoke the script by its full path
+from any directory; keep it inside this checkout. All terminal options are forwarded, for example:
+
+```sh
+sh scripts/launch-scholarweave.sh --api-url http://127.0.0.1:8001 --check
+```
+
+Errors remain in the invoking terminal, and quitting stops only a backend the launcher started.
+For a terminal-only launch without a frontend build or Node.js, use `.venv/bin/python -m scholarweave_tui`
+instead. Initial provider/model configuration still uses the web app's **Settings**.
+
 | Key | Action |
 | --- | --- |
 | `/` in the composer | Slash commands: model, reasoning, effort, web, focus, theme, status |

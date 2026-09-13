@@ -68,6 +68,9 @@ are never stopped. `--connect-only` disables autostart.
 `scripts/launch-scholarweave.ps1` wrapper in this checkout. It runs the same Python entry point with
 `--build-frontend`; no custom executable or bundled runtime is built. Frontend build failures stop
 startup and remain visible rather than opening a success-shaped TUI.
+On Linux, `sh scripts/launch-scholarweave.sh` runs the same entry point with `--build-frontend`
+using the checkout's `.venv/bin/python`, regardless of the invoking directory. It forwards CLI
+arguments and uses `exec` so terminal signals and exit status reach the Python launcher directly.
 
 Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
 only: `/model` saves `last_chat_model_reference` through `PUT /api/settings` and applies it when a
