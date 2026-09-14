@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from rich.style import Style
 from rich.text import Text
 from textual import events
@@ -9,9 +11,10 @@ from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Markdown, OptionList, Static, TextArea
+from textual.widgets import Button, Input, Label, Markdown, OptionList, Select, Static, TextArea
 from textual.widgets.option_list import Option
 
+from backend.providers.schemas import ProviderKind, ProviderResponse
 from scholarweave_tui.commands import COMMANDS
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -280,6 +283,117 @@ class NoteName(ModalScreen[str | None]):
             self.notify("Give this note a name.", severity="warning")
 
 
+@dataclass(frozen=True)
+class ProviderFormResult:
+    name: str
+    kind: ProviderKind
+    base_url: str
+    api_key: str | None
+
+
+class ProviderForm(ModalScreen[ProviderFormResult | None]):
+    BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
+    KINDS: tuple[tuple[str, ProviderKind], ...] = (
+        ("Ollama", "ollama"),
+        ("OpenAI", "openai"),
+        ("Azure OpenAI", "azure_openai"),
+        ("Azure Foundry", "azure_foundry"),
+        ("OpenAI compatible", "openai_compatible"),
+    )
+
+    def __init__(self, provider: ProviderResponse | None = None) -> None:
+        super().__init__()
+        self._provider = provider
+
+    def compose(self) -> ComposeResult:
+        provider = self._provider
+        with Vertical(classes="dialog provider-dialog"):
+            yield Label(
+                "Configure provider." if provider else "Add a model provider.",
+                classes="dialog-title",
+            )
+            yield Static(
+                "ScholarWeave connects through the OpenAI-compatible Chat Completions protocol.",
+                classes="dialog-body",
+            )
+            yield Label("Profile name", classes="form-label")
+            yield Input(
+                value=provider.name if provider else "Local Ollama",
+                placeholder="Research models",
+                max_length=120,
+                id="provider-name",
+            )
+            yield Label("Provider kind", classes="form-label")
+            yield Select(
+                self.KINDS,
+                value=provider.kind if provider else "ollama",
+                allow_blank=False,
+                id="provider-kind",
+            )
+            yield Label("Base URL", classes="form-label")
+            yield Input(
+                value=provider.base_url if provider else "http://127.0.0.1:11434",
+                placeholder="http://127.0.0.1:11434",
+                max_length=1024,
+                id="provider-url",
+            )
+            yield Label(
+                "API key" + (" (leave blank to keep the saved key)" if provider else ""),
+                classes="form-label",
+            )
+            yield Input(
+                placeholder="Optional for Ollama and OpenAI-compatible servers",
+                password=True,
+                max_length=16_384,
+                id="provider-key",
+            )
+            with Horizontal(classes="dialog-actions"):
+                yield Button("Cancel", id="cancel-provider")
+                yield Button("Save and discover", id="save-provider", variant="primary")
+            yield Static("Enter  save        Esc  cancel", classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#provider-name", Input).focus()
+
+    def on_input_submitted(self) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-provider":
+            self.dismiss(None)
+        else:
+            self._submit()
+
+    def _submit(self) -> None:
+        name = self.query_one("#provider-name", Input).value.strip()
+        base_url = self.query_one("#provider-url", Input).value.strip()
+        kind = self.query_one("#provider-kind", Select).value
+        api_key = self.query_one("#provider-key", Input).value.strip() or None
+        if not name:
+            self.notify("Give this provider a profile name.", severity="warning")
+            return
+        if not base_url:
+            self.notify("Enter the provider's base URL.", severity="warning")
+            return
+        valid_kinds = {value for _, value in self.KINDS}
+        if kind not in valid_kinds:
+            self.notify("Choose a provider kind.", severity="warning")
+            return
+        if (
+            kind not in {"ollama", "openai_compatible"}
+            and not api_key
+            and not (self._provider and self._provider.api_key_set)
+        ):
+            self.notify("This provider requires an API key.", severity="warning")
+            return
+        self.dismiss(ProviderFormResult(
+            name=name,
+            kind=kind,
+            base_url=base_url,
+            api_key=api_key,
+        ))
+
+
 class ChoicePicker(ModalScreen[str | None]):
     """One list, one choice. Used for models and reasoning levels.
 
@@ -325,6 +439,8 @@ class ChoicePicker(ModalScreen[str | None]):
         values = [value for value, _, _ in self._rows]
         if self._current in values:
             choices.highlighted = values.index(self._current)
+        elif self._rows:
+            choices.highlighted = 0
         (choices if self._rows else self.query_one("#cancel-choice", Button)).focus()
 
     def _prompt(self, title: str, subtitle: str) -> Text:
@@ -415,6 +531,7 @@ SHORTCUTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("Set up this message", (
         ("Ctrl+M", "Choose the model"),
         ("Ctrl+G", "Set the reasoning level"),
+        ("/provider", "Add or configure a model provider"),
         ("/effort quick", "Smallest sufficient evidence"),
         ("/web off", "Keep this message local"),
     )),

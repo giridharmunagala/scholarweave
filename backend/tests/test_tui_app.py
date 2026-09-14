@@ -24,6 +24,7 @@ from scholarweave_tui.widgets import (
     ChoicePicker,
     ConfirmDiscard,
     NoteName,
+    ProviderForm,
     Spinner,
     ThemePicker,
     TranscriptNote,
@@ -126,7 +127,47 @@ class CockpitServer:
         if self.offline:
             raise httpx.ConnectError("Server is offline", request=request)
         if path == "/providers":
+            if request.method == "POST":
+                created = {
+                    "id": "provider-2",
+                    **body,
+                    "api_key_set": bool(body.get("api_key")),
+                    "state": "active",
+                    "models": body.get("models", []),
+                    "serialize_model_switches": body.get("serialize_model_switches") or False,
+                    "created_at": NOW,
+                    "updated_at": NOW,
+                }
+                created.pop("api_key", None)
+                self.providers.append(created)
+                return httpx.Response(201, json=created)
             return httpx.Response(200, json=self.providers)
+        if path.startswith("/providers/") and path.endswith("/models"):
+            provider_id = path.split("/")[2]
+            provider = next(item for item in self.providers if item["id"] == provider_id)
+            if not provider["models"]:
+                provider["models"] = [{
+                    "name": "discovered-chat",
+                    "capabilities": ["chat", "tools"],
+                    "reasoning_efforts": None,
+                    "preserve_thinking": False,
+                    "context_window_tokens": None,
+                    "enabled": True,
+                }]
+            return httpx.Response(200, json={
+                "models": provider["models"], "discovery_error": None,
+            })
+        if path.startswith("/providers/") and request.method == "PUT":
+            provider_id = path.split("/")[2]
+            provider = next(item for item in self.providers if item["id"] == provider_id)
+            for key, value in body.items():
+                if key == "api_key":
+                    provider["api_key_set"] = bool(value)
+                else:
+                    provider[key] = value
+            provider.pop("api_key", None)
+            provider["updated_at"] = NOW
+            return httpx.Response(200, json=provider)
         if path == "/settings":
             if request.method == "PUT":
                 self.last_chat_model_reference = body["last_chat_model_reference"]
@@ -673,6 +714,74 @@ def test_model_picker_saves_choice_and_new_threads_use_it() -> None:
             assert created["model_reference"] == {
                 "provider_profile_id": "provider-1", "model": "weave-deep",
             }
+    asyncio.run(scenario())
+
+
+def test_provider_command_adds_and_discovers_profile() -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            app.run_command("provider")
+            await pilot.pause()
+            assert isinstance(app.screen, ChoicePicker)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ProviderForm)
+            app.screen.query_one("#provider-name", Input).value = "Lab server"
+            app.screen.query_one("#provider-url", Input).value = "http://127.0.0.1:8080/v1"
+            await pilot.click("#save-provider")
+            await settle(app, pilot)
+
+            created = next(
+                body for method, path, body in server.requests
+                if method == "POST" and path == "/providers"
+            )
+            assert created == {
+                "name": "Lab server",
+                "kind": "ollama",
+                "base_url": "http://127.0.0.1:8080/v1",
+                "api_key": None,
+                "models": [],
+                "serialize_model_switches": None,
+            }
+            assert any(
+                method == "GET" and path == "/providers/provider-2/models"
+                for method, path, _ in server.requests
+            )
+            assert app.providers[-1].models[0].name == "discovered-chat"
+    asyncio.run(scenario())
+
+
+def test_provider_command_updates_connection_without_clearing_saved_key() -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        server.providers[0]["api_key_set"] = True
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            app.run_command("provider")
+            await pilot.pause()
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ProviderForm)
+            app.screen.query_one("#provider-name", Input).value = "Renamed runtime"
+            app.screen.query_one("#provider-url", Input).value = "http://127.0.0.1:9000/v1"
+            await pilot.click("#save-provider")
+            await settle(app, pilot)
+
+            updated = next(
+                body for method, path, body in server.requests
+                if method == "PUT" and path == "/providers/provider-1"
+            )
+            assert updated == {
+                "name": "Renamed runtime",
+                "kind": "openai_compatible",
+                "base_url": "http://127.0.0.1:9000/v1",
+            }
+            assert server.providers[0]["api_key_set"] is True
+            assert app.providers[0].name == "Renamed runtime"
     asyncio.run(scenario())
 
 

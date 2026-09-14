@@ -94,8 +94,9 @@ Leaving a screen does not cancel backend runs; quitting an owning launcher shuts
 Notes are read and saved through
 the workspace API; a pre-save read catches already-visible external edits, but is not an atomic
 concurrency guarantee. The paper reader displays existing extracted chunks and citations rather than
-starting another extraction pipeline. Provider settings, paper acquisition, and PDF rendering remain
-in the web client.
+starting another extraction pipeline. `/provider` adds or updates provider connection profiles through
+the existing provider API and immediately refreshes model discovery; detailed per-model capability
+editing remains in the web client. Paper acquisition and PDF rendering also remain in the web client.
 
 Presentation is theme-driven: `scholarweave_tui/themes.py` registers the shipped Textual themes and
 `app.tcss` styles everything from theme variables, so no colour is hard-coded in widgets.

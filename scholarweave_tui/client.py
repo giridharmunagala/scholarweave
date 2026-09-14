@@ -19,7 +19,12 @@ from backend.conversations.schemas import (
 )
 from backend.core.settings_service import SettingsResponse
 from backend.providers.reasoning import ReasoningEffort
-from backend.providers.schemas import ProviderResponse
+from backend.providers.schemas import (
+    ProviderCreate,
+    ProviderModelsResponse,
+    ProviderResponse,
+    ProviderUpdate,
+)
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse, SteeringMessageResponse
 from backend.workspace.schemas import (
@@ -188,6 +193,25 @@ class ScholarWeaveClient:
 
     async def providers(self) -> list[ProviderResponse]:
         return await self._request("GET", "/providers", list[ProviderResponse])
+
+    async def create_provider(self, payload: ProviderCreate) -> ProviderResponse:
+        return await self._request(
+            "POST", "/providers", ProviderResponse,
+            json=payload.model_dump(mode="json"),
+        )
+
+    async def update_provider(
+        self, profile_id: str, payload: ProviderUpdate,
+    ) -> ProviderResponse:
+        return await self._request(
+            "PUT", f"/providers/{_segment(profile_id)}", ProviderResponse,
+            json=payload.model_dump(mode="json", exclude_unset=True),
+        )
+
+    async def discover_provider_models(self, profile_id: str) -> ProviderModelsResponse:
+        return await self._request(
+            "GET", f"/providers/{_segment(profile_id)}/models", ProviderModelsResponse,
+        )
 
     async def settings(self) -> SettingsResponse:
         return await self._request("GET", "/settings", SettingsResponse)

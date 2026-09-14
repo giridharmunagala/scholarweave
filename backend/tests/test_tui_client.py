@@ -89,6 +89,11 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
             ("GET", "/api/documents"): [document],
             ("GET", "/api/documents/paper-1"): {**document, "artifacts": [], "chunks": []},
             ("GET", "/api/providers"): [provider],
+            ("POST", "/api/providers"): provider,
+            ("PUT", "/api/providers/provider-1"): provider,
+            ("GET", "/api/providers/provider-1/models"): {
+                "models": provider["models"], "discovery_error": None,
+            },
             ("GET", "/api/settings"): settings,
             ("PUT", "/api/settings"): settings,
             ("GET", "/api/workspace/files/content"): note,
@@ -112,6 +117,31 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
                 "model_reference": {"provider_profile_id": "provider-1", "model": "weave-deep"},
             }
             assert (await client.providers())[0].models[0].reasoning_efforts == ["low", "high"]
+            from backend.providers.schemas import ProviderCreate, ProviderUpdate
+            assert (
+                await client.create_provider(ProviderCreate(
+                    name="Local runtime",
+                    kind="openai_compatible",
+                    base_url="http://127.0.0.1:11434/v1",
+                ))
+            ).id == "provider-1"
+            assert json.loads(requests[-1].content) == {
+                "name": "Local runtime",
+                "kind": "openai_compatible",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "api_key": None,
+                "models": [],
+                "serialize_model_switches": None,
+            }
+            assert (
+                await client.update_provider(
+                    "provider-1", ProviderUpdate(name="Renamed runtime"),
+                )
+            ).id == "provider-1"
+            assert json.loads(requests[-1].content) == {"name": "Renamed runtime"}
+            assert (
+                await client.discover_provider_models("provider-1")
+            ).models[0].name == "weave-deep"
             assert (await client.settings()).last_chat_model_reference == reference
             await client.save_chat_model(reference)
             assert json.loads(requests[-1].content) == {

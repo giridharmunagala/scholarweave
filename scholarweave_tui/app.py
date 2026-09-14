@@ -28,7 +28,7 @@ from textual.widgets.option_list import Option
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.conversations.schemas import ConversationResponse, ResponseEffort
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
-from backend.providers.schemas import ProviderResponse
+from backend.providers.schemas import ProviderCreate, ProviderResponse, ProviderUpdate
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse
 from backend.workspace.schemas import (
@@ -52,6 +52,7 @@ from scholarweave_tui.widgets import (
     ConfirmDiscard,
     Masthead,
     NoteName,
+    ProviderForm,
     ShortcutHelp,
     Spinner,
     ThemePicker,
@@ -292,7 +293,7 @@ class ScholarWeaveApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {
             "view", "search", "new", "send", "save_note", "reload", "sidebar", "observe", "themes", "help", "stop",
-            "edit_note", "focus_mode", "model", "reasoning", "quit",
+            "edit_note", "focus_mode", "model", "provider", "reasoning", "quit",
         }:
             return not self.screen.is_modal
         return True
@@ -596,6 +597,8 @@ class ScholarWeaveApp(App[None]):
         match name:
             case "model":
                 self.choose_model()
+            case "provider":
+                self.configure_provider()
             case "reasoning":
                 self.choose_reasoning(argument)
             case "effort":
@@ -685,6 +688,76 @@ class ScholarWeaveApp(App[None]):
     def action_model(self) -> None:
         self.choose_model()
 
+    def action_provider(self) -> None:
+        self.configure_provider()
+
+    @work(group="provider", exclusive=True)
+    async def configure_provider(self) -> None:
+        rows = [
+            ("__add__", "Add provider", "Connect Ollama, OpenAI, Azure, or another compatible server"),
+            *[
+                (
+                    provider.id,
+                    provider.name,
+                    f"{provider.kind.replace('_', ' ')}  ·  {provider.base_url}  ·  "
+                    f"{len(provider.models)} models",
+                )
+                for provider in self.providers
+                if provider.state == "active"
+            ],
+        ]
+        chosen = await self.push_screen_wait(ChoicePicker(
+            "Model providers.",
+            "Add a connection or update an existing profile.",
+            rows,
+        ))
+        if chosen is None:
+            return
+        current = next((provider for provider in self.providers if provider.id == chosen), None)
+        draft = await self.push_screen_wait(ProviderForm(current))
+        if draft is None:
+            return
+        self._mutating = True
+        self._busy("Saving provider")
+        try:
+            if current is None:
+                saved = await self.client.create_provider(ProviderCreate(
+                    name=draft.name,
+                    kind=draft.kind,
+                    base_url=draft.base_url,
+                    api_key=draft.api_key,
+                ))
+            else:
+                update_values = {
+                    "name": draft.name,
+                    "kind": draft.kind,
+                    "base_url": draft.base_url,
+                }
+                if draft.api_key is not None:
+                    update_values["api_key"] = draft.api_key
+                saved = await self.client.update_provider(
+                    current.id, ProviderUpdate(**update_values),
+                )
+            discovered = await self.client.discover_provider_models(saved.id)
+            await self._refresh_models()
+            if discovered.discovery_error:
+                self.notify(
+                    f"{saved.name} was saved, but model discovery failed: "
+                    f"{discovered.discovery_error}",
+                    severity="warning",
+                    timeout=12,
+                )
+            else:
+                self.notify(
+                    f"{saved.name} saved · {len(discovered.models)} models discovered."
+                )
+        except ApiError as exc:
+            self._error(exc)
+        finally:
+            self._mutating = False
+            self._busy(None)
+            self._controls()
+
     @work(group="picker", exclusive=True)
     async def choose_model(self) -> None:
         rows = [("", "Workspace default", "Whatever Settings has configured for chat"), *self._chat_models()]
@@ -695,7 +768,7 @@ class ScholarWeaveApp(App[None]):
         chosen = await self.push_screen_wait(ChoicePicker(
             "Choose your thinking partner.",
             "New conversations use this model. Your choice is remembered.",
-            rows, current, empty="No enabled models. Add a provider in the web app, then Ctrl+R.",
+            rows, current, empty="No enabled models. Use /provider to add one.",
         ))
         if chosen is None:
             return
@@ -753,7 +826,7 @@ class ScholarWeaveApp(App[None]):
             "How hard should it think?",
             f"Levels declared for {self._model_label()}.",
             rows, self.reasoning_effort or "",
-            empty=f"{self._model_label()} declares no reasoning levels. Add them in the web app.",
+            empty=f"{self._model_label()} declares no reasoning levels.",
         ))
         if chosen is not None:
             self._apply_reasoning(chosen or None)  # type: ignore[arg-type]

@@ -472,7 +472,7 @@ ChatMessage, TranscriptNote {
 }
 
 /* --- dialogs -------------------------------------------------------------- */
-ConfirmDiscard, NoteName, ThemePicker, ChoicePicker, ShortcutHelp {
+ConfirmDiscard, NoteName, ProviderForm, ThemePicker, ChoicePicker, ShortcutHelp {
     align: center middle;
     background: $background 70%;
 }
@@ -495,6 +495,14 @@ ConfirmDiscard, NoteName, ThemePicker, ChoicePicker, ShortcutHelp {
     height: auto;
     margin-bottom: 1;
     color: $text-muted;
+}
+.form-label {
+    height: 1;
+    margin-top: 1;
+    color: $text-muted;
+}
+.provider-dialog Input, .provider-dialog Select {
+    width: 100%;
 }
 .dialog-actions {
     height: 3;
