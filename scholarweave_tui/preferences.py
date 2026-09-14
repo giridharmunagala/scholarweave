@@ -1,8 +1,8 @@
 """Local, single-user preferences for the terminal cockpit.
 
 The cockpit remembers only how it is dressed and how the composer is set up
-(theme, focus mode, per-message defaults, and the reasoning level chosen for a
-model). Everything that changes research behaviour stays in backend settings.
+(theme, focus mode, per-message defaults, and per-model reasoning/context
+choices). Everything that changes research behaviour stays in backend settings.
 """
 
 from __future__ import annotations
@@ -104,3 +104,24 @@ class Preferences:
         else:
             levels.pop(key, None)
         self._set("reasoning", levels)
+
+    def context_window(
+        self, provider_profile_id: str | None, model: str | None,
+    ) -> int | None:
+        key = model_key(provider_profile_id, model)
+        stored = self._values.get("context_windows")
+        if key is None or not isinstance(stored, dict):
+            return None
+        value = stored.get(key)
+        return value if isinstance(value, int) and 4_096 <= value <= 2_000_000 else None
+
+    def save_context_window(
+        self, provider_profile_id: str | None, model: str | None, tokens: int,
+    ) -> None:
+        key = model_key(provider_profile_id, model)
+        if key is None:
+            return
+        stored = self._values.get("context_windows")
+        windows = dict(stored) if isinstance(stored, dict) else {}
+        windows[key] = tokens
+        self._set("context_windows", windows)

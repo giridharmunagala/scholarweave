@@ -26,7 +26,7 @@ class Command:
 
 
 COMMANDS: tuple[Command, ...] = (
-    Command("model", "Choose the model for new conversations"),
+    Command("model", "Choose a model, reasoning budget and context size"),
     Command("provider", "Add or configure a model provider"),
     Command(
         "reasoning", "Set how hard the model thinks", argument_hint="[level]",

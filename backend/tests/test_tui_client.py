@@ -164,6 +164,15 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
                 "content": "Think hard", "response_effort": "auto", "web_enabled": True,
                 "reasoning_effort": "high",
             }
+            await client.send_message(
+                "chat-1", "Use more context", context_window_tokens=65_536,
+            )
+            assert json.loads(requests[-1].content) == {
+                "content": "Use more context",
+                "response_effort": "auto",
+                "web_enabled": True,
+                "context_window_tokens": 65_536,
+            }
             assert isinstance((await client.runs())[0], RunResponse)
             assert not requests[-1].url.query
             await client.runs("chat-1")

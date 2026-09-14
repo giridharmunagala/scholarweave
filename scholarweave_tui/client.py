@@ -180,12 +180,15 @@ class ScholarWeaveClient:
     async def send_message(
         self, id: str, content: str, *, effort: ResponseEffort = "auto",
         web_enabled: bool = True, reasoning_effort: ReasoningEffort | None = None,
+        context_window_tokens: int | None = None,
     ) -> ConversationMessageResponse:
         payload: dict[str, Any] = {
             "content": content, "response_effort": effort, "web_enabled": web_enabled,
         }
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
+        if context_window_tokens is not None:
+            payload["context_window_tokens"] = context_window_tokens
         return await self._request(
             "POST", f"/agent/conversations/{_segment(id)}/messages",
             ConversationMessageResponse, json=payload,

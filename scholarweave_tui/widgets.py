@@ -14,6 +14,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Markdown, OptionList, Select, Static, TextArea
 from textual.widgets.option_list import Option
 
+from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 from backend.providers.schemas import ProviderKind, ProviderResponse
 from scholarweave_tui.commands import COMMANDS
 
@@ -394,6 +395,108 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
         ))
 
 
+@dataclass(frozen=True)
+class ModelConfigResult:
+    reasoning_effort: ReasoningEffort | None
+    context_window_tokens: int
+
+
+class ModelConfig(ModalScreen[ModelConfigResult | None]):
+    BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
+    DEFAULT_REASONING = "__provider_default__"
+
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        model_name: str,
+        reasoning_efforts: list[ReasoningEffort],
+        reasoning_effort: ReasoningEffort | None,
+        context_window_tokens: int,
+    ) -> None:
+        super().__init__()
+        self._provider_name = provider_name
+        self._model_name = model_name
+        self._reasoning_efforts = reasoning_efforts
+        self._reasoning_effort = reasoning_effort
+        self._context_window_tokens = context_window_tokens
+
+    def compose(self) -> ComposeResult:
+        reasoning_options = [("Provider default", self.DEFAULT_REASONING)]
+        reasoning_options.extend(
+            (effort.replace("xhigh", "extra high").title(), effort)
+            for effort in REASONING_EFFORTS
+            if effort in self._reasoning_efforts
+        )
+        with Vertical(classes="dialog model-dialog"):
+            yield Label("Configure this model.", classes="dialog-title")
+            yield Static(
+                f"{self._provider_name} / {self._model_name}",
+                classes="dialog-body",
+            )
+            yield Label("Reasoning budget", classes="form-label")
+            yield Select(
+                reasoning_options,
+                value=self._reasoning_effort or self.DEFAULT_REASONING,
+                allow_blank=False,
+                id="model-reasoning",
+            )
+            yield Static(
+                (
+                    "Choose how much reasoning to request for each message."
+                    if self._reasoning_efforts
+                    else "This model declares no configurable reasoning budgets."
+                ),
+                classes="form-help",
+            )
+            yield Label("Context size (tokens)", classes="form-label")
+            yield Input(
+                value=str(self._context_window_tokens),
+                type="integer",
+                id="model-context",
+            )
+            yield Static(
+                "The usable conversation, instructions, evidence, and response all share this window.",
+                classes="form-help",
+            )
+            with Horizontal(classes="dialog-actions"):
+                yield Button("Back", id="cancel-model")
+                yield Button("Use model", id="use-model", variant="primary")
+            yield Static("Enter  use model        Esc  cancel", classes="dialog-hint")
+
+    def on_mount(self) -> None:
+        self.query_one("#model-reasoning", Select).focus()
+
+    def on_input_submitted(self) -> None:
+        self._submit()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel-model":
+            self.dismiss(None)
+        else:
+            self._submit()
+
+    def _submit(self) -> None:
+        raw_context = self.query_one("#model-context", Input).value.strip()
+        try:
+            context_window = int(raw_context)
+        except ValueError:
+            self.notify("Context size must be a whole number of tokens.", severity="warning")
+            return
+        if not 4_096 <= context_window <= 2_000_000:
+            self.notify("Context size must be between 4,096 and 2,000,000 tokens.", severity="warning")
+            return
+        selected = self.query_one("#model-reasoning", Select).value
+        effort = None if selected == self.DEFAULT_REASONING else selected
+        if effort is not None and effort not in self._reasoning_efforts:
+            self.notify("Choose a reasoning budget supported by this model.", severity="warning")
+            return
+        self.dismiss(ModelConfigResult(
+            reasoning_effort=effort,
+            context_window_tokens=context_window,
+        ))
+
+
 class ChoicePicker(ModalScreen[str | None]):
     """One list, one choice. Used for models and reasoning levels.
 
@@ -529,7 +632,7 @@ SHORTCUTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Esc", "Stop the run that is streaming"),
     )),
     ("Set up this message", (
-        ("Ctrl+M", "Choose the model"),
+        ("Ctrl+M", "Choose model, reasoning budget and context"),
         ("Ctrl+G", "Set the reasoning level"),
         ("/provider", "Add or configure a model provider"),
         ("/effort quick", "Smallest sufficient evidence"),

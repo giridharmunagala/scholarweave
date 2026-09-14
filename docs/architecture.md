@@ -73,9 +73,11 @@ using the checkout's `.venv/bin/python`, regardless of the invoking directory. I
 arguments and uses `exec` so terminal signals and exit status reach the Python launcher directly.
 
 Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
-only: `/model` saves `last_chat_model_reference` through `PUT /api/settings` and applies it when a
-conversation is created, `/reasoning` sends a per-message `reasoning_effort` limited to the levels a
-`ProviderModel` declares, and `/effort` and `/web` set existing per-message request fields. Focus
+only: `/model` selects a configured model, its per-message reasoning budget, and context window;
+it saves `last_chat_model_reference` through `PUT /api/settings`, remembers the per-model composer
+choices locally, and applies the context and reasoning values to messages. `/reasoning` separately
+adjusts the selected model's declared reasoning levels, while `/effort` and `/web` set existing
+per-message request fields. Focus
 mode, the theme, the web toggle, and the per-model reasoning level live in
 `local_data/tui-preferences.json`; no research behaviour is stored there. The terminal observatory
 projects SSE events, resumes after the last received sequence, and reconciles the durable run after

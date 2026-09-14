@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Button, ContentSwitcher, Input, Markdown, OptionList, Static, TextArea
+from textual.widgets import Button, ContentSwitcher, Input, Markdown, OptionList, Select, Static, TextArea
 
 from backend.core.config import Settings as CoreSettings
 from backend.core.settings_service import SettingsResponse
@@ -23,6 +23,7 @@ from scholarweave_tui.widgets import (
     ChatMessage,
     ChoicePicker,
     ConfirmDiscard,
+    ModelConfig,
     NoteName,
     ProviderForm,
     Spinner,
@@ -698,12 +699,21 @@ def test_model_picker_saves_choice_and_new_threads_use_it() -> None:
             await pilot.pause()
             assert isinstance(app.screen, ChoicePicker)
             await pilot.press("down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelConfig)
+            app.screen.query_one("#model-reasoning", Select).value = "high"
+            app.screen.query_one("#model-context", Input).value = "65536"
+            await pilot.click("#use-model")
             await settle(app, pilot)
             assert app.model_reference.model == "weave-deep"
+            assert app.reasoning_effort == "high"
+            assert app.context_window_tokens == 65_536
             assert server.last_chat_model_reference == {
                 "provider_profile_id": "provider-1", "model": "weave-deep",
             }
-            assert "weave-deep" in str(app.query_one("#statusline", Static).render())
+            status = str(app.query_one("#statusline", Static).render())
+            assert "weave-deep" in status
+            assert "65,536 context" in status
             app.query_one("#composer", TextArea).load_text("Which model is thinking?")
             await pilot.click("#send")
             await settle(app, pilot)
@@ -714,6 +724,21 @@ def test_model_picker_saves_choice_and_new_threads_use_it() -> None:
             assert created["model_reference"] == {
                 "provider_profile_id": "provider-1", "model": "weave-deep",
             }
+            sent = next(
+                body for method, path, body in server.requests
+                if method == "POST" and path.endswith("/messages")
+            )
+            assert sent["reasoning_effort"] == "high"
+            assert sent["context_window_tokens"] == 65_536
+
+            app.run_command("model")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelConfig)
+            assert app.screen.query_one("#model-reasoning", Select).value == "high"
+            assert app.screen.query_one("#model-context", Input).value == "65536"
+            await pilot.press("escape")
     asyncio.run(scenario())
 
 
@@ -807,6 +832,9 @@ def test_reasoning_is_limited_to_declared_levels_and_remembered(tmp_path) -> Non
             await pilot.press("ctrl+m")
             await pilot.pause()
             await pilot.press("down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelConfig)
+            await pilot.click("#use-model")
             await settle(app, pilot)
             assert app.model_reference.model == "weave-deep"
             app.run_command("reasoning", "high")

@@ -28,7 +28,7 @@ from textual.widgets.option_list import Option
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.conversations.schemas import ConversationResponse, ResponseEffort
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
-from backend.providers.schemas import ProviderCreate, ProviderResponse, ProviderUpdate
+from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderResponse, ProviderUpdate
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse
 from backend.workspace.schemas import (
@@ -51,6 +51,7 @@ from scholarweave_tui.widgets import (
     Composer,
     ConfirmDiscard,
     Masthead,
+    ModelConfig,
     NoteName,
     ProviderForm,
     ShortcutHelp,
@@ -113,6 +114,8 @@ class ScholarWeaveApp(App[None]):
         self.providers: list[ProviderResponse] = []
         self.model_reference = ModelReferenceSpec()
         self.reasoning_effort: ReasoningEffort | None = None
+        self.context_window_tokens = 32_768
+        self._default_context_window_tokens = 32_768
         self.effort: ResponseEffort = "auto"
         self.web_enabled = self.preferences.web_enabled
         self.current_id: str | None = None
@@ -403,7 +406,9 @@ class ScholarWeaveApp(App[None]):
         if not (preferred.provider_profile_id and preferred.model):
             preferred = settings.default_model_references.get("chat") or ModelReferenceSpec()
         self.model_reference = preferred
+        self._default_context_window_tokens = settings.agent_context_window_tokens
         self.reasoning_effort = self._remembered_reasoning()
+        self.context_window_tokens = self._remembered_context()
         self._controls()
 
     def action_reload(self) -> None:
@@ -685,6 +690,26 @@ class ScholarWeaveApp(App[None]):
                     return list(model.reasoning_efforts or [])
         return []
 
+    def _selected_model(self) -> tuple[ProviderResponse, ProviderModel] | None:
+        for provider in self.providers:
+            if provider.id != self.model_reference.provider_profile_id:
+                continue
+            for model in provider.models:
+                if model.name == self.model_reference.model:
+                    return provider, model
+        return None
+
+    def _remembered_context(self) -> int:
+        remembered = self.preferences.context_window(
+            self.model_reference.provider_profile_id, self.model_reference.model,
+        )
+        if remembered is not None:
+            return remembered
+        selected = self._selected_model()
+        if selected is not None and selected[1].context_window_tokens is not None:
+            return selected[1].context_window_tokens
+        return self._default_context_window_tokens
+
     def action_model(self) -> None:
         self.choose_model()
 
@@ -760,33 +785,65 @@ class ScholarWeaveApp(App[None]):
 
     @work(group="picker", exclusive=True)
     async def choose_model(self) -> None:
-        rows = [("", "Workspace default", "Whatever Settings has configured for chat"), *self._chat_models()]
+        rows = self._chat_models()
         current = (
             f"{self.model_reference.provider_profile_id}\t{self.model_reference.model}"
             if self.model_reference.model else ""
         )
         chosen = await self.push_screen_wait(ChoicePicker(
             "Choose your thinking partner.",
-            "New conversations use this model. Your choice is remembered.",
-            rows, current, empty="No enabled models. Use /provider to add one.",
+            "Choose a configured model, then set its reasoning budget and context size.",
+            rows, current, empty="No enabled models. Use /provider to add and discover one.",
         ))
         if chosen is None:
             return
         provider_id, _, model = chosen.partition("\t")
-        await self._apply_model(ModelReferenceSpec(
+        reference = ModelReferenceSpec(
             provider_profile_id=provider_id or None, model=model or None,
+        )
+        provider = next(item for item in self.providers if item.id == provider_id)
+        configured_model = next(item for item in provider.models if item.name == model)
+        same_model = reference == self.model_reference
+        remembered_reasoning = self.preferences.reasoning(provider_id, model)
+        reasoning = (
+            self.reasoning_effort if same_model else
+            remembered_reasoning if remembered_reasoning in (configured_model.reasoning_efforts or []) else
+            None
+        )
+        remembered_context = self.preferences.context_window(provider_id, model)
+        context_window = (
+            self.context_window_tokens if same_model else
+            remembered_context or configured_model.context_window_tokens or
+            self._default_context_window_tokens
+        )
+        configured = await self.push_screen_wait(ModelConfig(
+            provider_name=provider.name,
+            model_name=model,
+            reasoning_efforts=list(configured_model.reasoning_efforts or []),
+            reasoning_effort=reasoning,
+            context_window_tokens=context_window,
         ))
+        if configured is None:
+            return
+        self.reasoning_effort = configured.reasoning_effort
+        self.context_window_tokens = configured.context_window_tokens
+        self.preferences.save_reasoning(provider_id, model, configured.reasoning_effort)
+        self.preferences.save_context_window(provider_id, model, configured.context_window_tokens)
+        await self._apply_model(reference)
 
     async def _apply_model(self, reference: ModelReferenceSpec) -> None:
+        changed = reference != self.model_reference
         self.model_reference = reference
-        self.reasoning_effort = self._remembered_reasoning()
+        if changed:
+            self.reasoning_effort = self._remembered_reasoning()
+            self.context_window_tokens = self._remembered_context()
         try:
             await self.client.save_chat_model(reference)
         except ApiError as exc:
             self._error(exc)
         self._controls()
         self.notify(f"Model: {self._model_label()}.")
-        if self.current_id is not None:
+        if changed and self.current_id is not None:
             await self._new_chat()
             self.notify("Started a new thread for this model.")
 
@@ -845,7 +902,8 @@ class ScholarWeaveApp(App[None]):
         reasoning = REASONING_LABELS.get(self.reasoning_effort or "", "provider default")
         return (
             f"Model: {self._model_label()}\n"
-            f"Thinking: {reasoning}\n"
+            f"Reasoning budget: {reasoning}\n"
+            f"Context size: {self.context_window_tokens:,} tokens\n"
             f"Effort: {self.effort} — {EFFORT_SUMMARY[self.effort]}\n"
             f"Web sources: {'allowed' if self.web_enabled else 'off'}"
         )
@@ -991,6 +1049,17 @@ class ScholarWeaveApp(App[None]):
             await transcript.mount(Welcome())
         self.run_record = active or (runs[-1] if runs else None)
         self.live = LiveRun.restore(self.run_record) if self.run_record else LiveRun()
+        if (
+            conversation.model_reference.provider_profile_id
+            and conversation.model_reference.model
+        ):
+            self.model_reference = conversation.model_reference
+        self.reasoning_effort = self._remembered_reasoning()
+        self.context_window_tokens = (
+            self.run_record.context_window_tokens
+            if self.run_record and self.run_record.context_window_tokens
+            else self._remembered_context()
+        )
         if active is None:
             self._session_usage_before_live = (session_input, session_output)
         self._live_usage_in_history = active is None
@@ -1025,9 +1094,9 @@ class ScholarWeaveApp(App[None]):
         )
 
     def _status_line(self) -> str:
-        parts = [self._model_label()]
+        parts = [self._model_label(), f"{self.context_window_tokens:,} context"]
         if self.reasoning_effort:
-            parts.append(f"thinking {self.reasoning_effort}")
+            parts.append(f"reasoning {self.reasoning_effort}")
         if self.effort != "auto":
             parts.append(self.effort)
         if not self.web_enabled:
@@ -1106,6 +1175,7 @@ class ScholarWeaveApp(App[None]):
                 response = await self.client.send_message(
                     self.current_id, content, effort=self.effort,
                     web_enabled=self.web_enabled, reasoning_effort=self.reasoning_effort,
+                    context_window_tokens=self.context_window_tokens,
                 )
                 self.current_title = response.conversation.title
                 previous_answer = self.live.assistant
