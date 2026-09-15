@@ -17,7 +17,7 @@ from backend.conversations.turns import (
     research_blueprint,
     validate_paper_work_completion,
 )
-from backend.core.errors import ValidationError
+from backend.core.errors import ConflictError, ValidationError
 from backend.bootstrap import create_services
 from backend.documents.models import Document
 from backend.research.sources import WebSourceUnavailable
@@ -2136,6 +2136,62 @@ async def test_research_note_tools_create_search_read_and_append(test_settings) 
         assert found[0]["path"] == created["path"]
         assert "Compare paged KV caches." in read["content"]
         assert read["tags"] == ["attention", "systems"]
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_note_tool_narrow_edits_require_unique_current_read_and_protect_summaries(test_settings):
+    services = create_services(test_settings)
+    try:
+        runtime = services.runs._tool_runtime
+        context = ScholarWeaveContext(run_id="narrow-notes", tool_runtime=runtime)
+        note = services.workspace.create_note(
+            name="Precise", content="# Note\n\nKeep this.\n\nRepeated\n\nRepeated\n\n    Fix this.\n",
+        )
+        read = await runtime.invoke("research.notes.read", {"path": note.path}, context)
+        arguments = {
+            "target": "path", "mode": "patch", "path": note.path,
+            "document_id": None, "name": None, "tags": ["precise"],
+            "content": "    Corrected.\n", "selection": "    Fix this.\n",
+            "expected_sha256": read["sha256"],
+        }
+        with pytest.raises(ToolInputError, match="expected_sha256"):
+            await runtime.invoke("research.notes.save", {**arguments, "expected_sha256": None}, context)
+        with pytest.raises(ValidationError):
+            await runtime.invoke("research.notes.save", {**arguments, "selection": "Repeated"}, context)
+        with pytest.raises(ValidationError):
+            await runtime.invoke("research.notes.save", {**arguments, "selection": "Missing"}, context)
+        assert services.workspace.read_file(note.path).content == note.content
+        saved = await runtime.invoke("research.notes.save", arguments, context)
+        assert services.workspace.read_file(note.path).content == note.content.replace("    Fix this.\n", "    Corrected.\n")
+        assert saved["sha256"] == services.workspace.read_file(note.path).sha256
+        assert saved["tags"] == ["precise"]
+        with pytest.raises(ConflictError):
+            await runtime.invoke("research.notes.save", arguments, context)
+        inserted = await runtime.invoke("research.notes.save", {
+            **arguments, "mode": "insert_after", "selection": "# Note",
+            "content": "\n\nNew introduction.", "expected_sha256": saved["sha256"],
+        }, context)
+        assert services.workspace.read_file(note.path).content == note.content.replace(
+            "    Fix this.\n", "    Corrected.\n",
+        ).replace("# Note", "# Note\n\nNew introduction.")
+        append = {**arguments, "mode": None, "selection": None, "content": "One addition.",
+                  "expected_sha256": inserted["sha256"]}
+        await runtime.invoke("research.notes.save", append, context)
+        with pytest.raises(ConflictError):
+            await runtime.invoke("research.notes.save", append, context)
+        assert services.workspace.read_file(note.path).content.count("One addition.") == 1
+        paper = services.workspace.ensure_paper_folder("protected-paper", "Protected")
+        summary = services.workspace.read_file(paper["summary_path"])
+        for mode in ("append", "overwrite", "patch", "insert_after"):
+            with pytest.raises(ToolInputError, match="summaries"):
+                await runtime.invoke("research.notes.save", {
+                    **arguments, "path": summary.path, "mode": mode,
+                    "selection": "Summary" if mode in {"patch", "insert_after"} else None,
+                    "expected_sha256": summary.sha256,
+                }, context)
+        assert services.workspace.read_file(summary.path).content == summary.content
     finally:
         await services.close()
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from urllib.parse import quote
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
@@ -26,6 +28,94 @@ from backend.research.sources import WebSource
 from backend.tests.test_api import configure_provider, wait_for_run
 from backend.tests.stub_provider import _message
 from backend.utils import utcnow
+
+
+@pytest.mark.parametrize("scope", ["connected", "only", "discussion", "partial"])
+def test_requested_notes_discover_read_and_preserve_connected_details(
+    test_settings, stub_provider, scope,
+):
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        workspace = client.app.state.services.workspace
+        primary = workspace.create_note(
+            name="Long context", content="# Long context\n\nKeep positional extrapolation caveats.",
+        )
+        supporting = workspace.create_note(
+            name="Attention architecture",
+            content="# Attention architecture\n\nGrouped query attention shares KV heads; keep this detail.",
+        )
+        unrelated = workspace.create_note(name="Garden", content="Keep seed dates.")
+        goal = {
+            "connected": "Take notes on how grouped query attention reduces the KV cache for long context.",
+            "only": "Save this KV cache observation only in the Long context note.",
+            "discussion": "Discuss the connection between long context and attention architecture; do not save.",
+            "partial": "Save these connected findings and report any notes you could not update.",
+        }[scope]
+        primary_addition = "Grouped query attention reduces stored KV heads for long-context inference."
+        supporting_addition = (
+            "KV head sharing also reduces long-context cache memory. "
+            f"[Long context](/library/notes?path={quote(primary.path, safe='')})"
+        )
+        plans = [
+            (goal, "search_research_notes", {
+                "query": query, "kinds": ["note"], "tags": [], "limit": 5, "offset": None,
+            })
+            for query in ["long context", "grouped query KV"]
+        ]
+        plans.extend([
+            (goal, "read_research_note", {"path": primary.path}),
+            (goal, "read_research_note", {"path": supporting.path}),
+        ])
+        if scope != "discussion":
+            for note, content in (
+                [(primary, primary_addition), (supporting, supporting_addition)]
+                if scope in {"connected", "partial"} else [(primary, primary_addition)]
+            ):
+                plans.append((goal, "save_research_note", {
+                    "target": "path", "mode": None, "path": note.path,
+                    "document_id": None, "name": None, "content": content, "tags": [],
+                    "selection": None,
+                    "expected_sha256": (
+                        "0" * 64 if scope == "partial" and note.path == supporting.path
+                        else hashlib.sha256(note.content.encode()).hexdigest()
+                    ),
+                }))
+        stub_provider.tool_plans = plans
+        stub_provider.reply = (
+            f"Saved the primary note at {primary.path}. Could not update {supporting.path}: "
+            "its read hash is stale; the supporting note is unchanged."
+            if scope == "partial" else (
+                "The connection is explained." if scope == "discussion" else "Requested notes saved."
+            )
+        )
+        conversation = client.post("/api/agent/conversations", json={
+            "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
+        }).json()
+        response = client.post(f"/api/agent/conversations/{conversation['id']}/messages", json={
+            "content": goal, "web_enabled": False,
+        })
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        record = client.app.state.services.runs.get(run["id"])
+        searches = [a for a in record.tool_attempts if a.catalog_id == "research.notes.search"]
+        assert primary.path in {hit["path"] for hit in searches[0].result_json}
+        assert supporting.path in {hit["path"] for hit in searches[1].result_json}
+        assert workspace.read_file(primary.path).content.startswith(primary.content)
+        assert workspace.read_file(supporting.path).content.startswith(supporting.content)
+        assert workspace.read_file(unrelated.path).content == unrelated.content
+        assert (primary_addition in workspace.read_file(primary.path).content) is (scope != "discussion")
+        assert (supporting_addition in workspace.read_file(supporting.path).content) is (scope == "connected")
+        writes = [a for a in record.tool_attempts if a.catalog_id == "research.notes.save"]
+        assert len(writes) == {"connected": 2, "only": 1, "discussion": 0, "partial": 2}[scope]
+        if scope == "partial":
+            assert writes[0].result_json["path"] == primary.path
+            assert "ConflictError" in writes[1].error
+            assert not writes[1].retryable
+            assert workspace.read_file(supporting.path).content == supporting.content
+            assert primary.path in run["final_output"]
+            assert supporting.path in run["final_output"]
+            assert "Could not update" in run["final_output"]
 
 
 def paper_context(mode: str | None, *, citations: list[str] | None = None):
@@ -504,6 +594,7 @@ def test_product_runs_continue_across_epochs_without_repeating_writes(
             {
                 "target": "path", "mode": "append", "path": "notes/checkpoints.md",
                 "document_id": None, "name": None, "content": content, "tags": [],
+                "selection": None, "expected_sha256": None,
             },
         )
         for content in expected
@@ -899,6 +990,7 @@ def test_default_can_save_requested_paper_questions_without_claiming_source_revi
         stub_provider.tool_plans = [(goal, "save_research_note", {
             "target": "paper_notes", "mode": "append", "document_id": document.id,
             "path": None, "name": None, "content": question, "tags": [],
+            "selection": None, "expected_sha256": None,
         })]
         stub_provider.reply = "Saved your question without claiming to have reviewed the paper."
         conversation = client.post(
@@ -991,6 +1083,7 @@ def test_explicit_review_reads_reuses_summary_and_saves_paper_notes(
             (goal, "save_research_note", {
                 "target": "paper_notes", "mode": "append", "document_id": document.id,
                 "path": None, "name": None, "content": "Verified thresholding [p.2].", "tags": [],
+                "selection": None, "expected_sha256": None,
             }),
         ]
         stub_provider.reply = "Review complete: thresholding preserves sparsity (p.2)."

@@ -450,6 +450,7 @@ def research_blueprint(
     tools = _application_tools(web_enabled=web_enabled)
     instructions = (
         f"{prompts.render('research')}\n\n"
+        f"{prompts.render_skills() if not fast_answer else ''}\n\n"
         f"Selected research mode: {research_mode}."
         f"\nSelected response effort: {response_effort}."
     )
@@ -491,6 +492,7 @@ def deep_work_blueprint(
     model = ModelReferenceSpec.model_validate(model_reference or {})
     research_mode = _resolve_research_mode(research_mode, deep_work=True)
     prompts = _resolve_prompts(prompts)
+    skill_instructions = prompts.render_skills()
     tools = _application_tools(web_enabled=web_enabled)
     coordinator_tool_ids = [tool["id"] for tool in tools]
     worker_tool_ids = [
@@ -509,6 +511,7 @@ def deep_work_blueprint(
                     "description": "Clarifies intent, answers discussion, and executes research when requested.",
                     "instructions": (
                         f"{prompts.render('research')}\n\n"
+                        f"{skill_instructions}\n\n"
                         f"{prompts.render('deep-work-coordinator')}\n\n"
                         f"Selected research mode: {research_mode}."
                         "\nSelected response effort: thorough."
@@ -523,6 +526,7 @@ def deep_work_blueprint(
                     "description": "Completes one bounded evidence-gathering track.",
                     "instructions": (
                         f"{prompts.render('deep-work-worker')}\n\n"
+                        f"{skill_instructions}\n\n"
                         f"Selected research mode: {research_mode}."
                     ),
                     "model": model,

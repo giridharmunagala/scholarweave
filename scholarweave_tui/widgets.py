@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from rich.style import Style
 from rich.text import Text
@@ -16,6 +17,7 @@ from textual.widgets.option_list import Option
 
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 from backend.providers.schemas import ProviderKind, ProviderResponse
+from backend.prompting.schemas import SKILL_NAME_PATTERN
 from scholarweave_tui.commands import COMMANDS
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -232,10 +234,14 @@ class ConfirmDiscard(ModalScreen[bool]):
         Binding("enter", "keep", "Keep editing", show=False, priority=True),
     ]
 
+    def __init__(self, subject: str = "note") -> None:
+        super().__init__()
+        self.subject = subject
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
             yield Label("Keep your thinking.", classes="dialog-title")
-            yield Static("This note has unsaved changes. Discard them?", classes="dialog-body")
+            yield Static(f"This {self.subject} has unsaved changes. Discard them?", classes="dialog-body")
             with Horizontal(classes="dialog-actions"):
                 yield Button("Discard", id="discard", variant="error")
                 yield Button("Keep editing", id="keep", variant="primary")
@@ -254,14 +260,25 @@ class ConfirmDiscard(ModalScreen[bool]):
 class NoteName(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
 
+    def __init__(self, *, skill: bool = False) -> None:
+        super().__init__()
+        self.skill = skill
+
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Label("A place for a new idea.", classes="dialog-title")
-            yield Static("Notes are plain Markdown in your local workspace.", classes="dialog-body")
-            yield Input(placeholder="Name your note", max_length=300, id="note-name")
+            yield Label("A recipe for recurring work." if self.skill else "A place for a new idea.", classes="dialog-title")
+            yield Static(
+                "Use a lowercase name like compare-notes. The model chooses when to use it."
+                if self.skill else "Notes are plain Markdown in your local workspace.",
+                classes="dialog-body",
+            )
+            yield Input(
+                placeholder="skill-name" if self.skill else "Name your note",
+                max_length=64 if self.skill else 300, id="note-name",
+            )
             with Horizontal(classes="dialog-actions"):
                 yield Button("Cancel", id="cancel")
-                yield Button("Create note", id="create", variant="primary")
+                yield Button("Create skill" if self.skill else "Create note", id="create", variant="primary")
             yield Static("Enter  create        Esc  cancel", classes="dialog-hint")
 
     def on_mount(self) -> None:
@@ -278,6 +295,10 @@ class NoteName(ModalScreen[str | None]):
 
     def _submit(self) -> None:
         name = self.query_one(Input).value.strip()
+        if self.skill:
+            if not re.fullmatch(SKILL_NAME_PATTERN, name) or len(name) > 64:
+                self.notify("Use a lowercase kebab-case name of at most 64 characters.", severity="warning")
+                return
         if name:
             self.dismiss(name)
         else:
@@ -641,7 +662,7 @@ SHORTCUTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("Enter", "Send (or steer an active run)"),
         ("Shift+Enter / Ctrl+J", "New line in the composer"),
         ("/", "Commands: model, reasoning, effort, web"),
-        ("Ctrl+N", "New conversation, or new note"),
+        ("Ctrl+N", "New conversation, note, or skill"),
         ("Esc", "Stop the run that is streaming"),
     )),
     ("Set up this message", (
@@ -652,16 +673,16 @@ SHORTCUTS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("/web off", "Keep this message local"),
     )),
     ("Move around", (
-        ("Ctrl+1 / 2 / 3", "Chat, papers, notes"),
+        ("Ctrl+1 / 2 / 3 / 4", "Chat, papers, notes, skills"),
         ("Ctrl+F", "Focus mode: hide or show the rails"),
         ("Ctrl+K", "Search the current list"),
         ("Ctrl+B", "Show or hide the library rail"),
         ("Ctrl+O", "Show or hide the observatory"),
         ("Ctrl+R", "Refresh from your local backend"),
     )),
-    ("Notes", (
-        ("Ctrl+S", "Save the open note"),
-        ("Ctrl+E", "Edit or preview the open note"),
+    ("Notes and skills", (
+        ("Ctrl+S", "Save the open note or skill"),
+        ("Ctrl+E", "Edit or preview the open note or skill"),
     )),
     ("The cockpit", (
         ("Ctrl+T", "Change theme"),

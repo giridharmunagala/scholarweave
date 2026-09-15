@@ -70,6 +70,41 @@ PDF chunk retrieval. Normal writes/deletes update FTS transactionally; refresh r
 edits and deletions. Test relevance ordering, pagination, restart persistence, metadata preservation,
 and failed-refresh rollback in `test_storage.py`, then API and tool wiring tests.
 
+## Change connected note-taking behavior
+
+Keep canonical paper notes in the existing paper `notes.md`; standalone topic notes live in
+`knowledge/`. Do not replace the paper-summary pipeline or create another notes catalog.
+
+Discovery uses the existing workspace FTS5/BM25 index. Have the main agent issue focused queries
+for the subject and relevant related concepts, read promising destinations, and distinguish
+lexical search results from source evidence. Do not add keyword routing or assume search is
+exhaustive.
+
+An explicit note-saving request can add detailed material to a primary note and concise,
+source-attributed connections to directly related existing standalone notes. Respect narrower
+user scope, avoid duplicate additions, and do not recursively update the library. Discussion
+alone does not authorize saving; related-topic discovery does not authorize editing other
+papers' canonical notes or summaries.
+
+Prefer additive writes. Narrow corrections must identify exact, unique existing text; do not
+regenerate a whole note to add a detail. Preserve old observations and metadata, report partial
+cross-note failures explicitly, and keep UI, terminal, and agent write behavior aligned.
+
+Cover preservation of earlier details, related-note additions, single-note scope, discussion
+without writes, ambiguous selections, and stale edits. Use the local stub provider for behavior
+tests, then run storage/API tests and the architecture guard.
+
+## Add an instruction-only skill
+
+1. Write one UTF-8 Markdown file in `backend/prompting/defaults/skills/<name>.md` for a bundled
+   recipe, or `local_data/skills/<name>.md` for a local recipe. See [skills](skills.md) for the format
+   and limits; local files override bundled names.
+2. Explain when to apply it and how to use existing tools. For substantial multi-step tasks,
+   reference the existing work-plan tools; do not create tools, scripts, or a separate checklist.
+3. Preserve source attribution, per-turn capabilities, and explicit save/delete permission.
+4. Test snapshots and tool workflows in `backend/tests/test_skills.py` with the local stub provider,
+   then run `test_prompting.py`, `test_research_modes.py`, and `test_architecture.py`.
+
 ## Add a delegated sub-agent
 
 1. Add the delegate agent to the blueprint's `agents` list.

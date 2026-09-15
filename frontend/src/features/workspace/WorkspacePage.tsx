@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
-import { json, request } from '../../api/client';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
-import { Link } from '../../app/router';
+import { Link, useLocation, useNavigate, useNavigationGuard } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, LibraryTabs, Loading, PageHeader, Panel } from '../../shared/components/Ui';
@@ -9,6 +9,8 @@ import '../library.css';
 
 type WorkspaceFile = components['schemas']['WorkspaceFileResponse'];
 type WorkspaceContent = components['schemas']['WorkspaceFileContentResponse'];
+type SearchResult = components['schemas']['WorkspaceSearchResponse'];
+const PAGE_SIZE = 25;
 
 interface FileTreeNode {
   name: string;
@@ -20,21 +22,38 @@ interface FileTreeNode {
 
 export default function WorkspacePage() {
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [scope, setScope] = useState('notes');
+  const [query, setQuery] = useState('');
+  const [tagFilter, setTagFilter] = useState('');
+  const [offset, setOffset] = useState(0);
+  const [revision, setRevision] = useState(0);
   const [selected, setSelected] = useState<WorkspaceContent | null>(null);
   const [draft, setDraft] = useState('');
   const [tagsDraft, setTagsDraft] = useState('');
   const [view, setView] = useState<'preview' | 'edit'>('preview');
   const [newPath, setNewPath] = useState('');
+  const [newName, setNewName] = useState('');
+  const [openRevision, setOpenRevision] = useState(0);
   const [error, setError] = useState<unknown>(null);
   const [loading, setLoading] = useState(true);
+  const [opening, setOpening] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveState, setSaveState] = useState('');
+  const [savedPath, setSavedPath] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const requestId = useRef(0);
+  const { searchParams } = useLocation();
+  const navigate = useNavigate();
+  const linkedPath = searchParams.get('path');
   const [deletingFolder, setDeletingFolder] = useState<string | null>(null);
-  const load = () => request<WorkspaceFile[]>('/workspace/files').then(setFiles);
+  const load = () => { setRevision((value) => value + 1); };
   const fileTree = useMemo(() => buildFileTree(files), [files]);
-  const targetPath = selected?.path ?? notePath(newPath);
+  const targetPath = selected?.path ?? newPath.trim();
   const savedContent = selected
     ? typeof selected.content === 'string' ? selected.content : JSON.stringify(selected.content, null, 2)
     : '';
-  const hasUnsavedChanges = draft !== savedContent
+  const hasUnsavedChanges = (!selected && !!newPath.trim()) || draft !== savedContent
     || tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean).join(',') !== (selected?.tags ?? []).join(',');
   const resetEditor = () => {
     setSelected(null);
@@ -42,27 +61,97 @@ export default function WorkspacePage() {
     setTagsDraft('');
     setNewPath('');
   };
-  useEffect(() => { load().catch(setError).finally(() => setLoading(false)); }, []);
-  if (loading) return <Loading label="Loading workspace…" />;
-
-  const open = (path: string) =>
-    request<WorkspaceContent>(`/workspace/files/content?path=${encodeURIComponent(path)}`)
+  useNavigationGuard(hasUnsavedChanges || saving || opening, 'Discard unsaved note changes and leave this draft?', !saving && !opening);
+  useEffect(() => {
+    if (savedPath && !saving && !hasUnsavedChanges) {
+      navigate(`/library/notes?path=${encodeURIComponent(savedPath)}`, { replace: true });
+      setSavedPath(null);
+    }
+  }, [savedPath, saving, hasUnsavedChanges, navigate]);
+  const discardDraft = () => !hasUnsavedChanges || window.confirm('Discard unsaved note changes?');
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) });
+    if (query.trim()) params.set('query', query.trim());
+    for (const tag of tagFilter.split(',').map((value) => value.trim()).filter(Boolean)) params.append('tags', tag);
+    if (scope === 'notes') {
+      params.append('kinds', 'note');
+      params.append('kinds', 'paper_notes');
+    } else if (scope === 'summaries') params.append('kinds', 'paper_summary');
+    const tree = scope === 'files';
+    const fetchResults = () => {
+      request<SearchResult[]>(tree ? '/workspace/files' : `/workspace/search?${params}`)
+        .then((items) => { if (active) { if (tree) setFiles(items); else setResults(items); } })
+        .catch((reason) => { if (active) setError(reason); })
+        .finally(() => { if (active) setLoading(false); });
+    };
+    const timer = !tree && (query || tagFilter) ? window.setTimeout(fetchResults, 200) : undefined;
+    if (timer === undefined) fetchResults();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [scope, query, tagFilter, offset, revision]);
+  useEffect(() => {
+    setOpening(false);
+    if (!linkedPath) {
+      resetEditor();
+      setSaveState('');
+      return;
+    }
+    if (linkedPath === selected?.path) return;
+    const id = ++requestId.current;
+    setOpening(true);
+    setError(null);
+    request<WorkspaceContent>(`/workspace/files/content?path=${encodeURIComponent(linkedPath)}`)
       .then((file) => {
+        if (id !== requestId.current) return;
         setSelected(file);
         setDraft(typeof file.content === 'string' ? file.content : JSON.stringify(file.content, null, 2));
         setTagsDraft(file.tags.join(', '));
+        setNewPath('');
+        setSaveState('');
         setView(file.media_type === 'text/markdown' ? 'preview' : 'edit');
       })
-      .catch(setError);
-  const save = () =>
-    request<WorkspaceContent>('/workspace/files/content', json('PUT', {
-      path: targetPath,
-      content: draft,
-      tags: tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean),
-    }))
-      .then((file) => { setSelected(file); setNewPath(''); return load(); })
-      .catch(setError);
+      .catch((reason) => { if (id === requestId.current) setError(reason); })
+      .finally(() => { if (id === requestId.current) setOpening(false); });
+    return () => { requestId.current += 1; };
+  }, [linkedPath, openRevision]);
+  const open = async (path: string) => {
+    if (opening || saving) return;
+    if (path === linkedPath && selected?.path === path) return;
+    if (path === linkedPath) {
+      if (discardDraft()) setOpenRevision((value) => value + 1);
+    } else navigate(`/library/notes?path=${encodeURIComponent(path)}`);
+  };
+  const save = async () => {
+    if (saving || opening) return;
+    setSaving(true);
+    setError(null);
+    setSaveState('Saving...');
+    try {
+      const tags = tagsDraft.split(',').map((tag) => tag.trim()).filter(Boolean);
+      if (selected && !selected.sha256) throw new Error('This file has no revision hash and cannot be safely saved. Reopen a text note.');
+      const file = await request<WorkspaceContent>(
+        selected ? '/workspace/files/content' : '/workspace/files/notes',
+        json(selected ? 'PUT' : 'POST', selected
+          ? { path: selected.path, content: draft, tags, expected_sha256: selected.sha256 }
+          : { name: newPath.trim(), content: draft, tags }),
+      );
+      setSelected(file);
+      setNewPath('');
+      setDraft(typeof file.content === 'string' ? file.content : JSON.stringify(file.content, null, 2));
+      setTagsDraft(file.tags.join(', '));
+      setSaveState('Saved locally');
+      setSavedPath(file.path);
+      load();
+    } catch (reason) {
+      setError(reason);
+      setSaveState(reason instanceof ApiError && reason.status === 409
+        ? 'Conflict: this note changed on disk. Your draft is retained. Copy it before reloading the latest version to reconcile changes.'
+        : 'Save failed. Your draft is retained.');
+    } finally { setSaving(false); }
+  };
   const deleteFolder = async (folder: FileTreeNode) => {
+    if (saving || opening) return;
     const fileCount = countFiles(folder);
     if (!window.confirm(`Delete "${folder.displayName ?? folder.name}" and its ${fileCount} file${fileCount === 1 ? '' : 's'}? This cannot be undone.`)) return;
     setDeletingFolder(folder.path);
@@ -75,7 +164,7 @@ export default function WorkspacePage() {
       if (selected?.path.startsWith(`${folder.path}/`)) {
         resetEditor();
       }
-      await load();
+      load();
     } catch (nextError) {
       setError(nextError);
     } finally {
@@ -91,7 +180,7 @@ export default function WorkspacePage() {
         { method: 'DELETE' },
       );
       resetEditor();
-      await load();
+      load();
     } catch (nextError) {
       setError(nextError);
     }
@@ -106,24 +195,44 @@ export default function WorkspacePage() {
       <LibraryTabs active="notes" />
       {error ? <ErrorNotice error={error} /> : null}
       <div className="workspace-layout">
-        <Panel description={files.length ? `${files.length} file${files.length === 1 ? '' : 's'}` : 'No files yet'}>
+        <Panel description="Find existing notes before creating another.">
           <div className="stack-tight">
+            <select aria-label="Workspace view" value={scope} onChange={(event) => { setScope(event.target.value); setOffset(0); }}>
+              <option value="notes">Notes</option>
+              <option value="summaries">Paper summaries</option>
+              <option value="files">All workspace files (tree)</option>
+            </select>
+            {scope !== 'files' ? <>
+              <input aria-label="Search notes" placeholder="Search note text (BM25)" value={query} onChange={(event) => { setQuery(event.target.value); setOffset(0); }} />
+              <input aria-label="Filter by tags" placeholder="Filter tags, comma separated" value={tagFilter} onChange={(event) => { setTagFilter(event.target.value); setOffset(0); }} />
+            </> : null}
+            <button className="button secondary small" type="button" disabled={refreshing} onClick={async () => {
+              setRefreshing(true);
+              setError(null);
+              try { await request('/workspace/index', { method: 'POST' }); load(); }
+              catch (reason) { setError(reason); }
+              finally { setRefreshing(false); }
+            }}>{refreshing ? 'Refreshing...' : 'Refresh external edits'}</button>
             <div className="row new-note">
               <input
                 aria-label="New note name"
                 placeholder="New note name"
-                value={newPath}
-                onChange={(event) => setNewPath(event.target.value)}
+                value={newName}
+                onChange={(event) => setNewName(event.target.value)}
               />
               <button
                 className="button small"
                 type="button"
-                disabled={!newPath.trim()}
+                disabled={!newName.trim() || saving || opening}
                 onClick={() => {
+                  if (!discardDraft()) return;
                   setSelected(null);
                   setDraft('');
                   setTagsDraft('');
+                  setNewPath(newName.trim());
+                  setNewName('');
                   setView('edit');
+                  setSaveState('');
                 }}
               >
                 <Icon name="plus" size={13} />
@@ -131,7 +240,8 @@ export default function WorkspacePage() {
               </button>
             </div>
             <div className="file-list">
-              {fileTree.folders.map((folder) => (
+              {loading ? <Loading label="Loading workspace..." /> : null}
+              {scope === 'files' ? <>{fileTree.folders.map((folder) => (
                 <WorkspaceFolder
                   folder={folder}
                   key={folder.path}
@@ -149,7 +259,19 @@ export default function WorkspacePage() {
                   onOpen={open}
                 />
               ))}
-              {!files.length ? <p>No workspace files yet.</p> : null}
+              {!files.length && !loading ? <p>No workspace files yet.</p> : null}</> : <>
+                {results.map((file) => <div key={file.path}>
+                  <WorkspaceFileRow file={file} selectedPath={selected?.path} onOpen={open} />
+                  <small>{file.kind === 'paper_notes' ? `Paper note: ${file.paper_name ?? file.paper_id}` : file.kind === 'paper_summary' ? `Paper summary: ${file.paper_name ?? file.paper_id}` : 'Standalone note'}{file.tags.length ? ` | ${file.tags.join(', ')}` : ''}</small>
+                  {file.excerpt ? <p className="muted">{file.excerpt}</p> : null}
+                </div>)}
+                {!results.length && !loading ? <p>No matching notes. Try fewer search terms or tags.</p> : null}
+                <div className="row">
+                  <button className="button small" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
+                  <small>Page {Math.floor(offset / PAGE_SIZE) + 1}</small>
+                  <button className="button small" disabled={results.length < PAGE_SIZE || loading} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
+                </div>
+              </>}
             </div>
           </div>
         </Panel>
@@ -158,12 +280,12 @@ export default function WorkspacePage() {
           description={targetPath || undefined}
           actions={selected || newPath ? (
             <>
-              <button className="button" type="button" onClick={() => void save()}>
+              <button className="button" type="button" disabled={saving || opening || !hasUnsavedChanges} onClick={() => void save()}>
                 <Icon name="save" size={14} />
-                Save
+                {saving ? 'Saving...' : 'Save'}
               </button>
               {selected ? (
-                <button className="button danger small" type="button" onClick={() => void deleteFile()}>
+                <button className="button danger small" type="button" disabled={saving || opening} onClick={() => void deleteFile()}>
                   <Icon name="trash" size={13} />
                   Delete
                 </button>
@@ -173,6 +295,23 @@ export default function WorkspacePage() {
         >
           {selected || newPath ? (
             <div className="stack">
+              <p role="status">{opening ? 'Opening...' : saveState || (hasUnsavedChanges ? 'Unsaved changes' : 'Saved locally')}</p>
+              {selected ? <div className="row">
+                <a href={`/library/notes?path=${encodeURIComponent(selected.path)}`}>Link to this note</a>
+                <button className="button secondary small" disabled={saving || opening} onClick={async () => {
+                  if (!discardDraft()) return;
+                  setOpening(true);
+                  try {
+                    const file = await request<WorkspaceContent>(`/workspace/files/content?path=${encodeURIComponent(selected.path)}`);
+                    setSelected(file);
+                    setDraft(typeof file.content === 'string' ? file.content : JSON.stringify(file.content, null, 2));
+                    setTagsDraft(file.tags.join(', '));
+                    setSaveState('');
+                    setError(null);
+                  } catch (reason) { setError(reason); }
+                  finally { setOpening(false); }
+                }}>Reload latest</button>
+              </div> : null}
               <div className="library-handoff">
                 {selected && !hasUnsavedChanges ? (
                   <Link
@@ -203,7 +342,7 @@ export default function WorkspacePage() {
                   <MarkdownViewer content={draft} />
                 </div>
               ) : (
-                <textarea className="workspace-editor mono" value={draft} onChange={(event) => setDraft(event.target.value)} />
+                <textarea aria-label="Note content" className="workspace-editor mono" disabled={saving || opening} value={draft} onChange={(event) => { setDraft(event.target.value); setSaveState(''); }} />
               )}
               <details className="workspace-options">
                 <summary>Tags{tagsDraft ? ` · ${tagsDraft.split(',').filter(Boolean).length}` : ''}</summary>
@@ -211,7 +350,8 @@ export default function WorkspacePage() {
                   aria-label="Tags"
                   placeholder="transformers, evaluation"
                   value={tagsDraft}
-                  onChange={(event) => setTagsDraft(event.target.value)}
+                  disabled={saving || opening}
+                  onChange={(event) => { setTagsDraft(event.target.value); setSaveState(''); }}
                 />
               </details>
             </div>
@@ -219,7 +359,7 @@ export default function WorkspacePage() {
             <EmptyState
               icon="workspace"
               title="Nothing open"
-              description="Select a file on the left, or enter a new safe relative path to create one."
+              description="Select a note on the left, or enter a name to create a standalone supporting note."
             />
           )}
         </Panel>
@@ -355,13 +495,6 @@ function countFiles(node: FileTreeNode): number {
 
 function isMarkdown(mediaType: string | undefined, path: string): boolean {
   return mediaType === 'text/markdown' || path.toLowerCase().endsWith('.md');
-}
-
-export function notePath(value: string): string {
-  const name = value.trim();
-  if (!name) return '';
-  const path = name.includes('/') ? name : `knowledge/${name}`;
-  return path.toLowerCase().endsWith('.md') ? path : `${path}.md`;
 }
 
 function formatBytes(size: number): string {

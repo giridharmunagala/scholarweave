@@ -29,6 +29,7 @@ from backend.agents.blueprint import ModelReferenceSpec
 from backend.conversations.schemas import ConversationResponse, ResponseEffort
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderResponse, ProviderUpdate
+from backend.prompting.schemas import SkillResponse
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse
 from backend.workspace.schemas import (
@@ -61,7 +62,7 @@ from scholarweave_tui.widgets import (
     Welcome,
 )
 
-View = Literal["chat", "paper", "notes"]
+View = Literal["chat", "paper", "notes", "skills"]
 ACTIVE_STATUSES = {"pending", "running"}
 EFFORT_SUMMARY = {
     "auto": "follows your intent",
@@ -75,6 +76,7 @@ REASONING_LABELS = {
 COMPOSER_MIN_HEIGHT = 3
 COMPOSER_MAX_HEIGHT = 8
 COMPOSER_SHORT_MAX_HEIGHT = 5
+NOTES_PAGE_SIZE = 25
 
 
 class ScholarWeaveApp(App[None]):
@@ -85,6 +87,7 @@ class ScholarWeaveApp(App[None]):
         Binding("ctrl+1", "view('chat')", "Chat", show=False, priority=True),
         Binding("ctrl+2", "view('paper')", "Papers", show=False, priority=True),
         Binding("ctrl+3", "view('notes')", "Notes", show=False, priority=True),
+        Binding("ctrl+4", "view('skills')", "Skills", show=False, priority=True),
         Binding("ctrl+k", "search", "Find", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
         Binding("ctrl+enter", "send", "Send", show=False, priority=True),
@@ -92,7 +95,7 @@ class ScholarWeaveApp(App[None]):
         Binding("ctrl+r", "reload", "Refresh", show=False, priority=True),
         Binding("ctrl+b", "sidebar", "Library", show=False, priority=True),
         Binding("ctrl+o", "observe", "Observe", show=False, priority=True),
-        Binding("ctrl+e", "edit_note", "Edit", show=False),
+        Binding("ctrl+e", "edit_note", "Edit", show=False, priority=True),
         Binding("ctrl+f", "focus_mode", "Focus", priority=True),
         Binding("ctrl+m", "model", "Model", priority=True),
         Binding("ctrl+g", "reasoning", "Thinking", priority=True),
@@ -111,6 +114,7 @@ class ScholarWeaveApp(App[None]):
         self.conversations: list[ConversationResponse] = []
         self.papers: list[DocumentSummaryResponse] = []
         self.notes: list[WorkspaceFileResponse] = []
+        self.skills: list[SkillResponse] = []
         self.providers: list[ProviderResponse] = []
         self.model_reference = ModelReferenceSpec()
         self.reasoning_effort: ReasoningEffort | None = None
@@ -122,6 +126,9 @@ class ScholarWeaveApp(App[None]):
         self.current_title = "A new thread"
         self.paper: DocumentResponse | None = None
         self.note: WorkspaceFileContentResponse | None = None
+        self.skill: SkillResponse | None = None
+        self._skill_name: str | None = None
+        self._skill_baseline = ""
         self.run_record: RunResponse | None = None
         self.live = LiveRun()
         self._entries: list[str] = []
@@ -135,6 +142,11 @@ class ScholarWeaveApp(App[None]):
         self._sidebar_override: bool | None = None
         self._observe_override: bool | None = None
         self._note_baseline = ""
+        self._note_save_error = ""
+        self._notes_offset = 0
+        self._notes_query = ""
+        self._notes_page_loading = False
+        self._notes_request_id = 0
         self._steering_seen: set[str] = set()
         self._session_usage_before_live = (0, 0)
         self._live_usage_in_history = True
@@ -145,12 +157,20 @@ class ScholarWeaveApp(App[None]):
             yield Button("1 Chat", id="nav-chat", classes="tab active")
             yield Button("2 Papers", id="nav-paper", classes="tab")
             yield Button("3 Notes", id="nav-notes", classes="tab")
+            yield Button("4 Skills", id="nav-skills", classes="tab")
             yield Spinner("Working", id="busy")
             yield Static("CONNECTING", id="connection", markup=False)
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Static("YOUR THREADS", id="catalog-title", classes="eyebrow")
                 yield Input(placeholder="Search threads...", id="search")
+                with Vertical(id="notes-discovery"):
+                    yield Input(placeholder="Tags, comma separated", id="notes-tags")
+                    with Horizontal(id="notes-pagination"):
+                        yield Button("Previous", id="notes-previous", disabled=True)
+                        yield Static("1", id="notes-page", markup=False)
+                        yield Button("Next", id="notes-next", disabled=True)
+                    yield Button("Refresh index", id="notes-refresh")
                 yield Button("+  New conversation", id="new", variant="primary")
                 yield OptionList(id="catalog")
                 yield Static("No conversations yet.", id="catalog-empty", markup=False)
@@ -204,6 +224,27 @@ class ScholarWeaveApp(App[None]):
                             yield Button("Edit", id="edit-note", disabled=True)
                             yield Button("Revert", id="revert-note", disabled=True)
                             yield Button("Save", id="save-note", variant="primary", disabled=True)
+                            yield Button("Discuss", id="discuss-note", disabled=True)
+                    with Vertical(id="skills-pane"):
+                        yield Static(
+                            "The model chooses relevant skills automatically. Select one here only to edit it.",
+                            id="skill-path", markup=False,
+                        )
+                        with ContentSwitcher(initial="skill-scroll", id="skill-content"):
+                            with VerticalScroll(id="skill-scroll"):
+                                yield Markdown(
+                                    "# Instructions, not new tools\n\n"
+                                    "Browse bundled and local skills, then edit their Markdown instructions.\n\n"
+                                    "**Ctrl+N** creates a skill. **Ctrl+E** edits. **Ctrl+S** saves.\n\n"
+                                    "Changes apply to new messages; running tasks keep their original instructions.",
+                                    id="skill-preview", open_links=False,
+                                )
+                            yield TextArea(id="skill-editor", show_line_numbers=True, read_only=True)
+                        with Horizontal(id="skill-actions"):
+                            yield Static("", id="skill-state", markup=False)
+                            yield Button("Edit", id="edit-skill", disabled=True)
+                            yield Button("Revert", id="revert-skill", disabled=True)
+                            yield Button("Save", id="save-skill", variant="primary", disabled=True)
             with Vertical(id="observatory"):
                 yield Static("OBSERVATORY", classes="eyebrow")
                 yield Static("READY WHEN YOU ARE", id="run-status", markup=False)
@@ -252,6 +293,7 @@ class ScholarWeaveApp(App[None]):
             "#nav-chat": "Conversations  ·  Ctrl+1",
             "#nav-paper": "Paper library  ·  Ctrl+2",
             "#nav-notes": "Knowledge notes  ·  Ctrl+3",
+            "#nav-skills": "Edit skill instructions  ·  Ctrl+4",
             "#new": "Start something new  ·  Ctrl+N",
             "#send": "Send your message  ·  Enter",
             "#stop": "Stop this run  ·  Esc",
@@ -259,6 +301,9 @@ class ScholarWeaveApp(App[None]):
             "#save-note": "Save to your workspace  ·  Ctrl+S",
             "#edit-note": "Switch between preview and editor",
             "#revert-note": "Throw away unsaved changes",
+            "#save-skill": "Save instructions for future messages  ·  Ctrl+S",
+            "#edit-skill": "Switch between skill preview and editor",
+            "#revert-skill": "Discard unsaved skill edits",
             "#discuss": "Open a conversation about this paper",
         }.items():
             screen.query_one(identifier).tooltip = tooltip
@@ -294,6 +339,8 @@ class ScholarWeaveApp(App[None]):
         await self.client.close()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "edit_note":
+            return not self.screen.is_modal and self.view in {"notes", "skills"}
         if action in {
             "view", "search", "new", "send", "save_note", "reload", "sidebar", "observe", "themes", "help", "stop",
             "edit_note", "focus_mode", "model", "provider", "reasoning", "quit",
@@ -370,20 +417,33 @@ class ScholarWeaveApp(App[None]):
         catalog = self.screen_stack[0].query_one("#catalog", OptionList)
         catalog.loading = True
         try:
+            note_filters = (self._notes_query, self._note_tags(), self._notes_offset)
+            self._notes_request_id += 1
+            note_request_id = self._notes_request_id
             conversations, papers, notes = await asyncio.gather(
-                self.client.conversations(), self.client.papers(), self.client.notes(),
+                self.client.conversations(), self.client.papers(),
+                self.client.notes_page(
+                    query=note_filters[0], tags=note_filters[1],
+                    offset=note_filters[2], limit=NOTES_PAGE_SIZE,
+                ),
             )
-            self.conversations, self.papers, self.notes = conversations, papers, notes
+            self.conversations, self.papers = conversations, papers
+            if (
+                note_request_id == self._notes_request_id
+                and (self._notes_query, self._note_tags(), self._notes_offset) == note_filters
+            ):
+                self.notes = notes
+            if self.view == "skills":
+                self.skills = await self.client.skills()
             self._connected()
             self._populate_catalog()
             await self._refresh_models()
-            if self.view == "notes" and self.screen_stack[0].query_one("#search", Input).value.strip():
-                self.search_notes()
             if reopen:
                 key = (
                     self.current_id if self.view == "chat" else
                     self.paper.id if self.view == "paper" and self.paper else
-                    self.note.path if self.view == "notes" and self.note and not self.note_dirty else None
+                    self.note.path if self.view == "notes" and self.note and not self.note_dirty else
+                    self.skill.name if self.view == "skills" and self.skill and not self.skill_dirty else None
                 )
                 if key:
                     self.open_entry(key)
@@ -430,12 +490,20 @@ class ScholarWeaveApp(App[None]):
                 for item in self.papers
                 if not query or query in f"{item.title} {item.source_filename}".casefold()
             ]
+        elif self.view == "notes":
+            rows = [
+                (
+                    item.path, item.note_name or item.paper_name or item.name,
+                    ("Paper note" if item.kind == "paper_notes" else "Standalone note")
+                    + (f" / {', '.join(item.tags)}" if item.tags else ""),
+                )
+                for item in (note_results if note_results is not None else self.notes)
+            ]
         else:
             rows = [
-                (item.path, item.note_name or item.paper_name or item.name, " / ".join(item.tags) or item.kind.replace("_", " "))
-                for item in (note_results if note_results is not None else self.notes)
-                if note_results is not None or not query
-                or query in f"{item.name} {item.note_name} {item.paper_name} {' '.join(item.tags)}".casefold()
+                (item.name, item.name, "Bundled / editable as a local override" if item.source == "bundled" else "Local instructions")
+                for item in self.skills
+                if not query or query in f"{item.name} {item.content}".casefold()
             ]
         options = []
         self._entries = []
@@ -444,7 +512,7 @@ class ScholarWeaveApp(App[None]):
         for key, title, subtitle in rows:
             prompt = Text(title, style=f"bold {title_style}")
             prompt.append("\n" + subtitle.replace("\n", " ")[:95], style=subtitle_style)
-            options.append(Option(prompt, id=str(len(self._entries))))
+            options.append(Option(prompt, id=key))
             self._entries.append(key)
         catalog = self.screen_stack[0].query_one("#catalog", OptionList)
         catalog.clear_options().add_options(options)
@@ -455,34 +523,91 @@ class ScholarWeaveApp(App[None]):
             "chat": "No conversations yet.\nStart with a question.",
             "paper": "No papers yet.\nImport PDFs in the web app.",
             "notes": "No notes yet.\nCtrl+N starts a new one.",
+            "skills": "No skills yet.\nCtrl+N creates a recipe.",
         }[self.view])
         self.screen_stack[0].query_one("#catalog-title", Static).update(
-            f"{ {'chat': 'YOUR THREADS', 'paper': 'PAPER LIBRARY', 'notes': 'KNOWLEDGE NOTES'}[self.view]}  ·  {len(rows):02}"
+            f"{ {'chat': 'YOUR THREADS', 'paper': 'PAPER LIBRARY', 'notes': 'KNOWLEDGE NOTES', 'skills': 'INSTRUCTION SKILLS'}[self.view]}  ·  {len(rows):02}"
         )
+        self._note_page_controls()
+
+    def _note_tags(self) -> list[str]:
+        return [
+            tag.strip() for tag in self.screen_stack[0].query_one("#notes-tags", Input).value.split(",")
+            if tag.strip()
+        ]
+
+    def _note_page_controls(self) -> None:
+        screen = self.screen_stack[0]
+        screen.query_one("#notes-discovery").display = self.view == "notes"
+        screen.query_one("#notes-page", Static).update(str(self._notes_offset // NOTES_PAGE_SIZE + 1))
+        screen.query_one("#notes-page").tooltip = f"Page {self._notes_offset // NOTES_PAGE_SIZE + 1}"
+        screen.query_one("#notes-previous", Button).disabled = self._notes_page_loading or self._notes_offset == 0
+        screen.query_one("#notes-next", Button).disabled = self._notes_page_loading or len(self.notes) < NOTES_PAGE_SIZE
 
     @on(Input.Changed, "#search")
     def search_changed(self) -> None:
-        self._populate_catalog()
-        if self.view == "notes" and self.screen_stack[0].query_one("#search", Input).value.strip():
+        if self.view == "notes":
+            query = self.screen_stack[0].query_one("#search", Input).value.strip()
+            if query == self._notes_query:
+                return
+            self._notes_query = query
+            self._notes_offset = 0
             self.search_notes()
         else:
             self.workers.cancel_group(self, "search")
+            self._populate_catalog()
+
+    @on(Input.Changed, "#notes-tags")
+    def note_tags_changed(self) -> None:
+        self._notes_offset = 0
+        if self.view == "notes":
+            self.search_notes()
 
     @work(group="search", exclusive=True)
     async def search_notes(self) -> None:
-        query = self.screen_stack[0].query_one("#search", Input).value.strip()
-        await asyncio.sleep(0.25)
+        query, tags, offset = self._notes_query, self._note_tags(), self._notes_offset
+        self._notes_request_id += 1
+        request_id = self._notes_request_id
+        self._notes_page_loading = True
+        self._note_page_controls()
         try:
-            matches = await self.client.search_notes(query)
-            if self.view == "notes" and self.screen_stack[0].query_one("#search", Input).value.strip() == query:
-                self._populate_catalog(matches)
+            await asyncio.sleep(0.25)
+            matches = await self.client.notes_page(query=query, tags=tags, offset=offset, limit=NOTES_PAGE_SIZE)
+            if (
+                request_id == self._notes_request_id and self.view == "notes"
+                and (self._notes_query, self._note_tags(), self._notes_offset) == (query, tags, offset)
+            ):
+                self.notes = matches
+                self._populate_catalog()
         except ApiError as exc:
             self._error(exc)
+        finally:
+            self._notes_page_loading = False
+            self._note_page_controls()
+
+    def change_notes_page(self, direction: int) -> None:
+        if self.view != "notes" or self._notes_page_loading:
+            return
+        self._notes_offset = max(0, self._notes_offset + direction * NOTES_PAGE_SIZE)
+        self.search_notes()
+
+    @work(group="notes-index", exclusive=True)
+    async def refresh_notes_index(self) -> None:
+        button = self.screen_stack[0].query_one("#notes-refresh", Button)
+        button.disabled = True
+        try:
+            result = await self.client.refresh_notes_index()
+            self.notify(f"Local index refreshed: {result.indexed_files} files. Open drafts were retained.")
+            self.search_notes()
+        except ApiError as exc:
+            self._error(exc)
+        finally:
+            button.disabled = False
 
     @on(OptionList.OptionSelected, "#catalog")
     def entry_selected(self, event: OptionList.OptionSelected) -> None:
-        if event.option.id is not None:
-            self.open_entry(self._entries[int(event.option.id)])
+        if event.option.id is not None and event.option.id in self._entries:
+            self.open_entry(event.option.id)
 
     @on(Button.Pressed)
     def button_pressed(self, event: Button.Pressed) -> None:
@@ -493,6 +618,8 @@ class ScholarWeaveApp(App[None]):
                 self.action_view("paper")
             case "nav-notes":
                 self.action_view("notes")
+            case "nav-skills":
+                self.action_view("skills")
             case "new":
                 self.action_new()
             case "send":
@@ -505,8 +632,22 @@ class ScholarWeaveApp(App[None]):
                 self.action_save_note()
             case "revert-note":
                 self.revert_note()
+            case "edit-skill":
+                self.edit_skill()
+            case "save-skill":
+                self.action_save_note()
+            case "revert-skill":
+                self.revert_skill()
             case "discuss":
                 self.discuss_paper()
+            case "discuss-note":
+                self.discuss_note()
+            case "notes-previous":
+                self.change_notes_page(-1)
+            case "notes-next":
+                self.change_notes_page(1)
+            case "notes-refresh":
+                self.refresh_notes_index()
 
     @on(Composer.Submitted)
     def composer_submitted(self) -> None:
@@ -618,6 +759,8 @@ class ScholarWeaveApp(App[None]):
                 self.action_view("paper")
             case "notes":
                 self.action_view("notes")
+            case "skills":
+                self.action_view("skills")
             case "chat":
                 self.action_view("chat")
             case "stop":
@@ -947,24 +1090,30 @@ class ScholarWeaveApp(App[None]):
             self._observe_override = False
             self._layout()
         self.screen_stack[0].query_one("#pages", ContentSwitcher).current = f"{view}-pane"
-        for name in ("chat", "paper", "notes"):
+        for name in ("chat", "paper", "notes", "skills"):
             self.screen_stack[0].query_one(f"#nav-{name}").set_class(name == view, "active")
-        self.screen_stack[0].query_one("#search", Input).value = ""
+        self.screen_stack[0].query_one("#search", Input).value = self._notes_query if view == "notes" else ""
         self.screen_stack[0].query_one("#search", Input).placeholder = {
             "chat": "Search threads...", "paper": "Search papers...", "notes": "Search notes...",
+            "skills": "Search skills...",
         }[view]
         new = self.screen_stack[0].query_one("#new", Button)
-        new.label = "+  New note" if view == "notes" else "+  New conversation"
+        new.label = "+  New skill" if view == "skills" else "+  New note" if view == "notes" else "+  New conversation"
         new.display = view != "paper"
         self._update_title()
         self._populate_catalog()
         if view == "chat":
             self.screen_stack[0].query_one("#composer", Composer).focus()
+        elif view == "skills":
+            self.refresh_catalog()
+        elif view == "notes":
+            self.search_notes()
 
     def _update_title(self) -> None:
         title = self.current_title if self.view == "chat" else (
             self.paper.title if self.view == "paper" and self.paper else
             (self.note.note_name or self.note.name) if self.view == "notes" and self.note else
+            (self._skill_name or "Reusable instructions") if self.view == "skills" else
             "The paper library" if self.view == "paper" else "Your knowledge, connected"
         )
         self.screen_stack[0].query_one("#section-title", Static).update(title)
@@ -976,6 +1125,16 @@ class ScholarWeaveApp(App[None]):
     async def _discard_note(self) -> bool:
         return not self.note_dirty or await self.push_screen_wait(ConfirmDiscard())
 
+    @property
+    def skill_dirty(self) -> bool:
+        return self._skill_name is not None and (
+            self.skill is None
+            or self.screen_stack[0].query_one("#skill-editor", TextArea).text != self._skill_baseline
+        )
+
+    async def _discard_skill(self) -> bool:
+        return not self.skill_dirty or await self.push_screen_wait(ConfirmDiscard("skill"))
+
     @work(group="selection", exclusive=True)
     async def open_entry(self, key: str) -> None:
         if self._mutating:
@@ -983,7 +1142,7 @@ class ScholarWeaveApp(App[None]):
         self._loading = True
         self._controls()
         pane = self.screen_stack[0].query_one(
-            {"chat": "#transcript", "paper": "#paper-scroll", "notes": "#note-content"}[self.view]
+            {"chat": "#transcript", "paper": "#paper-scroll", "notes": "#note-content", "skills": "#skill-content"}[self.view]
         )
         pane.loading = True
         try:
@@ -1000,9 +1159,12 @@ class ScholarWeaveApp(App[None]):
                 await self.screen_stack[0].query_one("#paper-content", Markdown).update("\n\n".join(parts))
                 self.screen_stack[0].query_one("#paper-scroll", VerticalScroll).scroll_home(animate=False)
                 self.screen_stack[0].query_one("#discuss", Button).disabled = False
-            elif await self._discard_note():
-                note = await self.client.read_note(key)
-                self._load_note(note)
+            elif self.view == "notes":
+                if await self._discard_note():
+                    note = await self.client.read_note(key)
+                    self._load_note(note)
+            elif await self._discard_skill():
+                self._load_skill(await self.client.read_skill(key))
             self._connected()
             self._update_title()
             if self.size.width < 90:
@@ -1115,10 +1277,16 @@ class ScholarWeaveApp(App[None]):
             if active else "Enter  send        Shift+Enter  new line        /  commands"
         )
         screen.query_one("#save-note", Button).disabled = not self.note_dirty or self._mutating
+        screen.query_one("#discuss-note", Button).disabled = self.note is None or self.note_dirty or busy
         screen.query_one("#revert-note", Button).disabled = not self.note_dirty or self._mutating
         screen.query_one("#note-state", Static).set_class(self.note_dirty, "dirty")
+        screen.query_one("#save-skill", Button).disabled = not self.skill_dirty or busy
+        screen.query_one("#revert-skill", Button).disabled = not self.skill_dirty or busy
+        screen.query_one("#edit-skill", Button).disabled = self._skill_name is None or busy
+        screen.query_one("#skill-editor", TextArea).read_only = self._skill_name is None or busy
+        screen.query_one("#skill-state", Static).set_class(self.skill_dirty, "dirty")
         self._busy(
-            "Saving your work" if self._mutating and self.view == "notes" else
+            "Saving your work" if self._mutating and self.view in {"notes", "skills"} else
             "Sending" if self._mutating else "Loading" if self._loading else None
         )
 
@@ -1566,6 +1734,27 @@ class ScholarWeaveApp(App[None]):
     async def action_new(self) -> None:
         if self._mutating or self._loading:
             return
+        if self.view == "skills":
+            if not await self._discard_skill():
+                return
+            name = await self.push_screen_wait(NoteName(skill=True))
+            if name is not None:
+                self.skill = None
+                self._skill_name = name
+                self._skill_baseline = ""
+                self.screen_stack[0].query_one("#skill-editor", TextArea).load_text(
+                    f"# {name.replace('-', ' ').capitalize()}\n\n"
+                    "Describe when this skill applies and the steps using existing tools.\n"
+                )
+                self.screen_stack[0].query_one("#skill-path", Static).update(
+                    f"skills/{name}.md  /  New local recipe. The model chooses when to use it."
+                )
+                self.screen_stack[0].query_one("#skill-content", ContentSwitcher).current = "skill-editor"
+                self.screen_stack[0].query_one("#edit-skill", Button).label = "Preview"
+                self._update_title()
+                self._controls()
+                self.screen_stack[0].query_one("#skill-editor", TextArea).focus()
+            return
         if self.view == "notes":
             if not await self._discard_note():
                 return
@@ -1594,6 +1783,7 @@ class ScholarWeaveApp(App[None]):
             return
         self.note = note
         self._note_baseline = note.content
+        self._note_save_error = ""
         self.screen_stack[0].query_one("#note-editor", TextArea).load_text(note.content)
         self.screen_stack[0].query_one("#note-preview", Markdown).update(note.content or "_An empty page. Make it yours._")
         self.screen_stack[0].query_one("#note-content", ContentSwitcher).current = "note-scroll"
@@ -1618,36 +1808,50 @@ class ScholarWeaveApp(App[None]):
     def action_edit_note(self) -> None:
         if self.view == "notes":
             self.edit_note()
+        elif self.view == "skills":
+            self.edit_skill()
 
     @on(TextArea.Changed, "#note-editor")
     def note_changed(self) -> None:
         self.screen_stack[0].query_one("#note-state", Static).update(
-            "●  Unsaved changes" if self.note_dirty else "✓  Saved locally" if self.note else ""
+            self._note_save_error or (
+                "●  Unsaved changes" if self.note_dirty else "✓  Saved locally" if self.note else ""
+            )
         )
         self._controls()
 
     @work(group="mutation")
     async def action_save_note(self) -> None:
+        if self.view == "skills":
+            await self._save_skill()
+            return
         if self.view != "notes" or not self.note_dirty or self._mutating or self._loading or not self.note:
             return
         self._mutating = True
         editor = self.screen_stack[0].query_one("#note-editor", TextArea)
         editor.read_only = True
+        self._note_save_error = ""
+        self.screen_stack[0].query_one("#note-state", Static).update("Saving...")
         self._controls()
         try:
-            current = await self.client.read_note(self.note.path)
-            if current.content != self._note_baseline:
+            if not self.note.sha256:
+                self._note_save_error = "Cannot safely save without a revision hash. Draft retained."
+                self.screen_stack[0].query_one("#note-state", Static).update(self._note_save_error)
                 self.notify(
-                    "This note changed outside the TUI. Your draft is retained. "
-                    "Copy it before reopening the note to reconcile changes.",
-                    title="Note changed on disk", severity="error", timeout=15,
+                    "This note has no revision hash. Your draft is retained. "
+                    "Copy it before reopening the note with an updated backend.",
+                    title="Cannot safely save", severity="error", timeout=15,
                 )
                 return
-            saved = await self.client.save_note(self.note.path, editor.text)
+            saved = await self.client.save_note(
+                self.note.path, editor.text, expected_sha256=self.note.sha256,
+            )
             self._load_note(saved)
             self.notify("Saved to your workspace and search index.")
             self.refresh_catalog()
         except ApiError as exc:
+            self._note_save_error = "Save failed. Draft retained; copy it before reopening to reconcile changes."
+            self.screen_stack[0].query_one("#note-state", Static).update(self._note_save_error)
             self._error(exc)
         finally:
             self._mutating = False
@@ -1660,6 +1864,79 @@ class ScholarWeaveApp(App[None]):
             self._load_note(self.note)
             self._controls()
 
+    def _load_skill(self, skill: SkillResponse) -> None:
+        self.skill = skill
+        self._skill_name = skill.name
+        self._skill_baseline = skill.content
+        screen = self.screen_stack[0]
+        screen.query_one("#skill-editor", TextArea).load_text(skill.content)
+        self._skill_baseline = screen.query_one("#skill-editor", TextArea).text
+        screen.query_one("#skill-preview", Markdown).update(skill.content)
+        screen.query_one("#skill-content", ContentSwitcher).current = "skill-scroll"
+        screen.query_one("#edit-skill", Button).label = "Edit"
+        origin = "Bundled / saving creates a local override" if skill.source == "bundled" else "Local instructions"
+        screen.query_one("#skill-path", Static).update(
+            f"{skill.name}.md  /  {origin}. The model chooses when to use it."
+        )
+
+    def edit_skill(self) -> None:
+        if self._skill_name is None or self._mutating or self._loading:
+            return
+        screen = self.screen_stack[0]
+        switcher = screen.query_one("#skill-content", ContentSwitcher)
+        editing = switcher.current == "skill-editor"
+        if editing:
+            screen.query_one("#skill-preview", Markdown).update(screen.query_one("#skill-editor", TextArea).text)
+        switcher.current = "skill-scroll" if editing else "skill-editor"
+        screen.query_one("#edit-skill", Button).label = "Edit" if editing else "Preview"
+        if not editing:
+            screen.query_one("#skill-editor", TextArea).focus()
+
+    @on(TextArea.Changed, "#skill-editor")
+    def skill_changed(self) -> None:
+        self.screen_stack[0].query_one("#skill-state", Static).update(
+            "●  Unsaved changes" if self.skill_dirty else "✓  Instructions saved" if self.skill else ""
+        )
+        self._controls()
+
+    async def _save_skill(self) -> None:
+        if not self.skill_dirty or self._mutating or self._loading or self._skill_name is None:
+            return
+        self._mutating = True
+        self._controls()
+        try:
+            saved = await self.client.save_skill(
+                self._skill_name,
+                self.screen_stack[0].query_one("#skill-editor", TextArea).text,
+                self.skill.revision if self.skill else None,
+            )
+            self._load_skill(saved)
+            self.notify("Skill saved. The model can use it automatically on future messages.")
+            self.refresh_catalog()
+        except ApiError as exc:
+            self.notify(
+                f"{exc}\nYour draft is retained. Copy it before reopening to reconcile changes.",
+                title="Skill not saved", severity="error", timeout=15,
+            )
+        finally:
+            self._mutating = False
+            self._controls()
+
+    @work(group="skill-discard", exclusive=True)
+    async def revert_skill(self) -> None:
+        if self._mutating or self._loading or not await self._discard_skill():
+            return
+        if self.skill:
+            self._load_skill(self.skill)
+        else:
+            self._skill_name = None
+            self.screen_stack[0].query_one("#skill-editor", TextArea).load_text("")
+            self.screen_stack[0].query_one("#skill-path", Static).update("Choose a skill to edit.")
+            self.screen_stack[0].query_one("#skill-preview", Markdown).update("Select a skill or create a new one.")
+            self.screen_stack[0].query_one("#skill-content", ContentSwitcher).current = "skill-scroll"
+        self._update_title()
+        self._controls()
+
     @work(group="discuss", exclusive=True)
     async def discuss_paper(self) -> None:
         if not self.paper or self._mutating or self._loading:
@@ -1670,10 +1947,58 @@ class ScholarWeaveApp(App[None]):
             "Use the existing paper as evidence."
         )
 
+    @work(group="discuss", exclusive=True)
+    async def discuss_note(self) -> None:
+        if self.note is None or self.note_dirty or self._mutating or self._loading:
+            return
+        await self._new_chat(
+            f'Analyze the existing saved note at workspace path "{self.note.path}". '
+            "Read it and connect its ideas with relevant existing notes and papers. "
+            "Discuss the evidence and open questions here in chat. "
+            "Do not save, create, or overwrite notes unless I request it."
+        )
+
+    @on(Markdown.LinkClicked)
+    def markdown_link_clicked(self, event: Markdown.LinkClicked) -> None:
+        # Textual already URL-decodes the whole href, including encoded '&' and '#'
+        # in filenames. Keep the single path parameter intact rather than splitting it.
+        for prefix in ("/library/notes?path=", "/workspace?path="):
+            if event.href.startswith(prefix):
+                event.stop()
+                event.prevent_default()
+                path = event.href[len(prefix):]
+                if path:
+                    self.open_note_link(path)
+                else:
+                    self.notify("This note link has no workspace path.", severity="error")
+                return
+
+    @work(group="note-link", exclusive=True)
+    async def open_note_link(self, path: str) -> None:
+        if self._mutating or self._loading:
+            self.notify("Finish the current request before opening another note.", severity="warning")
+            return
+        if not await self._discard_note():
+            return
+        if self.view == "skills" and not await self._discard_skill():
+            return
+        self._loading = True
+        self._controls()
+        try:
+            note = await self.client.read_note(path)
+            self._load_note(note)
+            self._loading = False
+            self.action_view("notes")
+        except ApiError as exc:
+            self._error(exc)
+        finally:
+            self._loading = False
+            self._controls()
+
     @work(group="quit", exclusive=True)
     async def action_quit(self) -> None:
         if self._mutating:
             self.notify("Wait for the current write to finish before quitting.", severity="warning")
             return
-        if await self._discard_note():
+        if await self._discard_note() and await self._discard_skill():
             self.exit()

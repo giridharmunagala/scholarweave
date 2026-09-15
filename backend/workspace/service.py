@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.utils import dumps_json
-from backend.core.errors import ValidationError
+from backend.core.errors import ConflictError, ValidationError
 from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.models import WorkspaceEntry
 from backend.workspace.repository import WorkspaceRepository
@@ -124,8 +124,12 @@ class WorkspaceService:
             return {**self.index_status(), "removed_files": len(existing.keys() - {e.path for e in entries})}
 
     def read_file(self, path: str) -> WorkspaceDocument:
-        media_type, content = self._storage.read_workspace_file(path)
-        return self._metadata(path, media_type=media_type, content=content)
+        with self._index_lock:
+            media_type, content, digest = self._storage.read_workspace_file_snapshot(path)
+            return replace(
+                self._metadata(path, media_type=media_type, content=content),
+                sha256=digest,
+            )
 
     def write_file(
         self,
@@ -133,15 +137,78 @@ class WorkspaceService:
         content: Any,
         *,
         tags: list[str] | None = None,
+        expected_sha256: str | None = None,
     ) -> WorkspaceDocument:
         normalized_tags = self._normalize_tags(tags) if tags is not None else None
         with self._index_lock:
+            self._check_revision(path, expected_sha256)
             stored = self._storage.write_workspace_file(path, content)
             document = self._index_file(
                 stored.relative_path, tags=normalized_tags,
                 existing=self._repository.get(stored.relative_path),
             )
             return replace(document, sha256=stored.sha256)
+
+    def _check_revision(self, path: str, expected_sha256: str | None) -> None:
+        if expected_sha256 is None:
+            return
+        try:
+            current = self._storage.file_hash(self._storage.settings.workspace_dir, path)
+        except FileNotFoundError as error:
+            raise ConflictError("The workspace file was deleted; reload before saving.") from error
+        if current != expected_sha256:
+            raise ConflictError("The workspace file changed; reload before saving.")
+
+    def edit_note(
+        self,
+        path: str,
+        *,
+        content: str,
+        operation: str = "append",
+        selection: str | None = None,
+        expected_sha256: str | None = None,
+    ) -> WorkspaceDocument:
+        if operation not in {"append", "replace", "insert_after", "overwrite"}:
+            raise ValidationError("Note operation must be append, replace, insert_after, or overwrite.")
+        if not isinstance(content, str):
+            raise ValidationError("Note content must be text.")
+        if operation in {"append", "overwrite"} and selection is not None:
+            raise ValidationError("Append and overwrite do not accept a selection.")
+        if operation in {"replace", "insert_after"} and (
+            not isinstance(selection, str) or not selection
+        ):
+            raise ValidationError("Provide a nonempty exact selection.")
+        with self._index_lock:
+            normalized = self._note_path(path)
+            self._check_revision(normalized, expected_sha256)
+            if operation == "overwrite":
+                self.read_file(normalized)
+                return self.write_file(normalized, content)
+            if operation == "append":
+                return self.append_markdown(normalized, content)
+            replacement = f"{selection}{content}" if operation == "insert_after" else content
+            return self.replace_markdown(normalized, selection, replacement)
+
+    def _note_path(self, path: str) -> str:
+        if not isinstance(path, str) or not path.strip():
+            raise ValidationError("Select one explicit Markdown note path.")
+        normalized = path.replace("\\", "/")
+        parts = normalized.split("/")
+        if any(part in {"", ".", ".."} or part.endswith((".", " ")) for part in parts) or any(
+            char in normalized for char in ':*?<>|\x00'
+        ):
+            raise ValidationError("Select a canonical workspace-relative note path.")
+        absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, normalized)
+        resolved = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix()
+        if resolved.casefold() != normalized.casefold() or absolute.suffix.lower() != ".md":
+            raise ValidationError("Select a Markdown note without symbolic links.")
+        lower = resolved.casefold()
+        if lower.startswith("library/papers/"):
+            if WorkspaceLayout.kind(lower) != "paper_notes":
+                raise ValidationError("Only canonical paper notes may be edited; summary artifacts are protected.")
+        elif lower.startswith((".scholarweave/", "inbox/attachments/")):
+            raise ValidationError("Workspace metadata and attachments are protected.")
+        return resolved
 
     def delete_file(self, path: str) -> None:
         with self._index_lock:
@@ -255,28 +322,27 @@ class WorkspaceService:
             raise ValueError("Targeted replacement is only supported for Markdown files.")
         if not old_text:
             raise ValueError("The exact text to replace cannot be empty.")
-        document = self.read_file(path)
-        if not isinstance(document.content, str):
-            raise ValueError("Markdown content must be text.")
-        occurrences = document.content.count(old_text)
-        if occurrences == 0:
-            raise ValueError("The exact text to replace was not found.")
-        if occurrences > 1 and not replace_all:
-            raise ValueError(
-                "The exact text occurs more than once; provide a larger unique selection "
-                "or enable replace_all."
-            )
-        updated = document.content.replace(old_text, new_text, -1 if replace_all else 1)
-        return self.write_file(path, updated)
+        with self._index_lock:
+            document = self.read_file(path)
+            if not isinstance(document.content, str):
+                raise ValidationError("Markdown content must be text.")
+            first = document.content.find(old_text)
+            if first < 0:
+                raise ValidationError("The exact text to replace was not found.")
+            if document.content.find(old_text, first + 1) >= 0 and not replace_all:
+                raise ValidationError("The exact text occurs more than once; provide a larger unique selection.")
+            updated = document.content.replace(old_text, new_text, -1 if replace_all else 1)
+            return self.write_file(path, updated)
 
     def append_markdown(self, path: str, content: str) -> WorkspaceDocument:
         if not path.lower().endswith(".md"):
             raise ValueError("Append is only supported for Markdown files.")
-        document = self.read_file(path)
-        if not isinstance(document.content, str):
-            raise ValueError("Markdown content must be text.")
-        separator = "" if not document.content or document.content.endswith("\n") else "\n"
-        return self.write_file(path, f"{document.content}{separator}{content}")
+        with self._index_lock:
+            document = self.read_file(path)
+            if not isinstance(document.content, str):
+                raise ValueError("Markdown content must be text.")
+            separator = "" if not document.content or document.content.endswith("\n") else "\n"
+            return self.write_file(path, f"{document.content}{separator}{content}")
 
     def set_tags(self, path: str, tags: list[str]) -> WorkspaceDocument:
         with self._index_lock:
@@ -322,6 +388,10 @@ class WorkspaceService:
             self._repository.delete_paper(document_id)
 
     def ensure_paper_folder(self, document_id: str, title: str) -> dict[str, Any]:
+        with self._index_lock:
+            return self._ensure_paper_folder(document_id, title)
+
+    def _ensure_paper_folder(self, document_id: str, title: str) -> dict[str, Any]:
         paper = self._repository.paper(document_id, self._normalize_paper_name(title))
         folder = paper.folder
         paper_tag = f"paper:{document_id}"

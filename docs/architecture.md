@@ -94,14 +94,25 @@ shows three lines by default, grows with wrapped or explicit lines to a bounded 
 scrolls internally so a long draft does not consume the transcript.
 Leaving a screen does not cancel backend runs; quitting an owning launcher shuts its backend down.
 Notes are read and saved through
-the workspace API; a pre-save read catches already-visible external edits, but is not an atomic
-concurrency guarantee. The paper reader displays existing extracted chunks and citations rather than
+the workspace API; saves include the loaded content hash and retain the draft on a conflict.
+The backend checks that revision under its mutation lock; external editors do not share that lock.
+The Notes catalog uses bounded 25-item workspace search pages with text and tag filters, and
+explicit index refresh reconciles external edits. Internal saved-note links in rendered Markdown
+open the exact workspace path through the same guarded editor. Discuss prepares an unsent chat
+draft referencing the saved note; agent note operations remain shared with the web client.
+The paper reader displays existing extracted chunks and citations rather than
 starting another extraction pipeline. `/provider` adds or updates provider connection profiles through
 the existing provider API and immediately refreshes model discovery, reporting enabled and disabled
 counts. `/model` lists both states and lets the researcher persist a model's enabled flag before
 using it; discovery does not override deliberately disabled models (new Azure OpenAI models start
 disabled). Detailed per-model capability
 editing remains in the web client. Paper acquisition and PDF rendering also remain in the web client.
+
+The **Skills** tab (`Ctrl+4`, `/skills`) lists and edits instruction files through the typed
+`/api/skills` management endpoints; it never loads a skill into a conversation manually.
+`Ctrl+N` creates a recipe, `Ctrl+E` toggles preview/edit, and `Ctrl+S` saves. Dirty drafts survive
+tab changes and failed saves; replacing a draft or quitting requires discard confirmation.
+Editing a bundled recipe creates a local override, not a modification of installed package files.
 
 Presentation is theme-driven: `scholarweave_tui/themes.py` registers the shipped Textual themes and
 `app.tcss` styles everything from theme variables, so no colour is hard-coded in widgets.
@@ -221,6 +232,36 @@ per-message only; `fast_answer=True` retains its old bounded-web contract for ol
 Explicit `response_effort` overrides both flags. Legacy response-style fields remain API-only;
 the UI uses Auto/Quick/Thorough and resets effort after sending or switching chats. Previously saved
 run blueprints and completion policies remain available for recovery without a database migration.
+
+### Instruction-only skills
+
+`prompting/skills.py` loads top-level Markdown recipes from packaged `defaults/skills/` and the
+configured data directory's `skills/` folder. Local files override matching bundled identifiers.
+Local paths go through `SafeStorage`; skills are configuration outside the research workspace.
+The loader validates filenames, UTF-8, containment, and per-file/combined size and count limits,
+raising semantic validation errors rather than omitting invalid recipes.
+
+`PromptRegistry.render_skills()` combines one immutable recipe snapshot with shared skill guidance.
+Conversation blueprint creation embeds it into Auto/Quick agents and both Thorough agents.
+The model selects applicability from the request; no classifier, keyword routing, new model tool,
+or executable extension is involved. Work-plan tools and the existing pending-plan continuation
+policy handle multi-step recipes. Worker scope and plan ownership remain unchanged.
+
+Edits apply to newly compiled messages. Persisted blueprints retain the exact skill instructions
+for continuation/recovery, even if local files change. The prompt revision includes packaged skill
+files; local recipe content is captured in the blueprint's source/effective instruction snapshot.
+Dedicated summary/OCR blueprints and legacy Fast Answer do not load skills. All loaded recipes
+consume context, bounded to 24 effective files, 16 KiB each and 48 KiB combined.
+See [skill authoring](skills.md) for usage and the bundled single-artifact web synthesis workflow.
+
+`prompting/service.py` owns skill-management reads and writes and is constructed in `bootstrap.py`.
+`GET /skills`, `GET /skills/{name}`, and `PUT /skills/{name}` share the registry's validation and
+effective-source rules with chat compilation. Writes require the last-read revision (or null for
+creation), validate the resulting combined budget, and use `SafeStorage` for atomic file replacement.
+A process-local lock serializes API saves. Revisions include source identity and file bytes so an
+external edit or newly added override invalidates an older editor's revision; this detects observed
+changes but cannot provide filesystem compare-and-swap against arbitrary external editors.
+These endpoints add no model tools, database tables, or manually selected skill state.
 
 ## 4. Blueprint compilation
 
@@ -739,6 +780,13 @@ See [workspace-upgrade.md](workspace-upgrade.md) for restore behavior and operat
 
 ### Workspace discovery
 
+The web Notes view uses paginated note search with text and tag filters, with separate views for
+canonical summaries and the complete workspace tree. Named creation uses the existing note
+creation API rather than asking the researcher to choose a file path. Saved-note links use
+`/library/notes?path=<URL-encoded-workspace-path>`, so supporting notes and chat can open the
+same canonical file. The editor protects dirty navigation, blocks navigation during a save,
+and retains a conflicting draft for reconciliation instead of silently overwriting it.
+
 | API (all under `/api`) | Purpose |
 | --- | --- |
 | `GET /documents` | Local paper library, including PDFs not yet prepared |
@@ -768,6 +816,35 @@ Agents share these services through `list_workspace` (bounded pages and `next_of
 `search_research_notes` (BM25 with pagination), and `workspace_index` (status/refresh). Canonical
 summaries can be incomplete or stale: agents read selected artifacts and verify source citations.
 Immutable summary history remains at `/documents/{id}/summaries`, separate from canonical discovery.
+
+Connected note-taking uses this same index, not a second semantic store or a filesystem scan on
+every turn. The main agent chooses focused searches for the current topic and related concepts,
+reads candidate notes, and judges relevance from their contents. Lexical search cannot guarantee
+that every conceptual connection has been found. Notes and excerpts retain their attribution;
+neither substitutes for cited PDF evidence.
+
+When durable note-taking is requested, the primary note holds the detailed addition. Directly
+related existing standalone notes may receive concise contextual additions linking to that detail,
+unless the user restricts the destination. This is not permission to duplicate entire notes,
+recursively update the library, or rewrite other papers' canonical notes. Discussion alone remains
+read-only. Paper notes and generated summaries retain their distinct existing contracts.
+
+Additive note updates preserve earlier text instead of regenerating complete files. Corrections
+target exact unique selections, and full-document replacement is reserved for explicitly requested
+rewrites. Cross-note changes are individual file operations, not a multi-file transaction: agents
+must report successful destinations and any remaining failures honestly.
+
+Workspace content responses include a SHA-256 hash of the read snapshot. Conditional writes
+provide `expected_sha256`; a changed or deleted file returns a conflict rather than overwriting
+newer work. `PATCH /workspace/files/content` edits an existing Markdown note with `append`,
+`replace`, `insert_after`, or explicit `overwrite`. Replacement and insertion use an exact unique
+text selection, not fuzzy heading matching. Managed summaries and attachments are not note-edit
+targets. Legacy unconditional `PUT` clients remain supported.
+
+The process-local workspace lock covers revision checking and read-modify-write operations.
+This coordinates the application's own editors and agents, not external programs: an external
+editor does not share the lock. Content files remain the source of truth, and external edits
+still require explicit index refresh for discovery.
 
 `organize_workspace` exposes single-file move/rename, tag replacement, and user-authorized deletion
 to research agents. It accepts exact indexed standalone text paths, refuses overwrites, traversal,

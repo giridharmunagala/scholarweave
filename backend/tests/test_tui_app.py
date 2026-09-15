@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from datetime import UTC, datetime
 
@@ -110,6 +111,12 @@ class CockpitServer:
         self.reject_send = False
         self.providers = [provider_record()]
         self.last_chat_model_reference: dict = {}
+        self.skills = {
+            "web-synthesis": {
+                "name": "web-synthesis", "content": "# Web synthesis\n\nKeep source links.",
+                "source": "bundled", "revision": "a" * 64,
+            },
+        }
         self.note = {
             "path": "knowledge/ideas/notes.md", "name": "notes.md", "note_name": "Connected ideas",
             "media_type": "text/markdown", "size_bytes": 20, "modified_at": NOW,
@@ -173,6 +180,21 @@ class CockpitServer:
             if request.method == "PUT":
                 self.last_chat_model_reference = body["last_chat_model_reference"]
             return httpx.Response(200, json=settings_payload(self.last_chat_model_reference))
+        if path == "/skills":
+            return httpx.Response(200, json=list(self.skills.values()))
+        if path.startswith("/skills/"):
+            name = path.split("/")[-1]
+            existing = self.skills.get(name)
+            if request.method == "PUT":
+                if body["expected_revision"] != (existing["revision"] if existing else None):
+                    return httpx.Response(409, json={"message": "This skill changed since it was opened."})
+                if not body["content"].strip():
+                    return httpx.Response(400, json={"message": "Skill instructions must be non-empty."})
+                self.skills[name] = {
+                    "name": name, "content": body["content"], "source": "local",
+                    "revision": hashlib.sha256(body["content"].encode()).hexdigest(),
+                }
+            return httpx.Response(200, json=self.skills[name])
         if path == "/agent/conversations":
             if request.method == "POST":
                 self.chats = [conversation()]
@@ -217,13 +239,22 @@ class CockpitServer:
             note = {key: value for key, value in self.note.items() if key != "content"}
             return httpx.Response(200, json=[note])
         if path == "/workspace/files/content":
+            digest = hashlib.sha256(self.note["content"].encode("utf-8")).hexdigest()
             if request.method == "PUT":
+                if body.get("expected_sha256") != digest:
+                    return httpx.Response(409, json={"detail": "Note changed on disk"})
                 self.note["content"] = body["content"]
-            return httpx.Response(200, json=self.note)
+            return httpx.Response(200, json={
+                **self.note,
+                "sha256": hashlib.sha256(self.note["content"].encode("utf-8")).hexdigest(),
+            })
         if path == "/workspace/files/notes":
             self.note["note_name"] = body["name"]
             self.note["content"] = body.get("content", "")
-            return httpx.Response(200, json=self.note)
+            return httpx.Response(200, json={
+                **self.note,
+                "sha256": hashlib.sha256(self.note["content"].encode("utf-8")).hexdigest(),
+            })
         raise AssertionError(f"Unexpected request: {request.method} {request.url}")
 
     def app(self) -> ScholarWeaveApp:
@@ -246,6 +277,7 @@ def test_cockpit_layout_and_keyboard_navigation(size) -> None:
             await settle(app, pilot)
             assert "CONNECTED" in str(app.query_one("#connection", Static).render())
             assert not app.focus_mode
+            assert app.query_one("#nav-skills", Button).region.right <= size[0]
             assert app.query_one("#sidebar").display == (size[0] >= 90)
             assert not app.query_one("#observatory").display
             await pilot.press("ctrl+f")
@@ -270,6 +302,11 @@ def test_cockpit_layout_and_keyboard_navigation(size) -> None:
             assert app.focused is app.query_one("#search")
             await pilot.press("ctrl+3")
             assert app.view == "notes"
+            await pilot.press("ctrl+4")
+            await settle(app, pilot)
+            assert app.view == "skills"
+            assert app.query_one("#pages", ContentSwitcher).current == "skills-pane"
+            assert app.query_one("#save-skill", Button).region.right <= size[0]
             was_visible = app.query_one("#observatory").display
             await pilot.press("ctrl+o")
             assert app.query_one("#observatory").display != was_visible
@@ -781,7 +818,14 @@ def test_model_picker_enables_disabled_model_before_selecting(save_fails) -> Non
                 if method == "PUT" and path == "/providers/provider-1"
             )
             original[1]["enabled"] = True
-            assert updated == {"models": original}
+            assert set(updated) == {"models"}
+            assert [
+                {**model, "capabilities": set(model["capabilities"])}
+                for model in updated["models"]
+            ] == [
+                {**model, "capabilities": set(model["capabilities"])}
+                for model in original
+            ]
             assert app.providers[0].models[1].enabled
             assert server.last_chat_model_reference["model"] == "weave-deep"
     asyncio.run(scenario())
@@ -977,6 +1021,7 @@ def test_notes_preview_edit_save_and_conflict_protection() -> None:
             assert not app.note_dirty
             saved = next(body for method, path, body in server.requests if method == "PUT")
             assert "tags" not in saved
+            assert saved["expected_sha256"]
             await pilot.click("#edit-note")
             app.query_one("#note-editor", TextArea).load_text("Keep my draft")
             server.note["content"] = "External edit"
@@ -985,6 +1030,8 @@ def test_notes_preview_edit_save_and_conflict_protection() -> None:
             assert server.note["content"] == "External edit"
             assert app.query_one("#note-editor", TextArea).text == "Keep my draft"
             assert app.note_dirty
+            assert "Draft retained" in str(app.query_one("#note-state", Static).render())
+            assert not app.query_one("#note-editor", TextArea).read_only
             app.action_quit()
             await pilot.pause()
             assert isinstance(app.screen, ConfirmDiscard)
@@ -1016,6 +1063,125 @@ def test_create_note_and_revert_guard() -> None:
             await settle(app, pilot)
             assert app.query_one("#note-editor", TextArea).text == ""
     asyncio.run(scenario())
+
+
+def test_skills_edit_preview_save_and_keep_conflicting_drafts() -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("ctrl+4")
+            await settle(app, pilot)
+            assert app.query_one("#catalog", OptionList).option_count == 1
+            app.open_entry("web-synthesis")
+            await settle(app, pilot)
+            assert app.skill.source == "bundled"
+            assert "local override" in str(app.query_one("#skill-path", Static).render())
+            await pilot.click("#edit-skill")
+            app.query_one("#skill-editor", TextArea).load_text("# Synthesis\n\nPreserve all source links.")
+            await pilot.pause()
+            assert app.skill_dirty
+            await pilot.press("ctrl+e")
+            assert app.query_one("#skill-content", ContentSwitcher).current == "skill-scroll"
+            await pilot.press("ctrl+s")
+            await settle(app, pilot)
+            assert server.skills["web-synthesis"]["source"] == "local"
+            assert server.skills["web-synthesis"]["content"] == "# Synthesis\n\nPreserve all source links."
+            assert not app.skill_dirty
+            assert app.skill.revision == server.skills["web-synthesis"]["revision"]
+            await pilot.click("#edit-skill")
+            app.query_one("#skill-editor", TextArea).load_text("My unsaved recipe")
+            server.skills["web-synthesis"]["revision"] = "c" * 64
+            server.skills["web-synthesis"]["content"] = "External revision"
+            await pilot.press("ctrl+s")
+            await settle(app, pilot)
+            assert server.skills["web-synthesis"]["content"] == "External revision"
+            assert app.query_one("#skill-editor", TextArea).text == "My unsaved recipe"
+            assert app.skill_dirty
+            await pilot.press("ctrl+1", "ctrl+4", "ctrl+r")
+            await settle(app, pilot)
+            assert app.query_one("#skill-editor", TextArea).text == "My unsaved recipe"
+            app.action_quit()
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmDiscard)
+            await pilot.press("escape")
+            await settle(app, pilot)
+            assert app.skill_dirty
+            assert not any(path.endswith("/messages") for _, path, _ in server.requests)
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+
+def test_create_skill_and_discard_guard_do_not_activate_or_save_automatically() -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            app.run_command("skills")
+            await settle(app, pilot)
+            await pilot.press("ctrl+n")
+            await pilot.pause()
+            assert isinstance(app.screen, NoteName)
+            app.screen.query_one(Input).value = "Bad Skill Name"
+            await pilot.click("#create")
+            await pilot.pause()
+            assert isinstance(app.screen, NoteName)
+            app.screen.query_one(Input).value = "compare-notes"
+            app.screen.query_one(Input).focus()
+            await pilot.press("enter")
+            assert not app.screen.is_modal
+            await settle(app, pilot)
+            assert app.skill is None
+            assert app.skill_dirty
+            assert "compare-notes" not in server.skills
+            app.query_one("#skill-editor", TextArea).load_text("# Compare notes\n\nUse existing local evidence.")
+            await pilot.press("ctrl+s")
+            await settle(app, pilot)
+            assert "compare-notes" in server.skills
+            assert not app.skill_dirty
+            await pilot.click("#edit-skill")
+            app.query_one("#skill-editor", TextArea).load_text("Draft to preserve")
+            await pilot.pause()
+            app.open_entry("web-synthesis")
+            await pilot.pause()
+            assert isinstance(app.screen, ConfirmDiscard)
+            await pilot.press("escape")
+            await settle(app, pilot)
+            assert app.skill.name == "compare-notes"
+            assert app.query_one("#skill-editor", TextArea).text == "Draft to preserve"
+            await pilot.click("#revert-skill")
+            await pilot.pause()
+            await pilot.click("#discard")
+            await settle(app, pilot)
+            assert app.query_one("#skill-editor", TextArea).text == server.skills["compare-notes"]["content"]
+            assert not app.skill_dirty
+            app.query_one("#search", Input).value = "compare"
+            await pilot.pause()
+            assert app.query_one("#catalog", OptionList).option_count == 1
+            assert not any(path.endswith("/messages") for _, path, _ in server.requests)
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
+
+
+def test_skill_save_failure_retains_draft_and_leaves_editor_usable() -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            app.action_view("skills")
+            app.open_entry("web-synthesis")
+            await settle(app, pilot)
+            app.edit_skill()
+            app.query_one("#skill-editor", TextArea).load_text("Keep this draft")
+            server.offline = True
+            await pilot.press("ctrl+s")
+            await settle(app, pilot)
+            assert app.skill_dirty
+            assert not app.query_one("#skill-editor", TextArea).read_only
+            assert app.query_one("#skill-editor", TextArea).text == "Keep this draft"
+            assert server.skills["web-synthesis"]["content"] != "Keep this draft"
+    asyncio.run(asyncio.wait_for(scenario(), timeout=30))
 
 
 def test_paper_reader_discussion_and_local_filter() -> None:
@@ -1181,24 +1347,31 @@ def test_composer_grows_from_three_lines_then_scrolls_at_cap() -> None:
         async with app.run_test(size=(140, 42)) as pilot:
             await settle(app, pilot)
             composer = app.query_one("#composer", TextArea)
+
+            async def wait_for_layout(height: int, *, scrolling: bool = False) -> None:
+                async with asyncio.timeout(5):
+                    await pilot.pause()
+                    while composer.region.height != height or (scrolling and composer.max_scroll_y <= 0):
+                        await pilot.pause()
+
             assert composer.region.height == 3
 
             composer.load_text("\n".join(f"Line {index}" for index in range(6)))
-            await pilot.pause()
+            await wait_for_layout(6)
             assert composer.region.height == 6
 
             composer.load_text("\n".join(f"Line {index}" for index in range(14)))
-            await pilot.pause()
+            await wait_for_layout(8, scrolling=True)
             assert composer.region.height == 8
             assert composer.max_scroll_y > 0
 
             composer.load_text("A long wrapped draft " * 100)
-            await pilot.pause()
+            await wait_for_layout(8, scrolling=True)
             assert composer.region.height == 8
             assert composer.max_scroll_y > 0
 
             composer.clear()
-            await pilot.pause()
+            await wait_for_layout(3)
             assert composer.region.height == 3
 
     asyncio.run(scenario())

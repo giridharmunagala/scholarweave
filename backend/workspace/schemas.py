@@ -29,6 +29,7 @@ class WorkspaceFileResponse(WorkspaceSchema):
 
 class WorkspaceFileContentResponse(WorkspaceFileResponse):
     content: Any
+    sha256: str | None = None
 
 
 class WorkspaceSearchResponse(WorkspaceFileResponse):
@@ -46,6 +47,15 @@ class WorkspaceFileWriteRequest(WorkspaceSchema):
     path: str = Field(min_length=1, max_length=512)
     content: Any
     tags: list[str] | None = None
+    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkspaceNoteEditRequest(WorkspaceSchema):
+    path: str = Field(min_length=1, max_length=512)
+    operation: Literal["append", "replace", "insert_after", "overwrite"] = "append"
+    content: str
+    selection: str | None = None
+    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class WorkspaceNoteCreateRequest(WorkspaceSchema):

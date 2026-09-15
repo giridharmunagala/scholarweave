@@ -14,6 +14,7 @@ from backend.agents.blueprint import AgentBlueprint
 from backend.agents.compiler import AgentCompiler
 from backend.agents.harness import ModelBinding
 from backend.core.config import Settings
+from backend.core.errors import ValidationError
 from backend.utils import utcnow
 from backend.persistence import create_session_factory
 from backend.providers.types import ModelReference, ResolvedAgentModel
@@ -1347,7 +1348,7 @@ async def test_safe_reads_retry_but_failed_writes_remain_unknown(test_settings) 
         assert result["results"] == []
         assert result["cached"] is False
 
-        with pytest.raises(ValueError):
+        with pytest.raises(ValidationError, match="canonical workspace-relative note path"):
             await services.runs._tool_runtime.invoke(
                 "research.notes.save",
                 {

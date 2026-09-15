@@ -12,7 +12,7 @@ from textual.widgets import Checkbox, TextArea
 from backend.app import create_app
 from scholarweave_tui.app import ScholarWeaveApp
 from scholarweave_tui.client import ScholarWeaveClient
-from scholarweave_tui.widgets import ChatMessage
+from scholarweave_tui.widgets import ChatMessage, ChoicePicker, ModelConfig
 
 
 async def settle(app: ScholarWeaveApp, pilot) -> None:
@@ -57,9 +57,14 @@ def test_terminal_chat_and_notes_use_real_local_backend(
                 assert app.model_reference.model == "stub-model"
                 if not initially_enabled:
                     app.run_command("model")
+                    async with asyncio.timeout(10):
+                        while not isinstance(app.screen, ChoicePicker):
+                            await pilot.pause()
                     await pilot.pause()
                     await pilot.press("enter")
-                    await pilot.pause()
+                    async with asyncio.timeout(10):
+                        while not isinstance(app.screen, ModelConfig):
+                            await pilot.pause()
                     assert not app.screen.query_one("#model-enabled", Checkbox).value
                     app.screen.query_one("#model-enabled", Checkbox).value = True
                     await pilot.click("#use-model")
@@ -99,6 +104,20 @@ def test_terminal_chat_and_notes_use_real_local_backend(
                 matches = await client.search_notes("spectroscopy")
                 assert note.path in {match.path for match in matches}
                 assert len(stub_provider.requests) == 1
+                app.action_view("skills")
+                app.open_entry("web-synthesis")
+                await settle(app, pilot)
+                assert app.skill.source == "bundled"
+                app.edit_skill()
+                skill_content = "# TUI web synthesis\n\nUse for webpages. Preserve source attribution."
+                app.query_one("#skill-editor", TextArea).load_text(skill_content)
+                await pilot.press("ctrl+s")
+                await settle(app, pilot)
+                assert not app.skill_dirty
+                assert (await client.read_skill("web-synthesis")).content == skill_content
+                assert (await client.read_skill("web-synthesis")).source == "local"
+                assert len(stub_provider.requests) == 1
+                assert "TUI web synthesis" not in stub_provider.requests[0]["messages"][0]["content"]
 
             restarted = ScholarWeaveApp(ScholarWeaveClient(transport=transport))
             async with restarted.run_test(size=(140, 42)) as pilot:
@@ -116,6 +135,7 @@ def test_terminal_chat_and_notes_use_real_local_backend(
                 assert restarted.current_id != first_conversation_id
                 assert len(await restarted.client.conversations()) == 2
                 assert len(stub_provider.requests) == 2
+                assert skill_content in stub_provider.requests[-1]["messages"][0]["content"]
 
                 restarted.open_entry(first_conversation_id)
                 await settle(restarted, pilot)

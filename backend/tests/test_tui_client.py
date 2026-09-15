@@ -16,6 +16,7 @@ from backend.conversations.schemas import (
     ConversationResponse,
 )
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
+from backend.prompting.schemas import SkillResponse
 from backend.runs.schemas import RunResponse, SteeringMessageResponse
 from backend.tests.test_tui_app import settings_payload
 from backend.workspace.schemas import (
@@ -58,6 +59,9 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
         "metadata": {}, "created_at": STAMP, "updated_at": STAMP,
     }
     note = {**note_data(), "content": "Saved"}
+    skill = {
+        "name": "web-synthesis", "content": "# Web synthesis", "source": "local", "revision": "a" * 64,
+    }
     provider = {
         "id": "provider-1", "name": "Local runtime", "kind": "openai_compatible",
         "base_url": "http://127.0.0.1:11434/v1", "api_key_set": False, "state": "active",
@@ -99,6 +103,9 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
             ("GET", "/api/workspace/files/content"): note,
             ("PUT", "/api/workspace/files/content"): note,
             ("POST", "/api/workspace/files/notes"): note,
+            ("GET", "/api/skills"): [skill],
+            ("GET", "/api/skills/web-synthesis"): skill,
+            ("PUT", "/api/skills/web-synthesis"): skill,
         }
         assert route in responses
         return httpx.Response(200, json=responses[route])
@@ -188,12 +195,24 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
             path = "notes/space & #unicode-é/notes.md"
             assert isinstance(await client.read_note(path), WorkspaceFileContentResponse)
             assert dict(requests[-1].url.params) == {"path": path}
-            await client.save_note(path, "Saved")
-            assert json.loads(requests[-1].content) == {"path": path, "content": "Saved"}
+            await client.save_note(path, "Saved", expected_sha256="a" * 64)
+            assert json.loads(requests[-1].content) == {
+                "path": path, "content": "Saved", "expected_sha256": "a" * 64,
+            }
             assert (await client.create_note("Ideas")).tags == ["keep"]
             assert json.loads(requests[-1].content) == {"name": "Ideas", "content": ""}
             await client.create_note("Ideas", "Opening")
             assert json.loads(requests[-1].content) == {"name": "Ideas", "content": "Opening"}
+            assert isinstance((await client.skills())[0], SkillResponse)
+            assert isinstance(await client.read_skill("web-synthesis"), SkillResponse)
+            assert isinstance(
+                await client.save_skill("web-synthesis", "# Web synthesis", "a" * 64), SkillResponse,
+            )
+            assert json.loads(requests[-1].content) == {
+                "content": "# Web synthesis", "expected_revision": "a" * 64,
+            }
+            await client.save_skill("web-synthesis", "# New skill", None)
+            assert json.loads(requests[-1].content)["expected_revision"] is None
         finally:
             await client.close()
         assert client._http.is_closed

@@ -661,6 +661,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Skills */
+        get: operations["list_skills_api_skills_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Skill */
+        get: operations["read_skill_api_skills__name__get"];
+        /** Save Skill */
+        put: operations["save_skill_api_skills__name__put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/web-sources": {
         parameters: {
             query?: never;
@@ -747,7 +782,8 @@ export interface paths {
         delete: operations["delete_file_api_workspace_files_content_delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /** Edit Note */
+        patch: operations["edit_note_api_workspace_files_content_patch"];
         trace?: never;
     };
     "/api/workspace/files/folder": {
@@ -1748,6 +1784,27 @@ export interface components {
             /** User Timezone */
             user_timezone?: string | null;
         };
+        /** SkillResponse */
+        SkillResponse: {
+            /** Content */
+            content: string;
+            /** Name */
+            name: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "bundled" | "local";
+        };
+        /** SkillWriteRequest */
+        SkillWriteRequest: {
+            /** Content */
+            content: string;
+            /** Expected Revision */
+            expected_revision?: string | null;
+        };
         /** SteeringMessageRequest */
         SteeringMessageRequest: {
             /** Content */
@@ -1911,6 +1968,8 @@ export interface components {
             paper_name?: string | null;
             /** Path */
             path: string;
+            /** Sha256 */
+            sha256?: string | null;
             /** Size Bytes */
             size_bytes: number;
             /** Tags */
@@ -1948,6 +2007,8 @@ export interface components {
         WorkspaceFileWriteRequest: {
             /** Content */
             content: unknown;
+            /** Expected Sha256 */
+            expected_sha256?: string | null;
             /** Path */
             path: string;
             /** Tags */
@@ -1976,6 +2037,23 @@ export interface components {
             name: string;
             /** Tags */
             tags?: string[];
+        };
+        /** WorkspaceNoteEditRequest */
+        WorkspaceNoteEditRequest: {
+            /** Content */
+            content: string;
+            /** Expected Sha256 */
+            expected_sha256?: string | null;
+            /**
+             * Operation
+             * @default append
+             * @enum {string}
+             */
+            operation: "append" | "replace" | "insert_after" | "overwrite";
+            /** Path */
+            path: string;
+            /** Selection */
+            selection?: string | null;
         };
         /** WorkspaceSearchResponse */
         WorkspaceSearchResponse: {
@@ -3515,6 +3593,92 @@ export interface operations {
             };
         };
     };
+    list_skills_api_skills_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillResponse"][];
+                };
+            };
+        };
+    };
+    read_skill_api_skills__name__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_skill_api_skills__name__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillWriteRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_web_sources_api_web_sources_get: {
         parameters: {
             query?: never;
@@ -3764,6 +3928,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    edit_note_api_workspace_files_content_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WorkspaceNoteEditRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFileContentResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

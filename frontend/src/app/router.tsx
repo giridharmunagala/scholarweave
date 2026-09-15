@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type AnchorHTMLAttributes,
   type ReactNode,
@@ -13,31 +14,83 @@ interface RouterState {
   pathname: string;
   search: string;
   navigate: (to: string, options?: { replace?: boolean }) => void;
+  block: (guard: () => boolean) => () => void;
 }
 
 const RouterContext = createContext<RouterState | null>(null);
 
 export function RouterProvider({ children }: { children: ReactNode }) {
+  const guards = useRef(new Set<() => boolean>());
+  const currentUrl = useRef(window.location.pathname + window.location.search);
+  const historyIndex = useRef<number>(window.history.state?.scholarweaveIndex ?? 0);
+  const restoringHistory = useRef(false);
+  const canLeave = useCallback(() => [...guards.current].every((guard) => guard()), []);
+  const block = useCallback((guard: () => boolean) => {
+    guards.current.add(guard);
+    return () => { guards.current.delete(guard); };
+  }, []);
   const [location, setLocation] = useState(() => ({
     pathname: window.location.pathname,
     search: window.location.search,
   }));
 
   useEffect(() => {
-    const update = () =>
+    window.history.replaceState({ ...window.history.state, scholarweaveIndex: historyIndex.current }, '', window.location.href);
+    const update = (event: PopStateEvent) => {
+      if (restoringHistory.current) {
+        restoringHistory.current = false;
+        return;
+      }
+      const targetIndex: unknown = event.state?.scholarweaveIndex;
+      if (!canLeave()) {
+        if (typeof targetIndex === 'number' && targetIndex !== historyIndex.current) {
+          restoringHistory.current = true;
+          window.history.go(historyIndex.current - targetIndex);
+        } else {
+          window.history.replaceState(
+            { ...window.history.state, scholarweaveIndex: historyIndex.current }, '', currentUrl.current,
+          );
+        }
+        return;
+      }
+      if (typeof targetIndex === 'number') historyIndex.current = targetIndex;
+      currentUrl.current = window.location.pathname + window.location.search;
       setLocation({ pathname: window.location.pathname, search: window.location.search });
+    };
     window.addEventListener('popstate', update);
     return () => window.removeEventListener('popstate', update);
-  }, []);
+  }, [canLeave]);
 
   const navigate = useCallback((to: string, options?: { replace?: boolean }) => {
-    window.history[options?.replace ? 'replaceState' : 'pushState']({}, '', to);
+    if (restoringHistory.current || !canLeave()) return;
+    if (!options?.replace) historyIndex.current += 1;
+    window.history[options?.replace ? 'replaceState' : 'pushState'](
+      { scholarweaveIndex: historyIndex.current }, '', to,
+    );
+    currentUrl.current = window.location.pathname + window.location.search;
     setLocation({ pathname: window.location.pathname, search: window.location.search });
     window.scrollTo({ top: 0 });
-  }, []);
+  }, [canLeave]);
 
-  const value = useMemo(() => ({ ...location, navigate }), [location, navigate]);
+  const value = useMemo(() => ({ ...location, navigate, block }), [location, navigate, block]);
   return <RouterContext.Provider value={value}>{children}</RouterContext.Provider>;
+}
+
+export function useNavigationGuard(active: boolean, message: string, allowDiscard = true) {
+  const { block } = useRouter();
+  useEffect(() => {
+    if (!active) return;
+    const unblock = block(() => allowDiscard && window.confirm(message));
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    return () => {
+      unblock();
+      window.removeEventListener('beforeunload', beforeUnload);
+    };
+  }, [active, message, allowDiscard, block]);
 }
 
 function useRouter(): RouterState {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { components } from '../../api/schema.generated';
-import { buildFileTree, notePath } from './WorkspacePage';
+import { buildFileTree } from './WorkspacePage';
 
 type WorkspaceFile = components['schemas']['WorkspaceFileResponse'];
 
@@ -64,14 +64,5 @@ describe('buildFileTree', () => {
     expect(tree.folders[0].name).toBe('knowledge');
     expect(tree.folders[0].folders).toEqual([]);
     expect(tree.folders[0].files[0].note_name).toBe('KV cache experiments');
-  });
-});
-
-describe('notePath', () => {
-  it('defaults new notes to knowledge without changing explicit relative paths', () => {
-    expect(notePath('  Ideas  ')).toBe('knowledge/Ideas.md');
-    expect(notePath('Concept.md')).toBe('knowledge/Concept.md');
-    expect(notePath('projects/example/notes/Ideas.md')).toBe('projects/example/notes/Ideas.md');
-    expect(notePath(' ')).toBe('');
   });
 });

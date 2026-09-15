@@ -13,6 +13,45 @@ from backend.conversations.turns import RESEARCH_TOOL_IDS, WORK_PLAN_TOOL_IDS
 from backend.runs.schemas import SteeringMessageRequest
 
 
+def test_workspace_note_mutation_and_conditional_save_api(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        note = client.post("/api/workspace/files/notes", json={
+            "name": "Safe edits", "content": "Original", "tags": ["keep"],
+        }).json()
+        path = note["path"]
+        read = client.get("/api/workspace/files/content", params={"path": path}).json()
+        assert len(read["sha256"]) == 64
+        appended = client.patch("/api/workspace/files/content", json={
+            "path": path, "content": "\nAdded", "expected_sha256": read["sha256"],
+        })
+        assert appended.status_code == 200, appended.text
+        assert appended.json()["content"] == read["content"] + "\nAdded"
+        stale = client.put("/api/workspace/files/content", json={
+            "path": path, "content": "lost edit", "expected_sha256": read["sha256"],
+        })
+        assert stale.status_code == 409
+        assert client.patch("/api/workspace/files/content", json={
+            "path": path, "operation": "replace", "selection": "missing", "content": "",
+        }).status_code == 400
+        saved = client.put("/api/workspace/files/content", json={
+            "path": path, "content": "Saved", "expected_sha256": appended.json()["sha256"],
+        })
+        assert saved.status_code == 200
+        assert saved.json()["tags"] == note["tags"]
+        paper = app.state.services.workspace.ensure_paper_folder("paper-1", "Paper")
+        assert client.patch("/api/workspace/files/content", json={
+            "path": paper["summary_path"], "content": "No",
+        }).status_code == 400
+        assert client.delete("/api/workspace/files/content", params={"path": path}).status_code == 204
+        assert client.put("/api/workspace/files/content", json={
+            "path": path, "content": "No", "expected_sha256": saved.json()["sha256"],
+        }).status_code == 409
+        assert client.put("/api/workspace/files/content", json={
+            "path": path, "content": "Legacy unconditional create",
+        }).status_code == 200
+
+
 def configure_provider(client: TestClient, stub_provider) -> str:
     response = client.post(
         "/api/providers",

@@ -15,6 +15,7 @@ from backend.core.config import Settings
 from backend.conversations.router import router as conversations_router
 from backend.core.router import router as core_router
 from backend.providers.router import router as providers_router
+from backend.prompting.router import router as skills_router
 from backend.research.router import router as research_router, summary_router
 from backend.runs.router import router as runs_router
 from backend.workspace.router import router as workspace_router
@@ -48,6 +49,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runs_router,
         research_router,
         workspace_router,
+        skills_router,
     ):
         app.include_router(router, prefix=prefix)
 

@@ -11,6 +11,8 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError
 
 from backend.core.errors import ValidationError
+from backend.persistence.files import SafeStorage
+from backend.prompting.skills import SkillRegistry
 
 _VARIABLE_PATTERN = re.compile(r"\{\{\s*([A-Za-z][A-Za-z0-9_]*)\s*\}\}")
 
@@ -34,6 +36,7 @@ PROMPT_DEFINITIONS = {
     for item in (
         PromptDefinition("global"),
         PromptDefinition("research"),
+        PromptDefinition("skills"),
         PromptDefinition("deep-work-coordinator"),
         PromptDefinition("deep-work-worker"),
         PromptDefinition("fast-answer", frozenset({"web_search_limit"})),
@@ -61,10 +64,13 @@ class PromptRegistry:
         self,
         _overrides_root: Path | None = None,
         defaults_root: Path | None = None,
+        *,
+        storage: SafeStorage | None = None,
     ) -> None:
         self.defaults_root = (
             defaults_root or Path(__file__).resolve().parent / "defaults"
         ).resolve()
+        self.skills = SkillRegistry(self.defaults_root / "skills", storage)
         self.validate_defaults()
 
     @classmethod
@@ -76,12 +82,23 @@ class PromptRegistry:
         files = [
             *(self.defaults_root / "prompts").glob("*.md"),
             *(self.defaults_root / "tools").glob("*.json"),
+            *(self.defaults_root / "skills").glob("*.md"),
         ]
         digest = hashlib.sha256()
         for path in sorted(files):
             digest.update(path.relative_to(self.defaults_root).as_posix().encode("utf-8"))
             digest.update(path.read_bytes())
         return digest.hexdigest()
+
+    def render_skills(self) -> str:
+        skills = self.skills.snapshot()
+        if not skills:
+            return ""
+        recipes = "\n\n".join(
+            f'<skill name="{skill.name}">\n{skill.instructions}\n</skill>'
+            for skill in skills
+        )
+        return f"{self.render('skills')}\n\n{recipes}"
 
     def validate_defaults(self) -> None:
         issues: list[str] = []

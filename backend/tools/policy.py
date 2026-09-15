@@ -42,6 +42,8 @@ def operation_policy(
         return ToolOperationPolicy(False, False)
     if catalog_id in _LOCAL_READS:
         return _LOCAL_READ
+    if catalog_id == "research.notes.save":
+        return _WRITE
     if catalog_id in {"research.sources.search", "research.web.read"}:
         return _NETWORK_READ
     action = arguments.get("action")

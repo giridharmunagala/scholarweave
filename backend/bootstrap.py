@@ -31,6 +31,7 @@ from backend.providers.repository import ProviderRepository
 from backend.providers.binding import ProfileModelResolver, ProviderClientPool
 from backend.providers.service import ProviderService
 from backend.prompting import PromptRegistry
+from backend.prompting.service import SkillService
 from backend.research import ResearchSearchService, SourceDownloadService
 from backend.documents.retrieval import RetrievalService
 from backend.runs.repository import RunRepository
@@ -72,6 +73,7 @@ class ApplicationServices:
     documents: DocumentService
     workspace: WorkspaceService
     prompts: PromptRegistry
+    skills: SkillService
     tool_catalog: Any
     compiler: AgentCompiler
     conversation_sessions: ConversationSessionFactory
@@ -132,7 +134,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     model_resolver = ProfileModelResolver(model_runtime, provider_clients)
 
     storage = SafeStorage(resolved)
-    prompts = PromptRegistry(resolved.prompt_config_dir)
+    prompts = PromptRegistry(resolved.prompt_config_dir, storage=storage)
+    skills = SkillService(prompts.skills, storage)
     workspace = WorkspaceService(storage, WorkspaceRepository(session_factory))
     retrieval = RetrievalService(session_factory, resolved)
     research_search = ResearchSearchService(resolved)
@@ -258,6 +261,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         documents=documents,
         workspace=workspace,
         prompts=prompts,
+        skills=skills,
         tool_catalog=tool_catalog,
         compiler=compiler,
         conversation_sessions=conversation_sessions,

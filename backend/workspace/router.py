@@ -10,6 +10,7 @@ from backend.workspace.schemas import (
     WorkspaceIndexResponse,
     WorkspaceKind,
     WorkspaceNoteCreateRequest,
+    WorkspaceNoteEditRequest,
     WorkspaceSearchResponse,
 )
 
@@ -90,7 +91,23 @@ def write_file(
     container=Depends(services),
 ) -> WorkspaceFileContentResponse:
     return WorkspaceFileContentResponse.model_validate(
-        container.workspace.write_file(payload.path, payload.content, tags=payload.tags)
+        container.workspace.write_file(
+            payload.path, payload.content, tags=payload.tags,
+            expected_sha256=payload.expected_sha256,
+        )
+    )
+
+
+@router.patch("/files/content", response_model=WorkspaceFileContentResponse)
+def edit_note(
+    payload: WorkspaceNoteEditRequest,
+    container=Depends(services),
+) -> WorkspaceFileContentResponse:
+    return WorkspaceFileContentResponse.model_validate(
+        container.workspace.edit_note(
+            payload.path, operation=payload.operation, content=payload.content,
+            selection=payload.selection, expected_sha256=payload.expected_sha256,
+        )
     )
 
 

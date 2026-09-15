@@ -292,14 +292,19 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.notes.save",
         "save_research_note",
-        "Create a note, or append to or overwrite a paper note or known note path.",
+        "Create or add to a note; narrowly patch read content, or explicitly rewrite a complete note.",
         _object_schema(
             {
                 "target": {
                     "type": "string",
                     "enum": ["new_note", "paper_notes", "path"],
                 },
-                "mode": {"type": "string", "enum": ["append", "overwrite"]},
+                "mode": {
+                    "type": ["string", "null"],
+                    "enum": ["append", "patch", "insert_after", "overwrite", None],
+                },
+                "selection": {"type": ["string", "null"], "minLength": 1, "maxLength": 200000},
+                "expected_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
                 "document_id": {"type": ["string", "null"]},
                 "path": {"type": ["string", "null"]},
                 "name": {"type": ["string", "null"], "maxLength": 300},
@@ -313,6 +318,8 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
             required=[
                 "target",
                 "mode",
+                "selection",
+                "expected_sha256",
                 "document_id",
                 "path",
                 "name",

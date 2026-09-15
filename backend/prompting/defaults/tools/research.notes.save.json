@@ -1,13 +1,15 @@
 {
   "label": "Save research note",
-  "description": "Create a durable note or append to or overwrite a known note or paper notes file. Paper findings are required only in explicit review; use paper_notes for that evidence. In research, learn, and understand modes, including Deep Work, write only when the user requests durable notes. In research, requested paper notes may record the user's questions or analysis of an existing summary without a new source read; attribute that context and never present it as independently verified paper evidence. Other notes likewise remain opt-in. Discussing existing notes or summaries does not authorize writes. Prefer append for additive observations; overwrite only when explicitly replacing the intended complete document. Never overwrite a paper summary through this tool.",
+  "description": "Save only requested durable notes (or required explicit review findings). Discussion does not authorize writes. Search related existing notes with focused query variants, read candidates, and choose one primary note for detailed findings. Only directly relevant supporting standalone notes receive a concise contextual addition and a Markdown link to the primary, not a copied body, keyword-based cascade, or new note per term. User scope such as 'only this note' overrides cross-note additions. Do not silently change unrelated paper notes; paper_notes is for the explicitly selected paper. Read every existing destination before editing and copy its sha256. Append is the default additive operation; use patch or insert_after for exact localized changes. Overwrite requires the user's explicit full-rewrite request, not merely permission to save. Canonical summaries and other managed artifacts cannot be edited here. After conflict, ambiguous match, or unknown outcome, reread the destination and reconcile whether the addition already exists before retrying; never blindly repeat an append. Report exact successful paths and partial failures honestly.",
   "parameter_descriptions": {
     "target": "new_note, paper_notes, or an existing path.",
-    "mode": "append to preserve existing content or overwrite to replace it.",
+    "mode": "append (or null, the default) preserves old details; patch replaces one exact unique selection; insert_after inserts immediately after it; overwrite replaces the entire note only for an explicit full rewrite.",
+    "selection": "Exact unique text copied from the destination read for patch or insert_after, otherwise null. Include sufficient context to disambiguate repeated headings.",
+    "expected_sha256": "Copy sha256 from the latest read_research_note result for an existing destination; mandatory for patch and insert_after. Null only for a new note or legacy additive call. A stale hash rejects the edit.",
     "document_id": "Required for paper_notes, otherwise null.",
     "path": "Required for path target, otherwise null.",
     "name": "Required human-readable name for a new note, otherwise null.",
-    "content": "The complete Markdown content to write or append.",
+    "content": "Only the new scoped addition for append, replacement text for patch, or inserted text including separators for insert_after. Complete Markdown only for new_note or explicit overwrite. Supporting notes get a short contextual addition with a link, never the whole primary note.",
     "tags": "Short searchable tags; use an empty list when none are useful."
   }
 }

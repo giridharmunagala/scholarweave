@@ -2707,6 +2707,67 @@
         "title": "SettingsUpdate",
         "type": "object"
       },
+      "SkillResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "bundled",
+              "local"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "content",
+          "source",
+          "revision"
+        ],
+        "title": "SkillResponse",
+        "type": "object"
+      },
+      "SkillWriteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "maxLength": 16384,
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "expected_revision": {
+            "anyOf": [
+              {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Revision"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "SkillWriteRequest",
+        "type": "object"
+      },
       "SteeringMessageRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3165,6 +3226,17 @@
             "title": "Path",
             "type": "string"
           },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sha256"
+          },
           "size_bytes": {
             "title": "Size Bytes",
             "type": "integer"
@@ -3288,6 +3360,18 @@
           "content": {
             "title": "Content"
           },
+          "expected_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Sha256"
+          },
           "path": {
             "maxLength": 512,
             "minLength": 1,
@@ -3374,6 +3458,61 @@
           "name"
         ],
         "title": "WorkspaceNoteCreateRequest",
+        "type": "object"
+      },
+      "WorkspaceNoteEditRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "expected_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Sha256"
+          },
+          "operation": {
+            "default": "append",
+            "enum": [
+              "append",
+              "replace",
+              "insert_after",
+              "overwrite"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "selection": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selection"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "title": "WorkspaceNoteEditRequest",
         "type": "object"
       },
       "WorkspaceSearchResponse": {
@@ -5514,6 +5653,123 @@
         ]
       }
     },
+    "/api/skills": {
+      "get": {
+        "operationId": "list_skills_api_skills_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SkillResponse"
+                  },
+                  "title": "Response List Skills Api Skills Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Skills",
+        "tags": [
+          "skills"
+        ]
+      }
+    },
+    "/api/skills/{name}": {
+      "get": {
+        "operationId": "read_skill_api_skills__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Skill",
+        "tags": [
+          "skills"
+        ]
+      },
+      "put": {
+        "operationId": "save_skill_api_skills__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkillWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Save Skill",
+        "tags": [
+          "skills"
+        ]
+      }
+    },
     "/api/web-sources": {
       "get": {
         "operationId": "list_web_sources_api_web_sources_get",
@@ -5802,6 +6058,45 @@
           }
         },
         "summary": "Read File",
+        "tags": [
+          "workspace"
+        ]
+      },
+      "patch": {
+        "operationId": "edit_note_api_workspace_files_content_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkspaceNoteEditRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceFileContentResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Edit Note",
         "tags": [
           "workspace"
         ]

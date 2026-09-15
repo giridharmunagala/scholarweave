@@ -18,6 +18,8 @@ Your library is stored on your machine; model inference runs with the provider y
 - Choose per-message effort: **Auto**, **Quick**, or **Thorough**. Quick can use local files and
   attachments as well as the web; Thorough enables focused workers without permanently changing the chat.
 - Ordinary conversation and targeted lookups need no plan. Longer assignments can use a tracked plan.
+- Reuse single-file Markdown [skills](docs/skills.md) for recurring tasks with the existing tools.
+  The bundled `web-synthesis` skill can combine multiple webpages into one sourced document.
 - Summaries appear in chat unless you request a saved artifact. Discussing a saved summary does not regenerate it.
 - Steer an active run, stop it, or request an answer from the evidence already collected.
 - **Observe** shows the full trace, with Deep Work workers nested beneath their delegation calls.
@@ -70,11 +72,17 @@ Each paper has a readable, stable folder containing its original PDF, notes, sum
 
 ### Notes And Research Discovery
 
-Create reusable knowledge notes and keep paper-specific notes beside their sources. Browse files,
-organize them with tags, and edit Markdown directly in the workspace.
+Create reusable knowledge notes and keep paper-specific notes beside their sources. Find notes
+with paginated full-text search and tag filters, or switch to summaries and the workspace file tree.
+Create notes by name and edit Markdown directly, with dirty-draft and stale-save protection.
 
 Research agents can find saved work through full-text search with ranked excerpts and tag filters.
 Application edits update the index automatically; refresh the index after editing files externally.
+When you request notes, the agent searches related topics before saving, appends detailed findings
+to the primary note, and can add concise connections and links to relevant existing standalone
+notes. Say "only this note" to restrict the destination. Additions preserve earlier content;
+precise corrections use exact-text edits rather than regenerating the whole note. Discussion
+alone does not save files, and paper notes remain separate from generated paper summaries.
 
 ![ScholarWeave notes workspace](docs/screenshots/workspace.png)
 
@@ -127,7 +135,12 @@ database, reorganizes the library, and retires old conversations and agent runs.
 
 Prefer the terminal? The optional Textual interface brings a themed, keyboard-first
 cockpit to the same local library: streaming conversations, searchable papers with extracted text
-and citations, editable notes, and a live observatory for tools, usage, and work plans.
+and citations, editable notes and skills, and a live observatory for tools, usage, and work plans.
+
+Open **Skills** with **Ctrl+4** to browse, create, or edit instruction files. **Ctrl+E** switches
+between editing and preview; **Ctrl+S** saves. Editing a bundled skill creates a local override.
+No activation or conversation association is needed: the model chooses relevant skills
+automatically. Saved changes apply to new messages, not tasks already running.
 
 Install the terminal extra, then launch:
 
@@ -249,9 +262,17 @@ and resumes live events. Connection errors preserve the composer draft and offer
 than silently retrying a write.
 
 Notes have a Markdown preview and editor. Unsaved changes are guarded when opening another note or
-quitting, and saving checks for external edits before writing. That check is best-effort, not an
-atomic compare-and-swap: avoid editing the same note simultaneously in another client. Note search
-uses the existing workspace index; refresh that index in the web app after external file edits.
+quitting. Saves send the loaded content hash; the backend checks it under its mutation lock and
+retains your draft on a conflict. External editors do not share this lock, so avoid simultaneous
+external writes to the same note. The Notes sidebar provides full-text search, comma-separated
+tag filters, and 25-item pages. Use **Refresh index** after external file edits. Paper notes and
+standalone notes are labeled separately; note links in the transcript or preview open the
+referenced note inside the terminal.
+
+Use **Discuss** on a saved, unchanged note to prepare a new chat draft referencing that exact file.
+Nothing is sent or saved automatically. When you explicitly request note-taking in terminal chat,
+the same backend tools support append-first additions, exact-text edits, and related supporting
+notes; there is no separate terminal note-writing pipeline.
 
 ## Data And Privacy
 

@@ -1838,10 +1838,22 @@ class ApplicationToolRuntime:
         context: ScholarWeaveContext,
     ) -> dict[str, Any]:
         target = str(arguments["target"])
-        mode = str(arguments["mode"])
+        mode = arguments.get("mode") or "append"
+        selection = arguments.get("selection")
+        if selection is not None and not isinstance(selection, str):
+            raise ToolInputError("selection must be exact text or null.")
+        expected_sha256 = _nullable_tool_string(arguments.get("expected_sha256"), "expected_sha256")
+        if mode not in {"append", "patch", "insert_after", "overwrite"}:
+            raise ToolInputError(f"Unknown research note save mode '{mode}'.")
+        if mode in {"patch", "insert_after"} and (not selection or not expected_sha256):
+            raise ToolInputError("Narrow edits require an exact selection and expected_sha256 from read_research_note.")
+        if mode not in {"patch", "insert_after"} and selection is not None:
+            raise ToolInputError("selection is only valid for patch or insert_after.")
         content = str(arguments["content"])
         tags = list(arguments["tags"])
         if target == "new_note":
+            if mode in {"patch", "insert_after"} or expected_sha256 is not None:
+                raise ToolInputError("New notes cannot patch existing content or require an existing hash.")
             name = _nullable_tool_string(arguments.get("name"), "name")
             if not name:
                 raise ValueError("A new research note requires a name.")
@@ -1870,18 +1882,18 @@ class ApplicationToolRuntime:
         else:
             raise ValueError(f"Unknown research note target '{target}'.")
 
-        if mode == "append":
-            document = self._workspace.append_markdown(path, content)
-        elif mode == "overwrite":
-            document = self._workspace.write_file(
-                path,
-                content,
-                tags=tags if tags else None,
-            )
-        else:
-            raise ValueError(f"Unknown research note save mode '{mode}'.")
-        if tags and mode == "append":
-            document = self._workspace.set_tags(path, tags)
+        if WorkspaceLayout.kind(path.replace("\\", "/")) == "paper_summary":
+            raise ToolInputError("Canonical paper summaries cannot be edited through save_research_note.")
+        document = self._workspace.edit_note(
+            path,
+            operation="replace" if mode == "patch" else mode,
+            content=content,
+            selection=selection,
+            expected_sha256=expected_sha256,
+        )
+        if tags:
+            self._workspace.set_tags(path, tags)
+            document = self._workspace.read_file(path)
         self._append_workspace_receipt(context, document, "Updated")
         if target == "paper_notes" and paper_document is not None:
             self._record_paper_activity(
@@ -2426,6 +2438,7 @@ class ApplicationToolRuntime:
             "media_type": document.media_type,
             "tags": list(document.tags),
             "content": document.content,
+            "sha256": document.sha256,
         }
 
     def _search_workspace(

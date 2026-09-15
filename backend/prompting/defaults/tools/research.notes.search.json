@@ -2,7 +2,7 @@
   "label": "Search workspace",
   "description": "Find workspace Markdown, text, and JSON by content, filename, display title, or tags using persistent SQLite FTS5 BM25. Any query word may match; results are ranked by relevance with higher scores better and compact excerpts. Use kinds to narrow to notes or canonical summaries. Read the selected path with read_research_note before relying on details; excerpts and notes are not full-source evidence. Application writes update the index automatically. Use workspace_index action=refresh only after external edits, file additions/deletions, or suspected stale results. This does not search PDF source bodies; use read_research_paper action=search for those.",
   "parameter_descriptions": {
-    "query": "Plain lexical query (1 to 2000 characters), or JSON null to browse. Words are OR-matched; punctuation is not FTS syntax. No semantic or substring matching.",
+    "query": "Focused plain lexical query (1 to 2000 characters), or null to browse. Words are OR-matched; punctuation is not FTS syntax. Expand vocabulary yourself into a few separate focused queries using plausible synonyms or connected concepts from the actual discussion; long keyword lists dilute ranking. No semantic or substring matching. Read candidates to confirm relevance; a lexical hit alone does not justify a write.",
     "kinds": "Workspace document kinds to include; use an empty list for all kinds.",
     "tags": "Tags that should constrain results; use an empty list for no tag filter.",
     "limit": "Maximum number of compact matches, from 1 to 50.",

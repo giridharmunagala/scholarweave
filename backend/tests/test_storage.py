@@ -1,12 +1,147 @@
 from __future__ import annotations
 
 import uuid
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
-from backend.core.errors import ValidationError
+from backend.core.errors import ConflictError, ValidationError
 from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.service import WorkspaceService
+
+
+def test_note_edits_preserve_identity_and_exact_content_hash(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    note = workspace.create_note(name="Evidence", content="Original", tags=["keep"])
+    initial = workspace.read_file(note.path)
+    assert initial.sha256 == hashlib.sha256(initial.content.encode("utf-8")).hexdigest()
+    updated = workspace.edit_note(
+        note.path, content="appendneedle", expected_sha256=initial.sha256,
+    )
+    assert updated.content == initial.content + "appendneedle"
+    assert (updated.note_id, updated.note_name, updated.tags) == (
+        initial.note_id, initial.note_name, initial.tags,
+    )
+    assert workspace.search(query="appendneedle")[0].path == note.path
+    with pytest.raises(ConflictError, match="changed"):
+        workspace.edit_note(note.path, content="duplicate", expected_sha256=initial.sha256)
+    inserted = workspace.edit_note(
+        note.path, operation="insert_after", selection="Original",
+        content="\nNew evidence", expected_sha256=updated.sha256,
+    )
+    patched = workspace.edit_note(
+        note.path, operation="replace", selection="New evidence",
+        content="Correct evidence", expected_sha256=inserted.sha256,
+    )
+    assert "Original\nCorrect evidence" in patched.content
+    assert workspace.read_file(note.path).sha256 == patched.sha256
+
+
+def test_note_patch_rejects_missing_and_overlapping_ambiguous_selection(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    note = workspace.create_note(name="Selections", content="aaa")
+    for selection in ("missing", "aa", ""):
+        with pytest.raises(ValidationError):
+            workspace.edit_note(note.path, operation="replace", selection=selection, content="no")
+        assert workspace.read_file(note.path).content == note.content
+
+
+def test_note_operations_protect_summary_and_other_managed_artifacts(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    paper = workspace.ensure_paper_folder("paper-1", "Paper")
+    original = workspace.read_file(paper["summary_path"])
+    for operation in ("append", "replace", "insert_after", "overwrite"):
+        with pytest.raises(ValidationError, match="protected"):
+            workspace.edit_note(
+                paper["summary_path"], operation=operation, content="bad",
+                selection="Contribution" if operation in {"replace", "insert_after"} else None,
+            )
+    for path in (
+        f"{paper['folder']}/summaries/version.md", "inbox/attachments/upload/text.md",
+        ".scholarweave/internal.md", f"{paper['folder']}/../notes.md",
+    ):
+        with pytest.raises(ValidationError):
+            workspace.edit_note(path, content="bad")
+    assert workspace.read_file(paper["summary_path"]).content == original.content
+    updated = workspace.edit_note(paper["notes_path"], content="paperneedle")
+    assert updated.paper_id == "paper-1"
+    assert updated.kind == "paper_notes"
+    assert workspace.search(query="paperneedle")[0].path == paper["notes_path"]
+
+
+def test_note_concurrent_appends_and_conditional_saves_are_serialized(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    note = workspace.create_note(name="Concurrent", content="")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: workspace.edit_note(note.path, content=f"entry-{i}\n"), range(24)))
+    content = workspace.read_file(note.path).content
+    for i in range(24):
+        assert content.splitlines().count(f"entry-{i}") == 1
+    revision = workspace.read_file(note.path).sha256
+
+    def save(content: str) -> bool:
+        try:
+            workspace.write_file(note.path, content, expected_sha256=revision)
+            return True
+        except ConflictError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(save, ["first", "second"])) == [False, True]
+
+
+def test_conditional_save_detects_external_edit_and_deletion(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="External", content="initial")
+    storage.write_workspace_file(note.path, "external\r\ncontent")
+    read = workspace.read_file(note.path)
+    assert read.sha256 == hashlib.sha256(b"external\r\ncontent").hexdigest()
+    with pytest.raises(ConflictError):
+        workspace.write_file(note.path, "stale", expected_sha256=note.sha256)
+    workspace.delete_file(note.path)
+    with pytest.raises(ConflictError, match="deleted"):
+        workspace.write_file(note.path, "resurrected", expected_sha256=read.sha256)
+    assert workspace.list_files() == []
+
+
+def test_workspace_atomic_write_failure_preserves_original_and_index(test_settings, monkeypatch) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Atomic", content="originalneedle", tags=["keep"])
+    target = storage.resolve_path(test_settings.workspace_dir, note.path)
+    replace = Path.replace
+
+    def fail_replace(source, destination):
+        if destination == target:
+            raise OSError("Replacement failed")
+        return replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="Replacement failed"):
+        workspace.edit_note(note.path, content="Not saved")
+    assert workspace.read_file(note.path).content == note.content
+    assert workspace.search(query="originalneedle")[0].tags == note.tags
+    assert list(target.parent.glob("*.tmp")) == []
+
+
+def test_workspace_json_read_hash_covers_original_bytes(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    raw = b'{ "value": 1 }\r\n'
+    storage.write_bytes(test_settings.workspace_dir, "data.json", raw)
+    document = WorkspaceService(storage).read_file("data.json")
+    assert document.content == {"value": 1}
+    assert document.sha256 == hashlib.sha256(raw).hexdigest()
+
+
+def test_workspace_atomic_writer_keeps_its_own_size_limit(test_settings) -> None:
+    settings = test_settings.model_copy(update={"max_artifact_bytes": 4, "max_workspace_file_bytes": 32})
+    storage = SafeStorage(settings)
+    assert storage.write_workspace_file("note.md", "longer than four").size_bytes == 16
+    with pytest.raises(StorageError, match="maximum"):
+        storage.write_bytes_atomic(settings.artifacts_dir, "file.txt", b"too long")
 
 
 def test_workspace_read_write_and_escape_protection(test_settings) -> None:

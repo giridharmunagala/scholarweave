@@ -25,11 +25,13 @@ from backend.providers.schemas import (
     ProviderResponse,
     ProviderUpdate,
 )
+from backend.prompting.schemas import SkillResponse
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse, SteeringMessageResponse
 from backend.workspace.schemas import (
     WorkspaceFileContentResponse,
     WorkspaceFileResponse,
+    WorkspaceIndexResponse,
     WorkspaceSearchResponse,
 )
 
@@ -161,6 +163,20 @@ class ScholarWeaveClient:
     async def conversations(self) -> list[ConversationResponse]:
         return await self._request("GET", "/agent/conversations", list[ConversationResponse])
 
+    async def skills(self) -> list[SkillResponse]:
+        return await self._request("GET", "/skills", list[SkillResponse])
+
+    async def read_skill(self, name: str) -> SkillResponse:
+        return await self._request("GET", f"/skills/{_segment(name)}", SkillResponse)
+
+    async def save_skill(
+        self, name: str, content: str, expected_revision: str | None,
+    ) -> SkillResponse:
+        return await self._request(
+            "PUT", f"/skills/{_segment(name)}", SkillResponse,
+            json={"content": content, "expected_revision": expected_revision},
+        )
+
     async def conversation(self, id: str) -> ConversationDetailResponse:
         return await self._request(
             "GET", f"/agent/conversations/{_segment(id)}", ConversationDetailResponse,
@@ -264,16 +280,37 @@ class ScholarWeaveClient:
     async def notes(self) -> list[WorkspaceFileResponse]:
         return await self._pages("/workspace/notes", WorkspaceFileResponse)
 
+    async def notes_page(
+        self, *, query: str = "", tags: list[str] | None = None,
+        limit: int = 25, offset: int = 0,
+    ) -> list[WorkspaceSearchResponse]:
+        params = [("limit", str(limit)), ("offset", str(offset))]
+        filtered = bool(query.strip() or tags)
+        if filtered:
+            params.extend([("kinds", "note"), ("kinds", "paper_notes")])
+            if query.strip():
+                params.append(("query", query.strip()))
+            params.extend(("tags", tag) for tag in tags or [])
+        return await self._request(
+            "GET", "/workspace/search" if filtered else "/workspace/notes",
+            list[WorkspaceSearchResponse], params=params,
+        )
+
+    async def refresh_notes_index(self) -> WorkspaceIndexResponse:
+        return await self._request("POST", "/workspace/index", WorkspaceIndexResponse)
+
     async def read_note(self, path: str) -> WorkspaceFileContentResponse:
         return await self._request(
             "GET", "/workspace/files/content", WorkspaceFileContentResponse,
             params={"path": path},
         )
 
-    async def save_note(self, path: str, content: str) -> WorkspaceFileContentResponse:
+    async def save_note(
+        self, path: str, content: str, *, expected_sha256: str,
+    ) -> WorkspaceFileContentResponse:
         return await self._request(
             "PUT", "/workspace/files/content", WorkspaceFileContentResponse,
-            json={"path": path, "content": content},
+            json={"path": path, "content": content, "expected_sha256": expected_sha256},
         )
 
     async def create_note(

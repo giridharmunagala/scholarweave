@@ -58,6 +58,13 @@ def test_operation_safety_depends_on_action(catalog_id, action, safe_retry, muta
     assert policy.mutating is mutating
 
 
+@pytest.mark.parametrize("mode", [None, "append", "patch", "insert_after", "overwrite"])
+def test_note_edits_are_never_automatically_retried(mode):
+    policy = operation_policy("research.notes.save", {"mode": mode})
+    assert policy.mutating
+    assert not policy.safe_retry
+
+
 @pytest.mark.parametrize(
     ("error", "category", "transient"),
     [

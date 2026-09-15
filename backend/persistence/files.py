@@ -160,6 +160,27 @@ class SafeStorage:
         data = content.encode("utf-8")
         return self.write_bytes(base_dir, relative_path, data)
 
+    def write_bytes_atomic(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
+        if len(content) > self.settings.max_artifact_bytes:
+            raise StorageError("Artifact exceeds maximum allowed size")
+        return self._write_bytes_atomic(base_dir, relative_path, content)
+
+    def _write_bytes_atomic(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
+        target = self._safe_path(base_dir, relative_path)
+        temporary_path = str(Path(relative_path).with_name(f".{target.name}.{uuid.uuid4().hex}.tmp"))
+        temporary_absolute = self._safe_path(base_dir, temporary_path)
+        try:
+            temporary = self._write_bytes(base_dir, temporary_path, content)
+            temporary.absolute_path.replace(target)
+        finally:
+            temporary_absolute.unlink(missing_ok=True)
+        return StoredFile(
+            relative_path=target.relative_to(base_dir.resolve()).as_posix(),
+            absolute_path=target,
+            size_bytes=temporary.size_bytes,
+            sha256=temporary.sha256,
+        )
+
     def write_json(self, base_dir: Path, relative_path: str, content: Any) -> StoredFile:
         return self.write_text(base_dir, relative_path, dumps_json(content))
 
@@ -187,16 +208,21 @@ class SafeStorage:
         return self.write_document_bytes(relative_path, content)
 
     def read_workspace_file(self, relative_path: str) -> tuple[str, Any]:
+        media_type, content, _ = self.read_workspace_file_snapshot(relative_path)
+        return media_type, content
+
+    def read_workspace_file_snapshot(self, relative_path: str) -> tuple[str, Any, str]:
         allowed = {".txt", ".md", ".json"}
         absolute = self._safe_path(self.settings.workspace_dir, relative_path, allowed_suffixes=allowed)
         content = absolute.read_bytes()
         if len(content) > self.settings.max_workspace_file_bytes:
             raise StorageError("Workspace file exceeds maximum allowed size")
         decoded = content.decode("utf-8")
+        digest = sha256_bytes(content)
         if absolute.suffix.lower() == ".json":
-            return ("application/json", loads_json(decoded, default={}))
+            return ("application/json", loads_json(decoded, default={}), digest)
         media_type = "text/markdown" if absolute.suffix.lower() == ".md" else "text/plain"
-        return (media_type, decoded)
+        return (media_type, decoded, digest)
 
     def list_workspace_markdown(self) -> list[WorkspaceMarkdownFile]:
         resolved_base = self.settings.workspace_dir.resolve()
@@ -362,15 +388,7 @@ class SafeStorage:
         data = serialized.encode("utf-8")
         if len(data) > self.settings.max_workspace_file_bytes:
             raise StorageError("Workspace write exceeds maximum allowed size")
-        absolute.write_bytes(data)
-        return StoredFile(
-            relative_path=absolute.resolve()
-            .relative_to(self.settings.workspace_dir.resolve())
-            .as_posix(),
-            absolute_path=absolute,
-            size_bytes=len(data),
-            sha256=sha256_bytes(data),
-        )
+        return self._write_bytes_atomic(self.settings.workspace_dir, relative_path, data)
 
     def clear_workspace_folder_markdown(self, relative_dir: str) -> None:
         """Removes the Markdown files directly inside one workspace folder.

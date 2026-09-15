@@ -14,6 +14,7 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
     assert set(PROMPT_DEFINITIONS) == {
         "global",
         "research",
+        "skills",
         "deep-work-coordinator",
         "deep-work-worker",
         "fast-answer",
@@ -74,3 +75,23 @@ def test_every_tool_has_complete_parameter_guidance(test_settings) -> None:
         schema_properties = set((definition.parameters_schema or {}).get("properties", {}))
         assert document.description.strip(), definition.catalog_id
         assert set(document.parameter_descriptions) == schema_properties
+
+
+def test_note_guidance_requires_scoped_append_first_discovery(test_settings) -> None:
+    registry = PromptRegistry(test_settings.prompt_config_dir)
+    for name in ("research", "deep-work-worker"):
+        prompt = registry.render(name).lower()
+        for instruction in (
+            "focused vocabulary variants", "supporting standalone", "only this note",
+            "expected_sha256", "append", "explicit full", "partial",
+            "/library/notes?path=",
+        ):
+            assert instruction in prompt
+    definition = next(
+        item for item in create_tool_catalog(registry).definitions()
+        if item.catalog_id == "research.notes.save"
+    )
+    schema = definition.parameters_schema
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["mode"]["enum"] == ["append", "patch", "insert_after", "overwrite", None]
