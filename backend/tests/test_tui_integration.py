@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import TextArea
+from textual.widgets import Checkbox, TextArea
 
 from backend.app import create_app
 from scholarweave_tui.app import ScholarWeaveApp
@@ -22,7 +22,10 @@ async def settle(app: ScholarWeaveApp, pilot) -> None:
         await pilot.pause()
 
 
-def test_terminal_chat_and_notes_use_real_local_backend(test_settings, stub_provider) -> None:
+@pytest.mark.parametrize("initially_enabled", [True, False])
+def test_terminal_chat_and_notes_use_real_local_backend(
+    test_settings, stub_provider, initially_enabled,
+) -> None:
     stub_provider.reply = "A connection grounded in your local evidence."
 
     async def scenario() -> None:
@@ -34,7 +37,10 @@ def test_terminal_chat_and_notes_use_real_local_backend(test_settings, stub_prov
                     "name": "TUI integration provider",
                     "kind": "openai_compatible",
                     "base_url": f"{stub_provider.base_url}/v1",
-                    "models": [{"name": "stub-model", "capabilities": ["chat", "tools"]}],
+                    "models": [{
+                        "name": "stub-model", "capabilities": ["chat", "tools"],
+                        "enabled": initially_enabled,
+                    }],
                 })
                 assert provider.status_code == 201, provider.text
                 settings = await setup.put("/api/settings", json={
@@ -49,6 +55,19 @@ def test_terminal_chat_and_notes_use_real_local_backend(test_settings, stub_prov
                 await settle(app, pilot)
                 # The real backend resolves the configured chat model for this session.
                 assert app.model_reference.model == "stub-model"
+                if not initially_enabled:
+                    app.run_command("model")
+                    await pilot.pause()
+                    await pilot.press("enter")
+                    await pilot.pause()
+                    assert not app.screen.query_one("#model-enabled", Checkbox).value
+                    app.screen.query_one("#model-enabled", Checkbox).value = True
+                    await pilot.click("#use-model")
+                    await settle(app, pilot)
+                    rediscovered = await client.discover_provider_models(provider.json()["id"])
+                    assert next(
+                        model for model in rediscovered.models if model.name == "stub-model"
+                    ).enabled
                 app.query_one("#composer", TextArea).load_text("Explain how to connect two ideas.")
                 app.run_command("effort", "quick")
                 app.query_one("#composer", TextArea).load_text("Explain how to connect two ideas.")

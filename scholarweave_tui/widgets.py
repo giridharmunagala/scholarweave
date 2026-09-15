@@ -11,7 +11,7 @@ from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Label, Markdown, OptionList, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Label, Markdown, OptionList, Select, Static, TextArea
 from textual.widgets.option_list import Option
 
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
@@ -399,6 +399,7 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
 class ModelConfigResult:
     reasoning_effort: ReasoningEffort | None
     context_window_tokens: int
+    enabled: bool
 
 
 class ModelConfig(ModalScreen[ModelConfigResult | None]):
@@ -413,6 +414,7 @@ class ModelConfig(ModalScreen[ModelConfigResult | None]):
         reasoning_efforts: list[ReasoningEffort],
         reasoning_effort: ReasoningEffort | None,
         context_window_tokens: int,
+        enabled: bool = True,
     ) -> None:
         super().__init__()
         self._provider_name = provider_name
@@ -420,6 +422,7 @@ class ModelConfig(ModalScreen[ModelConfigResult | None]):
         self._reasoning_efforts = reasoning_efforts
         self._reasoning_effort = reasoning_effort
         self._context_window_tokens = context_window_tokens
+        self._enabled = enabled
 
     def compose(self) -> ComposeResult:
         reasoning_options = [("Provider default", self.DEFAULT_REASONING)]
@@ -434,6 +437,7 @@ class ModelConfig(ModalScreen[ModelConfigResult | None]):
                 f"{self._provider_name} / {self._model_name}",
                 classes="dialog-body",
             )
+            yield Checkbox("Enabled for use", value=self._enabled, id="model-enabled")
             yield Label("Reasoning budget", classes="form-label")
             yield Select(
                 reasoning_options,
@@ -461,8 +465,16 @@ class ModelConfig(ModalScreen[ModelConfigResult | None]):
             )
             with Horizontal(classes="dialog-actions"):
                 yield Button("Back", id="cancel-model")
-                yield Button("Use model", id="use-model", variant="primary")
-            yield Static("Enter  use model        Esc  cancel", classes="dialog-hint")
+                yield Button(
+                    "Use model" if self._enabled else "Save disabled",
+                    id="use-model", variant="primary",
+                )
+            yield Static("Enable to use this model        Esc  cancel", classes="dialog-hint")
+
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        self.query_one("#use-model", Button).label = (
+            "Use model" if event.value else "Save disabled"
+        )
 
     def on_mount(self) -> None:
         self.query_one("#model-reasoning", Select).focus()
@@ -494,6 +506,7 @@ class ModelConfig(ModalScreen[ModelConfigResult | None]):
         self.dismiss(ModelConfigResult(
             reasoning_effort=effort,
             context_window_tokens=context_window,
+            enabled=self.query_one("#model-enabled", Checkbox).value,
         ))
 
 

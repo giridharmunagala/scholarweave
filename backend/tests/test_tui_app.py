@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("textual")
 
-from textual.widgets import Button, ContentSwitcher, Input, Markdown, OptionList, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, ContentSwitcher, Input, Markdown, OptionList, Select, Static, TextArea
 
 from backend.core.config import Settings as CoreSettings
 from backend.core.settings_service import SettingsResponse
@@ -739,6 +739,82 @@ def test_model_picker_saves_choice_and_new_threads_use_it() -> None:
             assert app.screen.query_one("#model-reasoning", Select).value == "high"
             assert app.screen.query_one("#model-context", Input).value == "65536"
             await pilot.press("escape")
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_model_picker_enables_disabled_model_before_selecting(save_fails) -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            # Changes made outside the TUI must be picked up when opening /model.
+            server.providers[0]["models"][1]["enabled"] = False
+            original = json.loads(json.dumps(server.providers[0]["models"]))
+            if save_fails:
+                async def reject_update(*args, **kwargs):
+                    from scholarweave_tui.client import ApiError
+                    raise ApiError("Cannot save provider")
+                app.client.update_provider = reject_update
+            app.run_command("model")
+            await pilot.pause()
+            assert "disabled" in app._chat_models()[1][2]
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert isinstance(app.screen, ModelConfig)
+            assert not app.screen.query_one("#model-enabled", Checkbox).value
+            app.screen.query_one("#model-enabled", Checkbox).value = True
+            await pilot.click("#use-model")
+            await settle(app, pilot)
+            if save_fails:
+                assert app.model_reference.model == "weave-fast"
+                assert not app.providers[0].models[1].enabled
+                assert not any(
+                    method == "PUT" and path == "/settings"
+                    for method, path, _ in server.requests
+                )
+                return
+            assert app.model_reference.model == "weave-deep"
+            updated = next(
+                body for method, path, body in server.requests
+                if method == "PUT" and path == "/providers/provider-1"
+            )
+            original[1]["enabled"] = True
+            assert updated == {"models": original}
+            assert app.providers[0].models[1].enabled
+            assert server.last_chat_model_reference["model"] == "weave-deep"
+    asyncio.run(scenario())
+
+
+def test_model_picker_can_disable_current_model_and_cancel_enable() -> None:
+    async def scenario() -> None:
+        server = CockpitServer()
+        app = server.app()
+        async with app.run_test(size=(140, 42)) as pilot:
+            await settle(app, pilot)
+            app.run_command("model")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            app.screen.query_one("#model-enabled", Checkbox).value = False
+            await pilot.click("#use-model")
+            await settle(app, pilot)
+            assert not server.providers[0]["models"][0]["enabled"]
+            assert "disabled" in app._status_line()
+            app.query_one("#composer", TextArea).load_text("Hello")
+            await pilot.click("#send")
+            await settle(app, pilot)
+            assert not any(method == "POST" for method, _, _ in server.requests)
+            assert app.query_one("#composer", TextArea).text == "Hello"
+            app.run_command("model")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            app.screen.query_one("#model-enabled", Checkbox).value = True
+            await pilot.press("escape")
+            await settle(app, pilot)
+            assert not server.providers[0]["models"][0]["enabled"]
     asyncio.run(scenario())
 
 

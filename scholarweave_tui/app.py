@@ -664,13 +664,12 @@ class ScholarWeaveApp(App[None]):
             if provider.state == "archived":
                 continue
             for model in provider.models:
-                if not model.enabled:
-                    continue
                 hints = sorted(model.capabilities) or ["chat"]
                 levels = ", ".join(model.reasoning_efforts or []) or "no reasoning levels"
                 rows.append((
                     f"{provider.id}\t{model.name}",
                     f"{provider.name} / {model.name}",
+                    f"{'enabled' if model.enabled else 'disabled'}  ·  "
                     f"{' · '.join(hints)}  ·  {levels}",
                 ))
         return rows
@@ -773,8 +772,12 @@ class ScholarWeaveApp(App[None]):
                     timeout=12,
                 )
             else:
+                enabled = sum(model.enabled for model in discovered.models)
                 self.notify(
-                    f"{saved.name} saved · {len(discovered.models)} models discovered."
+                    f"{saved.name} saved · {len(discovered.models)} models discovered "
+                    f"({enabled} enabled, {len(discovered.models) - enabled} disabled). "
+                    "Use /model to enable and select a model.",
+                    timeout=12,
                 )
         except ApiError as exc:
             self._error(exc)
@@ -785,6 +788,11 @@ class ScholarWeaveApp(App[None]):
 
     @work(group="picker", exclusive=True)
     async def choose_model(self) -> None:
+        try:
+            self.providers = await self.client.providers()
+        except ApiError as exc:
+            self._error(exc)
+            return
         rows = self._chat_models()
         current = (
             f"{self.model_reference.provider_profile_id}\t{self.model_reference.model}"
@@ -792,8 +800,8 @@ class ScholarWeaveApp(App[None]):
         )
         chosen = await self.push_screen_wait(ChoicePicker(
             "Choose your thinking partner.",
-            "Choose a configured model, then set its reasoning budget and context size.",
-            rows, current, empty="No enabled models. Use /provider to add and discover one.",
+            "Choose a model to enable or disable it and set its reasoning and context.",
+            rows, current, empty="No models. Use /provider to add and discover one.",
         ))
         if chosen is None:
             return
@@ -822,8 +830,29 @@ class ScholarWeaveApp(App[None]):
             reasoning_efforts=list(configured_model.reasoning_efforts or []),
             reasoning_effort=reasoning,
             context_window_tokens=context_window,
+            enabled=configured_model.enabled,
         ))
         if configured is None:
+            return
+        if configured.enabled != configured_model.enabled:
+            try:
+                saved = await self.client.update_provider(
+                    provider_id,
+                    ProviderUpdate(models=[
+                        entry.model_copy(update={"enabled": configured.enabled})
+                        if entry.name == model else entry
+                        for entry in provider.models
+                    ]),
+                )
+            except ApiError as exc:
+                self._error(exc)
+                return
+            self.providers = [
+                saved if entry.id == provider_id else entry for entry in self.providers
+            ]
+        if not configured.enabled:
+            self._controls()
+            self.notify(f"{model} is disabled. Use /model to enable it or choose another model.")
             return
         self.reasoning_effort = configured.reasoning_effort
         self.context_window_tokens = configured.context_window_tokens
@@ -1095,6 +1124,9 @@ class ScholarWeaveApp(App[None]):
 
     def _status_line(self) -> str:
         parts = [self._model_label(), f"{self.context_window_tokens:,} context"]
+        selected = self._selected_model()
+        if selected is not None and not selected[1].enabled:
+            parts.append("disabled")
         if self.reasoning_effort:
             parts.append(f"reasoning {self.reasoning_effort}")
         if self.effort != "auto":
@@ -1168,6 +1200,13 @@ class ScholarWeaveApp(App[None]):
                 await self._show_steering(steering.id, steering.content)
                 self.notify("Steering queued for the active run.")
             else:
+                selected = self._selected_model()
+                if selected is not None and not selected[1].enabled:
+                    self.notify(
+                        "This model is disabled. Use /model to enable it or choose another model.",
+                        severity="warning",
+                    )
+                    return
                 if self.current_id is None:
                     conversation = await self.client.create_conversation(self.model_reference)
                     self.current_id = conversation.id
