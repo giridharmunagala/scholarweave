@@ -204,7 +204,7 @@ instead. Initial provider/model configuration still uses the web app's **Setting
 | `Ctrl+K` | Find conversations or papers; full-text search notes |
 | `Ctrl+N` | New conversation or note |
 | `Enter` in the composer | Send; while running, queue steering |
-| `Shift+Enter` / `Ctrl+J` | New line |
+| `Shift+Enter` / `Ctrl+J` / `Alt+Enter` | New line |
 | `Esc` | Stop the active run |
 | `Ctrl+S` | Save the current note through the workspace API |
 | `Ctrl+E` | Switch a note between preview and editor |
@@ -214,6 +214,10 @@ instead. Initial provider/model configuration still uses the web app's **Setting
 | `Ctrl+P` | Command palette |
 | `F1` | Keyboard shortcuts and the full command list |
 | `Ctrl+Q` | Quit; stop the backend only if this TUI started it |
+
+If `Shift+Enter` sends instead of inserting a newline, your terminal may be reporting it as
+plain `Enter`. Use `Ctrl+J` as the newline fallback; `Alt+Enter` is also supported.
+Plain `Enter` sends the message, including any newlines in your draft.
 
 The cockpit always opens to **a fresh chat**, never the previous conversation. Existing threads
 remain in the library and reopen only when you select one. A new conversation is saved when you
