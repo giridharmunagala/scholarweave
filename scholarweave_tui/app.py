@@ -15,7 +15,6 @@ from textual.widgets import (
     ContentSwitcher,
     Footer,
     Input,
-    Markdown,
     OptionList,
     ProgressBar,
     RichLog,
@@ -38,6 +37,7 @@ from backend.workspace.schemas import (
 )
 from scholarweave_tui import commands
 from scholarweave_tui.client import ApiError, ScholarWeaveClient
+from scholarweave_tui.markdown import Markdown
 from scholarweave_tui.preferences import Preferences
 from scholarweave_tui.stream import LiveRun
 from scholarweave_tui.themes import (

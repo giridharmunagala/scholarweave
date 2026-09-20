@@ -1355,3 +1355,47 @@
 @media (prefers-reduced-motion: reduce) {
   .chat-layout, .message, .scroll-to-bottom { animation: none; transition: none; }
 }
+
+.run-activity {
+  padding-inline: var(--space-3);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.run-activity header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.run-activity header strong {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .08em;
+}
+
+.run-activity button {
+  padding: 2px 6px;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.run-activity ul { list-style: none; margin: 4px 0; padding: 0; }
+.run-activity p { margin: 4px 0; }
+.run-activity li { display: flex; align-items: baseline; gap: 8px; }
+.run-activity li > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.run-activity time { flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.run-activity .earlier-stages { font-style: italic; }
+.run-activity .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

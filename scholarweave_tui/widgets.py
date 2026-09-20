@@ -12,13 +12,14 @@ from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Label, Markdown, OptionList, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, Input, Label, OptionList, Select, Static, TextArea
 from textual.widgets.option_list import Option
 
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 from backend.providers.schemas import ProviderKind, ProviderResponse
 from backend.prompting.schemas import SKILL_NAME_PATTERN
 from scholarweave_tui.commands import COMMANDS
+from scholarweave_tui.markdown import Markdown
 
 SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 

@@ -87,6 +87,13 @@ message and assistant response, with completed and active work plus elapsed time
 muted usage line reports turn input, output, and cached tokens, cumulative conversation tokens, and
 the latest main-model context size against its window when the run reports those values. Short turns
 use a centered reading measure, while long answers expand across the available transcript width.
+All terminal Markdown surfaces (chat, plans, paper summaries, notes, and skill previews) share
+`scholarweave_tui/markdown.py`. Inline `$...$` / `\(...\)` and display `$$...$$` / `\[...\]`
+math render as terminal-readable Unicode symbols, scripts (including matrix transposes), and linear fractions/roots, not
+graphical typesetting. Unsupported commands or malformed expressions retain their TeX source
+instead of dropping information. Code spans/blocks, link destinations, and ordinary currency
+remain Markdown literals. Rendering is presentation-only: saved text, editor drafts, and streamed
+source are unchanged, and each streamed update reparses complete expressions as they arrive.
 Normal startup shows the conversation rail,
 keeps the optional observatory closed, and restores the most recently updated conversation; focus
 mode remains an explicit remembered choice after the presentation-default migration. The composer
@@ -473,6 +480,12 @@ Events are the execution-to-UI contract, not merely logs.
 Chat prioritizes the answer and editable composer. Observe opens the full hierarchical trace directly;
 usage and the optional work plan are compact, collapsed disclosures instead of a second worker dashboard.
 Running workers expand to show their current activity; assignments and handoffs remain expandable.
+Like the terminal client, web chat retains a quiet Activity ledger between each user message and
+its answer, reconstructed from the same persisted/live events. It shows work-plan tasks, context
+preparation, model phases, tool calls, delegated work, and per-stage elapsed time without exposing
+reasoning or raw payloads. Long turns show the latest seven stages plus any active or unsuccessful
+stages; earlier completed stages are counted. Details opens the existing full trace. Completed
+timers remain frozen after reload, and cancelled or interrupted work is not labeled successful.
 The compact activity line is docked above the composer, outside transcript scrolling. It shows
 current-phase and total elapsed time, plus recent trace headlines. Active tools never join a
 collapsed group of completed calls. Repeated provider tool-call IDs create distinct steps across

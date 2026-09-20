@@ -63,6 +63,8 @@ import {
 import './chat.css';
 import { useThrottledRates } from './useThrottledRates';
 import { buildSessionObservability } from './sessionObservability';
+import { buildRunStages } from './runStages';
+import { RunActivity } from './RunActivity';
 import { SessionOverview } from './SessionMonitor';
 
 const SUGGESTIONS = [
@@ -888,6 +890,17 @@ export function ResearchChatPage() {
   const metricsByRun = useThrottledRates(rawMetrics);
   const liveMetrics = run ? metricsByRun.get(run.id) ?? null : null;
   const sessionSummary = useMemo(() => buildSessionObservability(observedRuns), [observedRuns]);
+  const stagesByRun = useMemo(
+    () => new Map(observedRuns.map((candidate) => [candidate.id, buildRunStages(candidate)])),
+    [observedRuns],
+  );
+  const renderActivity = (candidate: Run) => (
+    <RunActivity
+      stages={stagesByRun.get(candidate.id) ?? []}
+      workPlan={sessionSummary.runs.find((summary) => summary.id === candidate.id)?.workPlan}
+      onOpenActivity={() => setActivityOpen(true)}
+    />
+  );
 
   // Every run is anchored, so a turn without tools still keeps its trace in place.
   const reasoningAnchors = useMemo(
@@ -1138,6 +1151,7 @@ export function ResearchChatPage() {
                       onRetry={role === 'assistant' ? () => retry(promptFor(current.items, index)) : null}
                       canRetry={!sending && !uploading}
                     />
+                    {recoveredRun ? renderActivity(recoveredRun) : null}
                     {recoveredResponses.map((text, responseIndex) => (
                       <Message
                         role="assistant"
@@ -1171,6 +1185,7 @@ export function ResearchChatPage() {
                   key={message.id}
                 />
               ))}
+              {run && !reasoningAnchors.anchored.has(run.id) ? renderActivity(run) : null}
               {streamingTimeline ? (
                 <details className="research-disclosure live-reasoning">
                   <summary>Live reasoning</summary>

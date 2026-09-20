@@ -47,6 +47,9 @@ function buildTurn(turn: Turn, runId: string) {
 
   };
 
+  push('run.started', {});
+  push('context.prepared', {});
+
   /** Emit the full call/output pair the runtime produces for one tool. */
   const emitTool = (toolName: string, key: string) => {
     const callId = `${runId}-${key}`;
@@ -807,7 +810,7 @@ describe('chat transcript detail', () => {
     expect(totalTokens()).toContain('670 tokens');
   });
 
-  it('keeps completed activity out of the transcript as the thread grows', async () => {
+  it('retains quiet turn activity inline while keeping full traces in the sidebar', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
@@ -815,6 +818,8 @@ describe('chat transcript detail', () => {
       await runTurn(turn);
 
       expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
+      expect(container.querySelectorAll('.message-list .run-activity')).toHaveLength(turn + 1);
+      expect(text(container.querySelector('.message-list .run-activity'))).toContain('Context prepared');
       expect(text(container.querySelector('.message-list'))).not.toContain(
         'Internal reasoning must stay in activity.',
       );
@@ -835,6 +840,7 @@ describe('chat transcript detail', () => {
     await mount(ChatPage as () => JSX.Element);
 
     expect(container.querySelector('.message-list .turn-timeline')).toBeNull();
+    expect(container.querySelectorAll('.message-list .run-activity')).toHaveLength(TURNS.length);
     expect(container.querySelectorAll('.activity-sidebar .turn-timeline')).toHaveLength(TURNS.length);
     expect(container.querySelectorAll('.timeline-detail')).toHaveLength(0);
     expect(text(container.querySelectorAll('.turn-timeline')[0])).toContain('Searched');
@@ -852,6 +858,9 @@ describe('chat transcript detail', () => {
       }));
       await flush(2);
       expect(text(container.querySelector('.composer .live-activity'))).toContain(`Read source ${turn}`);
+      const ledgers = container.querySelectorAll('.message-list .run-activity');
+      expect(text(ledgers[ledgers.length - 1])).toContain(`Read source ${turn}`);
+      expect(ledgers[ledgers.length - 1].querySelectorAll('.status-running')).toHaveLength(1);
       expect(container.querySelector('.message-list .live-activity')).toBeNull();
       server.completeRun(id, 0);
       await act(async () => source.deliver({ sequence: 999, event_type: 'run.completed', payload: {} }));
@@ -1325,8 +1334,9 @@ describe('chat transcript detail', () => {
     );
 
     // Watch the very first reasoning burst, before any tool has interrupted it.
+    const firstReasoning = BUILT[0].events.findIndex((event) => event.event_type === 'model.stream');
     await act(async () => {
-      source?.deliver(BUILT[0].events[0]);
+      for (const event of BUILT[0].events.slice(0, firstReasoning + 1)) source?.deliver(event);
     });
     await flush(2);
 
@@ -1336,7 +1346,7 @@ describe('chat transcript detail', () => {
     expect(text(live)).toContain('Thinking');
     expect(text(container.querySelector('.timeline-detail.reasoning'))).toContain('weighing the evidence');
 
-    for (const event of BUILT[0].events.slice(1)) {
+    for (const event of BUILT[0].events.slice(firstReasoning + 1)) {
       await act(async () => {
         source?.deliver(event);
       });
