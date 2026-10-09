@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.agents.compiler import AgentCompiler
 from backend.brief.service import BriefService
+from backend.brief.summaries import BriefSummaryService
 from backend.conversations.attachments import ConversationAttachmentService
 from backend.conversations.turns import (
     ConversationTurnService,
@@ -262,7 +263,10 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         retrieval=retrieval,
         research_search=research_search,
         source_downloads=source_downloads,
-        brief=BriefService(storage, source_downloads, documents, workspace),
+        brief=BriefService(
+            storage, source_downloads, documents, workspace,
+            BriefSummaryService(storage, workspace, model_runtime, prompts),
+        ),
         document_repository=document_repository,
         document_ocr=document_ocr,
         document_vision=document_vision,

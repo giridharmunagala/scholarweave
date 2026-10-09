@@ -94,6 +94,15 @@ class DocumentService:
     def list_documents(self) -> list[Document]:
         return self.repository.list()
 
+    def search_documents(
+        self, query: str, *, folder_id: str | None = None, unfiled: bool = False,
+        status: str | None = None, limit: int = 25, offset: int = 0,
+    ) -> list[tuple[Document, float, str, str | None, int | None]]:
+        return self.repository.search(
+            query, folder_id=folder_id, unfiled=unfiled,
+            status=status, limit=limit, offset=offset,
+        )
+
     def list_folders(self) -> list[PaperFolder]:
         return self.repository.list_folders()
 

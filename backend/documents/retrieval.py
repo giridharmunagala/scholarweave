@@ -23,26 +23,47 @@ class RetrievalService:
         # Use the same SQLite FTS5 engine as workspace search, with transactional triggers
         # so ingestion, re-extraction and deletion cannot leave stale search hits.
         with self.session_factory.kw["bind"].begin() as connection:
+            columns = connection.exec_driver_sql("PRAGMA table_info(document_chunks_fts)").all()
+            if columns and "title" not in {column[1] for column in columns}:
+                for operation in ("insert", "delete", "update"):
+                    connection.exec_driver_sql(f"DROP TRIGGER IF EXISTS document_chunks_search_{operation}")
+                connection.exec_driver_sql("DROP TABLE document_chunks_fts")
             connection.exec_driver_sql(
                 "CREATE VIRTUAL TABLE IF NOT EXISTS document_chunks_fts USING fts5("
-                "chunk_id UNINDEXED, document_id UNINDEXED, content, tokenize='unicode61')"
+                "chunk_id UNINDEXED, document_id UNINDEXED, content, title, tokenize='unicode61')"
             )
             for operation, body in (
-                ("insert", "INSERT INTO document_chunks_fts VALUES (new.id, new.document_id, new.text);"),
+                ("insert", "INSERT INTO document_chunks_fts VALUES (new.id, new.document_id, new.text, '');"),
                 ("delete", "DELETE FROM document_chunks_fts WHERE chunk_id = old.id;"),
                 ("update", "DELETE FROM document_chunks_fts WHERE chunk_id = old.id; "
-                 "INSERT INTO document_chunks_fts VALUES (new.id, new.document_id, new.text);"),
+                 "INSERT INTO document_chunks_fts VALUES (new.id, new.document_id, new.text, '');"),
             ):
                 connection.exec_driver_sql(
                     f"CREATE TRIGGER IF NOT EXISTS document_chunks_search_{operation} "
                     f"AFTER {operation.upper()} ON document_chunks BEGIN {body} END"
                 )
-            count = connection.exec_driver_sql("SELECT count(*) FROM document_chunks").scalar_one()
+            for operation, body in (
+                ("insert", "INSERT INTO document_chunks_fts VALUES (NULL, new.id, '', new.title);"),
+                ("delete", "DELETE FROM document_chunks_fts WHERE document_id = old.id;"),
+                ("update", "DELETE FROM document_chunks_fts WHERE document_id = old.id AND chunk_id IS NULL; "
+                 "INSERT INTO document_chunks_fts VALUES (NULL, new.id, '', new.title);"),
+            ):
+                connection.exec_driver_sql(
+                    f"CREATE TRIGGER IF NOT EXISTS document_titles_search_{operation} "
+                    f"AFTER {operation.upper()}{' OF title' if operation == 'update' else ''} "
+                    f"ON documents BEGIN {body} END"
+                )
+            count = connection.exec_driver_sql(
+                "SELECT (SELECT count(*) FROM document_chunks) + (SELECT count(*) FROM documents)"
+            ).scalar_one()
             indexed = connection.exec_driver_sql("SELECT count(*) FROM document_chunks_fts").scalar_one()
             if count != indexed:
                 connection.exec_driver_sql("DELETE FROM document_chunks_fts")
                 connection.exec_driver_sql(
-                    "INSERT INTO document_chunks_fts SELECT id, document_id, text FROM document_chunks"
+                    "INSERT INTO document_chunks_fts SELECT id, document_id, text, '' FROM document_chunks"
+                )
+                connection.exec_driver_sql(
+                    "INSERT INTO document_chunks_fts SELECT NULL, id, '', title FROM documents"
                 )
 
     def replace_document_chunks(self, document_id: str, chunks: list[dict[str, Any]]) -> list[DocumentChunk]:
@@ -144,7 +165,7 @@ class RetrievalService:
                 text(
                     "SELECT chunk_id, bm25(document_chunks_fts) AS rank, "
                     "snippet(document_chunks_fts, 2, '', '', ' … ', 48) AS excerpt "
-                    "FROM document_chunks_fts WHERE document_chunks_fts MATCH :query "
+                    "FROM document_chunks_fts WHERE document_chunks_fts MATCH :query AND chunk_id IS NOT NULL "
                     + ("AND document_id = :document_id " if document_id else "")
                     + "ORDER BY rank, chunk_id LIMIT :limit"
                 ),

@@ -166,6 +166,7 @@ export function SkeletonCards({ count = 3 }: { count?: number }) {
 }
 
 export function ErrorNotice({ error }: { error: unknown }) {
+  if (error === null || error === undefined || error === '') return null;
   const message = error instanceof Error ? error.message : String(error);
   return (
     <div className="notice error" role="alert">

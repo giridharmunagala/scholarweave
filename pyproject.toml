@@ -23,6 +23,7 @@ dependencies = [
   "pytesseract>=0.3.13,<1",
   "python-multipart>=0.0.9,<1",
   "sqlalchemy>=2.0,<3",
+  "tiktoken>=0.12,<1",
   "uvicorn[standard]>=0.30,<1",
   "stop-words>=2018.7.23,<2019",
 ]

@@ -163,10 +163,22 @@ class SafeStorage:
         data = content.encode("utf-8")
         return self.write_bytes(base_dir, relative_path, data)
 
-    def write_bytes_atomic(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
-        if len(content) > self.settings.max_artifact_bytes:
+    def write_bytes_atomic(
+        self, base_dir: Path, relative_path: str, content: bytes, *, max_bytes: int | None = None,
+    ) -> StoredFile:
+        if len(content) > (self.settings.max_artifact_bytes if max_bytes is None else max_bytes):
             raise StorageError("Artifact exceeds maximum allowed size")
         return self._write_bytes_atomic(base_dir, relative_path, content)
+
+    def read_stored_bytes(
+        self, base_dir: Path, relative_path: str, *, max_bytes: int | None = None,
+    ) -> bytes:
+        limit = self.settings.max_artifact_bytes if max_bytes is None else max_bytes
+        with self._safe_path(base_dir, relative_path).open("rb") as source:
+            content = source.read(limit + 1)
+        if len(content) > limit:
+            raise StorageError("Stored file exceeds maximum allowed size")
+        return content
 
     def _write_bytes_atomic(self, base_dir: Path, relative_path: str, content: bytes) -> StoredFile:
         target = self._safe_path(base_dir, relative_path)

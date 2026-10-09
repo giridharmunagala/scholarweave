@@ -2,9 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigationGuard } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { EmptyState, ErrorNotice, Loading } from '../../shared/components/Ui';
+import { ModelSelect } from '../../shared/components/ModelSelect';
+import { chatModelSelectOptions, modelReferenceLabel } from '../chat/ChatModelPicker';
+import { providersApi, type Provider } from '../providers/api';
 import {
-  clearBrief, discardBriefItem, fetchBriefItem, keepBriefItem, loadCatalog,
-  previewUrl, refreshBrief, savePreferences,
+  clearBrief, discardBriefItem, fetchBriefItem, keepBriefItem, loadBrief, loadCatalog,
+  previewUrl, refreshBrief, savePreferences, generateHighlights, loadBriefHistory,
+  type BriefHighlight,
   type BriefCatalog, type BriefEdition, type BriefItem, type BriefPreferences, type BriefPreview,
 } from './api';
 import './brief.css';
@@ -42,6 +46,12 @@ export default function BriefPage() {
   const [topic, setTopic] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [limits, setLimits] = useState<Record<string, number>>({});
+  const [providers, setProviders] = useState<Provider[]>([]);
+  const [pollError, setPollError] = useState<unknown>(null);
+  const [history, setHistory] = useState<BriefHighlight[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [moreHistory, setMoreHistory] = useState(false);
+  const editionRevision = useRef(0);
   const mounted = useRef(true);
   const running = useRef(true);
   useNavigationGuard(!!busy, 'A brief operation is still running. Please wait before leaving.', false);
@@ -49,18 +59,44 @@ export default function BriefPage() {
   useEffect(() => {
     mounted.current = true;
     let active = true;
-    Promise.all([loadCatalog(), refreshBrief()])
-      .then(([nextCatalog, nextEdition]) => {
-        if (active) { setCatalog(nextCatalog); setEdition(nextEdition); }
-      })
+    const catalogRequest = loadCatalog().then((nextCatalog) => {
+      if (active) setCatalog(nextCatalog);
+    });
+    providersApi.list().then((values) => { if (active) setProviders(values); })
+      .catch((reason) => { if (active) setError(reason); });
+    const editionRequest = loadBrief()
+      .then((cached) => cached.day ? cached : refreshBrief())
+      .then((nextEdition) => { if (active) setEdition(nextEdition); });
+    Promise.all([catalogRequest, editionRequest])
       .catch((reason) => { if (active) setError(reason); })
       .finally(() => { if (active) { running.current = false; setBusy(null); } });
     return () => { active = false; mounted.current = false; };
   }, []);
 
+  const summaryRunning = edition?.highlights?.status === 'running';
+  useEffect(() => {
+    if (!summaryRunning) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      const revision = editionRevision.current;
+      try {
+        const next = await loadBrief();
+        if (active && revision === editionRevision.current && !running.current) {
+          setEdition(next);
+          setPollError(null);
+        }
+      } catch (reason) { if (active) setPollError(reason); }
+      finally { if (active) timer = setTimeout(() => void poll(), 1500); }
+    };
+    timer = setTimeout(() => void poll(), 1500);
+    return () => { active = false; clearTimeout(timer); };
+  }, [summaryRunning, edition?.day]);
+
   const perform = async (label: string, work: () => Promise<void>) => {
     if (running.current) return;
     running.current = true;
+    editionRevision.current += 1;
     setBusy(label);
     setError(null);
     setNotice('');
@@ -135,6 +171,20 @@ export default function BriefPage() {
     setTopic('');
     setLimits({});
   });
+  const highlights = edition?.highlights;
+  const summary = highlights?.summary;
+  const startHighlights = () => perform('Starting highlights', async () => {
+    const next = await generateHighlights(catalog?.preferences.summary_model_reference ?? null);
+    if (mounted.current) { setEdition(next); setHistoryOpen(false); }
+  });
+  const showHistory = (offset = 0) => perform('Loading past highlights', async () => {
+    const values = await loadBriefHistory(offset);
+    if (mounted.current) {
+      setHistory((current) => offset ? [...current, ...values] : values);
+      setMoreHistory(values.length === 25);
+      setHistoryOpen(true);
+    }
+  });
 
   const items = edition?.items ?? [];
   const sourceStatuses = edition?.sources ?? [];
@@ -155,18 +205,18 @@ export default function BriefPage() {
           <p>A little less noise. A little more understanding.</p>
         </div>
         <div className="brief-header-actions">
-          <button type="button" onClick={() => setSettingsOpen(!settingsOpen)} aria-expanded={settingsOpen} disabled={!!busy}>
+          <button type="button" className="button secondary" onClick={() => setSettingsOpen(!settingsOpen)} aria-expanded={settingsOpen} disabled={!!busy}>
             <Icon name="sliders" size={15} /> Interests & sources
           </button>
-          <button type="button" className="primary" onClick={() => void refresh()} disabled={!!busy}>
+          <button type="button" className="button" onClick={() => void refresh()} disabled={!!busy}>
             <Icon name="refresh" size={15} /> Refresh
           </button>
         </div>
       </header>
 
       <div className="brief-lifecycle">
-        <span><Icon name="shield" size={15} /> Headlines first. Downloads stay temporary until you choose <strong>Keep</strong>.</span>
-        <button type="button" className="brief-clear" onClick={clear} disabled={!!busy || !items.length}>
+        <span><Icon name="shield" size={15} /> Today's edition is cached across visits and server restarts. Downloads stay temporary until you choose <strong>Keep</strong>.</span>
+        <button type="button" className="button ghost small brief-clear" onClick={clear} disabled={!!busy || !edition?.day || edition.cleared}>
           <Icon name="trash" size={14} /> Clear fetched data
         </button>
       </div>
@@ -177,6 +227,65 @@ export default function BriefPage() {
 
       {edition ? (
         <>
+          <section className="brief-highlights" aria-label="Today's highlights">
+            <div className="brief-highlights-heading">
+              <div><h2>Today's highlights</h2><p>The main ideas first. Explore the sources below when something catches your eye.</p></div>
+              <div className="brief-summary-controls">
+                <label htmlFor="brief-model">Morning Brief model</label>
+                <ModelSelect id="brief-model" ariaLabel="Morning Brief model"
+                  options={chatModelSelectOptions(providers)}
+                  value={catalog?.preferences.summary_model_reference ?? {}}
+                  disabled={!!busy || summaryRunning || !catalog}
+                  emptyOptionLabel="Same as chat"
+                  emptyOptionHint={modelReferenceLabel(catalog?.summary_model_reference ?? {}, providers) || 'No chat model selected'}
+                  onChange={(reference) => {
+                    if (!catalog) return;
+                    void perform('Saving brief model', async () => {
+                      const next = await savePreferences({ ...catalog.preferences,
+                        summary_model_reference: reference.model ? reference : null });
+                      if (mounted.current) setCatalog(next);
+                    });
+                  }}
+                />
+                <button type="button" className="button secondary small" onClick={() => void startHighlights()}
+                  disabled={!!busy || summaryRunning || !items.length || !catalog?.summary_model_reference?.model}>
+                  {summary ? 'Regenerate highlights' : 'Generate highlights'}
+                </button>
+              </div>
+            </div>
+            {summary ? <div className="brief-highlight-text">
+              {summary.text.split(/\n\s*\n/).map((paragraph, index) => <p key={index}>{paragraph}</p>)}
+              <small>Based on {summary.item_count} collected titles, abstracts and publisher excerpts. Full sources have not been reviewed.
+                {' '}<Link to={`/library/notes?path=${encodeURIComponent(summary.workspace_path)}`}>Saved daily JSON</Link>
+              </small>
+            </div> : !summaryRunning ? <p className="brief-summary-help">
+              {catalog?.summary_model_reference?.model
+                ? 'Generate a short overview from the collected metadata. No extra pages or PDFs are fetched.'
+                : <>Select a model for highlights, or <Link to="/settings">configure providers</Link>. The reading list works without an LLM.</>}
+            </p> : null}
+            {summaryRunning ? <p className="brief-notice" role="status">Preparing highlights in the background
+              {highlights?.total_parts ? ` (${highlights.completed_parts ?? 0}/${highlights.total_parts} stages complete)` : '...'}.
+              {summary ? ' The previous summary stays visible until the new one is ready.' : ' You can browse the sources or leave this page meanwhile.'}
+            </p> : null}
+            {highlights?.error ? <p className="brief-source-warning" role="alert">{highlights.error}</p> : null}
+            {pollError ? <ErrorNotice error={pollError} /> : null}
+            <div className="brief-highlights-foot">
+              <span>32K maximum input per call; whole sources only. Daily highlights stay saved when fetched data expires or is cleared.</span>
+              <button type="button" className="button ghost small" disabled={!!busy}
+                onClick={() => historyOpen ? setHistoryOpen(false) : void showHistory()}>
+                {historyOpen ? 'Hide past highlights' : 'Past highlights'}
+              </button>
+            </div>
+            {historyOpen ? <div className="brief-highlight-history" aria-label="Past highlights">
+              {history.length ? history.map((value) => <details key={value.day}>
+                <summary>{value.day}</summary>
+                {value.text.split(/\n\s*\n/).map((paragraph, index) => <p key={index}>{paragraph}</p>)}
+                <Link to={`/library/notes?path=${encodeURIComponent(value.workspace_path)}`}>Open daily JSON</Link>
+              </details>) : <p>No daily highlights have been saved yet.</p>}
+              {moreHistory ? <button type="button" className="button ghost small" disabled={!!busy}
+                onClick={() => void showHistory(history.length)}>Show earlier highlights</button> : null}
+            </div> : null}
+          </section>
           <div className="brief-edition-bar">
             <span><strong>{items.length}</strong> headlines</span>
             <span><strong>{items.filter(saved).length}</strong> already kept</span>
@@ -195,8 +304,8 @@ export default function BriefPage() {
                   <input aria-label="Search brief headlines" placeholder="Find a headline..." value={query} onChange={(event) => setQuery(event.target.value)} />
                 </label>
                 <div className="brief-topic-filter" aria-label="Filter by research interest">
-                  <button type="button" aria-pressed={!topic} onClick={() => setTopic('')}>All interests</button>
-                  {topics.map((value) => <button type="button" key={value.id} aria-pressed={topic === value.label} onClick={() => setTopic(value.label)}>{value.label}</button>)}
+                  <button type="button" className="button secondary small" aria-pressed={!topic} onClick={() => setTopic('')}>All interests</button>
+                  {topics.map((value) => <button type="button" className="button secondary small" key={value.id} aria-pressed={topic === value.label} onClick={() => setTopic(value.label)}>{value.label}</button>)}
                 </div>
               </div>
               <div className="brief-reading-layout">
@@ -219,7 +328,7 @@ export default function BriefPage() {
                           onDownload={() => void download(item)} onKeep={() => void keep(item)} onDiscard={() => void discard(item)}
                         />)}
                       </div>
-                      {sectionItems.length > limit ? <button type="button" className="brief-more" onClick={() => setLimits({ ...limits, [section.kind]: limit + 10 })}>
+                      {sectionItems.length > limit ? <button type="button" className="button ghost small block brief-more" onClick={() => setLimits({ ...limits, [section.kind]: limit + 10 })}>
                         Show more <span>({sectionItems.length - limit} remaining)</span><Icon name="arrowRight" size={14} />
                       </button> : null}
                     </section>;
@@ -234,9 +343,9 @@ export default function BriefPage() {
                   <p className="brief-reader-source">{selectedItem.source_name} · {bytes(selectedItem.size_bytes ?? 0)}</p>
                   <div className="brief-reader-actions">
                     {saved(selectedItem)
-                      ? <Link className="button" to={savedUrl(selectedItem)}><Icon name="check" size={15} /> Open kept copy</Link>
-                      : <button type="button" className="primary" disabled={!!busy} onClick={() => void keep(selectedItem)}><Icon name="save" size={15} /> Keep in library</button>}
-                    <button type="button" disabled={!!busy} onClick={() => void discard(selectedItem)}><Icon name="trash" size={14} /> Discard</button>
+                      ? <Link className="button secondary small" to={savedUrl(selectedItem)}><Icon name="check" size={15} /> Open kept copy</Link>
+                      : <button type="button" className="button small" disabled={!!busy} onClick={() => void keep(selectedItem)}><Icon name="save" size={15} /> Keep in library</button>}
+                    <button type="button" className="button danger small" disabled={!!busy} onClick={() => void discard(selectedItem)}><Icon name="trash" size={14} /> Discard</button>
                     <a href={selectedItem.url} target="_blank" rel="noreferrer">Original <Icon name="arrowRight" size={13} /></a>
                   </div>
                   <p className="brief-reader-help">Clear removes this preview, not a kept library copy.</p>
@@ -264,10 +373,10 @@ export default function BriefPage() {
           <footer className="brief-footer">
             Titles and abstracts drive topic matching—not popularity. Preprints and publisher claims are not independently verified.
             Undated links are labeled; arXiv revisions are separate from new submissions.
-            <span>Refreshes on your first visit each day while ScholarWeave is running. Unsaved content also disappears on restart.</span>
+            <span>Refreshes on your first visit each day. Temporary content expires when the day changes; daily highlights remain in your workspace.</span>
           </footer>
         </>
-      ) : !busy ? <button type="button" onClick={() => void refresh()}>Try again</button> : null}
+      ) : !busy ? <button type="button" className="button secondary" onClick={() => void refresh()}>Try again</button> : null}
     </div>
   );
 }
@@ -288,12 +397,12 @@ function Headline({ item, number, busy, selected, onDownload, onKeep, onDiscard 
       <div className="brief-headline-bottom">
         <div className="brief-tags">{item.topics?.slice(0, 2).map((label) => <span key={label}>{label}</span>)}</div>
         <div className="brief-item-actions">
-          <button type="button" onClick={onDownload} disabled={busy}>
+          <button type="button" className="button ghost small" onClick={onDownload} disabled={busy}>
             <Icon name={item.downloaded ? 'file' : 'download'} size={13} />
             {item.downloaded ? 'Read preview' : item.kind === 'paper' ? 'Download PDF' : 'Download page'}
           </button>
-          {saved(item) ? <Link to={savedUrl(item)} aria-label={`Open kept copy of ${item.title}`}>Library</Link>
-            : item.downloaded ? <button type="button" onClick={onKeep} disabled={busy}><Icon name="save" size={13} /> Keep</button> : null}
+          {saved(item) ? <Link className="button ghost small" to={savedUrl(item)} aria-label={`Open kept copy of ${item.title}`}>Library</Link>
+            : item.downloaded ? <button type="button" className="button ghost small" onClick={onKeep} disabled={busy}><Icon name="save" size={13} /> Keep</button> : null}
           <button type="button" className="icon-button" onClick={onDiscard} disabled={busy} title="Discard headline and temporary content" aria-label={`Discard ${item.title}`}><Icon name="close" size={14} /></button>
         </div>
       </div>
@@ -336,6 +445,6 @@ function BriefSettings({ catalog, busy, onSave, onClose }: {
     <fieldset disabled={busy}><legend>Sources</legend><div className="brief-choice-grid">
       {catalog.sources?.map((source) => <label key={source.id}><input type="checkbox" checked={draft.source_ids?.includes(source.id) ?? false} onChange={() => toggle('source_ids', source.id)} />{source.name}</label>)}
     </div></fieldset>
-    <div className="brief-settings-foot"><span>Free-to-read does not necessarily mean open-source models or code.</span><button className="primary" type="submit" disabled={busy || !draft.topic_ids?.length || !draft.source_ids?.length}>Save & refresh</button></div>
+    <div className="brief-settings-foot"><span>Free-to-read does not necessarily mean open-source models or code.</span><button className="button" type="submit" disabled={busy || !draft.topic_ids?.length || !draft.source_ids?.length}>Save & refresh</button></div>
   </form>;
 }

@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Sequence
 
-from sqlalchemy import column, create_engine, delete, func, inspect, literal, select, table, text
+from sqlalchemy import column, create_engine, delete, func, inspect, literal, or_, select, table, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -255,6 +255,24 @@ class WorkspaceRepository:
             statement = statement.order_by(WorkspaceEntry.modified_at.desc(), WorkspaceEntry.path)
             statement = statement.offset(offset).limit(limit)
             return [(entry, score, excerpt) for entry, score, excerpt in session.execute(statement)]
+
+    def paths_for_tags(self, tags: Sequence[str]) -> dict[str, str]:
+        if not tags:
+            return {}
+        requested = {tag.casefold() for tag in tags}
+        statement = (
+            select(WorkspaceEntry.path, WorkspaceEntry.tags_json)
+            .where(or_(*(
+                func.instr(WorkspaceEntry.tags_text, f"\n{tag}\n") > 0 for tag in requested
+            )))
+            .order_by(WorkspaceEntry.modified_at.desc(), WorkspaceEntry.path)
+        )
+        with self._session_factory() as session:
+            paths: dict[str, str] = {}
+            for path, stored_tags in session.execute(statement):
+                for tag in requested.intersection(tag.casefold() for tag in stored_tags):
+                    paths.setdefault(tag, path)
+            return paths
 
     def delete_path(self, path: str) -> None:
         with self._session_factory() as session:

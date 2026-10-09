@@ -78,7 +78,9 @@ export default function WorkspacePage() {
     if (scope === 'notes') {
       params.append('kinds', 'note');
       params.append('kinds', 'paper_notes');
-    } else if (scope === 'summaries') params.append('kinds', 'paper_summary');
+    } else if (scope === 'standalone') params.append('kinds', 'note');
+    else if (scope === 'paper-notes') params.append('kinds', 'paper_notes');
+    else if (scope === 'summaries') params.append('kinds', 'paper_summary');
     const tree = scope === 'files';
     const fetchResults = () => {
       request<SearchResult[]>(tree ? '/workspace/files' : `/workspace/search?${params}`)
@@ -199,6 +201,8 @@ export default function WorkspacePage() {
           <div className="stack-tight">
             <select aria-label="Workspace view" value={scope} onChange={(event) => { setScope(event.target.value); setOffset(0); }}>
               <option value="notes">Notes</option>
+              <option value="standalone">Standalone notes</option>
+              <option value="paper-notes">Paper notes</option>
               <option value="summaries">Paper summaries</option>
               <option value="files">All workspace files (tree)</option>
             </select>
@@ -260,19 +264,36 @@ export default function WorkspacePage() {
                 />
               ))}
               {!files.length && !loading ? <p>No workspace files yet.</p> : null}</> : <>
-                {results.map((file) => <div key={file.path}>
-                  <WorkspaceFileRow file={file} selectedPath={selected?.path} onOpen={open} />
-                  <small>{file.kind === 'paper_notes' ? `Paper note: ${file.paper_name ?? file.paper_id}` : file.kind === 'paper_summary' ? `Paper summary: ${file.paper_name ?? file.paper_id}` : 'Standalone note'}{file.tags.length ? ` | ${file.tags.join(', ')}` : ''}</small>
+                {results.map((file) => {
+                  const systemTags = file.kind === 'paper_notes' ? ['paper', 'notes']
+                    : file.kind === 'paper_summary' ? ['paper', 'summary']
+                    : file.kind === 'note' ? ['note'] : [];
+                  const tags = file.tags.filter((tag) => !systemTags.includes(tag.toLowerCase())
+                    && !tag.toLowerCase().startsWith('paper:') && !tag.toLowerCase().startsWith('brief-source:'));
+                  const activeTags = tagFilter.split(',').map((tag) => tag.trim()).filter(Boolean);
+                  return <div key={file.path}>
+                  <WorkspaceFileRow file={file} selectedPath={selected?.path} onOpen={open} showPaperTitle />
+                  <small className="muted">{file.kind === 'paper_notes' ? 'Paper note' : file.kind === 'paper_summary' ? 'Paper summary' : 'Standalone note'} · {new Date(file.modified_at).toLocaleDateString()}</small>
+                  {tags.length ? <div className="library-tags" aria-label={`Tags for ${file.note_name ?? file.paper_name ?? file.name}`}>
+                    {tags.map((tag) => <button className="button secondary small" type="button" key={tag}
+                      aria-pressed={activeTags.some((value) => value.toLowerCase() === tag.toLowerCase())}
+                      title={`Toggle filter: ${tag}`} onClick={() => {
+                      const active = activeTags.some((value) => value.toLowerCase() === tag.toLowerCase());
+                      setTagFilter((active ? activeTags.filter((value) => value.toLowerCase() !== tag.toLowerCase()) : [...activeTags, tag]).join(', '));
+                      setOffset(0);
+                    }}>{tag}</button>)}
+                  </div> : null}
                   {file.excerpt ? <p className="muted">{file.excerpt}</p> : null}
-                </div>)}
+                </div>;
+                })}
                 {!results.length && !loading ? <p>No matching notes. Try fewer search terms or tags.</p> : null}
-                <div className="row">
+              </>}
+            </div>
+            {scope !== 'files' ? <div className="library-pagination">
                   <button className="button small" disabled={offset === 0 || loading} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
                   <small>Page {Math.floor(offset / PAGE_SIZE) + 1}</small>
                   <button className="button small" disabled={results.length < PAGE_SIZE || loading} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
-                </div>
-              </>}
-            </div>
+                </div> : null}
           </div>
         </Panel>
         <Panel
@@ -381,8 +402,11 @@ function WorkspaceFolder({
   onDelete: (folder: FileTreeNode) => Promise<void>;
   deletingPath: string | null;
 }) {
+  const containsSelection = !!selectedPath?.startsWith(`${folder.path}/`);
+  const [expanded, setExpanded] = useState(containsSelection || !folder.path.includes('/') || folder.path === 'library/papers');
+  useEffect(() => { if (containsSelection) setExpanded(true); }, [containsSelection]);
   return (
-    <details className="file-tree-folder" open>
+    <details className="file-tree-folder" open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
       <summary>
         <Icon name="workspace" size={15} />
         <span className="file-tree-folder-label">
@@ -435,10 +459,12 @@ function WorkspaceFileRow({
   file,
   selectedPath,
   onOpen,
+  showPaperTitle = false,
 }: {
   file: WorkspaceFile;
   selectedPath?: string;
   onOpen: (path: string) => Promise<void>;
+  showPaperTitle?: boolean;
 }) {
   return (
     <button
@@ -449,7 +475,7 @@ function WorkspaceFileRow({
     >
       <span className="file-row-name">
         <Icon name="file" size={14} />
-        <strong>{file.note_name ?? file.name}</strong>
+        <strong>{file.note_name ?? (showPaperTitle ? file.paper_name ?? file.name : file.name)}</strong>
       </span>
       <small>{formatBytes(file.size_bytes)}</small>
     </button>

@@ -95,6 +95,82 @@ def test_paper_folders_organize_documents(test_settings) -> None:
         assert client.delete(f"/api/paper-folders/{folder['id']}").status_code == 404
 
 
+def test_library_bm25_search_titles_content_filters_and_pagination(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        title_paper, content_paper, unrelated = [
+            services.documents.create_document_from_bytes(
+                b"%PDF-1.4\n%%EOF", filename=f"{index}.pdf", title=title,
+            )
+            for index, title in enumerate(("Quasar discovery", "Observational astronomy", "Unrelated research"))
+        ]
+        services.retrieval.replace_document_chunks(content_paper.id, [
+            {"text": "We describe quasar observations and stellar measurements.", "page_start": index + 1}
+            for index in range(30)
+        ])
+        folder = services.documents.create_folder("Astronomy")
+        services.documents.assign_folder(content_paper.id, folder.id)
+        response = client.get("/api/documents/search", params={"query": "quasar"})
+        assert response.status_code == 200, response.text
+        hits = response.json()
+        assert [hit["id"] for hit in hits] == [title_paper.id, content_paper.id]
+        assert hits[0]["score"] > hits[1]["score"] > 0
+        assert hits[0]["citation"] is None
+        assert hits[1]["citation"] == "p.1"
+        assert hits[1]["page_start"] == 1
+        assert "quasar" in hits[1]["excerpt"]
+        assert "chunks" not in hits[1]
+        assert client.get("/api/documents/search", params={
+            "query": "quasar", "offset": 1, "limit": 1,
+        }).json()[0]["id"] == content_paper.id
+        assert [hit["id"] for hit in client.get("/api/documents/search", params={
+            "query": "quasar", "folder_id": folder.id,
+        }).json()] == [content_paper.id]
+        assert [hit["id"] for hit in client.get("/api/documents/search", params={
+            "query": "quasar", "unfiled": True, "paper_status": "uploaded",
+        }).json()] == [title_paper.id]
+        assert client.get("/api/documents/search", params={"query": "quasar", "paper_status": "ready"}).json() == []
+        assert client.get("/api/documents/search", params={"query": "*** : ()"}).json() == []
+        assert client.get("/api/documents/search", params={"query": 'quasar" OR *'}).status_code == 200
+        assert client.get("/api/documents/search", params={"query": "quasar", "limit": 101}).status_code == 422
+        assert client.get("/api/documents/search", params={"query": "quasar", "offset": -1}).status_code == 422
+        services.retrieval.replace_document_chunks(content_paper.id, [{"text": "Revised stellar measurements."}])
+        assert len(client.get("/api/documents/search", params={"query": "quasar"}).json()) == 1
+        with services.documents.repository.session_factory() as session:
+            session.get(Document, unrelated.id).title = "Quasar follow-up"
+            session.commit()
+        assert len(client.get("/api/documents/search", params={"query": "quasar"}).json()) == 2
+        assert client.delete(f"/api/documents/{title_paper.id}").status_code == 204
+        assert client.get("/api/documents/search", params={"query": "quasar"}).json()[0]["id"] == unrelated.id
+        assert services.retrieval.keyword_search("follow-up") == []
+    restarted = create_app(test_settings)
+    with TestClient(restarted) as client:
+        assert client.get("/api/documents/search", params={"query": "quasar"}).json()[0]["id"] == unrelated.id
+
+
+def test_library_search_upgrades_existing_chunk_index_without_changing_documents(test_settings) -> None:
+    from backend.documents.retrieval import RetrievalService
+
+    services = create_app(test_settings).state.services
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="legacy.pdf", title="Legacy quasar paper",
+    )
+    services.retrieval.replace_document_chunks(document.id, [{"text": "Existing stellar content."}])
+    with services.retrieval.session_factory.kw["bind"].begin() as connection:
+        for prefix in ("document_chunks", "document_titles"):
+            for operation in ("insert", "delete", "update"):
+                connection.exec_driver_sql(f"DROP TRIGGER {prefix}_search_{operation}")
+        connection.exec_driver_sql("DROP TABLE document_chunks_fts")
+        connection.exec_driver_sql(
+            "CREATE VIRTUAL TABLE document_chunks_fts USING fts5(chunk_id UNINDEXED, document_id UNINDEXED, content)"
+        )
+        connection.exec_driver_sql("INSERT INTO document_chunks_fts SELECT id, document_id, text FROM document_chunks")
+    retrieval = RetrievalService(services.retrieval.session_factory, test_settings)
+    assert retrieval.keyword_search("stellar")[0]["document_id"] == document.id
+    assert services.documents.search_documents("quasar")[0][0].id == document.id
+
+
 def test_deleting_paper_removes_managed_files_and_workspace_notes(test_settings) -> None:
     app = create_app(test_settings)
     with TestClient(app) as client:

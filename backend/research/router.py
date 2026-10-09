@@ -6,7 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from backend.core.http import services
@@ -17,6 +17,7 @@ from backend.research.schemas import (
     DocumentChunkResponse,
     DocumentResponse,
     DocumentSummaryResponse,
+    DocumentSearchResponse,
     IngestionOptionsResponse,
     PaperFolderAssignmentRequest,
     PaperFolderCreateRequest,
@@ -166,6 +167,28 @@ def list_documents(container=Depends(services)) -> list[DocumentSummaryResponse]
     return [
         _document_summary(document)
         for document in container.documents.list_documents()
+    ]
+
+
+@router.get("/documents/search", response_model=list[DocumentSearchResponse])
+def search_documents(
+    query: str = Query(min_length=1, max_length=1000),
+    folder_id: str | None = None,
+    unfiled: bool = False,
+    paper_status: Literal["uploaded", "processing", "ready", "failed"] | None = None,
+    limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    container=Depends(services),
+) -> list[DocumentSearchResponse]:
+    return [
+        DocumentSearchResponse(
+            **_document_summary(document).model_dump(),
+            score=score, excerpt=excerpt, citation=citation, page_start=page,
+        )
+        for document, score, excerpt, citation, page in container.documents.search_documents(
+            query, folder_id=folder_id, unfiled=unfiled, status=paper_status,
+            limit=limit, offset=offset,
+        )
     ]
 
 

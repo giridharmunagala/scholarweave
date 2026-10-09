@@ -555,8 +555,8 @@ class ScholarWeaveApp(App[None]):
             ]
         options = []
         self._entries = []
-        title_style = self._palette("foreground", "#eee8dc")
-        subtitle_style = self._palette("text-muted", "#9babae")
+        title_style = self._palette("foreground", "#e2e4e7")
+        subtitle_style = self._palette("text-muted", "#9ea4ad")
         for key, title, subtitle in rows:
             prompt = Text(title, style=f"bold {title_style}")
             prompt.append("\n" + subtitle.replace("\n", " ")[:95], style=subtitle_style)
@@ -754,12 +754,12 @@ class ScholarWeaveApp(App[None]):
         composer.menu_open = bool(self._commands)
 
     def _command_prompt(self, command: commands.Command, argument: str) -> Text:
-        text = Text(f"/{command.name}", style=f"bold {self._palette('primary', '#e6ad83')}")
+        text = Text(f"/{command.name}", style=f"bold {self._palette('primary', '#7ea3dc')}")
         if argument:
-            text.append(f" {argument}", style=self._palette("accent", "#f0c9a6"))
+            text.append(f" {argument}", style=self._palette("accent", "#70afbb"))
         elif command.argument_hint:
-            text.append(f" {command.argument_hint}", style=self._palette("text-muted", "#9babae"))
-        text.append("   " + command.summary, style=self._palette("text-muted", "#9babae"))
+            text.append(f" {command.argument_hint}", style=self._palette("text-muted", "#9ea4ad"))
+        text.append("   " + command.summary, style=self._palette("text-muted", "#9ea4ad"))
         return text
 
     @on(Composer.MenuKey)
@@ -1773,9 +1773,9 @@ class ScholarWeaveApp(App[None]):
     def _activity_line(self, entry: str) -> Text:
         kind, _, detail = entry.partition(": ")
         line = Text()
-        line.append(kind, style=self._palette("text-accent", "#e6ad83"))
+        line.append(kind, style=self._palette("text-accent", "#7ea3dc"))
         if detail:
-            line.append("  " + detail, style=self._palette("text-muted", "#9babae"))
+            line.append("  " + detail, style=self._palette("text-muted", "#9ea4ad"))
         return line
 
     def _paint_clock(self) -> None:

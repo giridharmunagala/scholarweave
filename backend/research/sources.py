@@ -4,6 +4,7 @@ import ipaddress
 import re
 import socket
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
@@ -387,11 +388,15 @@ class SourceDownloadService:
             tags=["web-source", *(tags or [])],
         )
 
-    def find_document(self, url: str, *, title: str | None = None) -> Document | None:
+    def find_document(
+        self, url: str, *, title: str | None = None,
+        documents: Sequence[Document] | None = None,
+    ) -> Document | None:
         source_key = _source_key(url)
         arxiv_key = _arxiv_key(url)
         title_key = _title_key(title)
-        for document in self._documents.list_documents():
+        library = documents if documents is not None else self._documents.list_documents()
+        for document in library:
             metadata = document.metadata_json if isinstance(document.metadata_json, dict) else {}
             candidates = (
                 metadata.get("source_url"),

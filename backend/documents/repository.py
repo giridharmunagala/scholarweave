@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import hashlib
 import uuid
+import re
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, delete, func, select
+from sqlalchemy import and_, delete, func, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -203,6 +204,51 @@ class DocumentRepository:
             return list(
                 session.scalars(select(Document).order_by(Document.created_at.desc()))
             )
+
+    def search(
+        self, query: str, *, folder_id: str | None = None, unfiled: bool = False,
+        status: str | None = None, limit: int = 25, offset: int = 0,
+    ) -> list[tuple[Document, float, str, str | None, int | None]]:
+        tokens = list(dict.fromkeys(re.findall(r"[^\W_]+", query, flags=re.UNICODE)))[:32]
+        if not tokens:
+            return []
+        with self.session_factory() as session:
+            # Materialize FTS ranks before deduplicating chunks into one hit per paper.
+            hits = session.execute(text("""
+                WITH hits AS MATERIALIZED (
+                    SELECT document_id, chunk_id,
+                        -bm25(document_chunks_fts, 0, 0, 1, 5) AS score,
+                        CASE WHEN chunk_id IS NULL THEN title
+                            ELSE snippet(document_chunks_fts, 2, '', '', ' ... ', 32) END AS excerpt
+                    FROM document_chunks_fts WHERE document_chunks_fts MATCH :query
+                ), ranked AS (
+                    SELECT hits.*, row_number() OVER (
+                        PARTITION BY hits.document_id ORDER BY score DESC, c.chunk_index, chunk_id
+                    ) AS position FROM hits LEFT JOIN document_chunks c ON c.id = hits.chunk_id
+                )
+                SELECT ranked.document_id, score, excerpt, c.citation, c.page_start
+                FROM ranked JOIN documents d ON d.id = ranked.document_id
+                LEFT JOIN document_chunks c ON c.id = ranked.chunk_id
+                WHERE position = 1
+                    AND (:folder_id IS NULL OR json_extract(d.metadata_json, '$.folder_id') = :folder_id)
+                    AND (:unfiled = 0 OR json_extract(d.metadata_json, '$.folder_id') IS NULL)
+                    AND (:status IS NULL OR d.status = :status)
+                ORDER BY score DESC, d.created_at DESC, d.id
+                LIMIT :limit OFFSET :offset
+            """), {
+                "query": " OR ".join(f'"{token}"' for token in tokens),
+                "folder_id": folder_id, "unfiled": unfiled, "status": status,
+                "limit": limit, "offset": offset,
+            }).all()
+            documents = {
+                document.id: document for document in session.scalars(
+                    select(Document).where(Document.id.in_([hit[0] for hit in hits]))
+                )
+            }
+            return [
+                (documents[document_id], score, excerpt, citation, page)
+                for document_id, score, excerpt, citation, page in hits
+            ]
 
     def get(self, document_id: str) -> Document | None:
         with self.session_factory() as session:

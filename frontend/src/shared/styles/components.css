@@ -2,55 +2,62 @@
 
 /* -------------------------------------------------------------- Buttons --- */
 
+/*
+ * One button family for the whole app. Variants differ only in emphasis:
+ *   .button            primary - the single main action of a view (solid accent)
+ *   .button.secondary  everyday actions (outlined surface)
+ *   .button.ghost      low-emphasis or inline actions (text only)
+ *   .button.danger     destructive actions (outlined in red)
+ * Two sizes (default and .small) share the same radius, weight and focus ring.
+ * A toggle is any variant with aria-pressed; its pressed state is a soft accent fill.
+ */
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-2);
-  padding: .55rem 1rem;
-  border: 1px solid transparent;
+  gap: .45rem;
+  min-height: 2.25rem;
+  padding: .45rem .95rem;
+  border: 1px solid var(--accent);
   border-radius: var(--radius-md);
   background: var(--accent);
   color: var(--accent-contrast);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.25;
   white-space: nowrap;
   text-decoration: none;
   cursor: pointer;
-  transition: transform var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease),
-    border-color var(--dur-fast) var(--ease), box-shadow var(--dur-med) var(--ease), filter var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease),
+    color var(--dur-fast) var(--ease), box-shadow var(--dur-fast) var(--ease);
 }
-.button:hover { background: color-mix(in srgb, var(--accent) 86%, var(--text-strong)); text-decoration: none; }
-.button:active { transform: translateY(1px) scale(.98); }
-.button:disabled, .button[aria-disabled='true'] { opacity: .5; cursor: not-allowed; transform: none; }
+.button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 86%, var(--text-strong));
+  background: color-mix(in srgb, var(--accent) 86%, var(--text-strong));
+  text-decoration: none;
+}
+.button:disabled, .button[aria-disabled='true'] { opacity: .5; cursor: not-allowed; }
 .button svg { flex: none; }
 
-.button.secondary { background: var(--surface); border-color: var(--border-strong); color: var(--text-strong); box-shadow: var(--shadow-sm); }
-.button.secondary:hover { background: var(--accent-tint); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); color: var(--accent-strong); }
+.button.secondary { border-color: var(--border-strong); background: var(--surface); color: var(--text-strong); }
+.button.secondary:hover:not(:disabled) { border-color: color-mix(in srgb, var(--text-strong) 30%, var(--border-strong)); background: var(--surface-2); color: var(--text-strong); }
 
-.button.ghost { background: transparent; color: var(--muted); }
-.button.ghost:hover { background: var(--hover-bg); color: var(--accent-strong); }
+.button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
+.button.ghost:hover:not(:disabled) { border-color: transparent; background: var(--hover-bg); color: var(--text-strong); }
 
-.button.danger { background: transparent; border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); color: var(--danger); }
-.button.danger:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: var(--danger); }
+.button.danger { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); background: transparent; color: var(--danger); }
+.button.danger:hover:not(:disabled) { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); color: var(--danger); }
 
-.button.small { padding: .36rem .7rem; font-size: var(--text-xs); }
-.button.icon { padding: .45rem; border-radius: var(--radius-md); }
+.button[aria-pressed='true'],
+.button[aria-pressed='true']:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.button.small { min-height: 1.9rem; padding: .3rem .7rem; font-size: var(--text-xs); }
+.button.icon { padding: .45rem; }
 .button.block { width: 100%; }
-
-/* The one primary action on a screen is a vivid gradient with a soft glow so it reads first. */
-.button:not(.secondary):not(.ghost):not(.danger) {
-  background: var(--grad-accent);
-  color: #fff;
-  box-shadow: var(--accent-glow), inset 0 1px 0 rgb(255 255 255 / 18%);
-}
-.button:not(.secondary):not(.ghost):not(.danger):hover:not(:disabled) {
-  filter: brightness(1.06) saturate(1.08);
-  transform: translateY(-1px);
-  box-shadow: 0 12px 26px -8px color-mix(in srgb, var(--accent) 70%, transparent), inset 0 1px 0 rgb(255 255 255 / 18%);
-}
-.button:not(.secondary):not(.ghost):not(.danger):disabled { box-shadow: none; }
 
 .button-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
 /* Pushes everything after it to the trailing edge of a toolbar. */
@@ -142,7 +149,7 @@ button.meter:hover { border-color: var(--border-strong); background: var(--surfa
   padding: 0 .3rem;
   border-radius: var(--radius-pill);
   background: var(--grad-accent);
-  color: #fff;
+  color: var(--accent-contrast);
   font-size: .68rem;
   font-weight: 700;
   line-height: 1.5;
@@ -196,7 +203,7 @@ button.meter:hover { border-color: var(--border-strong); background: var(--surfa
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), box-shadow var(--dur-med) var(--ease);
 }
 .page-tabs a:hover { background: var(--hover-bg); color: var(--accent-strong); }
-.page-tabs a.active { background: var(--grad-accent); color: #fff; box-shadow: var(--accent-glow); }
+.page-tabs a.active { background: var(--accent-soft); color: var(--accent-strong); }
 
 /* -------------------------------------------------------- Surfaces/cards --- */
 
@@ -206,7 +213,7 @@ button.meter:hover { border-color: var(--border-strong); background: var(--surfa
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--glass-panel);
-  box-shadow: var(--shadow-sm), 0 6px 20px -16px color-mix(in srgb, var(--accent) 40%, transparent);
+  box-shadow: var(--shadow-sm);
 }
 .panel-header {
   display: flex;
@@ -236,10 +243,9 @@ button.meter:hover { border-color: var(--border-strong); background: var(--surfa
 .card p { margin: 0; font-size: var(--text-sm); }
 a.card, button.card { cursor: pointer; }
 a.card:hover, button.card:hover {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-color: var(--border-strong);
   background: var(--surface);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-2px);
+  box-shadow: var(--shadow-sm);
   text-decoration: none;
 }
 .card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: var(--space-3); }
@@ -344,22 +350,21 @@ a.card:hover .card-arrow, button.card:hover .card-arrow { transform: translateX(
   align-content: center;
   gap: var(--space-2);
   padding: var(--space-6) var(--space-4);
-  border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--border-strong));
+  border: 1px dashed var(--border-strong);
   border-radius: var(--radius-lg);
-  background: var(--grad-accent-soft);
+  background: var(--surface-2);
   text-align: center;
 }
-.empty-state h2 { margin: 0; }
+.empty-state h2 { margin: 0; font-size: var(--text-base); }
 .empty-state p { max-width: 34rem; margin: 0; font-size: var(--text-sm); }
 .empty-state .empty-icon {
   display: grid;
-  width: 52px;
-  height: 52px;
+  width: 44px;
+  height: 44px;
   place-items: center;
   border-radius: var(--radius-lg);
-  background: var(--grad-accent);
-  color: #fff;
-  box-shadow: var(--accent-glow);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
 }
 .empty-state > .button-row, .empty-state > .button { margin-top: var(--space-2); }
 
@@ -372,17 +377,16 @@ th, td { border-bottom: 1px solid var(--table-border); }
 th {
   position: sticky;
   top: 0;
-  border-bottom: 2px solid var(--accent);
+  border-bottom: 1px solid var(--border-strong);
   background: var(--table-head-bg);
   color: var(--table-head-text);
   font-size: var(--text-xs);
   font-weight: 650;
-  letter-spacing: .05em;
-  text-transform: uppercase;
+  letter-spacing: .02em;
 }
 tbody tr { transition: background var(--dur-fast) var(--ease); }
 tbody tr:nth-child(even) { background: var(--table-row-alt); }
-tbody tr:hover { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
+tbody tr:hover { background: var(--hover-bg); }
 tbody tr:last-child td { border-bottom: 0; }
 
 /* Collapsible blocks (event logs, chunks, inspector sections). */
@@ -428,64 +432,69 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   overflow: auto;
 }
 
-/* Shared rich-text output for chats, documents, and workspace previews. */
+/*
+ * Shared rich-text output for chats, documents, notes and summaries.
+ * Research prose is long, so this is tuned like a well-set paper rather than a
+ * UI widget: a bounded measure, generous leading, clear but quiet heading
+ * hierarchy, and breathing room between paragraphs and list items. Colour is
+ * reserved for links; structure comes from size, weight and space.
+ */
 .markdown-viewer {
-  max-width: 82ch;
+  max-width: 72ch;
   margin: 0 auto;
   color: var(--text);
-  line-height: 1.7;
+  font-size: var(--text-base);
+  line-height: 1.72;
+  text-wrap: pretty;
+  hyphens: auto;
+  font-variant-numeric: proportional-nums;
 }
 .markdown-viewer > :first-child { margin-top: 0; }
 .markdown-viewer > :last-child { margin-bottom: 0; }
+.markdown-viewer p { margin: 0 0 1em; }
 .markdown-viewer h1,
 .markdown-viewer h2,
 .markdown-viewer h3,
-.markdown-viewer h4 {
-  margin: 1.6em 0 .6em;
+.markdown-viewer h4,
+.markdown-viewer h5,
+.markdown-viewer h6 {
+  margin: 1.9em 0 .55em;
   color: var(--text-strong);
-  font-weight: 680;
+  font-weight: 650;
   line-height: 1.3;
+  letter-spacing: -.01em;
+  hyphens: manual;
 }
-.markdown-viewer h1,
-.markdown-viewer h2 {
-  padding-bottom: .3em;
-  border-bottom: 1px solid var(--border);
-}
-.markdown-viewer h2 { position: relative; padding-left: .75em; border-bottom: 0; }
-.markdown-viewer h2::before {
-  position: absolute;
-  top: .15em;
-  bottom: .45em;
-  left: 0;
-  width: 4px;
-  border-radius: 4px;
-  background: var(--grad-accent);
-  content: '';
-}
-.markdown-viewer h3 { color: var(--accent-strong); }
-.markdown-viewer a { color: var(--link); font-weight: 550; text-decoration: underline; text-underline-offset: .18em; text-decoration-color: color-mix(in srgb, var(--link) 40%, transparent); }
+.markdown-viewer h1 { font-size: 1.5em; letter-spacing: -.02em; }
+.markdown-viewer h2 { padding-bottom: .3em; border-bottom: 1px solid var(--divider); font-size: 1.25em; }
+.markdown-viewer h3 { font-size: 1.08em; }
+.markdown-viewer h4 { font-size: 1em; }
+.markdown-viewer h5,
+.markdown-viewer h6 { color: var(--muted); font-size: .85em; letter-spacing: .04em; text-transform: uppercase; }
+.markdown-viewer h1 + h2,
+.markdown-viewer h2 + h3,
+.markdown-viewer h3 + h4 { margin-top: .9em; }
+.markdown-viewer a { color: var(--link); text-decoration: underline; text-underline-offset: .18em; text-decoration-thickness: 1px; text-decoration-color: color-mix(in srgb, var(--link) 45%, transparent); }
 .markdown-viewer a:hover { color: var(--link-hover); text-decoration-color: currentColor; }
-/* Bold runs get a highlighter stroke so the key phrase of a long answer is the first thing you see. */
-.markdown-viewer strong {
-  padding: 0 .08em;
-  background: linear-gradient(transparent 62%, var(--strong-highlight) 62%);
-  color: var(--text-strong);
-  font-weight: 700;
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
-}
-.markdown-viewer h1 strong, .markdown-viewer h2 strong, .markdown-viewer h3 strong, .markdown-viewer h4 strong, .markdown-viewer th strong { background: none; }
+.markdown-viewer strong { color: var(--text-strong); font-weight: 650; }
 .markdown-viewer mark { padding: .05em .25em; border-radius: var(--radius-sm); background: var(--mark-bg); color: var(--mark-text); }
+.markdown-viewer ul,
+.markdown-viewer ol { margin: 0 0 1em; padding-left: 1.4em; }
+.markdown-viewer li { margin: .3em 0; padding-left: .15em; }
+.markdown-viewer li > p { margin-bottom: .4em; }
+.markdown-viewer li > ul,
+.markdown-viewer li > ol { margin: .3em 0 .2em; }
+.markdown-viewer li::marker { color: var(--muted); }
 .markdown-viewer details {
-  margin: var(--space-4) 0;
+  margin: 1.2em 0;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--surface-2) 70%, transparent);
+  background: var(--surface-2);
 }
 .markdown-viewer summary {
   padding: var(--space-2) var(--space-3);
   color: var(--text-strong);
-  font-weight: 650;
+  font-weight: 600;
   cursor: pointer;
 }
 .markdown-viewer details[open] > summary { border-bottom: 1px solid var(--divider); }
@@ -499,18 +508,15 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   color: var(--text-strong);
   font: 600 .82em/1.4 var(--font-mono);
 }
-.markdown-viewer abbr[title] {
-  text-decoration-color: var(--accent);
-  text-underline-offset: .15em;
-}
+.markdown-viewer abbr[title] { text-decoration-color: var(--muted); text-underline-offset: .15em; }
 .markdown-viewer :not(pre) > code {
-  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  border: 1px solid var(--divider);
   background: var(--inline-code-bg);
   color: var(--inline-code-text);
-  font-size: .92em;
+  font-size: .88em;
+  hyphens: manual;
 }
-.markdown-viewer hr { margin: var(--space-5) 0; border: 0; border-top: 1px solid var(--border); }
-.markdown-viewer li::marker { color: var(--accent); font-weight: 700; }
+.markdown-viewer hr { margin: 2em 0; border: 0; border-top: 1px solid var(--divider); }
 .markdown-viewer p,
 .markdown-viewer li { color: var(--text); }
 .markdown-viewer .katex-display {
@@ -519,14 +525,12 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   padding: .15em 0;
 }
 .markdown-viewer blockquote {
-  margin: var(--space-4) 0;
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
-  border-left: 4px solid var(--quote-bar);
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  background: var(--grad-accent-soft);
+  margin: 1.2em 0;
+  padding: .1em 0 .1em 1.1em;
+  border-left: 3px solid var(--quote-bar);
 }
 .markdown-viewer blockquote p { color: var(--quote-text); }
+.markdown-viewer blockquote > :last-child { margin-bottom: 0; }
 .markdown-viewer pre {
   overflow: auto;
   padding: var(--space-3);
@@ -534,8 +538,9 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   border-radius: var(--radius-md);
   background: var(--surface-2);
   white-space: pre;
+  hyphens: manual;
 }
-.markdown-viewer table { width: 100%; margin: 0; }
+.markdown-viewer table { width: 100%; margin: 0; hyphens: manual; line-height: 1.5; }
 
 /* A table in an answer is an artefact: framed, liftable, and openable when it outgrows the column. */
 .markdown-table-card { margin: var(--space-4) 0; }

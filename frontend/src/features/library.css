@@ -20,6 +20,15 @@
 .upload-button input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 
 .paper-import { margin-bottom: var(--space-4); }
+.library-filter-row { display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-2); }
+.library-filter-row select { min-width: 0; font-size: var(--text-xs); }
+.library-pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.library-pagination small { color: var(--muted); white-space: nowrap; }
+.library-tags { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: var(--space-1) 0; }
+.library-tags button { overflow-wrap: anywhere; text-align: left; }
+.library-tags button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.paper-results { display: grid; gap: var(--space-1); max-height: 58vh; overflow-y: auto; }
+.paper-row .paper-search-excerpt { color: var(--text); line-height: 1.5; }
 .source-form { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .source-form input { min-width: min(100%, 18rem); flex: 1 1 14rem; }
 
@@ -70,7 +79,7 @@
   font-weight: 650;
   text-align: center;
 }
-.paper-folder-target.active small { background: var(--grad-accent); color: #fff; }
+.paper-folder-target.active small { background: var(--surface); color: var(--accent-strong); }
 .paper-folder-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

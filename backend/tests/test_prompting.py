@@ -28,6 +28,8 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
         "run-recovery",
         "paper-summary",
         "paper-summary-overview",
+        "brief-highlights",
+        "brief-highlights-combine",
     }
     assert "evidence-backed answer" in registry.render("research")
     assert registry.render("fast-answer", web_search_limit=2).startswith(

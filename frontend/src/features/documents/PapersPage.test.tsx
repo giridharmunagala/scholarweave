@@ -18,6 +18,84 @@ function noContent() {
   return new Response(null, { status: 204 });
 }
 
+it('browses bounded sorted pages and searches title/content by relevance within folder and status filters', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library');
+  const papers = Array.from({ length: 60 }, (_, index) => ({
+    id: `paper-${index}`, title: `Paper ${String(index).padStart(2, '0')}`, status: 'ready',
+    source_filename: `${index}.pdf`, page_count: 3, content_type: 'application/pdf',
+    metadata: index % 2 ? { folder_id: 'methods' } : {},
+    artifacts: [], chunks: [],
+    created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+  }));
+  const searches: URL[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'http://localhost');
+    if (url.pathname.endsWith('/documents/search')) {
+      searches.push(url);
+      return respond([
+        { ...papers[1], score: 2, excerpt: 'Quasar measurements in the body text.', citation: 'p.3', page_start: 3 },
+        { ...papers[3], score: 1, excerpt: 'Quasar discovery', citation: null, page_start: null },
+      ]);
+    }
+    if (url.pathname.endsWith('/documents')) return respond(papers);
+    if (url.pathname.endsWith('/paper-folders')) return respond([{ id: 'methods', name: 'Methods' }]);
+    if (url.pathname.endsWith('/providers') || url.pathname.endsWith('/summaries')) return respond([]);
+    if (url.pathname.endsWith('/settings')) return respond({ default_model_references: {} });
+    if (url.pathname.endsWith('/ingestion-options')) return respond({
+      total_pages: 3, embedded_text_pages: 3, embedded_text_ratio: 1,
+      recommended_mode: 'embedded', ocr_available: true, ocr_engine: 'tesseract',
+    });
+    const paper = papers.find((item) => url.pathname.endsWith(`/documents/${item.id}`));
+    if (paper) return respond(paper);
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const change = async (label: string, value: string) => {
+    const field = container.querySelector<HTMLInputElement | HTMLSelectElement>(`[aria-label="${label}"]`)!;
+    await act(async () => {
+      const prototype = field instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(field, value);
+      field.dispatchEvent(new Event(field instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
+    });
+  };
+  try {
+    await act(async () => root.render(<RouterProvider><PapersPage /></RouterProvider>));
+    expect(container.querySelectorAll('.paper-row-main')).toHaveLength(25);
+    expect(container.querySelector('.paper-row-main strong')?.textContent).toBe('Paper 59');
+    const next = [...container.querySelectorAll('button')].find((item) => item.textContent === 'Next')!;
+    await act(async () => next.click());
+    expect(container.textContent).toContain('Page 2 of 3');
+    await change('Sort papers', 'title');
+    expect(container.textContent).toContain('Page 1 of 3');
+    expect(container.querySelector('.paper-row-main strong')?.textContent).toBe('Paper 00');
+    await act(async () => [...container.querySelectorAll<HTMLButtonElement>('.paper-folder-target')]
+      .find((item) => item.textContent?.includes('Methods'))!.click());
+    await change('Paper status', 'ready');
+    await change('Search papers', 'quasar');
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(searches).toHaveLength(1);
+    expect(searches[0].searchParams.get('query')).toBe('quasar');
+    expect(searches[0].searchParams.get('folder_id')).toBe('methods');
+    expect(searches[0].searchParams.get('paper_status')).toBe('ready');
+    expect(searches[0].searchParams.get('limit')).toBe('26');
+    expect(searches[0].searchParams.get('offset')).toBe('0');
+    expect(container.querySelectorAll('.paper-row-main')).toHaveLength(2);
+    expect(container.querySelector('.paper-row-main strong')?.textContent).toBe('Paper 01');
+    expect(container.textContent).toContain('p.3: Quasar measurements in the body text.');
+    expect(container.textContent).toContain('Title match: Quasar discovery');
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Sort papers"]')!.disabled).toBe(true);
+    await act(async () => container.querySelectorAll<HTMLButtonElement>('.paper-row-main')[1].click());
+    expect(container.querySelector('[aria-label="Delete paper Paper 03"]')).not.toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+    vi.unstubAllGlobals();
+  }
+});
+
 it('opens the exact kept paper linked from the brief instead of the newest library item', async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   const oldUrl = window.location.href;
@@ -25,6 +103,7 @@ it('opens the exact kept paper linked from the brief instead of the newest libra
   const papers = ['Newest paper', 'Kept paper'].map((title, index) => ({
     id: index ? 'kept-paper' : 'newest-paper', title, status: 'uploaded',
     source_filename: `${index}.pdf`, page_count: 1, metadata: {}, artifacts: [], chunks: [],
+    created_at: `2026-01-0${2 - index}T00:00:00Z`,
   }));
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -57,6 +136,7 @@ it('expands preparation for unready papers and isolates delayed summary results 
   const papers = ['ready', 'uploaded', 'failed'].map((status, index) => ({
     id: `paper-${index}`, title: `Paper ${index}`, status, source_filename: `${index}.pdf`,
     page_count: 1, metadata: {}, artifacts: [], chunks: [],
+    created_at: `2026-01-0${3 - index}T00:00:00Z`,
   }));
   const version = {
     id: 'old-version', created_at: '2026-01-01T00:00:00Z', citation_count: 1,

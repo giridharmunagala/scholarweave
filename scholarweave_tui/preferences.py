@@ -11,7 +11,7 @@ import json
 import os
 from pathlib import Path
 
-from scholarweave_tui.themes import DEFAULT_THEME
+from scholarweave_tui.themes import DEFAULT_THEME, LEGACY_THEMES
 
 FILENAME = "tui-preferences.json"
 PREFERENCES_VERSION = 2
@@ -62,7 +62,9 @@ class Preferences:
     @property
     def theme(self) -> str:
         value = self._values.get("theme")
-        return value if isinstance(value, str) and value else DEFAULT_THEME
+        if not isinstance(value, str) or not value:
+            return DEFAULT_THEME
+        return LEGACY_THEMES.get(value, value)
 
     def save_theme(self, name: str) -> None:
         self._set("theme", name)

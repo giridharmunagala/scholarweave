@@ -16,6 +16,85 @@ async function change(element: HTMLInputElement | HTMLTextAreaElement | HTMLSele
   });
 }
 
+it('organizes notes by kind and tags, labels canonical files by paper, and collapses individual folders', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes');
+  const files = ['paper_notes', 'paper_summary'].map((kind, index) => ({
+    path: `library/papers/discovery--paper-${index}/${index ? 'summary' : 'notes'}.md`,
+    name: `${index ? 'summary' : 'notes'}.md`, paper_name: `Discovery paper ${index}`,
+    paper_id: `paper-${index}`,
+    size_bytes: 100, modified_at: '2026-10-09T09:00:00Z',
+    tags: ['paper', index ? 'summary' : 'notes', `paper:paper-${index}`, 'astronomy'],
+    kind, media_type: 'text/markdown',
+  }));
+  const searches: URL[] = [];
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = new URL(String(input), 'http://localhost');
+    if (url.pathname.endsWith('/search')) searches.push(url);
+    return Response.json(files);
+  }));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    expect(container.querySelector('.file-row strong')?.textContent).toBe('Discovery paper 0');
+    expect([...container.querySelectorAll('.library-tags button')].map((button) => button.textContent)).toEqual(['astronomy', 'astronomy']);
+    await change(container.querySelector('[aria-label="Workspace view"]')!, 'standalone');
+    expect(searches[searches.length - 1].searchParams.getAll('kinds')).toEqual(['note']);
+    await change(container.querySelector('[aria-label="Workspace view"]')!, 'paper-notes');
+    expect(searches[searches.length - 1].searchParams.getAll('kinds')).toEqual(['paper_notes']);
+    await act(async () => container.querySelector<HTMLButtonElement>('.library-tags button')!.click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(searches[searches.length - 1].searchParams.getAll('tags')).toEqual(['astronomy']);
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Filter by tags"]')!.value).toBe('astronomy');
+    expect(container.querySelector('.library-tags button')?.getAttribute('aria-pressed')).toBe('true');
+    await act(async () => container.querySelector<HTMLButtonElement>('.library-tags button')!.click());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+    expect(searches[searches.length - 1].searchParams.getAll('tags')).toEqual([]);
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Filter by tags"]')!.value).toBe('');
+    expect(container.querySelector('.library-tags button')?.getAttribute('aria-pressed')).toBe('false');
+    await change(container.querySelector('[aria-label="Workspace view"]')!, 'files');
+    expect(container.querySelector('.file-row strong')?.textContent).toBe('notes.md');
+    const folders = [...container.querySelectorAll<HTMLDetailsElement>('.file-tree-folder')];
+    expect(folders.filter((folder) => folder.querySelector(':scope > summary')?.textContent?.includes('Discovery paper'))).toHaveLength(2);
+    expect(folders.slice(-2).every((folder) => !folder.open)).toBe(true);
+    await act(async () => folders[folders.length - 1].querySelector('summary')!.click());
+    expect(folders[folders.length - 1].open).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
+
+it('omits tag controls entirely for automatic paper/note labels without removing stored metadata', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes');
+  const files = [
+    { kind: 'paper_notes', tags: ['paper', 'notes', 'paper:paper-1'] },
+    { kind: 'paper_summary', tags: ['paper', 'summary', 'paper:paper-2'] },
+    { kind: 'note', tags: ['note', 'brief-source:source-id'] },
+  ].map((file, index) => ({
+    ...file, path: `knowledge/${index}.md`, name: `${index}.md`,
+    size_bytes: 100, modified_at: '2026-10-09T09:00:00Z', media_type: 'text/markdown',
+  }));
+  const fetch = vi.fn(async () => Response.json(files));
+  vi.stubGlobal('fetch', fetch);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    expect(container.querySelectorAll('.file-row')).toHaveLength(3);
+    expect(container.querySelector('.library-tags')).toBeNull();
+    expect(files[0].tags).toEqual(['paper', 'notes', 'paper:paper-1']);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
+
 it('browses pages, searches tags, creates named notes and retains conflicting drafts', async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   const initialUrl = window.location.href;

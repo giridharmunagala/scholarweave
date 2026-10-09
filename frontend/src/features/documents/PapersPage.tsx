@@ -11,10 +11,16 @@ import '../library.css';
 
 type Document = components['schemas']['DocumentResponse'];
 type DocumentSummary = components['schemas']['DocumentSummaryResponse'];
+type DocumentSearch = components['schemas']['DocumentSearchResponse'];
 type ArtifactContent = components['schemas']['ArtifactContentResponse'];
 type IngestionOptions = components['schemas']['IngestionOptionsResponse'];
 type PaperFolder = components['schemas']['PaperFolderResponse'];
 type IngestionMode = IngestionOptions['recommended_mode'];
+const PAGE_SIZE = 25;
+function folderId(document: DocumentSummary): string | null {
+  const value = document.metadata.folder_id;
+  return typeof value === 'string' ? value : null;
+}
 type IngestionProgress = {
   completed: number;
   total: number;
@@ -74,6 +80,12 @@ export default function PapersPage() {
   const [folders, setFolders] = useState<PaperFolder[]>([]);
   const [activeFolder, setActiveFolder] = useState<string>('all');
   const [newFolderName, setNewFolderName] = useState('');
+  const [query, setQuery] = useState('');
+  const [paperStatus, setPaperStatus] = useState('');
+  const [sort, setSort] = useState('newest');
+  const [offset, setOffset] = useState(0);
+  const [searchResults, setSearchResults] = useState<DocumentSearch[]>([]);
+  const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<Document | null>(null);
   const [ingestionOptions, setIngestionOptions] = useState<IngestionOptions | null>(null);
   const [error, setError] = useState<unknown>(null);
@@ -158,6 +170,39 @@ export default function PapersPage() {
     setViewerMode('pdf');
     setRetrievedText(null);
   }, [selected?.id]);
+
+  useEffect(() => {
+    if (!query.trim()) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+    let active = true;
+    const controller = new AbortController();
+    setSearching(true);
+    setSearchResults([]);
+    setError(null);
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({ query: query.trim(), limit: String(PAGE_SIZE + 1), offset: String(offset) });
+      if (activeFolder === 'unfiled') params.set('unfiled', 'true');
+      else if (activeFolder !== 'all') params.set('folder_id', activeFolder);
+      if (paperStatus) params.set('paper_status', paperStatus);
+      request<DocumentSearch[]>(`/documents/search?${params}`, { signal: controller.signal })
+        .then((items) => { if (active) setSearchResults(items); })
+        .catch((reason) => { if (active) setError(reason); })
+        .finally(() => { if (active) setSearching(false); });
+    }, 200);
+    return () => { active = false; window.clearTimeout(timer); controller.abort(); };
+  }, [query, activeFolder, paperStatus, offset, documents]);
+
+  useEffect(() => {
+    if (query.trim()) return;
+    const count = documents.filter((document) =>
+      (!paperStatus || document.status === paperStatus)
+      && (activeFolder === 'all' || (activeFolder === 'unfiled' ? folderId(document) === null : folderId(document) === activeFolder)),
+    ).length;
+    setOffset((current) => Math.min(current, Math.max(0, Math.ceil(count / PAGE_SIZE) - 1) * PAGE_SIZE));
+  }, [documents, activeFolder, paperStatus, query]);
 
   if (loading) return <Loading label="Loading papers…" />;
 
@@ -294,6 +339,7 @@ export default function PapersPage() {
         method: 'DELETE',
       });
       setActiveFolder('unfiled');
+      setOffset(0);
       await load(selected?.id);
     } catch (nextError) {
       setError(nextError);
@@ -315,6 +361,7 @@ export default function PapersPage() {
       setFolders((current) => [...current, folder].sort((a, b) => a.name.localeCompare(b.name)));
       setNewFolderName('');
       setActiveFolder(folder.id);
+      setOffset(0);
     } catch (nextError) {
       setError(nextError);
     } finally {
@@ -384,15 +431,18 @@ export default function PapersPage() {
   const extractedText = selected?.artifacts.find(
     (artifact) => artifact.kind === 'extracted_markdown' && artifact.media_type === 'text/markdown',
   );
-  const folderId = (document: DocumentSummary): string | null => {
-    const value = document.metadata.folder_id;
-    return typeof value === 'string' ? value : null;
-  };
-  const visibleDocuments = documents.filter((document) => {
+  const folderDocuments = documents.filter((document) => {
     if (activeFolder === 'all') return true;
     if (activeFolder === 'unfiled') return folderId(document) === null;
     return folderId(document) === activeFolder;
   });
+  const filteredDocuments = folderDocuments.filter((document) => !paperStatus || document.status === paperStatus);
+  const sortedDocuments = [...filteredDocuments].sort((a, b) => sort === 'title'
+    ? a.title.localeCompare(b.title)
+    : sort === 'oldest' ? a.created_at.localeCompare(b.created_at) : b.created_at.localeCompare(a.created_at));
+  const visibleDocuments = query.trim() ? searchResults.slice(0, PAGE_SIZE) : sortedDocuments.slice(offset, offset + PAGE_SIZE);
+  const hasNextPage = query.trim() ? searchResults.length > PAGE_SIZE : offset + PAGE_SIZE < sortedDocuments.length;
+  const chooseFolder = (id: string) => { setActiveFolder(id); setOffset(0); };
   return (
     <div className="page">
       <PageHeader
@@ -432,7 +482,7 @@ export default function PapersPage() {
       />
       <LibraryTabs active="papers" />
       {error ? <ErrorNotice error={error} /> : null}
-      {showSummaryBatch ? <SummaryBatchPanel papers={visibleDocuments} /> : null}
+      {showSummaryBatch ? <SummaryBatchPanel papers={query.trim() ? visibleDocuments : filteredDocuments} /> : null}
       {importOpen ? (
       <div className="paper-import">
         <Panel
@@ -475,6 +525,30 @@ export default function PapersPage() {
           description={documents.length ? `${documents.length} paper${documents.length === 1 ? '' : 's'}` : undefined}
         >
           <div className="stack-tight">
+            <input
+              type="search"
+              aria-label="Search papers"
+              placeholder="Search titles and content (BM25)"
+              value={query}
+              maxLength={1000}
+              onChange={(event) => { setQuery(event.target.value); setOffset(0); }}
+            />
+            <small className="muted">Title matches are weighted higher. Prepare a PDF to search its content.</small>
+            <div className="library-filter-row">
+              <select aria-label="Paper status" value={paperStatus} onChange={(event) => { setPaperStatus(event.target.value); setOffset(0); }}>
+                <option value="">All statuses</option>
+                <option value="ready">Ready to read</option>
+                <option value="uploaded">Not yet prepared</option>
+                <option value="processing">Preparing</option>
+                <option value="failed">Needs attention</option>
+              </select>
+              <select aria-label="Sort papers" value={query.trim() ? 'relevance' : sort} disabled={!!query.trim()} onChange={(event) => { setSort(event.target.value); setOffset(0); }}>
+                {query.trim() ? <option value="relevance">Relevance</option> : null}
+                <option value="newest">Newest first</option>
+                <option value="oldest">Oldest first</option>
+                <option value="title">Title A-Z</option>
+              </select>
+            </div>
             <form
               className="paper-folder-form"
               onSubmit={(event) => {
@@ -501,7 +575,7 @@ export default function PapersPage() {
               <button
                 type="button"
                 className={`paper-folder-target${activeFolder === 'all' ? ' active' : ''}`}
-                onClick={() => setActiveFolder('all')}
+                onClick={() => chooseFolder('all')}
               >
                 <span>All papers</span>
                 <small>{documents.length}</small>
@@ -509,9 +583,9 @@ export default function PapersPage() {
               <button
                 type="button"
                 className={`paper-folder-target${activeFolder === 'unfiled' ? ' active' : ''}`}
-                onClick={() => setActiveFolder('unfiled')}
+                onClick={() => chooseFolder('unfiled')}
               >
-                <span>Papers</span>
+                <span>Unfiled papers</span>
                 <small>{documents.filter((document) => folderId(document) === null).length}</small>
               </button>
               {folders.map((folder) => (
@@ -519,7 +593,7 @@ export default function PapersPage() {
                   <button
                     type="button"
                     className={`paper-folder-target${activeFolder === folder.id ? ' active' : ''}`}
-                    onClick={() => setActiveFolder(folder.id)}
+                    onClick={() => chooseFolder(folder.id)}
                   >
                     <span>{folder.name}</span>
                     <small>
@@ -538,7 +612,11 @@ export default function PapersPage() {
                 </div>
               ))}
             </nav>
-            {visibleDocuments.map((document) => (
+            <div className="paper-results" aria-label="Paper results" aria-busy={searching}>
+            {searching ? <Loading label="Searching papers..." /> : null}
+            {visibleDocuments.map((document) => {
+              const hit = query.trim() ? searchResults.find((result) => result.id === document.id) : undefined;
+              return (
               <button
                 type="button"
                 className={selected?.id === document.id ? 'paper-row paper-row-main active' : 'paper-row paper-row-main'}
@@ -551,11 +629,19 @@ export default function PapersPage() {
                 }}
               >
                 <strong>{document.title}</strong>
-                <small>{document.source_filename}</small>
+                <small>{document.status} · {document.source_filename}</small>
+                {hit ? <small className="paper-search-excerpt">{hit.citation ? `${hit.citation}: ` : 'Title match: '}{hit.excerpt}</small> : null}
               </button>
-            ))}
+              );
+            })}
             {!documents.length ? <p>Upload or download a PDF to start the research library.</p> : null}
-            {documents.length && !visibleDocuments.length ? <p>No papers in this folder.</p> : null}
+            {!!documents.length && !visibleDocuments.length && !searching ? <p>{query.trim() || paperStatus ? 'No matching papers. Try fewer terms or another folder/status.' : 'No papers in this folder.'}</p> : null}
+            </div>
+            <div className="library-pagination">
+              <button className="button secondary small" type="button" disabled={offset === 0 || searching} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
+              <small>Page {Math.floor(offset / PAGE_SIZE) + 1}{!query.trim() ? ` of ${Math.max(1, Math.ceil(sortedDocuments.length / PAGE_SIZE))}` : ''}</small>
+              <button className="button secondary small" type="button" disabled={!hasNextPage || searching} onClick={() => setOffset(offset + PAGE_SIZE)}>Next</button>
+            </div>
           </div>
         </Panel>
         <Panel title={selected?.title ?? 'Document details'} className="paper-detail-panel">
@@ -573,7 +659,7 @@ export default function PapersPage() {
                       void movePaper(selected, event.target.value || null);
                     }}
                   >
-                    <option value="">Papers</option>
+                    <option value="">Unfiled papers</option>
                     {folders.map((folder) => (
                       <option value={folder.id} key={folder.id}>{folder.name}</option>
                     ))}

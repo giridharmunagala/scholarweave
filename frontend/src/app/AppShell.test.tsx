@@ -91,13 +91,12 @@ describe('application shell', () => {
       container.querySelector<HTMLButtonElement>('.theme-trigger')!.click();
     });
     const options = [...container.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
-    expect(options.map((option) => option.textContent)).toEqual(
-      expect.arrayContaining([
-        expect.stringContaining('Paper'),
-        expect.stringContaining('Slate'),
-        expect.stringContaining('Match system'),
-      ]),
-    );
+    expect(options.map((option) => option.textContent)).toEqual([
+      expect.stringContaining('Light'),
+      expect.stringContaining('Sepia'),
+      expect.stringContaining('Dark'),
+      expect.stringContaining('Match system'),
+    ]);
 
     await act(async () => {
       options.find((option) => option.textContent?.includes('Match system'))!.click();

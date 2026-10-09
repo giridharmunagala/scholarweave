@@ -353,7 +353,13 @@ class ModelRuntime:
         image_media_type: str = "image/png",
         think: bool | str | None = None,
         on_token: Any = None,
+        max_output_tokens: int | None = None,
+        context_window_tokens: int | None = None,
     ) -> dict[str, Any]:
+        if max_output_tokens is not None and max_output_tokens < 1:
+            raise ProviderRuntimeError("The output token limit must be positive.")
+        if context_window_tokens is not None and context_window_tokens < 1:
+            raise ProviderRuntimeError("The context token limit must be positive.")
         request = {
             "prompt": prompt,
             "messages": messages,
@@ -362,6 +368,8 @@ class ModelRuntime:
             "format": format_,
             "images": images,
             "think": think,
+            "max_output_tokens": max_output_tokens,
+            "context_window_tokens": context_window_tokens,
         }
         if resolved.kind == "ollama":
             client = (
@@ -376,14 +384,19 @@ class ModelRuntime:
                 )
             )
             try:
+                options = _options(temperature)
+                if max_output_tokens is not None:
+                    options = {**(options or {}), "num_predict": max_output_tokens}
+                if context_window_tokens is not None:
+                    options = {**(options or {}), "num_ctx": context_window_tokens}
                 if messages is not None:
                     response = await client.chat(
-                        resolved.model, messages, stream=on_token is not None, options=_options(temperature),
+                        resolved.model, messages, stream=on_token is not None, options=options,
                         format_=format_, on_token=on_token
                     )
                 else:
                     response = await client.generate(
-                        resolved.model, prompt, stream=on_token is not None, options=_options(temperature), system=system,
+                        resolved.model, prompt, stream=on_token is not None, options=options, system=system,
                         format_=format_, images=images, think=think, on_token=on_token
                     )
             except OllamaError as exc:
@@ -415,6 +428,8 @@ class ModelRuntime:
                 ]
             payload.append({"role": "user", "content": content})
         kwargs: dict[str, Any] = {"model": resolved.model, "messages": payload, "temperature": temperature}
+        if max_output_tokens is not None:
+            kwargs["max_completion_tokens"] = max_output_tokens
         if resolved.default_reasoning_effort is not None:
             kwargs["reasoning_effort"] = resolved.default_reasoning_effort
         if format_ is not None:

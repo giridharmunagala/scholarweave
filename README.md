@@ -62,6 +62,9 @@ language data; encrypted PDFs must be unlocked before upload.
 ![ScholarWeave paper library](docs/screenshots/papers.png)
 
 - Upload PDFs or acquire papers from a URL, then organize them into named collections.
+- Find papers with BM25-ranked search across titles and extracted content, with matched excerpts
+  and page references. Title matches carry more weight; unprepared PDFs are still searchable by title.
+- Browse 25-paper pages, filter by collection or preparation status, and sort by date or title.
 - Read the original PDF alongside extracted text, paper notes, and saved summaries.
 - Extract native PDF text and use Tesseract OCR for scanned pages, with optional vision-model OCR repair.
 - Generate quick overviews or reviewed, citation-grounded summaries for one paper or a collection.
@@ -82,12 +85,27 @@ the library. **Keep in library** explicitly saves the original PDF into the exis
 or the readable page text and source attribution as an indexed workspace note. Kept PDFs can be
 extracted through the library's existing preparation controls. Existing source-linked papers and
 previously kept pages are reused. **Discard** dismisses a headline and its temporary content;
-**Clear fetched data** erases the entire fetched edition and previews, never kept library content.
+**Clear fetched data** erases fetched headlines and previews, never kept library content or daily highlights.
 Clearing stays effective until you explicitly refresh.
 
-Headlines and previews are memory-only, expire on the next day's access, and disappear on backend
-restart. Only interest/source preferences and explicitly kept content persist locally. The first page
-visit each day refreshes the edition; this is not an always-on scheduler when the app is closed.
+**Today's highlights** appears above the reading list: two or three LLM-written paragraphs based
+only on collected titles, abstracts and publisher metadata, with no extra page or PDF downloads.
+Its separate model picker initially follows the model selected in chat; choosing another brief
+model does not change chat. Highlights generate in the background and are reused across visits.
+Each call is capped at 32K input tokens, including instructions, or less for smaller model contexts.
+Known OpenAI tokenizers are counted locally; other models use a conservative UTF-8 byte upper
+bound and may need smaller batches. Complete source records are never split or silently omitted.
+Larger editions use whole-record batches and a bounded combiner; intermediate JSON parts live in
+`workspace/.scholarweave/brief-temp/` until the day's data expires or you clear it.
+Completed summaries are also saved to `workspace/knowledge/morning-brief/YYYY-MM-DD.json`,
+without the headline/link list. These archives survive clearing and day changes; regenerating
+updates that day's file. **Past highlights** opens archived summaries.
+
+Headlines, previews, dismissals and the cleared state are cached in `local_data/temp/morning-brief/`
+for the current day in your configured timezone. Returning to the page or restarting the backend
+reuses that edition without collecting sources again. A new day's startup or access removes the old
+temporary cache; the first page visit collects the new edition. **Refresh** explicitly checks sources
+again. This is not an always-on scheduler when the app is closed.
 arXiv RSS supplies its latest announcement batch, not a historical backfill. Revisions, undated
 headlines, source failures and collection limits are labeled. Topic matching uses titles and abstracts;
 it does not claim full-paper review or independent validation of publisher claims. Free-to-read
@@ -97,7 +115,10 @@ framework prereleases are excluded from the default collection.
 ### Notes And Research Discovery
 
 Create reusable knowledge notes and keep paper-specific notes beside their sources. Find notes
-with paginated full-text search and tag filters, or switch to summaries and the workspace file tree.
+with paginated full-text search and tag filters, or switch between standalone notes, paper notes,
+summaries and the workspace file tree. Topic tags toggle list filters; automatic type and identity
+labels are hidden from the result cards. Paper notes and summaries show
+their paper titles; individual workspace folders start collapsed unless they contain the open file.
 Create notes by name and edit Markdown directly, with dirty-draft and stale-save protection.
 
 Research agents can find saved work through full-text search with ranked excerpts and tag filters.
@@ -215,6 +236,24 @@ was built, restart it first. Use `-ApiUrl http://127.0.0.1:8001` for a different
 `-Check -NoPause` to check startup without opening the browser. The existing Windows shortcut
 and `launch-scholarweave.ps1` remain terminal launchers.
 
+**Linux web launcher:** with Python 3.12+ and Node.js 20+ installed, set up the checkout once:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -e "."
+(cd frontend && npm ci)
+sh scripts/launch-scholarweave-web.sh
+```
+
+This has the same build, backend reuse and browser-opening behavior as the Windows web launcher,
+without requiring the terminal extra. No virtual-environment activation is needed, and the script
+can be invoked by its full path from any directory. Keep the terminal open for a backend it starts;
+Ctrl+C stops only that backend. All options are forwarded, including a startup-only check:
+
+```sh
+sh scripts/launch-scholarweave-web.sh --api-url http://127.0.0.1:8001 --check
+```
+
 The app has no authentication, so keep its web server bound to `127.0.0.1`. This does not restrict
 model connections: your provider can run on your machine, another server, or a hosted service.
 
@@ -277,7 +316,7 @@ backend it owns, so finish important work first; another TUI or browser using th
 server loses its connection too. A reused server is never stopped. An existing server started
 without frontend assets may need a manual restart before it can serve the newly built web app.
 
-**Linux shell launcher:** with Python 3.12+ and Node.js 20+ installed, run this setup once
+**Linux TUI launcher:** with Python 3.12+ and Node.js 20+ installed, run this setup once
 from the repository root:
 
 ```sh
@@ -345,8 +384,8 @@ your chat model in backend settings, so a new thread starts on it. `/effort auto
 and `/web on | off` set the next message, `/status` reports what it will use, and the status line
 under the composer always shows the current setup.
 
-Six themes ship with the cockpit: **Midnight Weave** (default), **Parchment**, **Aurora**, **Verdant**,
-**Ember**, and **Glacier**. `Ctrl+T` previews them live and remembers your choice in
+Three themes ship with the cockpit, matching the web app: **Dark** (default), **Light**, and
+**Sepia**. `Ctrl+T` previews them live and remembers your choice in
 `local_data/tui-preferences.json`; only presentation and composer setup are stored there, never
 research behaviour.
 

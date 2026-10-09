@@ -248,8 +248,8 @@ def test_startup_timeout_has_finite_bounds(value) -> None:
         _positive_timeout(value)
 
 
-@pytest.fixture()
-def shell_launcher(tmp_path, monkeypatch):
+@pytest.fixture(params=["launch-scholarweave.sh", "launch-scholarweave-web.sh"])
+def shell_launcher(tmp_path, monkeypatch, request):
     shell = shutil.which("sh")
     if shell is None:
         pytest.skip("Linux launcher tests require a POSIX shell")
@@ -258,14 +258,16 @@ def shell_launcher(tmp_path, monkeypatch):
     root = tmp_path / "checkout with spaces"
     scripts = root / "scripts"
     scripts.mkdir(parents=True)
+    script = request.param
     shutil.copyfile(
-        ROOT_DIR / "scripts" / "launch-scholarweave.sh", scripts / "launch-scholarweave.sh",
+        ROOT_DIR / "scripts" / script, scripts / script,
     )
     python = root / ".venv" / "bin" / "python"
     python.parent.mkdir(parents=True)
     python.write_text(
         '#!/bin/sh\n'
         'if [ "$1" = "-c" ]; then\n'
+        '    printf "%s\\n" "$2" > dependency-record.txt\n'
         '    exit "${DEPENDENCY_EXIT_CODE:-0}"\n'
         'fi\n'
         'printf "%s\\n" "$PWD" "$@" > launch-record.txt\n'
@@ -273,17 +275,17 @@ def shell_launcher(tmp_path, monkeypatch):
         encoding="utf-8", newline="\n",
     )
     python.chmod(0o755)
-    return shell, root
+    return shell, root, script
 
 
 @pytest.mark.parametrize("exit_code", [0, 7])
 def test_linux_shell_launcher_forwards_arguments_directory_and_exit_status(
     shell_launcher, tmp_path, exit_code,
 ) -> None:
-    shell, root = shell_launcher
+    shell, root, script = shell_launcher
     arguments = ["--api-url", "http://127.0.0.1:8001", "--check", "argument with spaces", "*"]
     result = subprocess.run(
-        [shell, str(root / "scripts" / "launch-scholarweave.sh"), *arguments],
+        [shell, str(root / "scripts" / script), *arguments],
         cwd=tmp_path, capture_output=True, text=True, timeout=10,
         env={**os.environ, "LAUNCH_EXIT_CODE": str(exit_code), "DEPENDENCY_EXIT_CODE": "0"},
     )
@@ -291,23 +293,29 @@ def test_linux_shell_launcher_forwards_arguments_directory_and_exit_status(
     expected_directory = subprocess.run(
         [shell, "-c", "pwd -P"], cwd=root, capture_output=True, text=True, check=True, timeout=10,
     ).stdout.strip()
+    web_options = ["--web"] if script == "launch-scholarweave-web.sh" else []
     assert (root / "launch-record.txt").read_text(encoding="utf-8").splitlines() == [
-        expected_directory, "-m", "scholarweave_tui", "--build-frontend", *arguments,
+        expected_directory, "-m", "scholarweave_tui", *web_options, "--build-frontend", *arguments,
     ]
+    assert (root / "dependency-record.txt").read_text(encoding="utf-8").strip() == (
+        "import uvicorn" if web_options else "import textual, uvicorn"
+    )
+    assert b"\r" not in (ROOT_DIR / "scripts" / script).read_bytes()
 
 
 @pytest.mark.parametrize("missing", ["venv", "dependencies"])
 def test_linux_shell_launcher_reports_missing_setup(shell_launcher, tmp_path, missing) -> None:
-    shell, root = shell_launcher
+    shell, root, script = shell_launcher
     if missing == "venv":
         (root / ".venv" / "bin" / "python").unlink()
     result = subprocess.run(
-        [shell, str(root / "scripts" / "launch-scholarweave.sh")],
+        [shell, str(root / "scripts" / script)],
         cwd=tmp_path, capture_output=True, text=True, timeout=10,
         env={**os.environ, "DEPENDENCY_EXIT_CODE": "1"},
     )
     assert result.returncode == 1
-    assert ("Create .venv" if missing == "venv" else 'pip install -e ".[tui]"') in result.stderr
+    install = 'pip install -e "."' if script == "launch-scholarweave-web.sh" else 'pip install -e ".[tui]"'
+    assert ("Create .venv" if missing == "venv" else install) in result.stderr
     assert not (root / "launch-record.txt").exists()
 
 

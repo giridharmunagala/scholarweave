@@ -151,6 +151,9 @@
             "title": "Sources",
             "type": "array"
           },
+          "summary_model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
           "topics": {
             "items": {
               "$ref": "#/components/schemas/BriefTopicResponse"
@@ -197,6 +200,9 @@
             ],
             "title": "Fetched At"
           },
+          "highlights": {
+            "$ref": "#/components/schemas/BriefSummaryState"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/BriefItemResponse"
@@ -218,6 +224,66 @@
           }
         },
         "title": "BriefEditionResponse",
+        "type": "object"
+      },
+      "BriefHighlightSummary": {
+        "properties": {
+          "batch_count": {
+            "title": "Batch Count",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "day": {
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "title": "Day",
+            "type": "string"
+          },
+          "input_token_limit": {
+            "title": "Input Token Limit",
+            "type": "integer"
+          },
+          "item_count": {
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "source_hash": {
+            "title": "Source Hash",
+            "type": "string"
+          },
+          "text": {
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          },
+          "token_counting": {
+            "title": "Token Counting",
+            "type": "string"
+          },
+          "workspace_path": {
+            "title": "Workspace Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "day",
+          "text",
+          "created_at",
+          "model_reference",
+          "source_hash",
+          "item_count",
+          "batch_count",
+          "input_token_limit",
+          "token_counting",
+          "workspace_path"
+        ],
+        "title": "BriefHighlightSummary",
         "type": "object"
       },
       "BriefItemResponse": {
@@ -392,6 +458,16 @@
             "title": "Source Ids",
             "type": "array"
           },
+          "summary_model_reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelReferenceSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "topic_ids": {
             "items": {
               "type": "string"
@@ -521,6 +597,72 @@
           "count"
         ],
         "title": "BriefSourceStatus",
+        "type": "object"
+      },
+      "BriefSummaryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "model_reference": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelReferenceSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "BriefSummaryRequest",
+        "type": "object"
+      },
+      "BriefSummaryState": {
+        "properties": {
+          "completed_parts": {
+            "default": 0,
+            "title": "Completed Parts",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "status": {
+            "default": "idle",
+            "enum": [
+              "idle",
+              "running",
+              "ready",
+              "failed",
+              "interrupted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BriefHighlightSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "total_parts": {
+            "default": 0,
+            "title": "Total Parts",
+            "type": "integer"
+          }
+        },
+        "title": "BriefSummaryState",
         "type": "object"
       },
       "BriefTopicResponse": {
@@ -997,6 +1139,104 @@
           "chunks"
         ],
         "title": "DocumentResponse",
+        "type": "object"
+      },
+      "DocumentSearchResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "citation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Citation"
+          },
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "excerpt": {
+            "title": "Excerpt",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "title": "Metadata",
+            "type": "object"
+          },
+          "page_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Count"
+          },
+          "page_start": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Start"
+          },
+          "score": {
+            "title": "Score",
+            "type": "number"
+          },
+          "source_filename": {
+            "title": "Source Filename",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "source_filename",
+          "content_type",
+          "status",
+          "page_count",
+          "metadata",
+          "created_at",
+          "updated_at",
+          "score",
+          "excerpt",
+          "citation",
+          "page_start"
+        ],
+        "title": "DocumentSearchResponse",
         "type": "object"
       },
       "DocumentSummaryResponse": {
@@ -5057,6 +5297,47 @@
         ]
       }
     },
+    "/api/brief/highlights": {
+      "post": {
+        "operationId": "highlights_api_brief_highlights_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BriefSummaryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefEditionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Highlights",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
     "/api/brief/items/{item_id}": {
       "delete": {
         "operationId": "discard_api_brief_items__item_id__delete",
@@ -5300,6 +5581,66 @@
           }
         },
         "summary": "Refresh",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/summaries": {
+      "get": {
+        "operationId": "summary_history_api_brief_summaries_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/BriefHighlightSummary"
+                  },
+                  "title": "Response Summary History Api Brief Summaries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Summary History",
         "tags": [
           "morning brief"
         ]
@@ -5598,6 +5939,125 @@
           }
         },
         "summary": "Download Document",
+        "tags": [
+          "research"
+        ]
+      }
+    },
+    "/api/documents/search": {
+      "get": {
+        "operationId": "search_documents_api_documents_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "maxLength": 1000,
+              "minLength": 1,
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "folder_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Folder Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "unfiled",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Unfiled",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "paper_status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "uploaded",
+                    "processing",
+                    "ready",
+                    "failed"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Paper Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DocumentSearchResponse"
+                  },
+                  "title": "Response Search Documents Api Documents Search Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Documents",
         "tags": [
           "research"
         ]

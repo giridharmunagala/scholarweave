@@ -45,31 +45,27 @@ export function ThemeSwitcher() {
       </button>
       {open ? (
         <div className="theme-popover" role="menu" aria-label="Theme">
-          {(['light', 'dark'] as const).map((scheme) => (
-            <div className="theme-group" key={scheme}>
-              <span className="theme-group-label">{scheme === 'light' ? 'Light' : 'Dark'}</span>
-              {THEMES.filter((theme) => theme.scheme === scheme).map((theme) => (
-                <button
-                  key={theme.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={preference === theme.id}
-                  className="theme-option"
-                  onClick={() => choose(theme.id)}
-                >
-                  <span className="swatch" aria-hidden="true">
-                    {theme.swatch.map((color) => (
-                      <i key={color} style={{ background: color }} />
-                    ))}
-                  </span>
-                  <span className="stack-tight" style={{ gap: 0 }}>
-                    {theme.label}
-                    <small className="muted">{theme.description}</small>
-                  </span>
-                  {preference === theme.id ? <Icon name="check" size={15} className="check" /> : null}
-                </button>
-              ))}
-            </div>
+          <span className="theme-popover-label">Theme</span>
+          {THEMES.map((theme) => (
+            <button
+              key={theme.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={preference === theme.id}
+              className="theme-option"
+              onClick={() => choose(theme.id)}
+            >
+              <span className="swatch" aria-hidden="true">
+                {theme.swatch.map((color) => (
+                  <i key={color} style={{ background: color }} />
+                ))}
+              </span>
+              <span className="stack-tight" style={{ gap: 0 }}>
+                {theme.label}
+                <small className="muted">{theme.description}</small>
+              </span>
+              {preference === theme.id ? <Icon name="check" size={15} className="check" /> : null}
+            </button>
           ))}
           <hr />
           <button
@@ -80,12 +76,12 @@ export function ThemeSwitcher() {
             onClick={() => choose('system')}
           >
             <span className="swatch" aria-hidden="true">
-              <i style={{ background: '#f3f2fb' }} />
-              <i style={{ background: '#0b0c16' }} />
+              <i style={{ background: '#ffffff' }} />
+              <i style={{ background: '#1f2227' }} />
             </span>
             <span className="stack-tight" style={{ gap: 0 }}>
               Match system
-              <small className="muted">Follow the OS setting</small>
+              <small className="muted">Light or Dark, following the OS</small>
             </span>
             {preference === 'system' ? <Icon name="check" size={15} className="check" /> : null}
           </button>

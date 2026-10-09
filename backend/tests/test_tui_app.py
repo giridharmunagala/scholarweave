@@ -344,7 +344,7 @@ def test_legacy_focus_default_migrates_to_visible_history(tmp_path) -> None:
     preferences = Preferences(path=path)
 
     assert preferences.focus_mode is False
-    assert preferences.theme == "parchment"
+    assert preferences.theme == "sepia"
     assert json.loads(path.read_text(encoding="utf-8")) == {
         "theme": "parchment",
         "focus_mode": False,

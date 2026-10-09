@@ -1,20 +1,6 @@
 /** Theme catalogue and the small amount of DOM plumbing a theme needs. */
 
-export type ThemeId =
-  | 'prism'
-  | 'nebula'
-  | 'paper'
-  | 'cloud'
-  | 'snow'
-  | 'mint'
-  | 'blossom'
-  | 'citrus'
-  | 'sunrise'
-  | 'slate'
-  | 'nord'
-  | 'aurora'
-  | 'forest'
-  | 'amoled';
+export type ThemeId = 'light' | 'sepia' | 'dark';
 export type ThemePreference = ThemeId | 'system';
 
 export interface ThemeDefinition {
@@ -22,123 +8,51 @@ export interface ThemeDefinition {
   label: string;
   description: string;
   scheme: 'light' | 'dark';
-  /** The three hues a theme combines, so the swatch previews the palette. */
+  /** Background, surface and accent, so the swatch previews the palette. */
   swatch: [string, string, string];
 }
 
 export const THEMES: ThemeDefinition[] = [
   {
-    id: 'prism',
-    label: 'Prism',
-    description: 'Crisp white, violet and pink',
+    id: 'light',
+    label: 'Light',
+    description: 'Neutral white with a muted blue accent',
     scheme: 'light',
-    swatch: ['#1e1b4b', '#ffffff', '#6246ea'],
+    swatch: ['#f5f6f8', '#ffffff', '#2f5c9e'],
   },
   {
-    id: 'paper',
-    label: 'Paper',
-    description: 'Plum, sand and terracotta',
+    id: 'sepia',
+    label: 'Sepia',
+    description: 'Warm, low-glare paper for long reading',
     scheme: 'light',
-    swatch: ['#3d2b32', '#eee2ce', '#c0562a'],
+    swatch: ['#f3eee4', '#fbf8f2', '#8a4f2e'],
   },
   {
-    id: 'cloud',
-    label: 'Cloud',
-    description: 'Teal, ivory and coral',
-    scheme: 'light',
-    swatch: ['#0e3f45', '#f2ece1', '#e2603c'],
-  },
-  {
-    id: 'snow',
-    label: 'Snow',
-    description: 'Pure white, vivid indigo',
-    scheme: 'light',
-    swatch: ['#ffffff', '#f3f4ff', '#4f46e5'],
-  },
-  {
-    id: 'mint',
-    label: 'Mint',
-    description: 'Fresh teal with layered greens',
-    scheme: 'light',
-    swatch: ['#eaf6f1', '#fbfffd', '#0b8f6b'],
-  },
-  {
-    id: 'blossom',
-    label: 'Blossom',
-    description: 'White with rose and violet',
-    scheme: 'light',
-    swatch: ['#fdf4f8', '#ffffff', '#d43f8d'],
-  },
-  {
-    id: 'citrus',
-    label: 'Citrus',
-    description: 'White with amber and lime',
-    scheme: 'light',
-    swatch: ['#fdfaf0', '#ffffff', '#c2740a'],
-  },
-  {
-    id: 'sunrise',
-    label: 'Sunrise',
-    description: 'Warm light with coral accents',
-    scheme: 'light',
-    swatch: ['#fdf4ef', '#fbeee5', '#e0533f'],
-  },
-  {
-    id: 'nebula',
-    label: 'Nebula',
-    description: 'Midnight, violet and cyan',
+    id: 'dark',
+    label: 'Dark',
+    description: 'Neutral graphite for low light',
     scheme: 'dark',
-    swatch: ['#0b0c16', '#1b1e35', '#8b7bff'],
-  },
-  {
-    id: 'slate',
-    label: 'Slate',
-    description: 'Indigo, charcoal and cyan',
-    scheme: 'dark',
-    swatch: ['#241b56', '#1b1f2a', '#3ec9e0'],
-  },
-  {
-    id: 'nord',
-    label: 'Nord',
-    description: 'Cool arctic dark',
-    scheme: 'dark',
-    swatch: ['#2e3440', '#3f4757', '#88c0d0'],
-  },
-  {
-    id: 'aurora',
-    label: 'Aurora',
-    description: 'Deep indigo, vivid violet',
-    scheme: 'dark',
-    swatch: ['#0c0a1b', '#282349', '#a77bff'],
-  },
-  {
-    id: 'forest',
-    label: 'Forest',
-    description: 'Pine, bark and amber',
-    scheme: 'dark',
-    swatch: ['#14382a', '#21221a', '#e9b24d'],
-  },
-  {
-    id: 'amoled',
-    label: 'Amoled',
-    description: 'Violet, true black and neon',
-    scheme: 'dark',
-    swatch: ['#1c0c40', '#000000', '#35e6f2'],
+    swatch: ['#16181c', '#1f2227', '#7ea3dc'],
   },
 ];
 
 export const STORAGE_KEY = 'scholarweave-theme';
 /*
- * Paper used to be the default, so a stored "paper" from before the refresh
- * usually means "never chose". Version 2 moves those users to the new default
- * once; picking Paper again afterwards is remembered as a real choice. The
- * pre-paint script in index.html mirrors this rule.
+ * Version 3 replaced the earlier catalogue of decorative themes with three
+ * neutral ones. Saved choices from older versions move to the closest new
+ * theme once. Before version 2, a stored "paper" was the untouched default, so
+ * it is dropped rather than mapped. The pre-paint script in index.html mirrors
+ * this rule.
  */
 export const THEME_VERSION_KEY = 'scholarweave-theme-version';
-const THEME_VERSION = '2';
-const LEGACY_DEFAULT = 'paper';
-export const DEFAULT_LIGHT: ThemeId = 'prism';
-export const DEFAULT_DARK: ThemeId = 'nebula';
+const THEME_VERSION = '3';
+const LEGACY_THEMES: Record<string, ThemeId> = {
+  prism: 'light', cloud: 'light', snow: 'light', mint: 'light', blossom: 'light',
+  paper: 'sepia', citrus: 'sepia', sunrise: 'sepia',
+  nebula: 'dark', slate: 'dark', nord: 'dark', aurora: 'dark', forest: 'dark', amoled: 'dark',
+};
+export const DEFAULT_LIGHT: ThemeId = 'light';
+export const DEFAULT_DARK: ThemeId = 'dark';
 
 const IDS = new Set<string>(THEMES.map((theme) => theme.id));
 
@@ -146,12 +60,18 @@ export function isThemeId(value: unknown): value is ThemeId {
   return typeof value === 'string' && IDS.has(value);
 }
 
+function migrateStoredPreference(): void {
+  const version = localStorage.getItem(THEME_VERSION_KEY);
+  if (version === THEME_VERSION) return;
+  const saved = localStorage.getItem(STORAGE_KEY);
+  if (saved && !version && saved === 'paper') localStorage.removeItem(STORAGE_KEY);
+  else if (saved && saved in LEGACY_THEMES) localStorage.setItem(STORAGE_KEY, LEGACY_THEMES[saved]);
+  localStorage.setItem(THEME_VERSION_KEY, THEME_VERSION);
+}
+
 export function readStoredPreference(): ThemePreference {
   try {
-    if (localStorage.getItem(THEME_VERSION_KEY) !== THEME_VERSION) {
-      if (localStorage.getItem(STORAGE_KEY) === LEGACY_DEFAULT) localStorage.removeItem(STORAGE_KEY);
-      localStorage.setItem(THEME_VERSION_KEY, THEME_VERSION);
-    }
+    migrateStoredPreference();
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === 'system' || isThemeId(saved)) return saved;
   } catch {

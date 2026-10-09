@@ -89,6 +89,33 @@ async def test_provider_default_reasoning_reaches_tool_free_generation(test_sett
 
 
 @pytest.mark.anyio
+async def test_bounded_generation_sets_ollama_context_and_output_without_changing_other_calls(test_settings, monkeypatch):
+    services = create_services(test_settings)
+    payloads = []
+
+    async def request(method, path, **kwargs):
+        payloads.append(kwargs["json"])
+        return httpx.Response(200, json={"response": "Bounded answer.", "done": True, "done_reason": "stop"})
+
+    monkeypatch.setattr(services.ollama, "_request_unlocked", request)
+    resolved = ResolvedModel(
+        profile_id=services.ollama.profile_id, profile_name="Default Ollama",
+        kind="ollama", base_url=services.ollama.base_url, api_key=None, model="local-model",
+    )
+    try:
+        await services.model_runtime.generate(
+            resolved, "hello", system="metadata only", temperature=0.2, think=False,
+            max_output_tokens=1024, context_window_tokens=8192,
+        )
+        assert payloads[-1]["options"] == {"temperature": 0.2, "num_predict": 1024, "num_ctx": 8192}
+        assert payloads[-1]["think"] is False
+        await services.model_runtime.generate(resolved, "hello")
+        assert "options" not in payloads[-1]
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
 async def test_model_switch_setting_persists_without_restart_confirmation(test_settings):
     services = create_services(test_settings)
     provider = services.providers.create(ProviderCreate(

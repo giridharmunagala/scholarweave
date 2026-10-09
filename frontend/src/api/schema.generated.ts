@@ -159,6 +159,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/brief/highlights": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Highlights */
+        post: operations["highlights_api_brief_highlights_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/brief/items/{item_id}": {
         parameters: {
             query?: never;
@@ -255,6 +272,23 @@ export interface paths {
         put?: never;
         /** Refresh */
         post: operations["refresh_api_brief_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/brief/summaries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Summary History */
+        get: operations["summary_history_api_brief_summaries_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -359,6 +393,23 @@ export interface paths {
         put?: never;
         /** Download Document */
         post: operations["download_document_api_documents_download_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/documents/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search Documents */
+        get: operations["search_documents_api_documents_search_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1341,6 +1392,7 @@ export interface components {
             preferences: components["schemas"]["BriefPreferences"];
             /** Sources */
             sources: components["schemas"]["BriefSourceResponse"][];
+            summary_model_reference?: components["schemas"]["ModelReferenceSpec"];
             /** Topics */
             topics: components["schemas"]["BriefTopicResponse"][];
         };
@@ -1355,6 +1407,7 @@ export interface components {
             day?: string | null;
             /** Fetched At */
             fetched_at?: string | null;
+            highlights?: components["schemas"]["BriefSummaryState"];
             /** Items */
             items?: components["schemas"]["BriefItemResponse"][];
             /** Sources */
@@ -1364,6 +1417,31 @@ export interface components {
              * @default 0
              */
             temporary_bytes: number;
+        };
+        /** BriefHighlightSummary */
+        BriefHighlightSummary: {
+            /** Batch Count */
+            batch_count: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Day */
+            day: string;
+            /** Input Token Limit */
+            input_token_limit: number;
+            /** Item Count */
+            item_count: number;
+            model_reference: components["schemas"]["ModelReferenceSpec"];
+            /** Source Hash */
+            source_hash: string;
+            /** Text */
+            text: string;
+            /** Token Counting */
+            token_counting: string;
+            /** Workspace Path */
+            workspace_path: string;
         };
         /** BriefItemResponse */
         BriefItemResponse: {
@@ -1430,6 +1508,7 @@ export interface components {
             lookback_days: number;
             /** Source Ids */
             source_ids?: string[];
+            summary_model_reference?: components["schemas"]["ModelReferenceSpec"] | null;
             /** Topic Ids */
             topic_ids?: string[];
         };
@@ -1477,6 +1556,32 @@ export interface components {
             source_id: string;
             /** Warning */
             warning?: string | null;
+        };
+        /** BriefSummaryRequest */
+        BriefSummaryRequest: {
+            model_reference?: components["schemas"]["ModelReferenceSpec"] | null;
+        };
+        /** BriefSummaryState */
+        BriefSummaryState: {
+            /**
+             * Completed Parts
+             * @default 0
+             */
+            completed_parts: number;
+            /** Error */
+            error?: string | null;
+            /**
+             * Status
+             * @default idle
+             * @enum {string}
+             */
+            status: "idle" | "running" | "ready" | "failed" | "interrupted";
+            summary?: components["schemas"]["BriefHighlightSummary"] | null;
+            /**
+             * Total Parts
+             * @default 0
+             */
+            total_parts: number;
         };
         /** BriefTopicResponse */
         BriefTopicResponse: {
@@ -1652,6 +1757,43 @@ export interface components {
             };
             /** Page Count */
             page_count: number | null;
+            /** Source Filename */
+            source_filename: string;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+        };
+        /** DocumentSearchResponse */
+        DocumentSearchResponse: {
+            /** Citation */
+            citation: string | null;
+            /** Content Type */
+            content_type: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Excerpt */
+            excerpt: string;
+            /** Id */
+            id: string;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Page Count */
+            page_count: number | null;
+            /** Page Start */
+            page_start: number | null;
+            /** Score */
+            score: number;
             /** Source Filename */
             source_filename: string;
             /** Status */
@@ -3133,6 +3275,39 @@ export interface operations {
             };
         };
     };
+    highlights_api_brief_highlights_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BriefSummaryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BriefEditionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     discard_api_brief_items__item_id__delete: {
         parameters: {
             query?: never;
@@ -3310,6 +3485,38 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BriefEditionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    summary_history_api_brief_summaries_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BriefHighlightSummary"][];
                 };
             };
             /** @description Validation Error */
@@ -3544,6 +3751,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DocumentResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_documents_api_documents_search_get: {
+        parameters: {
+            query: {
+                query: string;
+                folder_id?: string | null;
+                unfiled?: boolean;
+                paper_status?: ("uploaded" | "processing" | "ready" | "failed") | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentSearchResponse"][];
                 };
             };
             /** @description Validation Error */

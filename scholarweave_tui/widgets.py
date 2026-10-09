@@ -60,9 +60,9 @@ class Spinner(Static):
         text = Text()
         text.append(
             SPINNER_FRAMES[self._frame] + "  ",
-            style=Style(color=palette(self, "accent", "#e6ad83"), bold=True),
+            style=Style(color=palette(self, "accent", "#7ea3dc"), bold=True),
         )
-        text.append(self.label, style=Style(color=palette(self, "text-muted", "#9babae")))
+        text.append(self.label, style=Style(color=palette(self, "text-muted", "#9ea4ad")))
         return text
 
 
@@ -72,9 +72,9 @@ class Masthead(Static):
     compact = reactive(False)
 
     def render(self) -> Text:
-        accent = Style(color=palette(self, "primary", "#e6ad83"), bold=True)
-        paper = Style(color=palette(self, "foreground", "#eee8dc"), bold=True)
-        muted = Style(color=palette(self, "text-muted", "#9babae"))
+        accent = Style(color=palette(self, "primary", "#7ea3dc"), bold=True)
+        paper = Style(color=palette(self, "foreground", "#e2e4e7"), bold=True)
+        muted = Style(color=palette(self, "text-muted", "#9ea4ad"))
         text = Text()
         text.append(" ◈ ", style=accent)
         if self.compact:
@@ -103,9 +103,9 @@ class Welcome(Vertical):
         )
         with Vertical(id="welcome-starters"):
             for lead, rest in self.STARTERS:
-                line = Text("› ", style=Style(color=palette(self, "primary", "#e6ad83")))
+                line = Text("› ", style=Style(color=palette(self, "primary", "#7ea3dc")))
                 line.append(lead + " ", style=Style(bold=True))
-                line.append(rest, style=Style(color=palette(self, "text-muted", "#9babae")))
+                line.append(rest, style=Style(color=palette(self, "text-muted", "#9ea4ad")))
                 yield Static(line, classes="starter")
         yield Static("Type  /  for commands        Enter  sends", id="welcome-hint")
 
@@ -609,7 +609,7 @@ class ChoicePicker(ModalScreen[str | None]):
     def _prompt(self, title: str, subtitle: str) -> Text:
         text = Text(title, style=Style(bold=True))
         if subtitle:
-            text.append("\n" + subtitle, style=Style(color=palette(self, "text-muted", "#9babae")))
+            text.append("\n" + subtitle, style=Style(color=palette(self, "text-muted", "#9ea4ad")))
         return text
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
@@ -660,7 +660,7 @@ class ThemePicker(ModalScreen[str | None]):
         for colour in swatch:
             text.append("██", style=Style(color=colour))
         text.append(("  " if swatch else "") + name.replace("-", " ").title(), style=Style(bold=True))
-        text.append("\n" + description, style=Style(color=palette(self, "text-muted", "#9babae")))
+        text.append("\n" + description, style=Style(color=palette(self, "text-muted", "#9ea4ad")))
         return text
 
     def on_option_list_option_highlighted(self, event: OptionList.OptionHighlighted) -> None:
@@ -741,9 +741,9 @@ class ShortcutHelp(ModalScreen[None]):
         self.dismiss(None)
 
     def _shortcut_text(self) -> Text:
-        accent = Style(color=palette(self, "primary", "#e6ad83"), bold=True)
-        key = Style(color=palette(self, "accent", "#f0c9a6"))
-        muted = Style(color=palette(self, "text-muted", "#9babae"))
+        accent = Style(color=palette(self, "primary", "#7ea3dc"), bold=True)
+        key = Style(color=palette(self, "accent", "#70afbb"))
+        muted = Style(color=palette(self, "text-muted", "#9ea4ad"))
         text = Text()
         for index, (heading, rows) in enumerate(SHORTCUTS):
             if index:

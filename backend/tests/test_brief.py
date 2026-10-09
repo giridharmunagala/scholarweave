@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import json
+import time
 from xml.sax.saxutils import escape
 
 import httpx
@@ -12,9 +13,291 @@ from backend.app import create_app
 from backend.brief.catalog import SOURCES
 from backend.brief.collection import parse_feed, parse_headlines
 from backend.brief.schemas import BriefPreferences
+from backend.brief.service import BriefService
+from backend.brief.summaries import BriefSummaryService, InputBudget, MAX_INPUT_TOKENS
+from backend.agents.blueprint import ModelReferenceSpec
+from backend.providers.schemas import ProviderCreate, ProviderModel
 from backend.core.errors import NotFoundError, ValidationError
 from backend.research.sources import _ReadableHTMLParser
 from backend.utils import utcnow
+from sqlalchemy import event
+
+
+_HIGHLIGHTS = "Abstracts point to more efficient adaptive reasoning, with preliminary results.\n\nPublisher headlines suggest new inference work, but full sources have not been reviewed."
+
+
+def _brief_model(services, stub_provider, *, api_mode="chat_completions", window=65_536):
+    profile = services.providers.create(ProviderCreate(
+        name="Brief test model", kind="openai_compatible",
+        base_url=f"{stub_provider.base_url}/v1", api_mode=api_mode,
+        models=[
+            ProviderModel(name="brief-model", capabilities={"chat"}, context_window_tokens=window),
+            ProviderModel(name="chat-model", capabilities={"chat"}, context_window_tokens=window),
+        ],
+    ))
+    reference = ModelReferenceSpec(provider_profile_id=profile.id, model="brief-model")
+    services.settings.default_model_references = {"chat": reference.model_dump()}
+    stub_provider.reply = _HIGHLIGHTS
+    return reference
+
+
+async def _complete_highlights(brief):
+    task = brief._summary_task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=30)
+    return await brief.edition()
+
+
+def test_highlight_batches_obey_exact_token_boundary_and_preserve_whole_records():
+    system = "Summarize metadata."
+    records = [{"title": f"Paper {index}", "abstract": "alpha " * 16_100} for index in range(2)]
+    budget = InputBudget("gpt-4o", MAX_INPUT_TOKENS)
+    prompt = json.dumps({"stage": "final", "records": records}, ensure_ascii=False, separators=(",", ":"))
+    tokens = budget.count(system, prompt)
+    assert tokens <= MAX_INPUT_TOKENS
+    assert budget.method == "o200k_base"
+    assert InputBudget("gpt-4o", tokens).batches(records, system) == [records]
+    assert InputBudget("gpt-4o", tokens - 1).batches(records, system) == [[records[0]], [records[1]]]
+    three = [*records, {**records[0], "title": "Third paper"}]
+    groups = budget.batches(three, system)
+    assert len(groups) == 2
+    assert [record for group in groups for record in group] == three
+    for group in groups:
+        payload = json.dumps({"stage": "final", "records": group}, ensure_ascii=False, separators=(",", ":"))
+        assert budget.count(system, payload) <= MAX_INPUT_TOKENS
+    with pytest.raises(ValidationError, match="will not be cut"):
+        budget.batches([{"abstract": "alpha " * MAX_INPUT_TOKENS}], system)
+
+
+def test_unknown_model_uses_conservative_unicode_budget():
+    budget = InputBudget("unrecognized-local-model", MAX_INPUT_TOKENS)
+    prompt = json.dumps({"abstract": "\U0001f52c" * 100}, ensure_ascii=False)
+    assert budget.method == "utf8-byte-upper-bound"
+    assert budget.count("instructions", prompt) > len(prompt.encode("utf-8"))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("api_mode", ["chat_completions", "responses"])
+async def test_highlights_use_metadata_only_and_cache_archive_across_restart_and_clear(
+    brief_app, stub_provider, test_settings, api_mode,
+):
+    _, services, requests, client = brief_app
+    reference = _brief_model(services, stub_provider, api_mode=api_mode)
+    brief = services.brief
+    try:
+        first = await brief.refresh()
+        assert first.highlights.status == "running"
+        edition = await _complete_highlights(brief)
+        summary = edition.highlights.summary
+        assert edition.highlights.status == "ready" and summary is not None
+        assert summary.text == _HIGHLIGHTS and summary.model_reference == reference
+        assert summary.item_count == 2 and summary.batch_count == 1
+        assert len(requests) == 2
+        assert all("pdf" not in url and "/news/adaptive" not in url for url in requests)
+        payload = (stub_provider.response_api_requests if api_mode == "responses" else stub_provider.requests)[0]
+        serialized = json.dumps(payload)
+        for item in edition.items:
+            assert item.title in serialized and item.abstract in serialized
+            assert item.url not in serialized
+        if api_mode == "responses":
+            assert payload["store"] is False
+            assert 0 < payload["max_output_tokens"] <= 4096
+        else:
+            assert 0 < payload["max_completion_tokens"] <= 4096
+        archive = test_settings.workspace_dir / summary.workspace_path
+        archive_json = json.loads(archive.read_text(encoding="utf-8"))
+        assert archive_json["day"] == edition.day
+        assert "items" not in archive_json and "url" not in archive_json
+        assert brief.summary_history(limit=25, offset=0) == [summary]
+        before = len(stub_provider.requests) + len(stub_provider.response_api_requests)
+        await brief.close()
+        restored = BriefService(
+            services.storage, services.source_downloads, services.documents,
+            services.workspace, brief._summaries,
+        )
+        assert (await restored.edition()).highlights.summary == summary
+        assert len(stub_provider.requests) + len(stub_provider.response_api_requests) == before
+        cleared = await restored.clear()
+        assert cleared.cleared and not cleared.items and cleared.highlights.summary == summary
+        assert archive.exists() and restored.summary_history(limit=25, offset=0) == [summary]
+        await restored.close()
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_highlight_model_is_independent_and_defaults_to_last_chat_choice(brief_app, stub_provider):
+    _, services, _, client = brief_app
+    try:
+        reference = _brief_model(services, stub_provider)
+        chat = reference.model_copy(update={"model": "chat-model"})
+        services.settings.last_chat_model_reference = chat.model_dump()
+        assert services.brief.catalog().summary_model_reference == chat
+        await services.brief.preferences(BriefPreferences(
+            source_ids=["arxiv", "openai"], summary_model_reference=reference,
+        ))
+        assert services.brief.catalog().summary_model_reference == reference
+        assert services.settings.last_chat_model_reference == chat.model_dump()
+        await services.brief.refresh()
+        assert (await _complete_highlights(services.brief)).highlights.summary.model_reference == reference
+        assert stub_provider.requests[0]["model"] == "brief-model"
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("hierarchical", [False, True])
+async def test_highlights_batch_complete_metadata_and_bound_every_combiner(
+    brief_app, stub_provider, test_settings, monkeypatch, hierarchical,
+):
+    _, services, requests, client = brief_app
+    brief = services.brief
+    try:
+        initial = await brief.refresh()
+        reference = _brief_model(services, stub_provider)
+        limit = 3000 if hierarchical else MAX_INPUT_TOKENS
+        monkeypatch.setattr("backend.brief.summaries.MAX_INPUT_TOKENS", limit)
+        brief._edition.items = [
+            initial.items[0].model_copy(update={
+                "id": f"source-{index}", "title": f"Complete source {index}",
+                "abstract": "evidence " * (120 if hierarchical else 3000) + f"END-{index}",
+            }) for index in range(5)
+        ]
+        if hierarchical:
+            stub_provider.reply = "Concise evidence and limitations. " * 20
+        collected = list(requests)
+        await brief.generate_highlights(reference)
+        result = await _complete_highlights(brief)
+        assert result.highlights.status == "ready", result.highlights.error
+        summary = result.highlights.summary
+        assert summary is not None and summary.batch_count == 5
+        assert len(stub_provider.requests) >= 6
+        if hierarchical:
+            assert len(stub_provider.requests) > 6
+        budget = InputBudget("brief-model", limit)
+        all_records = []
+        for payload in stub_provider.requests:
+            system, user = payload["messages"]
+            assert budget.count(system["content"], user["content"]) <= limit
+            body = json.loads(user["content"])
+            if "source metadata" in system["content"]:
+                all_records.extend(body["records"])
+        assert all_records == BriefSummaryService.records(brief._edition)
+        assert requests == collected
+        folder = test_settings.workspace_dir / ".scholarweave" / "brief-temp"
+        assert len(list(folder.rglob("part-*.json"))) == 5
+        if hierarchical:
+            assert list(folder.rglob("combine-*.json"))
+        archive = test_settings.workspace_dir / summary.workspace_path
+        monkeypatch.setattr(brief, "_day", lambda: "2099-01-01")
+        assert (await brief.edition()).day is None
+        assert archive.exists() and not folder.exists()
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_oversized_source_and_failed_regeneration_do_not_save_partial_highlights(brief_app, stub_provider):
+    _, services, _, client = brief_app
+    brief = services.brief
+    try:
+        initial = await brief.refresh()
+        reference = _brief_model(services, stub_provider)
+        brief._edition.items[0].abstract = "evidence " * MAX_INPUT_TOKENS
+        await brief.generate_highlights(reference)
+        failed = await _complete_highlights(brief)
+        assert failed.highlights.status == "failed" and "will not be cut" in failed.highlights.error
+        assert not stub_provider.requests
+        assert brief.summary_history(limit=25, offset=0) == []
+        brief._edition.items = initial.items
+        await brief.generate_highlights(reference)
+        prior = (await _complete_highlights(brief)).highlights.summary
+        assert prior is not None
+        stub_provider.reply = ""
+        await brief.generate_highlights(reference)
+        failed = await _complete_highlights(brief)
+        assert failed.highlights.status == "failed" and "complete highlights summary" in failed.highlights.error
+        assert failed.highlights.summary == prior
+        assert brief.summary_history(limit=25, offset=0) == [prior]
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["clear", "close", "refresh"])
+async def test_slow_highlights_do_not_block_cached_reads_and_obsolete_work_is_cancelled(
+    brief_app, stub_provider, action,
+):
+    _, services, _, client = brief_app
+    brief = services.brief
+    try:
+        reference = _brief_model(services, stub_provider)
+        def delayed_reply(_payload):
+            time.sleep(0.5)
+            return _HIGHLIGHTS
+        stub_provider._reply_for = delayed_reply
+        await brief.refresh()
+        task = brief._summary_task
+        assert task is not None
+        assert await asyncio.to_thread(stub_provider.request_started.wait, 5)
+        edition = await asyncio.wait_for(brief.edition(), timeout=0.2)
+        assert len(edition.items) == 2 and edition.highlights.status == "running"
+        if action == "clear":
+            await brief.clear()
+            assert (await brief.edition()).cleared
+        elif action == "close":
+            await brief.close()
+            restored = BriefService(
+                services.storage, services.source_downloads, services.documents,
+                services.workspace, brief._summaries,
+            )
+            assert (await restored.edition()).highlights.status == "interrupted"
+            assert restored._summary_task is None
+            await restored.close()
+        else:
+            await brief.preferences(BriefPreferences(source_ids=["arxiv", "openai"],
+                summary_model_reference=reference.model_copy(update={"model": "chat-model"})))
+            await brief.refresh(force=True)
+            result = await _complete_highlights(brief)
+            assert result.highlights.summary.model_reference.model == "chat-model"
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        if action != "refresh":
+            assert brief.summary_history(limit=25, offset=0) == []
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_highlights_routes_generate_and_read_paginated_daily_archives(brief_app, stub_provider):
+    app, services, _, client = brief_app
+    try:
+        await services.brief.refresh()
+        reference = _brief_model(services, stub_provider)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as api:
+            started = await api.post("/api/brief/highlights", json={"model_reference": reference.model_dump()})
+            assert started.status_code == 200 and started.json()["highlights"]["status"] == "running"
+            assert started.headers["cache-control"] == "no-store"
+            completed = await _complete_highlights(services.brief)
+            cached = await api.get("/api/brief")
+            assert cached.json()["highlights"]["summary"]["text"] == _HIGHLIGHTS
+            history = await api.get("/api/brief/summaries?limit=1&offset=0")
+            assert history.status_code == 200
+            assert history.json() == [completed.highlights.summary.model_dump(mode="json")]
+            assert (await api.get("/api/brief/summaries?limit=1&offset=1")).json() == []
+            assert (await api.get("/api/brief/summaries?limit=0")).status_code == 422
+            assert (await api.get("/api/brief/summaries?offset=-1")).status_code == 422
+            await api.delete("/api/brief")
+            assert (await api.get("/api/brief/summaries")).json() == history.json()
+            assert (await api.post("/api/brief/highlights", json={})).status_code == 400
+    finally:
+        await services.close()
+        await client.aclose()
 
 
 @pytest.fixture
@@ -166,13 +449,135 @@ async def test_daily_cache_preferences_discard_and_source_failures(brief_app, te
         assert not filtered.items
         assert next(source for source in filtered.sources if source.source_id == "deepmind").error
         assert (test_settings.data_dir / "brief-preferences.json").exists()
-        from backend.brief.service import BriefService
         restarted = BriefService(services.storage, services.source_downloads, services.documents, services.workspace)
         assert restarted.catalog().preferences.exclude_terms == ["tool use"]
-        assert not (await restarted.edition()).items
+        assert (await restarted.edition()).sources == filtered.sources
         brief._edition.day = (utcnow() - timedelta(days=2)).date().isoformat()
         assert (await brief.edition()).day is None
         assert not brief._dismissed
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_daily_edition_previews_and_clear_survive_server_restarts(brief_app, test_settings, monkeypatch):
+    _, services, requests, client = brief_app
+    brief = services.brief
+    restart = lambda: BriefService(services.storage, services.source_downloads, services.documents, services.workspace)
+    try:
+        edition = await brief.refresh()
+        for item in edition.items:
+            await brief.fetch(item.id)
+        previews = {item.id: await brief.raw(item.id) for item in edition.items}
+        await brief.close()
+        count = len(requests)
+        restored = restart()
+        restored_edition = await restored.refresh()
+        assert [item.id for item in restored_edition.items] == [item.id for item in edition.items]
+        assert restored_edition.fetched_at == edition.fetched_at
+        assert restored_edition.temporary_bytes == sum(len(content) for content, _ in previews.values())
+        for item in restored_edition.items:
+            assert item.downloaded
+            assert await restored.raw(item.id) == previews[item.id]
+            await restored.fetch(item.id)
+        assert len(requests) == count
+        dismissed = restored_edition.items[0]
+        await restored.discard(dismissed.id)
+        restored = restart()
+        assert dismissed.id not in {item.id for item in (await restored.edition()).items}
+        assert restored._key(dismissed) in restored._dismissed
+        assert not services.storage.resolve_path(test_settings.data_dir, restored._preview_path(dismissed.id)).exists()
+        await restored.clear()
+        await restored.close()
+        restored = restart()
+        assert (await restored.refresh()).cleared
+        assert len(requests) == count
+        cache_dir = test_settings.data_dir / "temp" / "morning-brief"
+        assert list(cache_dir.glob("*.bin")) == []
+        tomorrow = utcnow() + timedelta(days=1)
+        monkeypatch.setattr("backend.brief.service.utcnow", lambda: tomorrow)
+        restored = restart()
+        assert (await restored.edition()).day is None
+        assert not cache_dir.exists()
+        refreshed = await restored.refresh()
+        assert refreshed.day == restored._day()
+        assert len(requests) > count
+    finally:
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_cached_edition_batches_saved_checks_and_reflects_library_deletions(brief_app):
+    _, services, requests, client = brief_app
+    brief = services.brief
+    statements: list[str] = []
+    engine = services.session_factory.kw["bind"]
+
+    def track(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    try:
+        edition = await brief.refresh()
+        paper = next(item for item in edition.items if item.kind == "paper")
+        page = next(item for item in edition.items if item.kind == "lab")
+        await brief.fetch(paper.id)
+        await brief.fetch(page.id)
+        kept_paper = await brief.keep(paper.id)
+        kept_page = await brief.keep(page.id)
+        brief._edition.items = [
+            paper.model_copy(update={"id": f"paper-{index}", "saved_document_id": kept_paper.saved_document_id})
+            for index in range(80)
+        ] + [
+            page.model_copy(update={"id": f"page-{index}", "saved_path": kept_page.saved_path})
+            for index in range(64)
+        ]
+        count = len(requests)
+        event.listen(engine, "before_cursor_execute", track)
+        cached = await brief.edition()
+        assert len(cached.items) == 144
+        assert all(item.saved_document_id for item in cached.items if item.kind == "paper")
+        assert all(item.saved_path for item in cached.items if item.kind != "paper")
+        assert len(statements) == 2
+        assert len(requests) == count
+        event.remove(engine, "before_cursor_execute", track)
+        services.documents.delete_document(kept_paper.saved_document_id)
+        services.workspace.delete_file(kept_page.saved_path)
+        statements.clear()
+        event.listen(engine, "before_cursor_execute", track)
+        cached = await brief.edition()
+        assert all(not item.saved_document_id and not item.saved_path for item in cached.items)
+        assert len(statements) == 2
+        assert len(requests) == count
+    finally:
+        if event.contains(engine, "before_cursor_execute", track):
+            event.remove(engine, "before_cursor_execute", track)
+        await services.close()
+        await client.aclose()
+
+
+@pytest.mark.anyio
+async def test_cached_previews_expire_at_local_midnight_and_missing_files_are_explicit(brief_app, test_settings, monkeypatch, caplog):
+    _, services, requests, client = brief_app
+    try:
+        brief = services.brief
+        edition = await brief.refresh()
+        paper = next(item for item in edition.items if item.kind == "paper")
+        await brief.fetch(paper.id)
+        count = len(requests)
+        services.storage.delete_stored_file(test_settings.data_dir, brief._preview_path(paper.id))
+        restored = BriefService(services.storage, services.source_downloads, services.documents, services.workspace)
+        cached = await restored.refresh()
+        assert len(requests) == count
+        assert not next(item for item in cached.items if item.id == paper.id).downloaded
+        assert "Could not restore Morning Brief preview" in caplog.text
+        await restored.fetch(paper.id)
+        assert len(requests) == count + 1
+        monkeypatch.setattr(restored, "_day", lambda: "2099-01-01")
+        assert (await restored.edition()).day is None
+        assert not restored._previews
+        assert not (test_settings.data_dir / "temp" / "morning-brief").exists()
     finally:
         await services.close()
         await client.aclose()

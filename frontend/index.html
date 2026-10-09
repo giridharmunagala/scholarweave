@@ -7,20 +7,28 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <meta name="theme-color" content="#6246ea" />
+    <meta name="theme-color" content="#1d232c" />
     <meta name="color-scheme" content="light dark" />
     <meta name="description" content="Local-first workspace for research papers, notes, and agent-assisted analysis." />
     <script>
       // Resolve the saved theme before first paint so there is no flash of the wrong palette.
       // Mirrors readStoredPreference() in src/shared/theme/themes.ts, including the one-time
-      // move off the old "paper" default.
+      // move from the retired themes to the closest current one.
       (function () {
-        var themes = ['prism', 'paper', 'cloud', 'snow', 'mint', 'blossom', 'citrus', 'sunrise', 'nebula', 'slate', 'nord', 'aurora', 'forest', 'amoled'];
-        var preference = 'prism';
+        var themes = ['light', 'sepia', 'dark'];
+        var legacy = {
+          prism: 'light', cloud: 'light', snow: 'light', mint: 'light', blossom: 'light',
+          paper: 'sepia', citrus: 'sepia', sunrise: 'sepia',
+          nebula: 'dark', slate: 'dark', nord: 'dark', aurora: 'dark', forest: 'dark', amoled: 'dark'
+        };
+        var preference = 'light';
         try {
-          if (localStorage.getItem('scholarweave-theme-version') !== '2') {
-            if (localStorage.getItem('scholarweave-theme') === 'paper') localStorage.removeItem('scholarweave-theme');
-            localStorage.setItem('scholarweave-theme-version', '2');
+          var version = localStorage.getItem('scholarweave-theme-version');
+          if (version !== '3') {
+            var old = localStorage.getItem('scholarweave-theme');
+            if (old && !version && old === 'paper') localStorage.removeItem('scholarweave-theme');
+            else if (old && Object.prototype.hasOwnProperty.call(legacy, old)) localStorage.setItem('scholarweave-theme', legacy[old]);
+            localStorage.setItem('scholarweave-theme-version', '3');
           }
           var saved = localStorage.getItem('scholarweave-theme');
           if (saved === 'system' || themes.indexOf(saved) >= 0) preference = saved;
@@ -29,7 +37,7 @@
         }
         var resolved = preference;
         if (preference === 'system') {
-          resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'nebula' : 'prism';
+          resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
         }
         document.documentElement.dataset.theme = resolved;
         document.documentElement.dataset.themePreference = preference;

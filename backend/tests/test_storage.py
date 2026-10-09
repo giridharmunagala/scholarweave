@@ -12,6 +12,16 @@ from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.service import WorkspaceService
 
 
+def test_batched_tag_paths_match_search_order_and_casefolding(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    older = workspace.create_note(name="Earlier", content="Earlier content", tags=["shared", "separate"])
+    newer = workspace.create_note(name="Later", content="Later content", tags=["shared", "\u00c4stronomy"])
+    paths = workspace.paths_for_tags(["SHARED", "separate", "\u00e4stronomy", "missing"])
+    assert paths == {"shared": newer.path, "separate": older.path, "\u00e4stronomy": newer.path}
+    assert paths["shared"] == workspace.search(tags=["shared"], limit=1)[0].path
+    assert workspace.paths_for_tags([]) == {}
+
+
 def test_note_edits_preserve_identity_and_exact_content_hash(test_settings) -> None:
     workspace = WorkspaceService(SafeStorage(test_settings))
     note = workspace.create_note(name="Evidence", content="Original", tags=["keep"])

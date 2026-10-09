@@ -98,8 +98,10 @@ On Linux, `sh scripts/launch-scholarweave.sh` runs the same entry point with `--
 using the checkout's `.venv/bin/python`, regardless of the invoking directory. It forwards CLI
 arguments and uses `exec` so terminal signals and exit status reach the Python launcher directly.
 
-`scripts/launch-scholarweave-web.ps1` uses the same entry point with `--web --build-frontend`,
-without importing Textual. It checks HTML availability before opening the browser and keeps
+`scripts/launch-scholarweave-web.ps1` and Linux `scripts/launch-scholarweave-web.sh` use the
+same entry point with `--web --build-frontend`, without importing or requiring Textual.
+The shell wrapper uses the checkout's `.venv/bin/python` and forwards arguments with `exec`,
+just like the TUI wrapper. Web mode checks HTML availability before opening the browser and keeps
 an owned backend alive until the launcher is closed; reused backends are left running.
 
 Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
@@ -165,15 +167,39 @@ existing bounded, redirect/peer-validated public downloader. Titles/abstracts dr
 matching, without model inference or claims of full-paper review. Source failures and unknown dates
 are included in the wire response instead of silently treated as successful empty feeds.
 
-The edition, dismissal set and PDF/page previews live in process memory. Access on a new calendar
-day in the configured user timezone expires the previous edition; a page visit then requests a single-flight refresh.
-Clear removes this state and records a same-day cleared sentinel, preventing navigation from
+The edition, dismissal set and PDF/page previews are cached through `SafeStorage` under
+`local_data/temp/morning-brief/`, with an atomically replaced edition manifest and bounded preview
+files. Same-day startup restores them; shutdown does not clear them. Startup or access on a new
+calendar day in the configured user timezone expires the previous edition. A page visit reads the
+edition first and requests a single-flight refresh only if no current-day edition exists.
+Cached reads reconcile kept status with one paper inventory query and one batched workspace-tag
+query, rather than issuing library queries per headline. The page renders the edition independently
+of catalog loading.
+`brief/summaries.py` generates metadata-only highlights through `ModelRuntime` and packaged prompts.
+The brief model preference is independent of chat and otherwise follows the last selected/default
+chat reference. Generation runs in a service-owned task outside the edition lock; progress/final
+commits take the lock briefly. Clear, refresh, expiry and shutdown cancel obsolete tasks, and task
+identity fences prevent late commits. Interrupted generation is surfaced on restart, not silently
+rerun. Completed highlights are part of the edition manifest, so cached reads never call the model.
+Requests include framing in a 32,768-token input ceiling, respect smaller context/output reserves,
+and batch whole metadata records. Tiktoken counts recognized models; unknown tokenizers use a
+conservative UTF-8-byte upper bound. Oversized records, empty/truncated responses and failed
+combination are explicit errors. Multi-stage parts use guarded workspace `.scholarweave/brief-temp/`
+files; combination is hierarchical when necessary and stays within the same input ceiling.
+Ollama receives matching `num_ctx`/`num_predict` limits, avoiding its smaller implicit context
+silently dropping early metadata; large declared windows are capped to the needs of this brief.
+The final summary alone, with day/model/budget provenance, is written through `WorkspaceService`
+to `knowledge/morning-brief/YYYY-MM-DD.json` and indexed by existing FTS5. This archive survives
+temporary expiry and clearing; regenerating replaces the same day's JSON. Archive history reads
+use the existing workspace repository, not a second catalog.
+Clear removes temporary headlines, previews and parts, retains completed highlights, and records
+a same-day cleared sentinel, preventing navigation from
 automatically repopulating it. Explicit Refresh starts collection again. The service lock serializes
 refresh, download, keep, discard and clear so late downloads cannot resurrect cleared items. Preview
 bytes are bounded collectively to 128 MiB and individually by existing download limits. Transient
 responses use `Cache-Control: no-store`; downloads do not enter the shared chat web-source cache.
 
-Only preferences use a small guarded JSON file in `local_data/`. Keep is the persistence boundary:
+Preferences use a separate guarded JSON file in `local_data/`. Keep remains the library persistence boundary:
 PDF bytes go through `DocumentService` into canonical paper folders, while readable webpage text
 becomes an attributed `WorkspaceService` note indexed by the existing FTS5/BM25 repository. No second
 paper/note catalog or database schema is introduced. Source identity tags deduplicate kept pages;
@@ -888,6 +914,7 @@ and retains a conflicting draft for reconciliation instead of silently overwriti
 | API (all under `/api`) | Purpose |
 | --- | --- |
 | `GET /documents` | Local paper library, including PDFs not yet prepared |
+| `GET /documents/search` | Paginated, deduplicated BM25-ranked paper title/content hits |
 | `GET /workspace/notes` | Standalone Markdown notes and canonical paper notes |
 | `GET /workspace/summaries` | Canonical summary files, including not-yet-filled templates |
 | `GET /workspace/files` | Existing complete safe-file listing |
@@ -950,8 +977,14 @@ folders, managed paper artifacts, attachments, and internal metadata, and preser
 on moves. Moves and deletions update the existing FTS index immediately; failed move indexing rolls
 the file back. Cleanup authorization is scoped by the conversation, not inferred from organization.
 
-Paper content search uses SQLite FTS5 with transactional chunk-index triggers, not an embedding or
-model call. Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses honor explicit
+Paper search reuses the existing SQLite FTS5 chunk index, including one title-only row per document
+so unprepared papers are discoverable. Transactional document-title and chunk triggers keep it current;
+the older derived index is rebuilt in place without altering domain tables. Library search weights
+titles above content, ranks each paper by its best hit, deduplicates before pagination and supplies a
+matched excerpt with a page reference for content hits. Folder/unfiled and preparation-status filters
+apply before `LIMIT`/`OFFSET`. Query tokens are safely quoted and OR-matched; no embedding or model
+call is involved. Agent chunk search excludes the title-only rows and keeps its cited-source contract.
+Chunk reads use database `LIMIT`/`OFFSET`; page/chunk tool responses honor explicit
 item/character continuation cursors without a hidden global output cap.
 
 Summary jobs use one serial model worker. Short extractions fitting the context allowance are

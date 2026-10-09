@@ -92,6 +92,9 @@ class WorkspaceService:
             if requested <= {tag.casefold() for tag in document.tags}
         ]
 
+    def paths_for_tags(self, tags: list[str]) -> dict[str, str]:
+        return self._repository.paths_for_tags(tags)
+
     def search(
         self,
         *,

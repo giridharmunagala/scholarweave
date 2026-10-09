@@ -138,6 +138,13 @@ class DocumentResponse(DocumentSummaryResponse):
     chunks: list[DocumentChunkResponse]
 
 
+class DocumentSearchResponse(DocumentSummaryResponse):
+    score: float
+    excerpt: str
+    citation: str | None
+    page_start: int | None
+
+
 class PaperFolderCreateRequest(ResearchSchema):
     name: str = Field(min_length=1, max_length=100)
 
