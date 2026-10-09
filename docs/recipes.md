@@ -94,6 +94,28 @@ Cover preservation of earlier details, related-note additions, single-note scope
 without writes, ambiguous selections, and stale edits. Use the local stub provider for behavior
 tests, then run storage/API tests and the architecture guard.
 
+## Change research tracking
+
+- `backend/tracks/`: track identity/associations, Markdown templates and experiment projection,
+  revision-guarded section writes, history, import/export and HTTP endpoints.
+- `backend/workspace/layout.py` and `service.py`: canonical paths, indexing, and managed-file guards.
+- `backend/conversations/turns.py`: attached-track metadata and persisted per-run association.
+- `backend/tools/catalog.py`, `runtime.py`, `policy.py`: aligned track read/write/organization tools.
+- `backend/prompting/defaults/skills/`: the four section recipes.
+- `frontend/src/features/tracks/` and `scholarweave_tui/`: notebook presentation and editing.
+
+Markdown is authoritative; do not add a second experiment-status catalog. Linked papers keep their
+canonical files. Distinguish long-lived external experiment states from the current agent work plan.
+Each track owns an `exploration/` directory of Markdown notes. Reuse track read/write tools,
+revision guards and history with `exploration/<filename>` document keys rather than adding another
+tool surface or allowing generic workspace writes. New-file revisions are explicitly null, never
+an overwrite exemption. Include exploration inventory in ZIPs, preserve legacy imports, and test
+creation rollback/recovery as well as updates.
+Test stale saves, externally edited files, revision history, paper reuse, import preview/confirmation,
+ZIP validation, round-trip preservation, and track-aware chat using the local stub provider.
+Run track and relevant storage/API/agent tests with the architecture guard; regenerate contracts.
+Frontend changes require `npm test` and `npm run build`, and terminal changes need the focused TUI tests.
+
 ## Add an instruction-only skill
 
 1. Write one UTF-8 Markdown file in `backend/prompting/defaults/skills/<name>.md` for a bundled
@@ -112,6 +134,24 @@ tests, then run storage/API tests and the architecture guard.
    `tool_description`, and an optional `max_turns` or `serialize_calls`.
 3. Keep the chain at most two levels deep; the compiler rejects a third level and any cycle.
 4. Remember the sub-agent receives only the `request` string, so its prompt must be self-contained.
+
+## Change a provider generation protocol
+
+Profiles explicitly select `api_mode` in their existing configuration JSON. Keep Chat Completions
+as the default for older profiles and compatible servers; never route by model-name keywords.
+Ollama does not support Responses. Preserve unset configuration fields when updating a profile.
+
+Wire selection through `providers/schemas.py`, `service.py`, `runtime.py`, and `binding.py` into
+the shared harness request/stream adapter. Direct vision/generation helpers must honor it too.
+Responses uses `store=false`, full local input, encrypted reasoning replay scoped to the same
+binding, and only application function tools. Keep reasoning overrides explicit; do not silently
+clear them or fall back to another endpoint on failure.
+
+Use the real local stub's `/v1/responses` endpoint to test reasoning-plus-function round trips,
+local history, usage/cache accounting, provider verification, and image/structured generation.
+Cover stream errors, cancellation, incomplete-output recovery, workers and context maintenance
+through the harness tests. Run provider/harness/context tests and the architecture guard, regenerate
+contracts, and check both web and terminal provider selectors.
 
 ## Change paper ingestion or OCR
 
@@ -152,6 +192,23 @@ Existing-table column:
 5. Run `npm test` and `npm run build`.
 
 The app uses a small custom router, plain React state, and CSS design tokens.
+
+## Change Morning Brief behavior
+
+- `backend/brief/catalog.py`: official sources and editable topic phrases.
+- `backend/brief/collection.py`: RSS/Atom, stable GitHub releases and lab-index adapters.
+- `backend/brief/service.py`: single-flight collection, transient previews, keep/discard/clear.
+- `frontend/src/features/brief/`: headline-first page and temporary reader.
+
+Use the existing public-network/size-validated downloader, never a separate unrestricted HTTP path.
+Do not import or extract papers while collecting headlines or downloading previews. Keep alone
+persists through `DocumentService` or `WorkspaceService`; clear/discard cannot delete library data.
+Changing an arXiv revision invalidates its old temporary preview. When a saved PDF is reused, label
+that it may be an earlier revision. Keep explicit errors, unknown dates, revision labels and source
+limits visible. Source-marketing filters are editorial policy, not a scientific quality assessment.
+Run `test_brief.py`, `test_source_downloads.py` and `test_architecture.py`, regenerate API contracts,
+then run frontend tests/build. Exercise headline -> preview -> keep -> clear, plus unsaved clear,
+daily expiration, invalid feeds, size limits, failed downloads and source-format changes.
 
 ## Add a run event
 

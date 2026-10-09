@@ -10,6 +10,7 @@ import {
   providersApi,
   type Provider,
   type ProviderCreate,
+  type ProviderUpdate,
   type ProviderVerification,
 } from './api';
 
@@ -18,6 +19,7 @@ const emptyProvider: ProviderCreate = {
   kind: 'ollama',
   base_url: 'http://127.0.0.1:11434',
   api_key: null,
+  api_mode: 'chat_completions',
   models: [],
 };
 const modelCapabilities = ['chat', 'tools', 'embedding', 'vision'] as const;
@@ -84,7 +86,7 @@ export function ProviderProfilesPanel({
   const create = async () => {
     setBusy('create');
     try {
-      await providersApi.create(draft);
+      await providersApi.create(draft.kind === 'ollama' ? { ...draft, api_mode: 'chat_completions' } : draft);
       setDraft(emptyProvider);
       setShowCreate(false);
       await onRefresh();
@@ -274,11 +276,47 @@ export function ProviderProfilesPanel({
     setModelFilter('all');
     setCatalogProviderId(providerId);
   };
+  const setReasoningOverride = async (
+    provider: Provider,
+    key: 'default_reasoning_effort' | 'tool_reasoning_effort',
+    value: string,
+  ) => {
+    const effort = REASONING_EFFORTS.find((item) => item === value) ?? null;
+    const payload: ProviderUpdate = {
+      serialize_model_switches: provider.serialize_model_switches,
+      [key]: effort,
+    };
+    setBusy(`reasoning:${provider.id}`);
+    try {
+      await providersApi.update(provider.id, payload);
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const setApiMode = async (provider: Provider, value: string) => {
+    if (value !== 'chat_completions' && value !== 'responses') return;
+    setBusy(`protocol:${provider.id}`);
+    try {
+      await providersApi.update(provider.id, {
+        api_mode: value,
+        serialize_model_switches: provider.serialize_model_switches,
+      });
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <Panel
       title="Provider profiles"
-      description="All chat providers use the OpenAI-compatible Chat Completions protocol."
+      description="Choose Chat Completions for compatible servers, or Responses for providers that support it."
       actions={
         <button className="button secondary" type="button" onClick={() => setShowCreate((value) => !value)}>
           <Icon name={showCreate ? 'close' : 'plus'} />
@@ -302,6 +340,20 @@ export function ProviderProfilesPanel({
             </label>
           </div>
           <label className="field">Base URL<input value={draft.base_url} onChange={(event) => setDraft({ ...draft, base_url: event.target.value })} /></label>
+          <label className="field">
+            Generation API
+            <select
+              value={draft.kind === 'ollama' ? 'chat_completions' : draft.api_mode ?? 'chat_completions'}
+              disabled={draft.kind === 'ollama'}
+              onChange={(event) => {
+                const value = event.target.value;
+                if (value === 'chat_completions' || value === 'responses') setDraft({ ...draft, api_mode: value });
+              }}
+            >
+              <option value="chat_completions">Chat Completions</option>
+              <option value="responses">Responses (provider must support it)</option>
+            </select>
+          </label>
           {draft.kind !== 'ollama' ? (
             <label className="field">
               {draft.kind === 'openai_compatible' ? 'API key (optional)' : 'API key'}
@@ -320,6 +372,37 @@ export function ProviderProfilesPanel({
             <article className="card stack" key={provider.id}>
               <div className="toolbar"><span className="eyebrow">{provider.kind}</span><StatusPill value={provider.state} /></div>
               <div><h2>{provider.name}</h2><code>{provider.base_url}</code></div>
+              <label className="field">
+                Generation API
+                <select
+                  aria-label={`Generation API for ${provider.name}`}
+                  value={provider.api_mode ?? 'chat_completions'}
+                  disabled={busy !== null || provider.kind === 'ollama'}
+                  onChange={(event) => void setApiMode(provider, event.target.value)}
+                >
+                  <option value="chat_completions">Chat Completions</option>
+                  <option value="responses">Responses (provider must support it)</option>
+                </select>
+              </label>
+              <p>Responses keeps history locally and uses only ScholarWeave functions, not hosted search or code execution. Keep the API base URL (usually ending in /v1); do not append /responses. Use Verify after switching.</p>
+              <details>
+                <summary>Reasoning overrides</summary>
+                <p>Applies to all models in this profile. Explicit per-message reasoning takes precedence over the default. The tool override takes precedence whenever function tools are sent, including verification and delegated agents.</p>
+                {(['default_reasoning_effort', 'tool_reasoning_effort'] as const).map((key) => (
+                  <label className="field" key={key}>
+                    {key === 'default_reasoning_effort' ? 'Default reasoning effort' : 'Reasoning effort with tools'}
+                    <select
+                      value={provider[key] ?? ''}
+                      disabled={busy !== null}
+                      onChange={(event) => void setReasoningOverride(provider, key, event.target.value)}
+                    >
+                      <option value="">No override</option>
+                      {REASONING_EFFORTS.map((effort) => <option value={effort} key={effort}>{effort}</option>)}
+                    </select>
+                  </label>
+                ))}
+                <p>For the OpenAI error &quot;Function tools with reasoning-effort are not supported&quot;, select Responses if your deployment supports it and clear the tool reasoning override to retain reasoning. Otherwise set reasoning effort with tools to none; it does not enable unsupported reasoning plus tools. Leave overrides unset for models that do not accept reasoning.</p>
+              </details>
               {provider.models.length ? (
                 <button
                   className="provider-model-catalog-trigger"

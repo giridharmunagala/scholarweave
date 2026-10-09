@@ -78,6 +78,9 @@ class SafeStorage:
     def resolve_path(self, base_dir: Path, relative_path: str) -> Path:
         return self._safe_path(base_dir, relative_path)
 
+    def ensure_workspace_folder(self, relative_path: str) -> None:
+        self._safe_path(self.settings.workspace_dir, relative_path).mkdir(parents=True, exist_ok=True)
+
     def file_hash(self, base_dir: Path, relative_path: str) -> str:
         with self._safe_path(base_dir, relative_path).open("rb") as source:
             return hashlib.file_digest(source, "sha256").hexdigest()

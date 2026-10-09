@@ -1124,14 +1124,16 @@ def test_invalid_upgrade_does_not_promote_conversation(test_settings):
 
 
 @pytest.mark.parametrize("mode", ["research", "learn", "understand", "review", "deep_work"])
+@pytest.mark.parametrize("attached_track", [False, True])
 def test_full_workflow_tool_surface_fits_working_context_budget(
-    test_settings, stub_provider, mode,
+    test_settings, stub_provider, mode, attached_track,
 ):
     with TestClient(create_app(test_settings)) as client:
         profile_id = configure_provider(client, stub_provider)
+        track = client.post("/api/tracks", json={"title": "A bounded research notebook"}).json() if attached_track else None
         conversation = client.post(
             "/api/agent/conversations",
-            json={"model_reference": {
+            json={"track_id": track["id"] if track else None, "model_reference": {
                 "provider_profile_id": profile_id, "model": "stub-model",
             }},
         ).json()

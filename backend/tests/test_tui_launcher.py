@@ -94,6 +94,7 @@ def test_owned_backend_starts_serves_frontend_and_stops(isolated_library) -> Non
             assert session.process is not None and session.process.is_alive()
             assert http.get(f"{origin}/api/health").json()["status"] == "ok"
             assert "ScholarWeave startup test" in http.get(origin).text
+            session.check_web()
             assert http.get(f"{origin}/api/agent/conversations").json() == []
             log_path = session.log_path
             with BackendSession(origin, ROOT_DIR) as second:
@@ -103,6 +104,57 @@ def test_owned_backend_starts_serves_frontend_and_stops(isolated_library) -> Non
             http.get(f"{origin}/api/health")
     assert session.process is None
     assert log_path is not None and not log_path.exists()
+
+
+def test_web_launcher_refuses_backend_without_frontend(isolated_library):
+    with BackendSession(free_origin(), ROOT_DIR, timeout=20) as session:
+        with pytest.raises(LaunchError, match="not serving the web app"):
+            session.check_web()
+
+
+def test_web_mode_does_not_require_textual_or_open_browser_during_check(isolated_library, monkeypatch):
+    from scholarweave_tui import __main__ as entry
+
+    assets = isolated_library.frontend_dist_dir / "assets"
+    assets.mkdir(parents=True)
+    (isolated_library.frontend_dist_dir / "index.html").write_text("<!doctype html><title>Web</title>")
+    monkeypatch.setattr(entry.importlib.util, "find_spec", lambda name: None)
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: pytest.fail("Check must not open a browser"))
+    monkeypatch.setattr("sys.argv", ["scholarweave", "--web", "--check", "--api-url", free_origin()])
+    entry.main()
+
+
+def test_web_mode_opens_browser_and_leaves_reused_backend_running(isolated_library, monkeypatch):
+    from scholarweave_tui import __main__ as entry
+
+    assets = isolated_library.frontend_dist_dir / "assets"
+    assets.mkdir(parents=True)
+    (isolated_library.frontend_dist_dir / "index.html").write_text("<!doctype html><title>Web</title>")
+    origin = free_origin()
+    opened = []
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr("sys.argv", ["scholarweave", "--web", "--api-url", origin])
+    with BackendSession(origin, ROOT_DIR, timeout=20) as owner:
+        entry.main()
+        assert opened == [origin]
+        assert owner.process is not None and owner.process.is_alive()
+
+
+def test_web_mode_reports_browser_failure(isolated_library, monkeypatch):
+    from scholarweave_tui import __main__ as entry
+
+    assets = isolated_library.frontend_dist_dir / "assets"
+    assets.mkdir(parents=True)
+    (isolated_library.frontend_dist_dir / "index.html").write_text("<!doctype html><title>Web</title>")
+    origin = free_origin()
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: False)
+    monkeypatch.setattr("sys.argv", ["scholarweave", "--web", "--api-url", origin])
+    with pytest.raises(SystemExit) as error:
+        entry.main()
+    assert error.value.code == 1
+    with pytest.raises(LaunchError, match="connect-only"):
+        with BackendSession(origin, ROOT_DIR, connect_only=True):
+            pytest.fail("A browser failure must stop the owned backend")
 
 
 def failed_server(sock, stop, root, log_path) -> None:
@@ -260,12 +312,13 @@ def test_linux_shell_launcher_reports_missing_setup(shell_launcher, tmp_path, mi
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows shortcut launcher")
+@pytest.mark.parametrize("script", ["launch-scholarweave.ps1", "launch-scholarweave-web.ps1"])
 def test_windows_shortcut_script_builds_and_checks_from_another_directory(
-    isolated_library, tmp_path,
+    isolated_library, tmp_path, script,
 ) -> None:
     if (
         shutil.which("npm.cmd") is None
-        or importlib.util.find_spec("textual") is None
+        or (script == "launch-scholarweave.ps1" and importlib.util.find_spec("textual") is None)
         or not (ROOT_DIR / "frontend" / "node_modules" / ".bin" / "tsc.cmd").is_file()
     ):
         pytest.skip("Desktop launcher smoke test requires the tui extra and frontend dependencies")
@@ -273,13 +326,16 @@ def test_windows_shortcut_script_builds_and_checks_from_another_directory(
     command = [
         str(Path(os.environ["WINDIR"]) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"),
         "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", str(ROOT_DIR / "scripts" / "launch-scholarweave.ps1"),
+        "-File", str(ROOT_DIR / "scripts" / script),
         "-ApiUrl", origin, "-Check", "-NoPause",
     ]
     result = subprocess.run(
         command, cwd=tmp_path, capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=90,
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        env={
+            **os.environ, "PYTHONIOENCODING": "utf-8",
+            "SCHOLARWEAVE_FRONTEND_DIST_DIR": str(ROOT_DIR / "frontend" / "dist"),
+        },
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Building the web frontend" in result.stdout

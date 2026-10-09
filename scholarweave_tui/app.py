@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import webbrowser
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -29,6 +31,7 @@ from backend.conversations.schemas import ConversationResponse, ResponseEffort
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderResponse, ProviderUpdate
 from backend.prompting.schemas import SkillResponse
+from backend.tracks.schemas import TrackDetailResponse, TrackSectionResponse
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse
 from backend.workspace.schemas import (
@@ -62,7 +65,9 @@ from scholarweave_tui.widgets import (
     Welcome,
 )
 
-View = Literal["chat", "paper", "notes", "skills"]
+View = Literal["chat", "paper", "notes", "skills", "tracks"]
+TrackSection = Literal["problem", "literature", "experiments", "results"]
+TRACK_SECTIONS: tuple[TrackSection, ...] = ("problem", "literature", "experiments", "results")
 ACTIVE_STATUSES = {"pending", "running"}
 EFFORT_SUMMARY = {
     "auto": "follows your intent",
@@ -88,6 +93,7 @@ class ScholarWeaveApp(App[None]):
         Binding("ctrl+2", "view('paper')", "Papers", show=False, priority=True),
         Binding("ctrl+3", "view('notes')", "Notes", show=False, priority=True),
         Binding("ctrl+4", "view('skills')", "Skills", show=False, priority=True),
+        Binding("ctrl+5", "view('tracks')", "Tracks", show=False, priority=True),
         Binding("ctrl+k", "search", "Find", priority=True),
         Binding("ctrl+n", "new", "New", priority=True),
         Binding("ctrl+enter", "send", "Send", show=False, priority=True),
@@ -115,6 +121,12 @@ class ScholarWeaveApp(App[None]):
         self.papers: list[DocumentSummaryResponse] = []
         self.notes: list[WorkspaceFileResponse] = []
         self.skills: list[SkillResponse] = []
+        self.tracks: list[TrackDetailResponse] = []
+        self.track: TrackDetailResponse | None = None
+        self.track_section: TrackSectionResponse | None = None
+        self._track_section_name: TrackSection = "problem"
+        self._track_baseline = ""
+        self._chat_track_id: str | None = None
         self.providers: list[ProviderResponse] = []
         self.model_reference = ModelReferenceSpec()
         self.reasoning_effort: ReasoningEffort | None = None
@@ -158,6 +170,7 @@ class ScholarWeaveApp(App[None]):
             yield Button("2 Papers", id="nav-paper", classes="tab")
             yield Button("3 Notes", id="nav-notes", classes="tab")
             yield Button("4 Skills", id="nav-skills", classes="tab")
+            yield Button("5 Tracks", id="nav-tracks", classes="tab")
             yield Spinner("Working", id="busy")
             yield Static("CONNECTING", id="connection", markup=False)
         with Horizontal(id="body"):
@@ -245,6 +258,29 @@ class ScholarWeaveApp(App[None]):
                             yield Button("Edit", id="edit-skill", disabled=True)
                             yield Button("Revert", id="revert-skill", disabled=True)
                             yield Button("Save", id="save-skill", variant="primary", disabled=True)
+                    with Vertical(id="tracks-pane"):
+                        yield Static("Choose a track or create a research notebook.", id="track-path", markup=False)
+                        with Horizontal(id="track-tabs"):
+                            for section in TRACK_SECTIONS:
+                                yield Button(section.capitalize(), id=f"track-{section}", disabled=True)
+                            yield Button("Exploration", id="track-exploration", disabled=True)
+                        with VerticalScroll(id="track-overview-scroll"):
+                            yield Markdown(
+                                "Research tracks connect a problem, evidence, experiments and results. "
+                                "Experiments run outside ScholarWeave.",
+                                id="track-overview", open_links=False,
+                            )
+                        with ContentSwitcher(initial="track-scroll", id="track-content"):
+                            with VerticalScroll(id="track-scroll"):
+                                yield Markdown("**Ctrl+N** creates a track.", id="track-preview", open_links=False)
+                            yield TextArea(id="track-editor", show_line_numbers=True, read_only=True)
+                        with Horizontal(id="track-actions"):
+                            yield Static("", id="track-state", markup=False)
+                            yield Button("Edit", id="edit-track", disabled=True)
+                            yield Button("Save", id="save-track", variant="primary", disabled=True)
+                            yield Button("History", id="history-track", disabled=True)
+                            yield Button("Discuss", id="discuss-track", disabled=True)
+                            yield Button("Import/export", id="manage-track", disabled=True)
             with Vertical(id="observatory"):
                 yield Static("OBSERVATORY", classes="eyebrow")
                 yield Static("READY WHEN YOU ARE", id="run-status", markup=False)
@@ -294,6 +330,8 @@ class ScholarWeaveApp(App[None]):
             "#nav-paper": "Paper library  ·  Ctrl+2",
             "#nav-notes": "Knowledge notes  ·  Ctrl+3",
             "#nav-skills": "Edit skill instructions  ·  Ctrl+4",
+            "#nav-tracks": "Persistent research notebooks  ·  Ctrl+5",
+            "#manage-track": "Open the web track editor for file import/export and paper membership",
             "#new": "Start something new  ·  Ctrl+N",
             "#send": "Send your message  ·  Enter",
             "#stop": "Stop this run  ·  Esc",
@@ -435,6 +473,8 @@ class ScholarWeaveApp(App[None]):
                 self.notes = notes
             if self.view == "skills":
                 self.skills = await self.client.skills()
+            elif self.view == "tracks":
+                self.tracks = await self.client.tracks()
             self._connected()
             self._populate_catalog()
             await self._refresh_models()
@@ -445,6 +485,8 @@ class ScholarWeaveApp(App[None]):
                     self.note.path if self.view == "notes" and self.note and not self.note_dirty else
                     self.skill.name if self.view == "skills" and self.skill and not self.skill_dirty else None
                 )
+                if self.view == "tracks" and self.track and not self.track_dirty:
+                    key = self.track.id
                 if key:
                     self.open_entry(key)
         except ApiError as exc:
@@ -499,6 +541,12 @@ class ScholarWeaveApp(App[None]):
                 )
                 for item in (note_results if note_results is not None else self.notes)
             ]
+        elif self.view == "tracks":
+            rows = [
+                (item.id, item.title, f"{len(item.paper_ids)} linked papers / {len(item.experiments)} experiments")
+                for item in self.tracks
+                if not query or query in item.title.casefold()
+            ]
         else:
             rows = [
                 (item.name, item.name, "Bundled / editable as a local override" if item.source == "bundled" else "Local instructions")
@@ -524,9 +572,10 @@ class ScholarWeaveApp(App[None]):
             "paper": "No papers yet.\nImport PDFs in the web app.",
             "notes": "No notes yet.\nCtrl+N starts a new one.",
             "skills": "No skills yet.\nCtrl+N creates a recipe.",
+            "tracks": "No tracks yet.\nCtrl+N creates a research notebook.",
         }[self.view])
         self.screen_stack[0].query_one("#catalog-title", Static).update(
-            f"{ {'chat': 'YOUR THREADS', 'paper': 'PAPER LIBRARY', 'notes': 'KNOWLEDGE NOTES', 'skills': 'INSTRUCTION SKILLS'}[self.view]}  ·  {len(rows):02}"
+            f"{ {'chat': 'YOUR THREADS', 'paper': 'PAPER LIBRARY', 'notes': 'KNOWLEDGE NOTES', 'skills': 'INSTRUCTION SKILLS', 'tracks': 'RESEARCH TRACKS'}[self.view]}  ·  {len(rows):02}"
         )
         self._note_page_controls()
 
@@ -620,6 +669,23 @@ class ScholarWeaveApp(App[None]):
                 self.action_view("notes")
             case "nav-skills":
                 self.action_view("skills")
+            case "nav-tracks":
+                self.action_view("tracks")
+            case "track-problem" | "track-literature" | "track-experiments" | "track-results":
+                self.change_track_section(event.button.id.removeprefix("track-"))
+            case "track-exploration":
+                self.choose_track_exploration()
+            case "edit-track":
+                self.edit_track()
+            case "save-track":
+                self.action_save_note()
+            case "history-track":
+                self.restore_track_history()
+            case "discuss-track":
+                self.discuss_track()
+            case "manage-track":
+                if self.track and not webbrowser.open(f"{self.client.base_url}/tracks/{self.track.id}"):
+                    self.notify("Could not open a browser. Open the local web app's Research Tracks page.", severity="error")
             case "new":
                 self.action_new()
             case "send":
@@ -761,6 +827,10 @@ class ScholarWeaveApp(App[None]):
                 self.action_view("notes")
             case "skills":
                 self.action_view("skills")
+            case "tracks":
+                self.action_view("tracks")
+            case "track":
+                self.choose_chat_track()
             case "chat":
                 self.action_view("chat")
             case "stop":
@@ -893,12 +963,14 @@ class ScholarWeaveApp(App[None]):
                     kind=draft.kind,
                     base_url=draft.base_url,
                     api_key=draft.api_key,
+                    api_mode=draft.api_mode,
                 ))
             else:
                 update_values = {
                     "name": draft.name,
                     "kind": draft.kind,
                     "base_url": draft.base_url,
+                    "api_mode": draft.api_mode,
                 }
                 if draft.api_key is not None:
                     update_values["api_key"] = draft.api_key
@@ -1090,21 +1162,22 @@ class ScholarWeaveApp(App[None]):
             self._observe_override = False
             self._layout()
         self.screen_stack[0].query_one("#pages", ContentSwitcher).current = f"{view}-pane"
-        for name in ("chat", "paper", "notes", "skills"):
+        for name in ("chat", "paper", "notes", "skills", "tracks"):
             self.screen_stack[0].query_one(f"#nav-{name}").set_class(name == view, "active")
         self.screen_stack[0].query_one("#search", Input).value = self._notes_query if view == "notes" else ""
         self.screen_stack[0].query_one("#search", Input).placeholder = {
             "chat": "Search threads...", "paper": "Search papers...", "notes": "Search notes...",
             "skills": "Search skills...",
+            "tracks": "Search tracks...",
         }[view]
         new = self.screen_stack[0].query_one("#new", Button)
-        new.label = "+  New skill" if view == "skills" else "+  New note" if view == "notes" else "+  New conversation"
+        new.label = "+  New track" if view == "tracks" else "+  New skill" if view == "skills" else "+  New note" if view == "notes" else "+  New conversation"
         new.display = view != "paper"
         self._update_title()
         self._populate_catalog()
         if view == "chat":
             self.screen_stack[0].query_one("#composer", Composer).focus()
-        elif view == "skills":
+        elif view in {"skills", "tracks"}:
             self.refresh_catalog()
         elif view == "notes":
             self.search_notes()
@@ -1114,6 +1187,7 @@ class ScholarWeaveApp(App[None]):
             self.paper.title if self.view == "paper" and self.paper else
             (self.note.note_name or self.note.name) if self.view == "notes" and self.note else
             (self._skill_name or "Reusable instructions") if self.view == "skills" else
+            (self.track.title if self.track else "Your research tracks") if self.view == "tracks" else
             "The paper library" if self.view == "paper" else "Your knowledge, connected"
         )
         self.screen_stack[0].query_one("#section-title", Static).update(title)
@@ -1142,7 +1216,7 @@ class ScholarWeaveApp(App[None]):
         self._loading = True
         self._controls()
         pane = self.screen_stack[0].query_one(
-            {"chat": "#transcript", "paper": "#paper-scroll", "notes": "#note-content", "skills": "#skill-content"}[self.view]
+            {"chat": "#transcript", "paper": "#paper-scroll", "notes": "#note-content", "skills": "#skill-content", "tracks": "#track-content"}[self.view]
         )
         pane.loading = True
         try:
@@ -1163,6 +1237,13 @@ class ScholarWeaveApp(App[None]):
                 if await self._discard_note():
                     note = await self.client.read_note(key)
                     self._load_note(note)
+            elif self.view == "tracks":
+                if not self.track_dirty or await self.push_screen_wait(ConfirmDiscard("research section")):
+                    track = await self.client.track(key)
+                    section = await self.client.track_section(key, self._track_section_name)
+                    self.track = track
+                    self._load_track_section(section)
+                    self._paint_track_overview()
             elif await self._discard_skill():
                 self._load_skill(await self.client.read_skill(key))
             self._connected()
@@ -1183,6 +1264,7 @@ class ScholarWeaveApp(App[None]):
         self._chat_generation += 1
         self.workers.cancel_group(self, "stream")
         self.current_id, self.current_title = key, conversation.title
+        self._chat_track_id = conversation.track_id
         self.screen_stack[0].query_one("#composer", TextArea).load_text(self._drafts.get(key, ""))
         self.effort = "auto"
         transcript = self.screen_stack[0].query_one("#transcript", VerticalScroll)
@@ -1285,6 +1367,15 @@ class ScholarWeaveApp(App[None]):
         screen.query_one("#edit-skill", Button).disabled = self._skill_name is None or busy
         screen.query_one("#skill-editor", TextArea).read_only = self._skill_name is None or busy
         screen.query_one("#skill-state", Static).set_class(self.skill_dirty, "dirty")
+        for section in TRACK_SECTIONS:
+            screen.query_one(f"#track-{section}", Button).disabled = self.track is None or busy
+        screen.query_one("#track-exploration", Button).disabled = self.track is None or busy
+        screen.query_one("#edit-track", Button).disabled = self.track_section is None or busy
+        screen.query_one("#save-track", Button).disabled = not self.track_dirty or busy
+        screen.query_one("#history-track", Button).disabled = self.track_section is None or busy
+        screen.query_one("#discuss-track", Button).disabled = self.track is None or self.track_dirty or busy
+        screen.query_one("#manage-track", Button).disabled = self.track is None or busy
+        screen.query_one("#track-editor", TextArea).read_only = self.track_section is None or busy
         self._busy(
             "Saving your work" if self._mutating and self.view in {"notes", "skills"} else
             "Sending" if self._mutating else "Loading" if self._loading else None
@@ -1301,13 +1392,16 @@ class ScholarWeaveApp(App[None]):
             parts.append(self.effort)
         if not self.web_enabled:
             parts.append("local only")
+        if self._chat_track_id:
+            parts.append("track attached")
         return "  ·  ".join(parts)
 
-    async def _new_chat(self, draft: str | None = None) -> None:
+    async def _new_chat(self, draft: str | None = None, *, track_id: str | None = None) -> None:
         self._drafts[self.current_id or ""] = self.screen_stack[0].query_one("#composer", TextArea).text
         self._chat_generation += 1
         self.workers.cancel_group(self, "stream")
         self.current_id, self.current_title, self.run_record = None, "A new thread", None
+        self._chat_track_id = track_id
         self.live = LiveRun()
         self._session_usage_before_live = (0, 0)
         self._live_usage_in_history = True
@@ -1376,7 +1470,10 @@ class ScholarWeaveApp(App[None]):
                     )
                     return
                 if self.current_id is None:
-                    conversation = await self.client.create_conversation(self.model_reference)
+                    conversation = (
+                        await self.client.create_conversation(self.model_reference, track_id=self._chat_track_id)
+                        if self._chat_track_id else await self.client.create_conversation(self.model_reference)
+                    )
                     self.current_id = conversation.id
                     self.current_title = conversation.title
                 response = await self.client.send_message(
@@ -1734,6 +1831,27 @@ class ScholarWeaveApp(App[None]):
     async def action_new(self) -> None:
         if self._mutating or self._loading:
             return
+        if self.view == "tracks":
+            if self.track_dirty and not await self.push_screen_wait(ConfirmDiscard("research section")):
+                return
+            title = await self.push_screen_wait(NoteName(track=True))
+            if title is None:
+                return
+            self._mutating = True
+            self._controls()
+            try:
+                self.track = await self.client.create_track(title)
+                self._track_section_name = "problem"
+                self._load_track_section(await self.client.track_section(self.track.id, "problem"))
+                self._paint_track_overview()
+                self._update_title()
+                self.refresh_catalog()
+            except ApiError as exc:
+                self._error(exc)
+            finally:
+                self._mutating = False
+                self._controls()
+            return
         if self.view == "skills":
             if not await self._discard_skill():
                 return
@@ -1810,6 +1928,8 @@ class ScholarWeaveApp(App[None]):
             self.edit_note()
         elif self.view == "skills":
             self.edit_skill()
+        elif self.view == "tracks":
+            self.edit_track()
 
     @on(TextArea.Changed, "#note-editor")
     def note_changed(self) -> None:
@@ -1822,6 +1942,9 @@ class ScholarWeaveApp(App[None]):
 
     @work(group="mutation")
     async def action_save_note(self) -> None:
+        if self.view == "tracks":
+            await self._save_track_section()
+            return
         if self.view == "skills":
             await self._save_skill()
             return
@@ -1937,6 +2060,216 @@ class ScholarWeaveApp(App[None]):
         self._update_title()
         self._controls()
 
+    @property
+    def track_dirty(self) -> bool:
+        return self.track_section is not None and (
+            self.screen_stack[0].query_one("#track-editor", TextArea).text != self._track_baseline
+        )
+
+    def _load_track_section(self, section: TrackSectionResponse) -> None:
+        self.track_section = section
+        screen = self.screen_stack[0]
+        screen.query_one("#track-editor", TextArea).load_text(section.content)
+        self._track_baseline = screen.query_one("#track-editor", TextArea).text
+        screen.query_one("#track-preview", Markdown).update(section.content or "_An empty research section._")
+        screen.query_one("#track-content", ContentSwitcher).current = "track-scroll"
+        screen.query_one("#track-path", Static).update(section.path)
+        screen.query_one("#edit-track", Button).label = "Edit"
+        screen.query_one("#track-state", Static).update("Saved locally")
+        for name in TRACK_SECTIONS:
+            screen.query_one(f"#track-{name}", Button).set_class(name == self._track_section_name, "active")
+        screen.query_one("#track-exploration", Button).set_class(
+            self._track_section_name.startswith("exploration/"), "active",
+        )
+
+    def _paint_track_overview(self) -> None:
+        if self.track is None:
+            return
+        counts: dict[str, int] = {}
+        for experiment in self.track.experiments:
+            counts[experiment.status] = counts.get(experiment.status, 0) + 1
+        parts = [
+            f"### {self.track.title}",
+            f"{len(self.track.paper_ids)} linked papers. Experiments execute outside ScholarWeave.",
+            f"{len(self.track.exploration)} exploration files: hypotheses, leads and open questions.",
+            " | ".join(f"{status}: {count}" for status, count in counts.items()) or "No experiments recorded.",
+        ]
+        parts.extend(f"**Needs attention:** {warning}" for warning in self.track.warnings)
+        self.screen_stack[0].query_one("#track-overview", Markdown).update("\n\n".join(parts))
+
+    def edit_track(self) -> None:
+        if self.track_section is None or self._mutating or self._loading:
+            return
+        screen = self.screen_stack[0]
+        switcher = screen.query_one("#track-content", ContentSwitcher)
+        editing = switcher.current == "track-editor"
+        if editing:
+            screen.query_one("#track-preview", Markdown).update(screen.query_one("#track-editor", TextArea).text)
+        switcher.current = "track-scroll" if editing else "track-editor"
+        screen.query_one("#edit-track", Button).label = "Edit" if editing else "Preview"
+        if not editing:
+            screen.query_one("#track-editor", TextArea).focus()
+
+    @on(TextArea.Changed, "#track-editor")
+    def track_changed(self) -> None:
+        self.screen_stack[0].query_one("#track-state", Static).update(
+            "Unsaved changes" if self.track_dirty else "Saved locally" if self.track_section else ""
+        )
+        self._controls()
+
+    @work(group="track-section", exclusive=True)
+    async def change_track_section(self, section: str) -> None:
+        if self.track is None or self._mutating or self._loading or (
+            section not in TRACK_SECTIONS and section not in {item.section for item in self.track.exploration}
+        ):
+            return
+        if self.track_dirty and not await self.push_screen_wait(ConfirmDiscard("research section")):
+            return
+        self._loading = True
+        self._controls()
+        try:
+            loaded = await self.client.track_section(self.track.id, section)
+            self._track_section_name = section
+            self._load_track_section(loaded)
+        except ApiError as exc:
+            self._error(exc)
+        finally:
+            self._loading = False
+            self._controls()
+
+    @work(group="track-exploration", exclusive=True)
+    async def choose_track_exploration(self) -> None:
+        if self.track is None or self._mutating or self._loading:
+            return
+        if self.track_dirty and not await self.push_screen_wait(ConfirmDiscard("research section")):
+            return
+        try:
+            self.track = await self.client.track(self.track.id)
+            rows = [("new", "New exploration file", "Lowercase filename, hyphens or underscores")] + [
+                (item.section, item.section.removeprefix("exploration/") + ".md", "Open saved exploration")
+                for item in self.track.exploration
+            ]
+            selected = await self.push_screen_wait(ChoicePicker(
+                "Track exploration", "Keep working ideas separate from established results.", rows,
+            ))
+            if selected is None:
+                return
+            if selected == "new":
+                name = await self.push_screen_wait(NoteName())
+                if name is None:
+                    return
+                name = name.removesuffix(".md")
+                if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", name):
+                    self.notify("Use up to 80 lowercase letters, digits, hyphens or underscores.", severity="warning")
+                    return
+                selected = f"exploration/{name}"
+                loaded = await self.client.save_track_section(self.track.id, selected, f"# {name}\n\n", None)
+                self.track = await self.client.track(self.track.id)
+            else:
+                loaded = await self.client.track_section(self.track.id, selected)
+            self._track_section_name = selected
+            self._load_track_section(loaded)
+            self._paint_track_overview()
+        except ApiError as exc:
+            self._error(exc)
+        finally:
+            self._controls()
+
+    async def _save_track_section(self) -> None:
+        if not self.track_dirty or self.track is None or self.track_section is None or self._mutating or self._loading:
+            return
+        self._mutating = True
+        self._controls()
+        try:
+            saved = await self.client.save_track_section(
+                self.track.id, self._track_section_name,
+                self.screen_stack[0].query_one("#track-editor", TextArea).text,
+                self.track_section.sha256,
+            )
+            self._load_track_section(saved)
+            self.track = await self.client.track(self.track.id)
+            self._paint_track_overview()
+            self.refresh_catalog()
+            self.notify("Research section saved; previous content is retained in history.")
+        except ApiError as exc:
+            self.screen_stack[0].query_one("#track-state", Static).update(
+                "Save failed; draft retained. Copy it before refreshing to reconcile changes."
+            )
+            self._error(exc)
+        finally:
+            self._mutating = False
+            self._controls()
+
+    @work(group="track-history", exclusive=True)
+    async def restore_track_history(self) -> None:
+        if self.track is None or self.track_section is None or self._mutating or self._loading:
+            return
+        if self.track_dirty and not await self.push_screen_wait(ConfirmDiscard("research section")):
+            return
+        try:
+            history = await self.client.track_history(self.track.id, self._track_section_name)
+            rows = [(item.revision, str(item.created_at), item.revision[:12]) for item in history]
+            revision = await self.push_screen_wait(ChoicePicker(
+                "Recover earlier content", rows,
+                hint="Loads a draft. Review it, then save against the current revision.",
+            ))
+            if revision is not None:
+                restored = await self.client.track_revision(self.track.id, self._track_section_name, revision)
+                self.screen_stack[0].query_one("#track-editor", TextArea).load_text(restored.content)
+                self.screen_stack[0].query_one("#track-content", ContentSwitcher).current = "track-editor"
+                self.screen_stack[0].query_one("#edit-track", Button).label = "Preview"
+                self._controls()
+        except ApiError as exc:
+            self._error(exc)
+
+    @work(group="track-discussion", exclusive=True)
+    async def discuss_track(self) -> None:
+        if self.track is None or self.track_dirty or self._mutating or self._loading:
+            return
+        skills = {
+            "problem": "problem-framing", "literature": "literature-review",
+            "experiments": "experiment-planning", "results": "results-interpretation",
+        }
+        await self._new_chat(
+            f"{'Use ' + skills[self._track_section_name] + ' to discuss' if self._track_section_name in skills else 'Explore'} the {self._track_section_name} "
+            f"section of research track {self.track.title}. Read relevant existing evidence. "
+            "Return suggestions in chat; do not save until I request an update.",
+            track_id=self.track.id,
+        )
+
+    @work(group="chat-track", exclusive=True)
+    async def choose_chat_track(self) -> None:
+        if self._mutating or self._loading:
+            return
+        if self.run_record and self.run_record.status in ACTIVE_STATUSES:
+            self.notify("Wait for this run to finish before changing its research track.", severity="warning")
+            return
+        try:
+            tracks = await self.client.tracks()
+            rows = [("", "No research track", "Detach this chat")] + [
+                (track.id, track.title, f"{len(track.paper_ids)} linked papers") for track in tracks
+            ]
+            selected = await self.push_screen_wait(ChoicePicker(
+                "Research track for this chat", rows,
+                hint="Association does not authorize notebook writes.",
+            ))
+            if selected is None:
+                return
+            self._mutating = True
+            self._controls()
+            if self.current_id:
+                if selected:
+                    await self.client.link_track_conversation(selected, self.current_id)
+                elif self._chat_track_id:
+                    await self.client.unlink_track_conversation(self._chat_track_id, self.current_id)
+            self._chat_track_id = selected or None
+            self.notify("Chat research track updated.")
+        except ApiError as exc:
+            self._error(exc)
+        finally:
+            self._mutating = False
+            self._controls()
+
     @work(group="discuss", exclusive=True)
     async def discuss_paper(self) -> None:
         if not self.paper or self._mutating or self._loading:
@@ -2000,5 +2333,8 @@ class ScholarWeaveApp(App[None]):
         if self._mutating:
             self.notify("Wait for the current write to finish before quitting.", severity="warning")
             return
-        if await self._discard_note() and await self._discard_skill():
+        if (
+            await self._discard_note() and await self._discard_skill()
+            and (not self.track_dirty or await self.push_screen_wait(ConfirmDiscard("research section")))
+        ):
             self.exit()

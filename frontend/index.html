@@ -7,15 +7,21 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <meta name="theme-color" content="#0d7d87" />
+    <meta name="theme-color" content="#6246ea" />
     <meta name="color-scheme" content="light dark" />
     <meta name="description" content="Local-first workspace for research papers, notes, and agent-assisted analysis." />
     <script>
       // Resolve the saved theme before first paint so there is no flash of the wrong palette.
+      // Mirrors readStoredPreference() in src/shared/theme/themes.ts, including the one-time
+      // move off the old "paper" default.
       (function () {
-        var themes = ['paper', 'cloud', 'snow', 'mint', 'blossom', 'citrus', 'sunrise', 'slate', 'nord', 'aurora', 'forest', 'amoled'];
-        var preference = 'paper';
+        var themes = ['prism', 'paper', 'cloud', 'snow', 'mint', 'blossom', 'citrus', 'sunrise', 'nebula', 'slate', 'nord', 'aurora', 'forest', 'amoled'];
+        var preference = 'prism';
         try {
+          if (localStorage.getItem('scholarweave-theme-version') !== '2') {
+            if (localStorage.getItem('scholarweave-theme') === 'paper') localStorage.removeItem('scholarweave-theme');
+            localStorage.setItem('scholarweave-theme-version', '2');
+          }
           var saved = localStorage.getItem('scholarweave-theme');
           if (saved === 'system' || themes.indexOf(saved) >= 0) preference = saved;
         } catch (error) {
@@ -23,7 +29,7 @@
         }
         var resolved = preference;
         if (preference === 'system') {
-          resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'slate' : 'paper';
+          resolved = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'nebula' : 'prism';
         }
         document.documentElement.dataset.theme = resolved;
         document.documentElement.dataset.themePreference = preference;

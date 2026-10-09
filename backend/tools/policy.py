@@ -30,6 +30,7 @@ _LOCAL_READS = {
     "research.notes.read",
     "tool.results.read",
     "work.plan.read",
+    "research.tracks.read",
 }
 
 

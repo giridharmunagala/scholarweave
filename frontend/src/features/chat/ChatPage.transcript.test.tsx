@@ -328,6 +328,7 @@ function installFetch() {
       }
       if (url.endsWith('/api/providers')) return respond(PROVIDERS);
       if (url.endsWith('/api/settings')) return respond(SETTINGS);
+      if (url.endsWith('/api/tracks')) return respond([]);
       if (url.includes(`/api/agent/conversations/${CONVERSATION_ID}/messages`) && method === 'POST') {
         lastMessageRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
         const { content } = lastMessageRequest as { content: string };

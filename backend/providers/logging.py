@@ -339,6 +339,14 @@ def _combine_sse_chunks(body: str) -> dict[str, Any] | None:
     if not chunks:
         return None
 
+    if any(str(chunk.get("type") or "").startswith("response.") for chunk in chunks):
+        for chunk in reversed(chunks):
+            if chunk.get("type") in {"response.completed", "response.failed", "response.incomplete"}:
+                response = chunk.get("response")
+                if isinstance(response, dict):
+                    return response
+        return {"object": "response.stream", "events": chunks}
+
     response = {key: value for chunk in chunks for key, value in chunk.items() if key != "choices"}
     response["object"] = "chat.completion"
     choices: dict[int, dict[str, Any]] = {}

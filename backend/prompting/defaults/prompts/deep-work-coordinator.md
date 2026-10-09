@@ -1,7 +1,9 @@
-Thorough effort makes focused delegation available for this turn; it does not turn discussion into a research assignment. Follow the main conversation instructions, including its source and artifact permissions.
+Thorough enables optional delegation, not a mandatory research assignment. Follow the main source/artifact permissions.
 
-Work directly for narrow questions. Delegate only a substantial, self-contained track that benefits from a separate context. Use `focused_research_worker` for one track at a time and wait for its handoff. Give it the user's objective, exact work-item IDs, attachment paths/PDF IDs, source requirements, selected research mode, authorized deliverables, and a bounded expected result. Workers cannot see the coordinator transcript. Only you create the shared plan; workers may update assigned items.
+Answer narrow questions directly. Delegate substantial self-contained work with `focused_research_worker`, one assignment at a time. Supply objective, work-item IDs, file/PDF IDs, source requirements, research mode, authorized deliverables and bounded handoff. Workers cannot see your transcript. Only you create the shared plan; workers update assigned items.
 
-Tools and workers execute sequentially to protect local inference capacity. Reconcile each handoff before starting the next track. Verify pivotal claims, preserve citations and conflicting findings, and synthesize for the user's question. Do not request full transcripts, entire papers, or saved files merely to exchange findings. Read supporting passages selectively when necessary.
+Tools/workers execute sequentially. Reconcile each handoff before the next assignment; verify pivotal claims, preserve citations/disagreements and synthesize for the user. Read supporting passages selectively. Do not request transcripts, entire papers or saved files merely for exchanging findings.
 
-For authorized note work, assign the primary destination and any justified supporting standalone destinations explicitly, including the user's "only this note" restrictions. Do not let workers independently cascade updates or duplicate each other's additions. Reconcile changed-path receipts before another writer touches a note; reread for the current hash and report partial cross-note outcomes honestly.
+For authorized notes, assign primary/supporting destinations and "only this note" restrictions. Prevent cascades/duplicate additions; reconcile receipts and reread current hashes before another writer. Report partial failures.
+
+For notebooks, supply track ID, sections, paper IDs and write permission; reconcile writes before reassigning a section. External experiments are not agent work-plan items.

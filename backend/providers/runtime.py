@@ -15,12 +15,14 @@ from urllib.parse import urlsplit
 from openai import AsyncOpenAI, OpenAIError
 from sqlalchemy import select
 
+from backend.agents.harness import ModelBehaviorError, ModelBinding
+from backend.agents.responses import responses_parameters_from_chat, response_output_text
 from backend.core.config import Settings
 from backend.providers.logging import LLMCallLogger, logged_http_client
 from backend.providers.models import ProviderProfile as ProviderProfileRecord
 from backend.providers.repository import ProviderRepository
 from backend.providers.ollama import OllamaClient, OllamaError
-from backend.providers.schemas import ProviderModel as ProviderModelEntry
+from backend.providers.schemas import ProviderApiMode, ProviderModel as ProviderModelEntry
 from backend.providers.types import (
     AgentModelDefaults,
     ModelReference,
@@ -68,6 +70,9 @@ class ResolvedModel:
     context_window_tokens: int | None = None
     preserve_thinking: bool = False
     reasoning_efforts: tuple[str, ...] | None = None
+    default_reasoning_effort: str | None = None
+    tool_reasoning_effort: str | None = None
+    api_mode: ProviderApiMode = "chat_completions"
 
     @property
     def agent_base_url(self) -> str:
@@ -168,6 +173,11 @@ class ModelRuntime:
             raise ProviderRuntimeError(
                 f"Model '{model}' is disabled for provider profile '{profile.name}'."
             )
+        api_mode = (profile.config_json or {}).get("api_mode", "chat_completions")
+        if api_mode not in {"chat_completions", "responses"} or (
+            profile.kind == "ollama" and api_mode == "responses"
+        ):
+            raise ProviderRuntimeError(f"Invalid generation API mode for provider '{profile.name}'.")
         return ResolvedModel(
             profile_id=profile.id,
             profile_name=profile.name,
@@ -175,6 +185,9 @@ class ModelRuntime:
             base_url=profile.base_url,
             api_key=profile.api_key,
             model=model,
+            api_mode=api_mode,
+            default_reasoning_effort=(profile.config_json or {}).get("default_reasoning_effort"),
+            tool_reasoning_effort=(profile.config_json or {}).get("tool_reasoning_effort"),
             context_window_tokens=(
                 int(declared_model["context_window_tokens"])
                 if declared_model is not None
@@ -402,11 +415,24 @@ class ModelRuntime:
                 ]
             payload.append({"role": "user", "content": content})
         kwargs: dict[str, Any] = {"model": resolved.model, "messages": payload, "temperature": temperature}
+        if resolved.default_reasoning_effort is not None:
+            kwargs["reasoning_effort"] = resolved.default_reasoning_effort
         if format_ is not None:
             kwargs["response_format"] = _openai_response_format(format_)
         async with self.client(resolved) as client:
-            response = await client.chat.completions.create(**kwargs)
-        text = response.choices[0].message.content or ""
+            if resolved.api_mode == "responses":
+                binding = ModelBinding(
+                    client=client, model_name=resolved.model, provider_kind=resolved.kind,
+                    api_mode=resolved.api_mode, provider_profile_id=resolved.profile_id,
+                )
+                try:
+                    response = await client.responses.create(**responses_parameters_from_chat(kwargs, binding))
+                    text = response_output_text(response)
+                except ModelBehaviorError as exc:
+                    raise ProviderRuntimeError(str(exc)) from exc
+            else:
+                response = await client.chat.completions.create(**kwargs)
+                text = response.choices[0].message.content or ""
         if on_token and text:
             await on_token(text)
         return {"message": {"content": text}, "response": text, "raw": response.model_dump(mode="json")}

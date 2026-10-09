@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from backend.core.http import install_error_handlers
 from backend.bootstrap import ApplicationServices, create_services
+from backend.brief.router import router as brief_router
 from backend.core.config import Settings
 from backend.conversations.router import router as conversations_router
 from backend.core.router import router as core_router
@@ -19,6 +20,7 @@ from backend.prompting.router import router as skills_router
 from backend.research.router import router as research_router, summary_router
 from backend.runs.router import router as runs_router
 from backend.workspace.router import router as workspace_router
+from backend.tracks.router import router as tracks_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -49,7 +51,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runs_router,
         research_router,
         workspace_router,
+        tracks_router,
         skills_router,
+        brief_router,
     ):
         app.include_router(router, prefix=prefix)
 

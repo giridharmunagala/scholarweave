@@ -1,7 +1,7 @@
 """A tiny OpenAI-compatible server for deterministic harness integration tests.
 
-Implements enough of ``/v1/chat/completions`` to exercise plain replies, streaming,
-tool calls, model discovery, and embeddings without a live provider.
+Implements ``/v1/chat/completions`` and stateless ``/v1/responses`` for replies,
+streaming, tool calls, reasoning replay, model discovery, and embeddings.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 
 def _free_port() -> int:
@@ -60,6 +60,8 @@ class StubProvider:
         self.stream_delay_seconds = 0.0
         self.tool_plan_cursor = 0
         self.base_url = ""
+        self.reject_reasoning_with_tools = False
+        self.response_api_requests: list[dict[str, Any]] = []
 
     def _reply_for(self, _payload: dict[str, Any]) -> str:
         return self.reply
@@ -132,6 +134,84 @@ class StubProvider:
         lines.append("data: [DONE]\n\n")
         return "".join(lines)
 
+    def response_api(self, payload: dict[str, Any]) -> dict[str, Any]:
+        self.response_api_requests.append(payload)
+        messages: list[dict[str, Any]] = []
+        for item in payload.get("input") or []:
+            if item.get("type") == "function_call":
+                messages.append({
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{
+                        "id": item["call_id"], "type": "function",
+                        "function": {"name": item["name"], "arguments": item["arguments"]},
+                    }],
+                })
+            elif item.get("type") == "function_call_output":
+                messages.append({"role": "tool", "tool_call_id": item["call_id"], "content": item["output"]})
+            elif "role" in item:
+                messages.append({"role": item["role"], "content": item.get("content")})
+        completion = self.responses({
+            **payload, "messages": messages,
+            "tools": [{"type": "function", "function": tool} for tool in payload.get("tools") or []],
+        })
+        message = completion["choices"][0]["message"]
+        output: list[dict[str, Any]] = [{
+            "type": "reasoning", "id": "rs_stub",
+            "summary": [{"type": "summary_text", "text": "Checked the supplied evidence."}],
+            "encrypted_content": "opaque-stub-reasoning",
+        }]
+        if message.get("tool_calls"):
+            output.extend({
+                "type": "function_call", "id": f"fc_{index}",
+                "call_id": call["id"], "name": call["function"]["name"],
+                "arguments": call["function"]["arguments"], "status": "completed",
+            } for index, call in enumerate(message["tool_calls"]))
+        else:
+            output.append({
+                "type": "message", "id": "msg_stub", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": message.get("content") or "", "annotations": []}],
+            })
+        return {
+            "id": "resp_stub", "object": "response", "created_at": int(time.time()),
+            "status": "completed", "model": payload.get("model", "stub-model"),
+            "output": output, "error": None, "incomplete_details": None,
+            "usage": {
+                "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                "input_tokens_details": {"cached_tokens": 4},
+                "output_tokens_details": {"reasoning_tokens": 2},
+            },
+        }
+
+    def response_api_stream(self, payload: dict[str, Any]) -> str:
+        response = self.response_api(payload)
+        lines: list[str] = []
+
+        def event(kind: str, **data: Any) -> None:
+            body = {"type": kind, "sequence_number": len(lines), **data}
+            lines.append(f"event: {kind}\ndata: {json.dumps(body)}\n\n")
+
+        event("response.created", response={**response, "status": "in_progress", "output": [], "usage": None})
+        for index, item in enumerate(response["output"]):
+            event("response.output_item.added", output_index=index, item={
+                **item, **({"arguments": ""} if item["type"] == "function_call" else {}),
+            })
+            if item["type"] == "reasoning":
+                event("response.reasoning_summary_text.delta", item_id=item["id"], output_index=index,
+                      summary_index=0, delta=item["summary"][0]["text"])
+            elif item["type"] == "function_call":
+                for piece in _split(item["arguments"]):
+                    event("response.function_call_arguments.delta", item_id=item["id"], output_index=index, delta=piece)
+                event("response.function_call_arguments.done", item_id=item["id"], output_index=index, arguments=item["arguments"])
+            elif item["type"] == "message":
+                for piece in _split(item["content"][0]["text"]):
+                    event("response.output_text.delta", item_id=item["id"], output_index=index,
+                          content_index=0, delta=piece, logprobs=[])
+                event("response.output_text.done", item_id=item["id"], output_index=index, content_index=0,
+                      text=item["content"][0]["text"], logprobs=[])
+            event("response.output_item.done", output_index=index, item=item)
+        event("response.completed", response=response)
+        return "".join(lines)
+
     @property
     def tools_offered(self) -> list[str]:
         names: list[str] = []
@@ -153,6 +233,15 @@ def stub_provider():
     async def chat_completions(request: Request):
         payload = await request.json()
         provider.request_started.set()
+        if (
+            provider.reject_reasoning_with_tools
+            and payload.get("tools")
+            and payload.get("reasoning_effort") != "none"
+        ):
+            return JSONResponse(status_code=400, content={"error": {
+                "message": "Function tools with reasoning-effort are not supported",
+                "type": "invalid_request_error", "param": "reasoning_effort", "code": None,
+            }})
         if payload.get("stream"):
             async def chunks():
                 if provider.stream_delay_seconds:
@@ -165,6 +254,19 @@ def stub_provider():
     @app.get("/v1/models")
     async def models() -> dict[str, Any]:
         return {"object": "list", "data": [{"id": "stub-model", "object": "model"}]}
+
+    @app.post("/v1/responses")
+    async def response_api(request: Request):
+        payload = await request.json()
+        provider.request_started.set()
+        if payload.get("stream"):
+            async def chunks():
+                if provider.stream_delay_seconds:
+                    await asyncio.sleep(provider.stream_delay_seconds)
+                yield provider.response_api_stream(payload)
+
+            return StreamingResponse(chunks(), media_type="text/event-stream")
+        return provider.response_api(payload)
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> dict[str, Any]:

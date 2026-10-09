@@ -22,6 +22,11 @@ from backend.research.sources import WebSource, WebSourceUnavailable
 from backend.tests.test_api import configure_provider, wait_for_run
 from backend.utils import utcnow
 
+BUNDLED_SKILLS = [
+    "experiment-planning", "literature-review", "problem-framing",
+    "results-interpretation", "web-synthesis",
+]
+
 
 def _write_skill(settings, name: str, content: str | bytes) -> Path:
     data = content.encode("utf-8") if isinstance(content, str) else content
@@ -40,22 +45,22 @@ def _registry(settings, *, empty_defaults: bool = False) -> SkillRegistry:
 
 def test_local_skills_override_defaults_and_reload_in_stable_order(test_settings):
     registry = _registry(test_settings)
-    assert [skill.name for skill in registry.snapshot()] == ["web-synthesis"]
+    assert [skill.name for skill in registry.snapshot()] == BUNDLED_SKILLS
     _write_skill(test_settings, "web-synthesis.md", "# My web recipe\n\nCompare the sources.")
     first_path = _write_skill(test_settings, "a-recipe.md", b"\xef\xbb\xbf# A recipe\n\nUse local notes.")
     _write_skill(test_settings, "ignored.py", "raise RuntimeError('never execute')")
     _write_skill(test_settings, "nested/not-loaded.md", "Not a top-level skill.")
 
     first = registry.snapshot()
-    assert [skill.name for skill in first] == ["a-recipe", "web-synthesis"]
+    assert [skill.name for skill in first] == ["a-recipe", *BUNDLED_SKILLS]
     assert first[0].instructions.startswith("# A recipe")
-    assert first[1].instructions == "# My web recipe\n\nCompare the sources."
+    assert first[-1].instructions == "# My web recipe\n\nCompare the sources."
     _write_skill(test_settings, "web-synthesis.md", "# Changed\n\nReturn a comparison table.")
     first_path.unlink()
     second = registry.snapshot()
-    assert [skill.name for skill in second] == ["web-synthesis"]
-    assert second[0].instructions.startswith("# Changed")
-    assert first[1].instructions.startswith("# My web recipe")
+    assert [skill.name for skill in second] == BUNDLED_SKILLS
+    assert second[-1].instructions.startswith("# Changed")
+    assert first[-1].instructions.startswith("# My web recipe")
 
 
 @pytest.mark.parametrize(
@@ -395,7 +400,7 @@ def test_skill_api_edits_bundled_as_local_override_and_creates_custom_files(test
     with TestClient(create_app(test_settings)) as client:
         listed = client.get("/api/skills")
         assert listed.status_code == 200
-        assert [item["name"] for item in listed.json()] == ["web-synthesis"]
+        assert [item["name"] for item in listed.json()] == BUNDLED_SKILLS
         original = client.get("/api/skills/web-synthesis").json()
         assert original["source"] == "bundled"
         content = "# My web synthesis\n\nRetain source URLs.\n"
@@ -418,7 +423,7 @@ def test_skill_api_edits_bundled_as_local_override_and_creates_custom_files(test
         })
         assert created.status_code == 200, created.text
         assert [item["name"] for item in client.get("/api/skills").json()] == [
-            "compare-notes", "web-synthesis",
+            "compare-notes", *BUNDLED_SKILLS,
         ]
         assert client.app.state.services.workspace.list_files() == []
         assert client.get("/api/skills/missing").status_code == 404

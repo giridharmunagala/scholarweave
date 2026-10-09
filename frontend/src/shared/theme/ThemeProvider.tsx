@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
   applyTheme,
+  DEFAULT_DARK,
+  DEFAULT_LIGHT,
   prefersDark,
   readStoredPreference,
   resolveTheme,
@@ -45,8 +47,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setPreferenceState((current) => {
       const active = resolveTheme(current);
       const isDark = THEMES.find((item) => item.id === active)?.scheme === 'dark';
-      if (current === 'system') return isDark ? 'paper' : 'slate';
-      return isDark ? 'paper' : 'slate';
+      if (current === 'system') return isDark ? DEFAULT_LIGHT : DEFAULT_DARK;
+      return isDark ? DEFAULT_LIGHT : DEFAULT_DARK;
     });
   }, []);
 

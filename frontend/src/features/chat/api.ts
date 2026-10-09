@@ -19,10 +19,10 @@ type SendMessageOptions = Partial<Pick<ConversationMessageRequest,
 function conversationApi(basePath: string) {
   return {
   list: () => request<Conversation[]>(basePath),
-  create: (modelReference: ModelReference) =>
+  create: (modelReference: ModelReference, trackId?: string) =>
     request<Conversation>(
       basePath,
-      json('POST', { model_reference: modelReference }),
+      json('POST', { model_reference: modelReference, ...(trackId ? { track_id: trackId } : {}) } satisfies Pick<components['schemas']['ResearchConversationCreateRequest'], 'model_reference' | 'track_id'>),
     ),
   get: (id: string) =>
     request<ConversationDetail>(`${basePath}/${encodeURIComponent(id)}`),

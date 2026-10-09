@@ -139,7 +139,7 @@ class BackendSession:
                 sock.close()
             print(f"Starting the backend at {self.base_url}...", flush=True)
             self._wait_ready()
-            print("Backend ready. Closing this TUI will stop this backend.", flush=True)
+            print("Backend ready. Closing this launcher will stop this backend.", flush=True)
             return self
         except BaseException:
             # Context managers are not exited when __enter__ fails.
@@ -159,6 +159,20 @@ class BackendSession:
             f"Backend did not become ready within {self.timeout:g} seconds at {self.base_url}. "
             "The port may be occupied by another program.",
         ))
+
+    def check_web(self) -> None:
+        try:
+            response = self._http.get(self.base_url)
+        except httpx.RequestError as exc:
+            raise LaunchError(f"Could not check the web app at {self.base_url}: {exc}") from exc
+        if (
+            response.status_code != 200
+            or "text/html" not in response.headers.get("content-type", "")
+        ):
+            raise LaunchError(
+                "The backend is running but is not serving the web app. "
+                "Build the frontend and restart the existing backend before launching again."
+            )
 
     def _diagnostic(self, message: str) -> str:
         if self.log_path is None:

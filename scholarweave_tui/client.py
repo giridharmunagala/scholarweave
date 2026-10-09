@@ -26,6 +26,7 @@ from backend.providers.schemas import (
     ProviderUpdate,
 )
 from backend.prompting.schemas import SkillResponse
+from backend.tracks.schemas import TrackDetailResponse, TrackHistoryEntry, TrackSectionResponse
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse, SteeringMessageResponse
 from backend.workspace.schemas import (
@@ -184,11 +185,14 @@ class ScholarWeaveClient:
 
     async def create_conversation(
         self, model_reference: ModelReferenceSpec | None = None,
+        *, track_id: str | None = None,
     ) -> ConversationResponse:
         # An empty reference stays out of the payload so the backend picks the configured default.
         payload: dict[str, Any] = {}
         if model_reference and (model_reference.provider_profile_id or model_reference.model):
             payload["model_reference"] = model_reference.model_dump(mode="json")
+        if track_id is not None:
+            payload["track_id"] = track_id
         return await self._request(
             "POST", "/agent/conversations", ConversationResponse, json=payload,
         )
@@ -259,6 +263,59 @@ class ScholarWeaveClient:
 
     async def papers(self) -> list[DocumentSummaryResponse]:
         return await self._request("GET", "/documents", list[DocumentSummaryResponse])
+
+    async def tracks(self) -> list[TrackDetailResponse]:
+        return await self._request("GET", "/tracks", list[TrackDetailResponse])
+
+    async def create_track(self, title: str) -> TrackDetailResponse:
+        return await self._request("POST", "/tracks", TrackDetailResponse, json={"title": title})
+
+    async def track(self, track_id: str) -> TrackDetailResponse:
+        return await self._request("GET", f"/tracks/{_segment(track_id)}", TrackDetailResponse)
+
+    async def track_section(self, track_id: str, section: str) -> TrackSectionResponse:
+        return await self._request(
+            "GET", self._track_document_path(track_id, section),
+            TrackSectionResponse,
+        )
+
+    async def save_track_section(
+        self, track_id: str, section: str, content: str, expected_sha256: str | None,
+    ) -> TrackSectionResponse:
+        return await self._request(
+            "PUT", self._track_document_path(track_id, section),
+            TrackSectionResponse, json={"content": content, "expected_sha256": expected_sha256},
+        )
+
+    async def track_history(self, track_id: str, section: str) -> list[TrackHistoryEntry]:
+        return await self._request(
+            "GET", f"{self._track_document_path(track_id, section)}/history",
+            list[TrackHistoryEntry],
+        )
+
+    async def track_revision(self, track_id: str, section: str, revision: str) -> TrackSectionResponse:
+        return await self._request(
+            "GET", f"{self._track_document_path(track_id, section)}/history/{_segment(revision)}",
+            TrackSectionResponse,
+        )
+
+    @staticmethod
+    def _track_document_path(track_id: str, section: str) -> str:
+        if section.startswith("exploration/"):
+            return f"/tracks/{_segment(track_id)}/exploration/{_segment(section.removeprefix('exploration/'))}"
+        return f"/tracks/{_segment(track_id)}/sections/{_segment(section)}"
+
+    async def link_track_conversation(self, track_id: str, conversation_id: str) -> TrackDetailResponse:
+        return await self._request(
+            "PUT", f"/tracks/{_segment(track_id)}/conversations/{_segment(conversation_id)}",
+            TrackDetailResponse,
+        )
+
+    async def unlink_track_conversation(self, track_id: str, conversation_id: str) -> TrackDetailResponse:
+        return await self._request(
+            "DELETE", f"/tracks/{_segment(track_id)}/conversations/{_segment(conversation_id)}",
+            TrackDetailResponse,
+        )
 
     async def paper(self, id: str) -> DocumentResponse:
         return await self._request("GET", f"/documents/{_segment(id)}", DocumentResponse)

@@ -70,6 +70,30 @@ language data; encrypted PDFs must be unlocked before upload.
 
 Each paper has a readable, stable folder containing its original PDF, notes, summaries, and evidence.
 
+### Morning Brief
+
+Open **Morning Brief** for a headline-first reading list from arXiv, official AI labs, technical blogs,
+and framework releases. The default interests cover LLM training, inference, test-time compute,
+RL/post-training, context/memory, agents/tool use, and ML/DL foundations. Edit interests, exclusions,
+sources and the recent-reading window directly on the page. Collection needs no model or paid feed.
+
+**Download PDF** or **Download page** opens a temporary preview; neither action imports content into
+the library. **Keep in library** explicitly saves the original PDF into the existing paper library,
+or the readable page text and source attribution as an indexed workspace note. Kept PDFs can be
+extracted through the library's existing preparation controls. Existing source-linked papers and
+previously kept pages are reused. **Discard** dismisses a headline and its temporary content;
+**Clear fetched data** erases the entire fetched edition and previews, never kept library content.
+Clearing stays effective until you explicitly refresh.
+
+Headlines and previews are memory-only, expire on the next day's access, and disappear on backend
+restart. Only interest/source preferences and explicitly kept content persist locally. The first page
+visit each day refreshes the edition; this is not an always-on scheduler when the app is closed.
+arXiv RSS supplies its latest announcement batch, not a historical backfill. Revisions, undated
+headlines, source failures and collection limits are labeled. Topic matching uses titles and abstracts;
+it does not claim full-paper review or independent validation of publisher claims. Free-to-read
+research is not necessarily open-source code or weights. OpenAI customer marketing and unstable
+framework prereleases are excluded from the default collection.
+
 ### Notes And Research Discovery
 
 Create reusable knowledge notes and keep paper-specific notes beside their sources. Find notes
@@ -86,6 +110,39 @@ alone does not save files, and paper notes remain separate from generated paper 
 
 ![ScholarWeave notes workspace](docs/screenshots/workspace.png)
 
+### Research Tracks
+
+Organize a long-lived research problem in **Research Tracks**, separately from any chat or
+agent work plan. Each track has four editable Markdown sections: **Problem**, **Literature**,
+**Experiments**, and **Results**. The literature template includes one comparison table,
+cross-paper synthesis, and detailed per-paper reviews. Link existing library papers without
+copying PDFs or moving their canonical notes and summaries.
+
+Every track also has an **Exploration** folder for multiple Markdown files containing working
+hypotheses, questions, search leads and rejected approaches. You and the assistant can create/edit
+these files without mixing tentative ideas into established results. Existing tracks receive the
+folder automatically. Exploration files have the same revision guards, history and import/export
+support as the four main documents.
+
+Experiments use stable `EXP-001`-style IDs with **Suggested**, **Planned**, **Running**,
+**Completed**, **Blocked**, or **Cancelled** states. The overview reads these states directly
+from `experiments.md`; it does not invent a completion percentage. Code and experiments run
+outside ScholarWeave. Record supplied measurements in results, keeping observations separate
+from assistant interpretation and unresolved questions.
+
+Attach a chat to a track, or start a section discussion from the track. The bundled
+`problem-framing`, `literature-review`, `experiment-planning`, and `results-interpretation`
+skills guide the model's work. Discussion does not save anything; explicitly request an update
+to persist findings. Track chats read relevant sections on demand rather than injecting the
+entire notebook into every message.
+
+Export one Markdown section or the whole track as a ZIP. Import externally edited Markdown or
+a track ZIP, review the preview and warnings, then merge or explicitly confirm replacement.
+Revision checks protect newer edits, and section history lets you recover earlier content.
+Files remain under `workspace\projects\tracks\<title--id>\`; refresh the workspace index after direct
+external edits. [Research track organization](docs/research-tracks.md) describes the document
+format and round-trip workflow.
+
 ### Your Choice Of Models
 
 Add provider profiles for Ollama, self-hosted OpenAI-compatible servers such as llama.cpp, or hosted
@@ -93,8 +150,28 @@ services such as OpenAI and OpenRouter. Configure the service's compatible base 
 required, and available models in **Settings**.
 
 Choose models and supported reasoning settings for chat and paper summaries. ScholarWeave uses the
-official OpenAI client with the Chat Completions API; provider support depends on compatible endpoints
+official OpenAI client with the profile's selected API; provider support depends on compatible endpoints
 and the model capabilities required for your task, such as tool calling or vision.
+
+**Generation API** defaults to **Chat Completions**, keeping Ollama, llama.cpp, proxies and existing
+profiles unchanged. Choose **Responses** for an OpenAI or Azure deployment that supports it, then
+use **Verify** to check the deployment. Keep the API base URL (usually ending in `/v1`), not an
+individual `/responses` endpoint. API selection is also available in the terminal's `/provider`
+form. Responses requests use only ScholarWeave's functions, not OpenAI-hosted tools. History stays
+local with `store=false` requests and encrypted reasoning replay; this does not change which
+provider receives your inference inputs. Unsupported endpoints return an error, not a silent fallback.
+
+Expand **Reasoning overrides** on a provider profile to set a default reasoning effort.
+An explicit per-message choice overrides that default. **Reasoning effort with tools**
+overrides both whenever function tools are included (also during verification and delegation).
+For the OpenAI error "Function tools with reasoning-effort are not supported", set the tool
+override to `none`, or switch to Responses if the deployment supports reasoning with functions
+and clear the tool override. A `none` override keeps tool calling available but disables reasoning on those requests:
+the affected models cannot combine reasoning and tools on Chat Completions. Tool-free calls
+can still use reasoning. Overrides apply to all models in that profile, so use separate
+profiles for models with different requirements. Leave overrides unset for models that do
+not accept reasoning; clearing an override restores the previous behavior. Switching APIs alone
+does not clear intentional overrides.
 
 ![ScholarWeave provider settings](docs/screenshots/settings-providers.png)
 
@@ -124,6 +201,20 @@ Set-Location ..
 Open [ScholarWeave](http://127.0.0.1:8000), add your provider in **Settings**, and select a chat model.
 The backend serves both the API and the built frontend.
 
+**Windows web launcher (not the terminal cockpit):**
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\launch-scholarweave-web.ps1
+```
+
+This builds the frontend, starts or reuses the local backend for this library, checks that
+it serves the web app, and opens your default browser. It does not require the terminal extra.
+Keep the launcher window open while using a server it started; Ctrl+C shuts down only that
+server. A pre-existing backend is left running. If that backend started before the frontend
+was built, restart it first. Use `-ApiUrl http://127.0.0.1:8001` for a different port, or
+`-Check -NoPause` to check startup without opening the browser. The existing Windows shortcut
+and `launch-scholarweave.ps1` remain terminal launchers.
+
 The app has no authentication, so keep its web server bound to `127.0.0.1`. This does not restrict
 model connections: your provider can run on your machine, another server, or a hosted service.
 
@@ -141,6 +232,12 @@ Open **Skills** with **Ctrl+4** to browse, create, or edit instruction files. **
 between editing and preview; **Ctrl+S** saves. Editing a bundled skill creates a local override.
 No activation or conversation association is needed: the model chooses relevant skills
 automatically. Saved changes apply to new messages, not tasks already running.
+
+Open **Research Tracks** with **Ctrl+5** or `/tracks` to create, read, and edit the four notebook
+sections. **Ctrl+S** saves with revision protection; **History** loads an earlier version as a
+draft for review. **Discuss** prepares an unsent track-linked chat. Use `/track` to attach or
+detach an existing chat. **Import/export** opens the web track editor for file round-tripping
+and linked-paper management; the terminal never reads or writes research files directly.
 
 Install the terminal extra, then launch:
 

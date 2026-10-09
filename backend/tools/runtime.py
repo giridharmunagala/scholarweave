@@ -9,7 +9,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from stop_words import get_stop_words
 
@@ -32,6 +32,9 @@ from backend.tools.failures import classify_tool_error
 from backend.tools.policy import ToolInputError, operation_policy, retry_delay
 from backend.workspace.service import WorkspaceDocument, WorkspaceService
 from backend.workspace.layout import WorkspaceLayout
+
+if TYPE_CHECKING:
+    from backend.tracks.service import TrackService
 
 
 _WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
@@ -298,6 +301,7 @@ class ApplicationToolRuntime:
         conversations: ConversationService,
         prompts: PromptRegistry | None = None,
         run_repository: RunRepository | None = None,
+        tracks: TrackService | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -309,6 +313,7 @@ class ApplicationToolRuntime:
         self._conversations = conversations
         self._prompts = prompts
         self._runs = run_repository
+        self._tracks = tracks
         self._paper_summary_lock = asyncio.Lock()
         self._summary_save_lock = threading.RLock()
         self._mutation_lock = asyncio.Lock()
@@ -317,6 +322,79 @@ class ApplicationToolRuntime:
 
     def set_summary_runner(self, runner: Any) -> None:
         self._summary_runner = runner
+
+    def _track_service(self) -> TrackService:
+        if self._tracks is None:
+            raise ToolInputError("Research tracks are unavailable.")
+        return self._tracks
+
+    def _track_id(self, arguments: dict[str, Any], context: ScholarWeaveContext) -> str:
+        track_id = arguments.get("track_id") or context.metadata.get("research_track_id")
+        if not isinstance(track_id, str) or not track_id.strip():
+            raise ToolInputError("Select a track_id from read_research_track or attach this chat to a track.")
+        return track_id
+
+    def _read_research_track(
+        self, arguments: dict[str, Any], context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        service = self._track_service()
+        action = arguments["action"]
+        if action == "list":
+            if arguments["track_id"] is not None or arguments["section"] is not None:
+                raise ToolInputError("List requires track_id and section to be null.")
+            tracks = service.list()
+            offset, limit = arguments["offset"], arguments["limit"]
+            return {
+                "results": [track.model_dump(mode="json") for track in tracks[offset:offset + limit]],
+                "next_offset": offset + limit if len(tracks) > offset + limit else None,
+            }
+        track_id = self._track_id(arguments, context)
+        if action == "inspect":
+            if arguments["section"] is not None:
+                raise ToolInputError("Inspect requires section to be null.")
+            return service.get(track_id).model_dump(mode="json")
+        if action != "section" or arguments["section"] is None:
+            raise ToolInputError("Select problem, literature, experiments, results, or exploration/<filename-without-md>.")
+        return service.read_section(track_id, arguments["section"]).model_dump(mode="json")
+
+    def _write_research_track(
+        self, arguments: dict[str, Any], context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        track_id = self._track_id(arguments, context)
+        saved = self._track_service().write_section(
+            track_id, arguments["section"], arguments["content"],
+            expected_sha256=arguments["expected_sha256"],
+        )
+        context.receipts.append(ToolReceipt(
+            kind="research_track",
+            title=f"Updated {arguments['section']}",
+            description=saved.path,
+            href=f"/tracks/{track_id}",
+            metadata={"track_id": track_id, "section": arguments["section"], "path": saved.path},
+        ))
+        return saved.model_dump(mode="json")
+
+    def _organize_research_track(
+        self, arguments: dict[str, Any], context: ScholarWeaveContext,
+    ) -> dict[str, Any]:
+        service = self._track_service()
+        action = arguments["action"]
+        if action == "create":
+            if arguments["track_id"] is not None or arguments["document_id"] is not None or not arguments["title"]:
+                raise ToolInputError("Creating a track requires title; track_id and document_id must be null.")
+            track = service.create(arguments["title"])
+        else:
+            if action not in {"add_paper", "remove_paper"} or arguments["title"] is not None or not arguments["document_id"]:
+                raise ToolInputError("Paper membership requires document_id, null title, and add_paper or remove_paper.")
+            track_id = self._track_id(arguments, context)
+            operation = service.add_paper if action == "add_paper" else service.remove_paper
+            operation(track_id, arguments["document_id"])
+            track = service.get(track_id)
+        context.receipts.append(ToolReceipt(
+            kind="research_track", title=track.title, description=action,
+            href=f"/tracks/{track.id}", metadata={"track_id": track.id},
+        ))
+        return track.model_dump(mode="json")
 
     async def _summarize_research_paper(
         self, arguments: dict[str, Any], context: ScholarWeaveContext,

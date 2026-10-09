@@ -30,6 +30,7 @@ class SessionItemResponse(ConversationSchema):
 class ResearchConversationCreateRequest(ConversationSchema):
     title: str = Field(default="New chat", min_length=1, max_length=120)
     model_reference: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
+    track_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class ConversationResponse(ConversationSchema):
@@ -42,6 +43,7 @@ class ConversationResponse(ConversationSchema):
     last_message_preview: str
     created_at: datetime
     updated_at: datetime
+    track_id: str | None = None
 
 
 class ConversationDetailResponse(ConversationResponse):

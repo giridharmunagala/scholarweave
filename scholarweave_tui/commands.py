@@ -44,6 +44,8 @@ COMMANDS: tuple[Command, ...] = (
     Command("papers", "Open the paper library"),
     Command("notes", "Open your knowledge notes"),
     Command("skills", "Browse and edit instruction-only skills"),
+    Command("tracks", "Open your persistent research notebooks"),
+    Command("track", "Attach this chat to a research track or detach it"),
     Command("chat", "Back to the conversation"),
     Command("stop", "Stop the run that is streaming"),
     Command("refresh", "Reload everything from your local backend"),

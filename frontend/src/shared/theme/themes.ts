@@ -1,6 +1,8 @@
 /** Theme catalogue and the small amount of DOM plumbing a theme needs. */
 
 export type ThemeId =
+  | 'prism'
+  | 'nebula'
   | 'paper'
   | 'cloud'
   | 'snow'
@@ -25,6 +27,13 @@ export interface ThemeDefinition {
 }
 
 export const THEMES: ThemeDefinition[] = [
+  {
+    id: 'prism',
+    label: 'Prism',
+    description: 'Crisp white, violet and pink',
+    scheme: 'light',
+    swatch: ['#1e1b4b', '#ffffff', '#6246ea'],
+  },
   {
     id: 'paper',
     label: 'Paper',
@@ -75,6 +84,13 @@ export const THEMES: ThemeDefinition[] = [
     swatch: ['#fdf4ef', '#fbeee5', '#e0533f'],
   },
   {
+    id: 'nebula',
+    label: 'Nebula',
+    description: 'Midnight, violet and cyan',
+    scheme: 'dark',
+    swatch: ['#0b0c16', '#1b1e35', '#8b7bff'],
+  },
+  {
     id: 'slate',
     label: 'Slate',
     description: 'Indigo, charcoal and cyan',
@@ -112,8 +128,17 @@ export const THEMES: ThemeDefinition[] = [
 ];
 
 export const STORAGE_KEY = 'scholarweave-theme';
-export const DEFAULT_LIGHT: ThemeId = 'paper';
-export const DEFAULT_DARK: ThemeId = 'slate';
+/*
+ * Paper used to be the default, so a stored "paper" from before the refresh
+ * usually means "never chose". Version 2 moves those users to the new default
+ * once; picking Paper again afterwards is remembered as a real choice. The
+ * pre-paint script in index.html mirrors this rule.
+ */
+export const THEME_VERSION_KEY = 'scholarweave-theme-version';
+const THEME_VERSION = '2';
+const LEGACY_DEFAULT = 'paper';
+export const DEFAULT_LIGHT: ThemeId = 'prism';
+export const DEFAULT_DARK: ThemeId = 'nebula';
 
 const IDS = new Set<string>(THEMES.map((theme) => theme.id));
 
@@ -123,6 +148,10 @@ export function isThemeId(value: unknown): value is ThemeId {
 
 export function readStoredPreference(): ThemePreference {
   try {
+    if (localStorage.getItem(THEME_VERSION_KEY) !== THEME_VERSION) {
+      if (localStorage.getItem(STORAGE_KEY) === LEGACY_DEFAULT) localStorage.removeItem(STORAGE_KEY);
+      localStorage.setItem(THEME_VERSION_KEY, THEME_VERSION);
+    }
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === 'system' || isThemeId(saved)) return saved;
   } catch {

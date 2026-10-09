@@ -86,6 +86,20 @@
         "title": "ArtifactResponse",
         "type": "object"
       },
+      "Body_preview_zip_api_tracks__track_id__imports_preview_zip_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_preview_zip_api_tracks__track_id__imports_preview_zip_post",
+        "type": "object"
+      },
       "Body_upload_attachment_api_agent_attachments_post": {
         "properties": {
           "file": {
@@ -123,6 +137,408 @@
           "file"
         ],
         "title": "Body_upload_document_api_documents_post",
+        "type": "object"
+      },
+      "BriefCatalogResponse": {
+        "properties": {
+          "preferences": {
+            "$ref": "#/components/schemas/BriefPreferences"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/BriefSourceResponse"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/BriefTopicResponse"
+            },
+            "title": "Topics",
+            "type": "array"
+          }
+        },
+        "required": [
+          "sources",
+          "topics",
+          "preferences"
+        ],
+        "title": "BriefCatalogResponse",
+        "type": "object"
+      },
+      "BriefEditionResponse": {
+        "properties": {
+          "cleared": {
+            "default": false,
+            "title": "Cleared",
+            "type": "boolean"
+          },
+          "day": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetched At"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BriefItemResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/BriefSourceStatus"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "temporary_bytes": {
+            "default": 0,
+            "title": "Temporary Bytes",
+            "type": "integer"
+          }
+        },
+        "title": "BriefEditionResponse",
+        "type": "object"
+      },
+      "BriefItemResponse": {
+        "properties": {
+          "abstract": {
+            "default": "",
+            "title": "Abstract",
+            "type": "string"
+          },
+          "announcement": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Announcement"
+          },
+          "arxiv_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arxiv Id"
+          },
+          "authors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authors",
+            "type": "array"
+          },
+          "downloaded": {
+            "default": false,
+            "title": "Downloaded",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "paper",
+              "lab",
+              "engineering",
+              "reading"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "preview_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preview Note"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "saved_document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved Document Id"
+          },
+          "saved_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saved Path"
+          },
+          "size_bytes": {
+            "default": 0,
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "source_name": {
+            "title": "Source Name",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topics": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "url",
+          "source_id",
+          "source_name",
+          "kind"
+        ],
+        "title": "BriefItemResponse",
+        "type": "object"
+      },
+      "BriefPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "exclude_terms": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 30,
+            "title": "Exclude Terms",
+            "type": "array"
+          },
+          "extra_interests": {
+            "default": "",
+            "maxLength": 1000,
+            "title": "Extra Interests",
+            "type": "string"
+          },
+          "lookback_days": {
+            "default": 7,
+            "maximum": 14.0,
+            "minimum": 1.0,
+            "title": "Lookback Days",
+            "type": "integer"
+          },
+          "source_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Source Ids",
+            "type": "array"
+          },
+          "topic_ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 7,
+            "title": "Topic Ids",
+            "type": "array"
+          }
+        },
+        "title": "BriefPreferences",
+        "type": "object"
+      },
+      "BriefPreviewResponse": {
+        "properties": {
+          "item": {
+            "$ref": "#/components/schemas/BriefItemResponse"
+          },
+          "media_type": {
+            "title": "Media Type",
+            "type": "string"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          }
+        },
+        "required": [
+          "item",
+          "media_type"
+        ],
+        "title": "BriefPreviewResponse",
+        "type": "object"
+      },
+      "BriefRefreshRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "title": "BriefRefreshRequest",
+        "type": "object"
+      },
+      "BriefSourceResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "kind"
+        ],
+        "title": "BriefSourceResponse",
+        "type": "object"
+      },
+      "BriefSourceStatus": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "fetched_at": {
+            "format": "date-time",
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "source_id",
+          "name",
+          "fetched_at",
+          "count"
+        ],
+        "title": "BriefSourceStatus",
+        "type": "object"
+      },
+      "BriefTopicResponse": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "BriefTopicResponse",
         "type": "object"
       },
       "ConversationAttachmentResponse": {
@@ -210,6 +626,17 @@
           "title": {
             "title": "Title",
             "type": "string"
+          },
+          "track_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Id"
           },
           "updated_at": {
             "format": "date-time",
@@ -403,6 +830,17 @@
           "title": {
             "title": "Title",
             "type": "string"
+          },
+          "track_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Id"
           },
           "updated_at": {
             "format": "date-time",
@@ -625,6 +1063,48 @@
         "title": "DocumentSummaryResponse",
         "type": "object"
       },
+      "ExperimentResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "title": "Evidence",
+            "type": "string"
+          },
+          "experiment": {
+            "title": "Experiment",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "Suggested",
+              "Planned",
+              "Running",
+              "Completed",
+              "Blocked",
+              "Cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "success_criterion": {
+            "title": "Success Criterion",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "experiment",
+          "status",
+          "success_criterion",
+          "evidence"
+        ],
+        "title": "ExperimentResponse",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -674,6 +1154,167 @@
           "ocr_available"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "ImportApplyRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed_replace": {
+            "default": false,
+            "title": "Confirmed Replace",
+            "type": "boolean"
+          },
+          "expected_revisions": {
+            "patternProperties": {
+              "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "title": "Expected Revisions",
+            "type": "object"
+          },
+          "merged_content": {
+            "anyOf": [
+              {
+                "patternProperties": {
+                  "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$": {
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Merged Content"
+          },
+          "mode": {
+            "enum": [
+              "merge",
+              "replace"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "preview_id",
+          "mode",
+          "expected_revisions"
+        ],
+        "title": "ImportApplyRequest",
+        "type": "object"
+      },
+      "ImportPreviewRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "section": {
+            "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+            "title": "Section",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section",
+          "content"
+        ],
+        "title": "ImportPreviewRequest",
+        "type": "object"
+      },
+      "ImportPreviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "paper_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Paper Ids",
+            "type": "array"
+          },
+          "preview_id": {
+            "title": "Preview Id",
+            "type": "string"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/ImportSectionPreview"
+            },
+            "title": "Sections",
+            "type": "array"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "preview_id",
+          "sections",
+          "paper_ids",
+          "warnings"
+        ],
+        "title": "ImportPreviewResponse",
+        "type": "object"
+      },
+      "ImportSectionPreview": {
+        "additionalProperties": false,
+        "properties": {
+          "current_content": {
+            "title": "Current Content",
+            "type": "string"
+          },
+          "diff": {
+            "title": "Diff",
+            "type": "string"
+          },
+          "expected_sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Sha256"
+          },
+          "incoming_content": {
+            "title": "Incoming Content",
+            "type": "string"
+          },
+          "section": {
+            "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+            "title": "Section",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section",
+          "current_content",
+          "incoming_content",
+          "expected_sha256",
+          "diff"
+        ],
+        "title": "ImportSectionPreview",
         "type": "object"
       },
       "IngestionOptionsResponse": {
@@ -1383,11 +2024,42 @@
             ],
             "title": "Api Key"
           },
+          "api_mode": {
+            "default": "chat_completions",
+            "description": "Explicit generation protocol. Responses uses stateless local history and application function tools.",
+            "enum": [
+              "chat_completions",
+              "responses"
+            ],
+            "title": "Api Mode",
+            "type": "string"
+          },
           "base_url": {
             "maxLength": 1024,
             "minLength": 1,
             "title": "Base Url",
             "type": "string"
+          },
+          "default_reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reasoning effort when a request has no explicit selection.",
+            "title": "Default Reasoning Effort"
           },
           "kind": {
             "enum": [
@@ -1424,6 +2096,27 @@
             ],
             "description": "Prevent overlapping calls to different models on this provider. Defaults on for local providers.",
             "title": "Serialize Model Switches"
+          },
+          "tool_reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Override reasoning effort on requests with function tools. Use none for models that reject reasoning with tools.",
+            "title": "Tool Reasoning Effort"
           }
         },
         "required": [
@@ -1545,6 +2238,15 @@
             "title": "Api Key Set",
             "type": "boolean"
           },
+          "api_mode": {
+            "default": "chat_completions",
+            "enum": [
+              "chat_completions",
+              "responses"
+            ],
+            "title": "Api Mode",
+            "type": "string"
+          },
           "base_url": {
             "title": "Base Url",
             "type": "string"
@@ -1553,6 +2255,26 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "default_reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Reasoning Effort"
           },
           "id": {
             "title": "Id",
@@ -1592,6 +2314,26 @@
             "title": "State",
             "type": "string"
           },
+          "tool_reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Reasoning Effort"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -1628,6 +2370,21 @@
             ],
             "title": "Api Key"
           },
+          "api_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "chat_completions",
+                  "responses"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Mode"
+          },
           "base_url": {
             "anyOf": [
               {
@@ -1640,6 +2397,26 @@
               }
             ],
             "title": "Base Url"
+          },
+          "default_reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Reasoning Effort"
           },
           "kind": {
             "anyOf": [
@@ -1691,6 +2468,26 @@
             "description": "Allow same-model concurrency, but wait for active calls before switching models.",
             "title": "Serialize Model Switches",
             "type": "boolean"
+          },
+          "tool_reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Reasoning Effort"
           }
         },
         "title": "ProviderUpdate",
@@ -1832,9 +2629,47 @@
             "minLength": 1,
             "title": "Title",
             "type": "string"
+          },
+          "track_id": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Id"
           }
         },
         "title": "ResearchConversationCreateRequest",
+        "type": "object"
+      },
+      "RevisionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "revision",
+          "sha256",
+          "created_at"
+        ],
+        "title": "RevisionResponse",
         "type": "object"
       },
       "RunEpochResponse": {
@@ -2180,6 +3015,37 @@
           "name"
         ],
         "title": "SavedWebSourceNoteResponse",
+        "type": "object"
+      },
+      "SectionMetadata": {
+        "additionalProperties": false,
+        "properties": {
+          "modified_at": {
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "section": {
+            "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+            "title": "Section",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section",
+          "path",
+          "sha256",
+          "modified_at"
+        ],
+        "title": "SectionMetadata",
         "type": "object"
       },
       "SessionItemResponse": {
@@ -3012,6 +3878,176 @@
           "output"
         ],
         "title": "ToolOutputRunItem",
+        "type": "object"
+      },
+      "TrackCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "TrackCreateRequest",
+        "type": "object"
+      },
+      "TrackDetailResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Conversation Ids",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "experiments": {
+            "items": {
+              "$ref": "#/components/schemas/ExperimentResponse"
+            },
+            "title": "Experiments",
+            "type": "array"
+          },
+          "exploration": {
+            "items": {
+              "$ref": "#/components/schemas/SectionMetadata"
+            },
+            "title": "Exploration",
+            "type": "array"
+          },
+          "folder_path": {
+            "title": "Folder Path",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "paper_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Paper Ids",
+            "type": "array"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SectionMetadata"
+            },
+            "title": "Sections",
+            "type": "array"
+          },
+          "status_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Status Counts",
+            "type": "object"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "folder_path",
+          "created_at",
+          "updated_at",
+          "paper_ids",
+          "conversation_ids",
+          "sections",
+          "experiments",
+          "status_counts",
+          "warnings"
+        ],
+        "title": "TrackDetailResponse",
+        "type": "object"
+      },
+      "TrackSectionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "modified_at": {
+            "format": "date-time",
+            "title": "Modified At",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "section": {
+            "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+            "title": "Section",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section",
+          "path",
+          "sha256",
+          "modified_at",
+          "content"
+        ],
+        "title": "TrackSectionResponse",
+        "type": "object"
+      },
+      "TrackSectionWriteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "expected_sha256": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Sha256"
+          }
+        },
+        "required": [
+          "content",
+          "expected_sha256"
+        ],
+        "title": "TrackSectionWriteRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -3957,6 +4993,315 @@
         "summary": "Get Artifact Raw",
         "tags": [
           "research"
+        ]
+      }
+    },
+    "/api/brief": {
+      "delete": {
+        "operationId": "clear_api_brief_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefEditionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Clear",
+        "tags": [
+          "morning brief"
+        ]
+      },
+      "get": {
+        "operationId": "edition_api_brief_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefEditionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Edition",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/catalog": {
+      "get": {
+        "operationId": "catalog_api_brief_catalog_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefCatalogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Catalog",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/items/{item_id}": {
+      "delete": {
+        "operationId": "discard_api_brief_items__item_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefEditionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Discard",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/items/{item_id}/fetch": {
+      "post": {
+        "operationId": "fetch_api_brief_items__item_id__fetch_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Fetch",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/items/{item_id}/keep": {
+      "post": {
+        "operationId": "keep_api_brief_items__item_id__keep_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefItemResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Keep",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/items/{item_id}/raw": {
+      "get": {
+        "operationId": "raw_api_brief_items__item_id__raw_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "item_id",
+            "required": true,
+            "schema": {
+              "title": "Item Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Raw",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/preferences": {
+      "put": {
+        "operationId": "preferences_api_brief_preferences_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BriefPreferences"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefCatalogResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preferences",
+        "tags": [
+          "morning brief"
+        ]
+      }
+    },
+    "/api/brief/refresh": {
+      "post": {
+        "operationId": "refresh_api_brief_refresh_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BriefRefreshRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BriefEditionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Refresh",
+        "tags": [
+          "morning brief"
         ]
       }
     },
@@ -5770,6 +7115,979 @@
         ]
       }
     },
+    "/api/tracks": {
+      "get": {
+        "operationId": "list_tracks_api_tracks_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TrackDetailResponse"
+                  },
+                  "title": "Response List Tracks Api Tracks Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Tracks",
+        "tags": [
+          "tracks"
+        ]
+      },
+      "post": {
+        "operationId": "create_track_api_tracks_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrackCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Track",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}": {
+      "get": {
+        "operationId": "get_track_api_tracks__track_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Track",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/conversations/{conversation_id}": {
+      "delete": {
+        "operationId": "unlink_conversation_api_tracks__track_id__conversations__conversation_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unlink Conversation",
+        "tags": [
+          "tracks"
+        ]
+      },
+      "put": {
+        "operationId": "link_conversation_api_tracks__track_id__conversations__conversation_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Link Conversation",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/exploration/{name}": {
+      "get": {
+        "operationId": "read_exploration_api_tracks__track_id__exploration__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Exploration",
+        "tags": [
+          "tracks"
+        ]
+      },
+      "put": {
+        "operationId": "write_exploration_api_tracks__track_id__exploration__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrackSectionWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write Exploration",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/exploration/{name}/history": {
+      "get": {
+        "operationId": "exploration_history_api_tracks__track_id__exploration__name__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RevisionResponse"
+                  },
+                  "title": "Response Exploration History Api Tracks  Track Id  Exploration  Name  History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exploration History",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/exploration/{name}/history/{revision}": {
+      "get": {
+        "operationId": "exploration_revision_api_tracks__track_id__exploration__name__history__revision__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "title": "Revision",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Exploration Revision",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/export": {
+      "get": {
+        "operationId": "export_api_tracks__track_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/imports": {
+      "post": {
+        "operationId": "apply_import_api_tracks__track_id__imports_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportApplyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply Import",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/imports/preview": {
+      "post": {
+        "operationId": "preview_import_api_tracks__track_id__imports_preview_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportPreviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Import",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/imports/preview-zip": {
+      "post": {
+        "operationId": "preview_zip_api_tracks__track_id__imports_preview_zip_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_preview_zip_api_tracks__track_id__imports_preview_zip_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportPreviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview Zip",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/papers/{document_id}": {
+      "delete": {
+        "operationId": "remove_paper_api_tracks__track_id__papers__document_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Paper",
+        "tags": [
+          "tracks"
+        ]
+      },
+      "put": {
+        "operationId": "add_paper_api_tracks__track_id__papers__document_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Paper",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/sections/{section}": {
+      "get": {
+        "operationId": "read_section_api_tracks__track_id__sections__section__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+              "title": "Section",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Section",
+        "tags": [
+          "tracks"
+        ]
+      },
+      "put": {
+        "operationId": "write_section_api_tracks__track_id__sections__section__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+              "title": "Section",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrackSectionWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Write Section",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/sections/{section}/history": {
+      "get": {
+        "operationId": "list_history_api_tracks__track_id__sections__section__history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+              "title": "Section",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RevisionResponse"
+                  },
+                  "title": "Response List History Api Tracks  Track Id  Sections  Section  History Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List History",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
+    "/api/tracks/{track_id}/sections/{section}/history/{revision}": {
+      "get": {
+        "operationId": "read_history_api_tracks__track_id__sections__section__history__revision__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "track_id",
+            "required": true,
+            "schema": {
+              "title": "Track Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "section",
+            "required": true,
+            "schema": {
+              "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$",
+              "title": "Section",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "revision",
+            "required": true,
+            "schema": {
+              "title": "Revision",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrackSectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read History",
+        "tags": [
+          "tracks"
+        ]
+      }
+    },
     "/api/web-sources": {
       "get": {
         "operationId": "list_web_sources_api_web_sources_get",
@@ -6355,6 +8673,7 @@
                   "paper_summary",
                   "paper_notes",
                   "paper_file",
+                  "track_section",
                   "file"
                 ],
                 "type": "string"

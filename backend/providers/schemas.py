@@ -15,6 +15,7 @@ ProviderKind = Literal[
     "openai_compatible",
 ]
 ModelCapability = Literal["chat", "embedding", "vision", "tools"]
+ProviderApiMode = Literal["chat_completions", "responses"]
 
 
 class ProviderSchema(BaseModel):
@@ -47,6 +48,16 @@ class ProviderCreate(ProviderSchema):
     base_url: str = Field(min_length=1, max_length=1024)
     api_key: str | None = Field(default=None, max_length=16_384)
     models: list[ProviderModel] = Field(default_factory=list)
+    api_mode: ProviderApiMode = Field(
+        default="chat_completions",
+        description="Explicit generation protocol. Responses uses stateless local history and application function tools.",
+    )
+    default_reasoning_effort: ReasoningEffort | None = Field(
+        default=None, description="Reasoning effort when a request has no explicit selection.",
+    )
+    tool_reasoning_effort: ReasoningEffort | None = Field(
+        default=None, description="Override reasoning effort on requests with function tools. Use none for models that reject reasoning with tools.",
+    )
     serialize_model_switches: bool | None = Field(
         default=None,
         description="Prevent overlapping calls to different models on this provider. Defaults on for local providers.",
@@ -56,6 +67,8 @@ class ProviderCreate(ProviderSchema):
     def validate_provider(self) -> "ProviderCreate":
         if self.kind not in {"ollama", "openai_compatible"} and not self.api_key:
             raise ValueError(f"{self.kind} providers require an API key.")
+        if self.kind == "ollama" and self.api_mode == "responses":
+            raise ValueError("Ollama requires Chat Completions; its native API does not support Responses.")
         return self
 
 
@@ -65,10 +78,19 @@ class ProviderUpdate(ProviderSchema):
     base_url: str | None = Field(default=None, min_length=1, max_length=1024)
     api_key: str | None = Field(default=None, max_length=16_384)
     models: list[ProviderModel] | None = None
+    api_mode: ProviderApiMode | None = None
+    default_reasoning_effort: ReasoningEffort | None = None
+    tool_reasoning_effort: ReasoningEffort | None = None
     serialize_model_switches: bool = Field(
         default=True,
         description="Allow same-model concurrency, but wait for active calls before switching models.",
     )
+
+    @model_validator(mode="after")
+    def validate_api_mode(self) -> "ProviderUpdate":
+        if "api_mode" in self.model_fields_set and self.api_mode is None:
+            raise ValueError("api_mode cannot be null.")
+        return self
 
 
 class ProviderResponse(ProviderSchema):
@@ -79,6 +101,9 @@ class ProviderResponse(ProviderSchema):
     api_key_set: bool
     state: Literal["active", "archived"]
     models: list[ProviderModel]
+    api_mode: ProviderApiMode = "chat_completions"
+    default_reasoning_effort: ReasoningEffort | None = None
+    tool_reasoning_effort: ReasoningEffort | None = None
     serialize_model_switches: bool
     created_at: datetime
     updated_at: datetime

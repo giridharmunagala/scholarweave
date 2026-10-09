@@ -11,6 +11,7 @@ const localProvider: Provider = {
   kind: 'openai_compatible',
   base_url: 'http://127.0.0.1:8080/v1',
   api_key_set: false,
+  api_mode: 'chat_completions',
   models: [],
   state: 'active',
   serialize_model_switches: true,
@@ -77,5 +78,66 @@ describe('application-wide inference scheduling', () => {
     expect(create).toHaveBeenCalledOnce();
     expect(create.mock.calls[0][0]).not.toHaveProperty('serialize_model_switches');
     expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it('saves and clears provider reasoning overrides without changing models', async () => {
+    const update = vi.spyOn(providersApi, 'update').mockResolvedValue(localProvider);
+    await render([{ ...localProvider, default_reasoning_effort: 'high', tool_reasoning_effort: 'none' }]);
+    const selects = container.querySelectorAll('details select');
+    expect((selects[0] as HTMLSelectElement).value).toBe('high');
+    expect((selects[1] as HTMLSelectElement).value).toBe('none');
+    await act(async () => {
+      (selects[1] as HTMLSelectElement).value = '';
+      selects[1].dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(update).toHaveBeenLastCalledWith('local', {
+      serialize_model_switches: true, tool_reasoning_effort: null,
+    });
+    await act(async () => {
+      (selects[0] as HTMLSelectElement).value = 'medium';
+      selects[0].dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(update).toHaveBeenLastCalledWith('local', {
+      serialize_model_switches: true, default_reasoning_effort: 'medium',
+    });
+    expect(onRefresh).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('it does not enable unsupported reasoning plus tools');
+  });
+
+  it('switches the generation endpoint explicitly without changing reasoning or models', async () => {
+    const update = vi.spyOn(providersApi, 'update').mockResolvedValue(localProvider);
+    await render([localProvider]);
+    const select = container.querySelector('[aria-label="Generation API for Local models"]') as HTMLSelectElement;
+    expect(select.value).toBe('chat_completions');
+    await act(async () => {
+      select.value = 'responses';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(update).toHaveBeenLastCalledWith('local', {
+      api_mode: 'responses', serialize_model_switches: true,
+    });
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('not hosted search or code execution');
+  });
+
+  it('does not offer Responses for Ollama', async () => {
+    await render([{ ...localProvider, kind: 'ollama' }]);
+    const select = container.querySelector('[aria-label="Generation API for Local models"]') as HTMLSelectElement;
+    expect(select.disabled).toBe(true);
+    expect(select.value).toBe('chat_completions');
+  });
+
+  it('surfaces errors saving reasoning overrides', async () => {
+    const error = new Error('Could not save');
+    vi.spyOn(providersApi, 'update').mockRejectedValue(error);
+    await render([localProvider]);
+    const select = container.querySelector('details select') as HTMLSelectElement;
+    await act(async () => {
+      select.value = 'high';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(onRefresh).not.toHaveBeenCalled();
+    expect(select.disabled).toBe(false);
   });
 });

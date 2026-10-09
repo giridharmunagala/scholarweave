@@ -14,6 +14,7 @@ from backend.agents.harness import (
     run_agent,
 )
 from backend.agents.context import ScholarWeaveContext
+from backend.core.errors import ValidationError
 from backend.providers.ollama import OllamaError
 from backend.providers.reasoning import infer_reasoning_efforts
 from backend.providers.runtime import ModelRuntime, serializes_model_switches, uses_local_inference
@@ -88,6 +89,9 @@ class ProviderService:
             ],
             state="active",
             config_json={
+                "api_mode": payload.api_mode,
+                "default_reasoning_effort": payload.default_reasoning_effort,
+                "tool_reasoning_effort": payload.tool_reasoning_effort,
                 "serialize_model_switches": (
                     payload.serialize_model_switches
                     if payload.serialize_model_switches is not None
@@ -104,7 +108,14 @@ class ProviderService:
         values = payload.model_dump(exclude_unset=True)
         profile = self._repository.get(profile_id)
         config = dict(profile.config_json or {})
+        if values.get("kind", profile.kind) == "ollama" and values.get(
+            "api_mode", config.get("api_mode", "chat_completions"),
+        ) == "responses":
+            raise ValidationError("Ollama requires Chat Completions; it does not support Responses.")
         config.pop("residency", None)
+        for key in ("api_mode", "default_reasoning_effort", "tool_reasoning_effort"):
+            if key in values:
+                config[key] = values.pop(key)
         config["serialize_model_switches"] = values.pop(
             "serialize_model_switches", serializes_model_switches(profile),
         )
@@ -316,6 +327,9 @@ class ProviderService:
             kind=record.kind,
             base_url=record.base_url,
             api_key_set=bool(record.api_key),
+            api_mode=(record.config_json or {}).get("api_mode", "chat_completions"),
+            default_reasoning_effort=(record.config_json or {}).get("default_reasoning_effort"),
+            tool_reasoning_effort=(record.config_json or {}).get("tool_reasoning_effort"),
             state=record.state,
             serialize_model_switches=serializes_model_switches(record),
             models=[

@@ -38,7 +38,9 @@ colocated tests. Avoid reading all of the large tool runtime or run state machin
 
 ## Invariants
 
-- Native runtime: every provider uses the official `openai` client and `/v1/chat/completions` only.
+- Native model harness: use the official `openai` client. Profiles explicitly choose
+  `/v1/chat/completions` (default) or `/v1/responses`; never infer the API from a model name.
+  Responses is stateless (`store=false`) with local history and application function tools only.
   Keep `openapi-typescript` exactly **7.13.0**.
 - Routers parse/shape HTTP; services orchestrate and raise semantic `core/errors.py` errors;
   repositories own SQLAlchemy sessions/queries. ORM records and Pydantic wire models stay separate.

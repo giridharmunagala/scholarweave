@@ -8,6 +8,16 @@ from pathlib import PurePosixPath
 class WorkspaceLayout:
     paper_root = "library/papers"
     knowledge_root = "knowledge"
+    track_root = "projects/tracks"
+
+    @classmethod
+    def track_folder(cls, track_id: str, title: str) -> str:
+        return f"{cls.track_root}/{cls.named_component(title, track_id)}"
+
+    @classmethod
+    def is_track_path(cls, path: str) -> bool:
+        normalized = path.replace("\\", "/").casefold().strip("/")
+        return normalized == cls.track_root or normalized.startswith(f"{cls.track_root}/")
 
     @staticmethod
     def named_component(title: str, identifier: str) -> str:
@@ -55,6 +65,12 @@ class WorkspaceLayout:
 
     @classmethod
     def kind(cls, path: str) -> str:
+        if cls.is_track_path(path) and (
+            PurePosixPath(path).name in {
+                "problem.md", "literature.md", "experiments.md", "results.md",
+            } or ("/exploration/" in path and PurePosixPath(path).suffix.lower() == ".md")
+        ):
+            return "track_section"
         parts = PurePosixPath(path).parts
         if cls.paper_id(path) is not None:
             if len(parts) == 4 and parts[-1] == "summary.md":

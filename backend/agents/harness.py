@@ -1,7 +1,7 @@
-"""Native agent harness: a streamed Chat Completions model/tool loop.
+"""Native agent harness: a streamed model/tool loop.
 
-ScholarWeave talks to every provider through ``POST /v1/chat/completions`` using the
-official ``openai`` client.  This module owns the deterministic loop that turns a
+ScholarWeave uses the official ``openai`` client with provider-selected Chat
+Completions (the default) or stateless Responses. This module owns the loop that turns a
 compiled agent definition into streamed model output, executed tools, delegated
 sub-agents, and the run items the rest of the product persists.
 
@@ -33,6 +33,7 @@ from jsonschema import Draft202012Validator, ValidationError as JsonSchemaValida
 from openai import AsyncOpenAI, BadRequestError, OpenAIError
 
 from backend.agents.context import ScholarWeaveContext
+from backend.agents.responses import ResponsesStreamState, responses_request_parameters
 from backend.runs.repository import LeaseOwnershipError
 from backend.utils import to_jsonable
 
@@ -188,6 +189,10 @@ class ModelBinding:
     context_window_tokens: int | None = None
     local_inference: bool = False
     reasoning_efforts: tuple[str, ...] | None = None
+    default_reasoning_effort: str | None = None
+    tool_reasoning_effort: str | None = None
+    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
+    provider_profile_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -434,7 +439,11 @@ def to_chat_messages(
             continue
         item_type = str(item.get("type") or "")
         if item_type == "reasoning":
-            if preserve_thinking and item.get("model") in (None, model_name):
+            if (
+                preserve_thinking and not item.get("_scholarweave_binding")
+                and not item.get("encrypted_content")
+                and item.get("model") in (None, model_name)
+            ):
                 pending_reasoning = item_text(item)
             index += 1
             continue
@@ -514,6 +523,21 @@ def to_chat_messages(
         index += 1
     flush_assistant()
     return messages
+
+
+def model_input_messages(
+    agent: AgentDefinition, items: Sequence[ConversationItem], instructions: str | None,
+) -> list[dict[str, Any]]:
+    """Keep canonical opaque reasoning until the Responses request boundary."""
+    if agent.binding.api_mode == "responses":
+        return [
+            *([{"role": "system", "content": instructions}] if instructions else []),
+            *items,
+        ]
+    return to_chat_messages(
+        items, instructions, preserve_thinking=agent.binding.preserve_thinking,
+        model_name=agent.binding.model_name,
+    )
 
 
 def tool_payload(tool: FunctionTool) -> dict[str, Any]:
@@ -610,6 +634,7 @@ class ModelTurn:
     usage: Usage
     finish_reason: str | None
     timings: dict[str, float] = field(default_factory=dict)
+    reasoning_items: RunInputItems = field(default_factory=list)
 
 
 def usage_from_payload(payload: Any) -> Usage:
@@ -642,6 +667,8 @@ def request_parameters(
     *,
     stream: bool = True,
 ) -> dict[str, Any]:
+    if agent.binding.api_mode == "responses":
+        return responses_request_parameters(agent, messages, tools, stream=stream)
     settings = agent.model_settings
     parameters: dict[str, Any] = {
         "model": agent.binding.model_name,
@@ -665,8 +692,13 @@ def request_parameters(
             else "max_tokens"
         )
         parameters[token_parameter] = settings.max_tokens
-    if settings.reasoning_effort is not None:
-        parameters["reasoning_effort"] = settings.reasoning_effort
+    reasoning_effort = settings.reasoning_effort
+    if reasoning_effort is None:
+        reasoning_effort = agent.binding.default_reasoning_effort
+    if tools and agent.binding.tool_reasoning_effort is not None:
+        reasoning_effort = agent.binding.tool_reasoning_effort
+    if reasoning_effort is not None:
+        parameters["reasoning_effort"] = reasoning_effort
     if settings.verbosity is not None:
         parameters["verbosity"] = settings.verbosity
     if tools:
@@ -719,7 +751,7 @@ async def stream_model_turn(
     tools: list[FunctionTool],
     context: ScholarWeaveContext,
 ) -> ModelTurn:
-    """Stream one Chat Completions response, emitting normalized model events."""
+    """Stream one model response, emitting normalized model events."""
     from backend.providers.inference import inference_progress
 
     parameters = request_parameters(agent, messages, tools)
@@ -732,6 +764,10 @@ async def stream_model_turn(
     timings: dict[str, float] = {}
     model_call_id = str(uuid.uuid4())
     phase: str | None = None
+    responses_state = (
+        ResponsesStreamState(agent.binding) if agent.binding.api_mode == "responses" else None
+    )
+    responses_calls: list[StreamedToolCall] = []
 
     async def progress(next_phase: str) -> None:
         nonlocal phase
@@ -750,12 +786,19 @@ async def stream_model_turn(
     try:
         await progress("waiting")
         with inference_progress(progress):
-            stream = await agent.binding.client.chat.completions.create(**parameters)
+            endpoint = (
+                agent.binding.client.responses if responses_state is not None
+                else agent.binding.client.chat.completions
+            )
+            stream = await endpoint.create(**parameters)
         async for chunk in stream:
             raw = chunk.model_dump() if hasattr(chunk, "model_dump") else dict(chunk)
-            if raw.get("usage"):
-                usage = usage_from_payload(raw["usage"])
-                raw_usage = raw["usage"]
+            raw_usage = (
+                (raw.get("response") or {}).get("usage") if responses_state is not None
+                else raw.get("usage")
+            )
+            if raw_usage:
+                usage = usage_from_payload(raw_usage)
                 reported_cache = cached_tokens_from_usage(raw_usage)
                 if reported_cache is not None:
                     cached_tokens = reported_cache
@@ -788,6 +831,11 @@ async def stream_model_turn(
                 for key in ("total", "processed")
             ):
                 await progress("processing")
+            if responses_state is not None:
+                await responses_state.consume(raw, context.emit, progress)
+                if responses_state.response is not None:
+                    finish_reason = "stop"
+                continue
             for choice in raw.get("choices") or []:
                 finish_reason = choice.get("finish_reason") or finish_reason
                 delta = choice.get("delta") or {}
@@ -819,6 +867,9 @@ async def stream_model_turn(
                             "model.stream",
                             {"raw_type": "response.function_call_arguments.delta", "delta": arguments},
                         )
+        if responses_state is not None:
+            await responses_state.finish(context.emit, progress)
+            responses_calls = responses_state.tool_calls()
         completed = True
     finally:
         try:
@@ -853,17 +904,18 @@ async def stream_model_turn(
         },
     )
     return ModelTurn(
-        text="".join(text_parts),
-        reasoning="".join(reasoning_parts),
-        tool_calls=calls.calls(),
+        text=responses_state.text if responses_state is not None else "".join(text_parts),
+        reasoning=responses_state.reasoning if responses_state is not None else "".join(reasoning_parts),
+        tool_calls=responses_calls if responses_state is not None else calls.calls(),
         usage=usage,
         finish_reason=finish_reason,
         timings=timings,
+        reasoning_items=responses_state.reasoning_items() if responses_state is not None else [],
     )
 
 
 class AgentRunner:
-    """Runs one agent's model/tool loop against the streaming Chat Completions API."""
+    """Runs one agent's model/tool loop against its configured streaming API."""
 
     def __init__(
         self,
@@ -918,8 +970,10 @@ class AgentRunner:
             self._snapshot_generated_count = len(generated)
             turn = await self._model_turn(working, turn_index, usage)
             turn_index += 1
-            if turn.reasoning:
-                item = reasoning_item(turn.reasoning, self._agent.binding.model_name)
+            reasoning_items = turn.reasoning_items
+            if not reasoning_items and turn.reasoning and self._agent.binding.api_mode != "responses":
+                reasoning_items = [reasoning_item(turn.reasoning, self._agent.binding.model_name)]
+            for item in reasoning_items:
                 working.append(item)
                 generated.append(item)
                 new_items.append(
@@ -1066,12 +1120,7 @@ class AgentRunner:
                         ),
                     )
             self._working_snapshot = list(working)
-            messages = to_chat_messages(
-                prepared,
-                instructions,
-                preserve_thinking=self._agent.binding.preserve_thinking,
-                model_name=self._agent.binding.model_name,
-            )
+            messages = model_input_messages(request_agent, prepared, instructions)
             parameters = request_parameters(request_agent, messages, tools, stream=False)
             if rejected_request == parameters:
                 raise ModelBehaviorError(

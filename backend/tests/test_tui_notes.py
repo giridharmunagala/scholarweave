@@ -35,6 +35,14 @@ async def settle(app, pilot) -> None:
         await pilot.pause()
 
 
+async def wait_for_ui(pilot, predicate) -> None:
+    async def wait() -> None:
+        while not predicate():
+            await pilot.pause()
+
+    await asyncio.wait_for(wait(), timeout=5)
+
+
 class NotesServer(CockpitServer):
     def __init__(self) -> None:
         super().__init__()
@@ -164,6 +172,7 @@ def test_note_links_preserve_dirty_drafts_and_open_exact_paths_internally(monkey
             markdown = message.query_one(Markdown)
             markdown.post_message(Markdown.LinkClicked(markdown, href))
             await settle(app, pilot)
+            await wait_for_ui(pilot, lambda: app.view == "notes")
             assert app.view == "notes"
             assert app.note.path == target
             assert not opened
@@ -202,6 +211,7 @@ def test_refresh_index_retains_draft_and_discuss_only_prepares_chat() -> None:
             app.edit_note()
             app.query_one("#note-editor", TextArea).load_text("Unsaved supporting evidence")
             await pilot.pause()
+            await wait_for_ui(pilot, lambda: app.query_one("#discuss-note", Button).disabled)
             assert app.query_one("#discuss-note", Button).disabled
             app.refresh_notes_index()
             await settle(app, pilot)

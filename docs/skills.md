@@ -24,6 +24,16 @@ artifact, not a paper folder, raw-page archive, or collection of per-page notes.
 the existing `knowledge/<title--id>.md` location; this feature does not change workspace layout.
 Page content remains temporary; the saved document retains its source attribution.
 
+## Research-track skills
+
+Bundled research-track recipes include `problem-framing`, `literature-review`,
+`experiment-planning`, and `results-interpretation`. They use `read_research_track`,
+`write_research_track`, and existing source tools to work on the four persistent notebook
+sections. They preserve citations and prior findings, distinguish suggestions from accepted
+experiments, and keep supplied results separate from interpretation. Track association is not
+permission to save, and external experiment states are not agent work-plan items.
+See [research tracks](research-tracks.md) for the document format and import/export workflow.
+
 ## Write a local skill
 
 In the TUI, open **Skills** with **Ctrl+4** (or `/skills`). Select an entry to view its

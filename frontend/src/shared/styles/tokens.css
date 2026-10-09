@@ -8,13 +8,15 @@
  */
 
 :root {
-  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", Menlo, Consolas, monospace;
+  --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
 
-  --text-xs: .72rem;
-  --text-sm: .8rem;
-  --text-base: .92rem;
-  --text-lg: 1.05rem;
+  --text-xs: .76rem;
+  --text-sm: .85rem;
+  --text-base: .95rem;
+  --text-lg: 1.1rem;
+  --text-xl: 1.4rem;
+  --text-2xl: 1.85rem;
 
   --space-1: .25rem;
   --space-2: .5rem;
@@ -24,19 +26,20 @@
   --space-6: 2rem;
   --space-7: 3rem;
 
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-xl: 20px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
   --radius-pill: 999px;
   --radius: var(--radius-lg);
 
-  --dur-fast: 120ms;
-  --dur-med: 220ms;
+  --dur-fast: 140ms;
+  --dur-med: 240ms;
   --dur-slow: 420ms;
   --ease: cubic-bezier(.22, .8, .3, 1);
+  --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
 
-  --rail-width: 78px;
+  --rail-width: 86px;
   --rail-bar-height: 64px;
   --page-gutter: clamp(1rem, 2.2vw, 2rem);
   --content-max: 1380px;
@@ -46,8 +49,89 @@
   --reading-max: clamp(46rem, 64vw, 70rem);
 }
 
+/* ---------------------------------------------------------------- Prism --- */
+/* Crisp, vivid light theme: clean white reading surfaces, a violet accent with
+ * a pink partner for highlights, and a deep indigo rail. Default. */
+[data-theme='prism'] {
+  color-scheme: light;
+  --bg: #f3f2fb;
+  --surface: #ffffff;
+  --surface-2: #f1effb;
+  --surface-3: #e4e0f7;
+  --surface-inset: #f8f7fd;
+  --border: #e3e0f2;
+  --border-strong: #c4bee6;
+  --text: #24213a;
+  --text-strong: #110e26;
+  --muted: #5d5a78;
+  --accent: #6246ea;
+  --accent-strong: #4b31d0;
+  --accent-2: #e5317f;
+  --accent-contrast: #ffffff;
+  --accent-soft: #ebe6ff;
+  --success: #12a06b;
+  --warning: #d68100;
+  --danger: #e0364f;
+  --agent: #6246ea;
+  --tool: #0d94b8;
+  --handoff: #d68100;
+  --guardrail: #e0364f;
+  --hosted: #a23de0;
+  --rail-solid: #26206a;
+  --rail-deep: #15113f;
+  --rail-edge: #0e0b2e;
+  --list-bg: #f8f7fe;
+  --canvas-bg: #ffffff;
+  --divider: #e6e3f4;
+  --shadow-sm: 0 1px 2px rgb(40 30 110 / 7%);
+  --shadow-md: 0 12px 28px -14px rgb(40 30 110 / 26%);
+  --shadow-lg: 0 32px 64px -28px rgb(40 30 110 / 36%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(20 16 50 / 46%);
+}
+
+/* --------------------------------------------------------------- Nebula --- */
+/* Vivid dark theme: midnight surfaces with violet and cyan light. */
+[data-theme='nebula'] {
+  color-scheme: dark;
+  --bg: #0b0c16;
+  --surface: #141628;
+  --surface-2: #1b1e35;
+  --surface-3: #262a48;
+  --surface-inset: #10121f;
+  --border: #252946;
+  --border-strong: #3a3f68;
+  --text: #e6e6f5;
+  --text-strong: #ffffff;
+  --muted: #a3a3c6;
+  --accent: #8b7bff;
+  --accent-strong: #ada1ff;
+  --accent-2: #22d3ee;
+  --accent-contrast: #0b0920;
+  --accent-soft: #272259;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --danger: #fb7185;
+  --agent: #8b7bff;
+  --tool: #22d3ee;
+  --handoff: #fbbf24;
+  --guardrail: #fb7185;
+  --hosted: #e879f9;
+  --rail-solid: #1c1748;
+  --rail-deep: #0d0b26;
+  --rail-edge: #080619;
+  --list-bg: #0f1120;
+  --canvas-bg: #0f1120;
+  --divider: #23263f;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 30%);
+  --shadow-md: 0 12px 28px -12px rgb(0 0 0 / 55%);
+  --shadow-lg: 0 32px 64px -24px rgb(0 0 0 / 65%);
+  --shadow: var(--shadow-md);
+  --scrim: rgb(4 4 14 / 60%);
+}
+
 /* ---------------------------------------------------------------- Paper --- */
-/* Warm, low-glare light theme tuned for long reading sessions. Default. */
+/* Warm, low-glare light theme tuned for long reading sessions. */
 [data-theme='paper'] {
   color-scheme: light;
   --bg: #f3ebdf;
@@ -553,6 +637,18 @@
    * panels read as raised without needing a shadow. */
   --grad-panel: linear-gradient(175deg, var(--surface) 0%, color-mix(in srgb, var(--surface-2) 55%, var(--surface)) 100%);
   --grad-accent: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+  --grad-accent-soft: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--surface)) 0%, color-mix(in srgb, var(--accent-2) 10%, var(--surface)) 100%);
+  --grad-text: linear-gradient(100deg, var(--accent-strong) 0%, var(--accent) 45%, var(--accent-2) 100%);
+
+  /* Focus and emphasis. */
+  --accent-ring: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+  --accent-glow: 0 8px 22px -8px color-mix(in srgb, var(--accent) 60%, transparent);
+  --accent-tint: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  --accent-tint-strong: color-mix(in srgb, var(--accent) 16%, var(--surface));
+  --accent-2-tint: color-mix(in srgb, var(--accent-2) 12%, var(--surface));
+  --warning-soft: color-mix(in srgb, var(--warning) 16%, var(--surface));
+  --warning-border: color-mix(in srgb, var(--warning) 50%, var(--border));
+  --hover-bg: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
 
   /* The rail is a dark branded column in every theme, light and dark alike, so it
    * carries its own foreground ramp rather than the page's. */
@@ -613,11 +709,14 @@
   --quote-text: var(--text);
   --mark-bg: color-mix(in srgb, var(--warning) 34%, var(--surface));
   --mark-text: var(--text-strong);
+  /* A highlighter stroke under bold text so key phrases jump out of long answers. */
+  --strong-highlight: color-mix(in srgb, var(--accent-2) 22%, transparent);
 }
 
 /* Syntax palettes. Hand-picked rather than derived: legibility of code depends
  * on hue separation that colour-mix cannot invent. Light themes use One Light,
  * dark themes One Dark — both long-proven at these contrast levels. */
+[data-theme='prism'],
 [data-theme='paper'],
 [data-theme='cloud'],
 [data-theme='snow'],
@@ -641,6 +740,7 @@
   --syn-deleted: #cf3b30;
 }
 
+[data-theme='nebula'],
 [data-theme='slate'],
 [data-theme='amoled'],
 [data-theme='forest'],

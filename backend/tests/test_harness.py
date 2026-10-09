@@ -86,6 +86,28 @@ def make_context(sink: RecordingSink | None = None) -> ScholarWeaveContext:
     )
 
 
+@pytest.mark.parametrize("selected,default,tool_override,with_tools,expected", [
+    (None, None, None, False, None),
+    (None, "high", None, False, "high"),
+    ("low", "high", None, False, "low"),
+    ("high", "low", "none", True, "none"),
+    (None, "high", "none", True, "none"),
+    ("high", "low", "none", False, "high"),
+    (None, None, "none", False, None),
+    ("high", None, None, True, "high"),
+])
+def test_provider_reasoning_override_precedence(selected, default, tool_override, with_tools, expected):
+    definition = agent(None, binding=ModelBinding(
+        client=None, model_name="reasoner", provider_kind="openai",
+        default_reasoning_effort=default, tool_reasoning_effort=tool_override,
+    ), model_settings=ModelSettings(reasoning_effort=selected))
+    parameters = request_parameters(definition, [], [echo_tool([])] if with_tools else [])
+    if expected is None:
+        assert "reasoning_effort" not in parameters
+    else:
+        assert parameters["reasoning_effort"] == expected
+
+
 def agent(client: FakeClient, **overrides: Any) -> AgentDefinition:
     defaults: dict[str, Any] = {
         "id": "agent",

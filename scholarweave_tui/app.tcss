@@ -423,6 +423,15 @@ ChatMessage, TranscriptNote {
 }
 #note-state.dirty, #skill-state.dirty { color: $warning; }
 
+#track-path { height: auto; color: $text-muted; margin-bottom: 1; }
+#track-tabs, #track-actions { height: 3; }
+#track-tabs Button { width: 1fr; }
+#track-tabs Button.active { color: $primary; text-style: bold; }
+#track-overview-scroll { height: auto; max-height: 9; margin-bottom: 1; }
+#track-content { height: 1fr; }
+#track-state { width: 1fr; height: 3; color: $text-muted; }
+#track-actions Button { min-width: 7; margin-left: 1; }
+
 /* --- observatory --------------------------------------------------------- */
 #observatory {
     width: 34;

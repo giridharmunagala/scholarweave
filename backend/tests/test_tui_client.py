@@ -137,6 +137,9 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
                 "kind": "openai_compatible",
                 "base_url": "http://127.0.0.1:11434/v1",
                 "api_key": None,
+                "api_mode": "chat_completions",
+                "default_reasoning_effort": None,
+                "tool_reasoning_effort": None,
                 "models": [],
                 "serialize_model_switches": None,
             }

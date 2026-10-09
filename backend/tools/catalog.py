@@ -34,6 +34,55 @@ ApplicationToolDefinition = tuple[str, str, str, dict[str, Any], bool, str]
 
 APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
+        "research.tracks.read",
+        "read_research_track",
+        "List notebooks, inspect exploration files, or read one track document and revision.",
+        _object_schema(
+            {
+                "action": {"type": "string", "enum": ["list", "inspect", "section"]},
+                "track_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+                "section": {"type": ["string", "null"], "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                "offset": {"type": "integer", "minimum": 0},
+            },
+            required=["action", "track_id", "section", "limit", "offset"],
+        ),
+        True,
+        "_read_research_track",
+    ),
+    (
+        "research.tracks.write",
+        "write_research_track",
+        "Save a requested track document; create exploration files with a null revision.",
+        _object_schema(
+            {
+                "track_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+                "section": {"type": "string", "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$"},
+                "content": {"type": "string", "minLength": 1},
+                "expected_sha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+            },
+            required=["track_id", "section", "content", "expected_sha256"],
+        ),
+        True,
+        "_write_research_track",
+    ),
+    (
+        "research.tracks.organize",
+        "organize_research_track",
+        "Create a track or link/unlink library papers without moving files.",
+        _object_schema(
+            {
+                "action": {"type": "string", "enum": ["create", "add_paper", "remove_paper"]},
+                "track_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
+                "title": {"type": ["string", "null"], "minLength": 1, "maxLength": 120},
+                "document_id": {"type": ["string", "null"], "minLength": 1},
+            },
+            required=["action", "track_id", "title", "document_id"],
+        ),
+        True,
+        "_organize_research_track",
+    ),
+    (
         "conversation.title.set",
         "set_conversation_title",
         "Set a concise title for this conversation during its first turn.",

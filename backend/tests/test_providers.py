@@ -21,6 +21,73 @@ from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderUpd
 from backend.providers.types import AgentModelDefaults, ModelReference
 
 
+def test_provider_reasoning_overrides_persist_clear_and_validate(test_settings):
+    with TestClient(create_app(test_settings)) as client:
+        response = client.post("/api/providers", json={
+            "name": "Reasoning", "kind": "openai", "api_key": "test-key",
+            "base_url": "https://example.test/v1",
+            "default_reasoning_effort": "high", "tool_reasoning_effort": "none",
+        })
+        assert response.status_code == 201
+        profile = response.json()
+        assert profile["default_reasoning_effort"] == "high"
+        assert profile["tool_reasoning_effort"] == "none"
+        path = f"/api/providers/{profile['id']}"
+        assert client.put(path, json={"name": "Renamed"}).json()["tool_reasoning_effort"] == "none"
+        assert client.put(path, json={"tool_reasoning_effort": "invalid"}).status_code == 422
+    with TestClient(create_app(test_settings)) as client:
+        profile = client.get(path).json()
+        assert profile["default_reasoning_effort"] == "high"
+        assert profile["tool_reasoning_effort"] == "none"
+        runtime = client.app.state.services.model_runtime
+        resolved = runtime.resolve("chat", model_reference=ModelReference(profile["id"], "reasoner"))
+        assert resolved.default_reasoning_effort == "high"
+        assert resolved.tool_reasoning_effort == "none"
+        cleared = client.put(path, json={"tool_reasoning_effort": None}).json()
+        assert cleared["tool_reasoning_effort"] is None
+        assert cleared["default_reasoning_effort"] == "high"
+        assert client.put(path, json={"default_reasoning_effort": None}).json()["default_reasoning_effort"] is None
+
+
+def test_tool_reasoning_override_fixes_provider_rejection(test_settings, stub_provider):
+    stub_provider.reject_reasoning_with_tools = True
+    stub_provider.call_tool = "record_colour"
+    stub_provider.tool_arguments = {"colour": "teal"}
+    with TestClient(create_app(test_settings)) as client:
+        profile = client.post("/api/providers", json={
+            "name": "OpenAI reasoning", "kind": "openai", "api_key": "test-key",
+            "base_url": f"{stub_provider.base_url}/v1",
+            "models": [{"name": "gpt-6-luna", "capabilities": ["chat", "tools"]}],
+            "default_reasoning_effort": "high",
+        }).json()
+        path = f"/api/providers/{profile['id']}"
+        failed = client.post(path + "/verify", json={"model": "gpt-6-luna"}).json()
+        assert not failed["reachable"]
+        assert "Function tools with reasoning-effort" in failed["detail"]
+        assert client.put(path, json={"tool_reasoning_effort": "none"}).status_code == 200
+        verified = client.post(path + "/verify", json={"model": "gpt-6-luna"}).json()
+        assert verified["reachable"] and verified["tool_calling"]
+        assert len(stub_provider.requests) == 2
+        assert all(request["reasoning_effort"] == "none" for request in stub_provider.requests)
+
+
+@pytest.mark.anyio
+async def test_provider_default_reasoning_reaches_tool_free_generation(test_settings, stub_provider):
+    services = create_services(test_settings)
+    try:
+        profile = services.providers.create(ProviderCreate(
+            name="Reasoning", kind="openai", api_key="test-key",
+            base_url=f"{stub_provider.base_url}/v1", default_reasoning_effort="high",
+            tool_reasoning_effort="none",
+        ))
+        resolved = services.model_runtime.resolve("chat", model_reference=ModelReference(profile.id, "reasoner"))
+        await services.model_runtime.generate(resolved, "hello")
+        assert stub_provider.requests[-1]["reasoning_effort"] == "high"
+        assert "tools" not in stub_provider.requests[-1]
+    finally:
+        await services.close()
+
+
 @pytest.mark.anyio
 async def test_model_switch_setting_persists_without_restart_confirmation(test_settings):
     services = create_services(test_settings)

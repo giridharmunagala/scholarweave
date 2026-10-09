@@ -47,7 +47,7 @@ describe('application shell', () => {
     const labels = Array.from(container.querySelectorAll('.rail .nav-link .rail-label')).map(
       (node) => node.textContent,
     );
-    expect(labels).toEqual(['Chat', 'Library', 'Settings']);
+    expect(labels).toEqual(['Chat', 'Morning Brief', 'Research Tracks', 'Library', 'Settings']);
     expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Chat');
 
     // The rail is the only navigation chrome: no top bar, no breadcrumb, no drawer.
@@ -67,6 +67,16 @@ describe('application shell', () => {
     await render('/library/123');
 
     expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Library');
+  });
+
+  it('marks Research Tracks as a primary destination', async () => {
+    await render('/tracks?id=track-1');
+    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Research Tracks');
+  });
+
+  it('marks Morning Brief as a primary destination', async () => {
+    await render('/brief');
+    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Morning Brief');
   });
 
   it('opens the compact theme picker and supports matching the system theme', async () => {

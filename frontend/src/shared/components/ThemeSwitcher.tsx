@@ -80,8 +80,8 @@ export function ThemeSwitcher() {
             onClick={() => choose('system')}
           >
             <span className="swatch" aria-hidden="true">
-              <i style={{ background: '#f3ebdf' }} />
-              <i style={{ background: '#131520' }} />
+              <i style={{ background: '#f3f2fb' }} />
+              <i style={{ background: '#0b0c16' }} />
             </span>
             <span className="stack-tight" style={{ gap: 0 }}>
               Match system

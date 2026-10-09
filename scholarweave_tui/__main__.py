@@ -4,6 +4,8 @@ import argparse
 import importlib.util
 import multiprocessing
 import os
+import time
+import webbrowser
 from pathlib import Path
 
 
@@ -20,6 +22,7 @@ def main() -> None:
         description="ScholarWeave research cockpit. Starts or reuses your local backend automatically.",
     )
     parser.add_argument("--build-frontend", action="store_true", help="Build the web frontend before launching (requires Node.js).")
+    parser.add_argument("--web", action="store_true", help="Open the web app in your browser instead of the terminal UI.")
     parser.add_argument("--connect-only", action="store_true", help="Use an existing backend without starting one.")
     parser.add_argument("--startup-timeout", type=_positive_timeout, default=60, help="Backend readiness timeout in seconds (default: 60).")
     parser.add_argument("--check", action="store_true", help="Check startup, then stop any owned backend without opening the TUI.")
@@ -29,7 +32,7 @@ def main() -> None:
         help="Local server origin (default: http://127.0.0.1:8000).",
     )
     args = parser.parse_args()
-    if importlib.util.find_spec("textual") is None:
+    if not args.web and importlib.util.find_spec("textual") is None:
         parser.exit(1, 'The terminal UI is optional. Install it with: pip install -e ".[tui]"\n')
 
     from scholarweave_tui.client import _local_origin
@@ -46,9 +49,19 @@ def main() -> None:
             build_frontend(root)
         with BackendSession(
             base_url, root, connect_only=args.connect_only, timeout=args.startup_timeout,
-        ):
+        ) as session:
+            if args.web:
+                session.check_web()
             if args.check:
                 print("ScholarWeave startup check passed.", flush=True)
+            elif args.web:
+                if not webbrowser.open(base_url):
+                    raise LaunchError(f"Could not open your browser. Open {base_url} manually.")
+                if session.process is not None:
+                    print(f"ScholarWeave is open at {base_url}. Keep this window open; Ctrl+C stops the server.", flush=True)
+                    while session.process.is_alive():
+                        time.sleep(0.5)
+                    raise LaunchError(session._diagnostic("The web backend stopped unexpectedly."))
             else:
                 from scholarweave_tui.app import ScholarWeaveApp
                 from scholarweave_tui.client import ScholarWeaveClient

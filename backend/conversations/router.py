@@ -42,7 +42,7 @@ async def delete_conversation(
 
 @router.get("/agent/conversations", response_model=list[ConversationResponse])
 def list_research_conversations(container=Depends(services)) -> list[ConversationResponse]:
-    return [_response(record) for record in container.conversation_turns.list_conversations()]
+    return [_response(record, container.tracks) for record in container.conversation_turns.list_conversations()]
 
 
 @router.post(
@@ -58,7 +58,9 @@ def create_research_conversation(
         container.conversation_turns.create_conversation(
             title=payload.title,
             model_reference=payload.model_reference,
-        )
+            track_id=payload.track_id,
+        ),
+        container.tracks,
     )
 
 
@@ -72,7 +74,7 @@ async def get_research_conversation(
 ) -> ConversationDetailResponse:
     record = container.conversation_turns.get_conversation(conversation_id)
     items = await container.conversation_turns.conversation_items(conversation_id)
-    return ConversationDetailResponse(**_response(record).model_dump(), items=items)
+    return ConversationDetailResponse(**_response(record, container.tracks).model_dump(), items=items)
 
 
 @router.post(
@@ -99,7 +101,7 @@ async def send_research_message(
         attachment_paths=payload.attachment_paths,
     )
     return ConversationMessageResponse(
-        conversation=_response(container.conversation_turns.get_conversation(conversation_id)),
+        conversation=_response(container.conversation_turns.get_conversation(conversation_id), container.tracks),
         run=run_response(container.runs.get(run.id)),
     )
 
@@ -107,7 +109,7 @@ async def send_research_message(
 @router.get("/deep-work/conversations", response_model=list[ConversationResponse])
 def list_deep_work_conversations(container=Depends(services)) -> list[ConversationResponse]:
     return [
-        _response(record)
+        _response(record, container.tracks)
         for record in container.conversation_turns.list_deep_work_conversations()
     ]
 
@@ -125,7 +127,9 @@ def create_deep_work_conversation(
         container.conversation_turns.create_deep_work_conversation(
             title=payload.title,
             model_reference=payload.model_reference,
-        )
+            track_id=payload.track_id,
+        ),
+        container.tracks,
     )
 
 
@@ -139,7 +143,7 @@ async def get_deep_work_conversation(
 ) -> ConversationDetailResponse:
     record = container.conversation_turns.get_deep_work_conversation(conversation_id)
     items = await container.conversation_turns.conversation_items(conversation_id)
-    return ConversationDetailResponse(**_response(record).model_dump(), items=items)
+    return ConversationDetailResponse(**_response(record, container.tracks).model_dump(), items=items)
 
 
 @router.post(
@@ -165,13 +169,14 @@ async def send_deep_work_message(
     )
     return ConversationMessageResponse(
         conversation=_response(
-            container.conversation_turns.get_deep_work_conversation(conversation_id)
+            container.conversation_turns.get_deep_work_conversation(conversation_id), container.tracks,
         ),
         run=run_response(container.runs.get(run.id)),
     )
 
 
-def _response(record) -> ConversationResponse:
+def _response(record, tracks=None) -> ConversationResponse:
+    track_id = tracks.conversation_track_id(record.id) if tracks is not None else None
     return ConversationResponse(
         id=record.id,
         title=record.title,
@@ -182,4 +187,5 @@ def _response(record) -> ConversationResponse:
         last_message_preview=record.last_message_preview,
         created_at=record.created_at,
         updated_at=record.updated_at,
+        track_id=track_id,
     )

@@ -1,0 +1,10 @@
+{
+  "label": "Organize research track",
+  "description": "Requested creation/paper references only; avoid duplicates. Never copy/move PDFs. Creation grants no section-write permission.",
+  "parameter_descriptions": {
+    "action": "Create or link/unlink; never delete papers.",
+    "track_id": "Null for create; otherwise ID or attached default.",
+    "title": "Create title or null.",
+    "document_id": "Paper ID or null for create."
+  }
+}

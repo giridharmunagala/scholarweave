@@ -46,7 +46,33 @@ flowchart LR
 - SQLite stores metadata and durable run history.
 - `local_data/` stores generated extraction artifacts and operational run snapshots.
 - `workspace/` stores source PDFs beside canonical paper notes/summaries, and reusable knowledge notes.
-- Model traffic uses `POST /v1/chat/completions` through the official OpenAI client.
+- Model traffic uses the official OpenAI client. A profile's explicit `api_mode` selects
+  `POST /v1/chat/completions` (default) or `POST /v1/responses`; model names never select a protocol.
+  Ollama retains Chat Completions in the harness and its existing native generation helpers.
+
+Responses requests use `store=false`, reconstruct input from local history, and request encrypted
+reasoning for stateless continuation. They never use `previous_response_id` or provider-managed
+conversations. Only ScholarWeave function tools are offered, not hosted search, code execution,
+or computer tools. Opaque reasoning is replayed only to the same provider/model binding; visible
+reasoning summaries remain distinct from private reasoning. Scope includes profile ID, endpoint,
+model, API mode, and a credential fingerprint (never the raw key), preventing opaque replay after
+switching profiles or rotating credentials. Endpoint failures are reported rather
+than silently switching protocols. API selection lives in the existing profile configuration JSON,
+so existing profiles retain Chat Completions without a database migration. Provider verification,
+chat, workers, summaries, context maintenance, and direct vision generation honor this selection;
+embedding and model discovery endpoints are unchanged.
+
+Provider profiles store optional `default_reasoning_effort` and `tool_reasoning_effort`
+in their existing configuration JSON (no schema cutover). Resolved bindings carry these
+settings to the shared request builder. An explicit request effort wins over the profile
+default; the tool-specific override wins whenever the request includes enabled function
+tools. Verification, delegated agents, and summary agents use that same builder. Unset
+overrides preserve existing behavior; provider errors are not silently retried with reasoning
+disabled. For models that reject reasoning with tools on Chat Completions, an explicit
+tool override of `none` disables reasoning for those requests, not the tool surface.
+For deployments supporting Responses, switch API mode and clear that workaround explicitly
+to allow the request's reasoning effort to reach the model. Overrides otherwise retain their
+precedence in either protocol.
 
 ### Terminal client
 
@@ -71,6 +97,10 @@ startup and remain visible rather than opening a success-shaped TUI.
 On Linux, `sh scripts/launch-scholarweave.sh` runs the same entry point with `--build-frontend`
 using the checkout's `.venv/bin/python`, regardless of the invoking directory. It forwards CLI
 arguments and uses `exec` so terminal signals and exit status reach the Python launcher directly.
+
+`scripts/launch-scholarweave-web.ps1` uses the same entry point with `--web --build-frontend`,
+without importing Textual. It checks HTML availability before opening the browser and keeps
+an owned backend alive until the launcher is closed; reused backends are left running.
 
 Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
 only: `/model` selects a configured model, its per-message reasoning budget, and context window;
@@ -125,6 +155,30 @@ Presentation is theme-driven: `scholarweave_tui/themes.py` registers the shipped
 `app.tcss` styles everything from theme variables, so no colour is hard-coded in widgets.
 `scholarweave_tui/preferences.py` persists only the chosen theme in `local_data/tui-preferences.json`;
 research behaviour stays in backend settings, and a read-only data directory degrades silently.
+
+### Morning Brief lifecycle
+
+`backend/brief/` owns the headline catalog, interest preferences, collection and transient reading
+state. Its service is constructed in `bootstrap.py`; `/api/brief` routes only shape requests and
+responses. RSS/Atom, official lab indexes and stable release metadata are collected through the
+existing bounded, redirect/peer-validated public downloader. Titles/abstracts drive explicit phrase
+matching, without model inference or claims of full-paper review. Source failures and unknown dates
+are included in the wire response instead of silently treated as successful empty feeds.
+
+The edition, dismissal set and PDF/page previews live in process memory. Access on a new calendar
+day in the configured user timezone expires the previous edition; a page visit then requests a single-flight refresh.
+Clear removes this state and records a same-day cleared sentinel, preventing navigation from
+automatically repopulating it. Explicit Refresh starts collection again. The service lock serializes
+refresh, download, keep, discard and clear so late downloads cannot resurrect cleared items. Preview
+bytes are bounded collectively to 128 MiB and individually by existing download limits. Transient
+responses use `Cache-Control: no-store`; downloads do not enter the shared chat web-source cache.
+
+Only preferences use a small guarded JSON file in `local_data/`. Keep is the persistence boundary:
+PDF bytes go through `DocumentService` into canonical paper folders, while readable webpage text
+becomes an attributed `WorkspaceService` note indexed by the existing FTS5/BM25 repository. No second
+paper/note catalog or database schema is introduced. Source identity tags deduplicate kept pages;
+source-linked arXiv versions and PDF content hashes reuse existing papers. Clear and discard never
+call library/file deletion APIs. Kept PDFs use existing library extraction controls when needed.
 
 ### Single-researcher product boundary
 
@@ -270,6 +324,37 @@ external edit or newly added override invalidates an older editor's revision; th
 changes but cannot provide filesystem compare-and-swap against arbitrary external editors.
 These endpoints add no model tools, database tables, or manually selected skill state.
 
+### Persistent research tracks
+
+Research tracks are long-lived Markdown notebooks, distinct from conversation history and
+per-run work plans. The track feature owns identity and paper/conversation associations in new
+database tables, four workspace documents (problem, literature, experiments, results), and an
+`exploration/` folder of individually revisioned Markdown notes. Startup adds the empty folder
+to existing tracks without rewriting their documents. Exploration captures tentative hypotheses,
+search leads, open questions and dead ends separately from established findings.
+Markdown remains authoritative for content and experiment states; overview projections are
+rebuilt from current files, and discovery reuses the workspace FTS5/BM25 index.
+
+Track section mutations share workspace safety, revision checks, validation and recoverable
+history; generic workspace operations cannot bypass managed-document invariants. Import/export
+supports single Markdown sections and validated whole-track packages without copying linked
+PDFs. Version 2 packages inventory exploration files; version 1 four-section imports remain
+supported and never delete unrelated exploration. New exploration files require an explicit null
+revision; existing documents require their current hash. Journal recovery removes uncommitted
+new files as well as restoring old content. External changes require explicit index refresh.
+
+Chats can associate with one track. New run compilation adds bounded reference metadata, not all
+section bodies, and snapshots the associated ID in run metadata. Tools read relevant sections on
+demand and write only requested changes against a fresh revision. Four instruction-only skills
+guide problem framing, literature review, external experiment planning and result interpretation.
+External Planned/Running experiments never prolong an agent run; experiment execution and
+computational data analysis remain outside the product.
+
+The web client exposes overview, section editing, paper links, history and safe round-tripping.
+The terminal uses the same API for notebook editing and track-aware chat, opening the local web
+editor for file transfer and paper membership. No frontend or terminal client writes user files
+directly. See [research tracks](research-tracks.md) for the document and evidence contracts.
+
 ## 4. Blueprint compilation
 
 Blueprints are provider-neutral, serializable workflow definitions. The exact blueprint is stored
@@ -324,7 +409,7 @@ sequenceDiagram
     Runs->>Runner: Run durable history + new input
 
     loop Until final answer or budget boundary
-        Runner->>Model: Stream Chat Completions request
+        Runner->>Model: Stream selected generation API request
         Model-->>Runner: Reasoning, text, tool-call fragments
         opt Tool calls returned
             Runner->>Tools: Execute validated tool calls
@@ -381,7 +466,7 @@ Canonical conversation items are plain provider-neutral dictionaries:
 - function-call outputs;
 - reasoning items.
 
-They become Chat Completions messages only at the provider boundary. Streamed tool-call fragments
+They become Chat Completions messages or Responses input items only at the provider boundary. Streamed tool-call fragments
 are reassembled by index, call ID, or last-seen call to tolerate OpenAI-compatible provider
 differences.
 

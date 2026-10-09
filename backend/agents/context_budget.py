@@ -29,13 +29,14 @@ from backend.agents.harness import (
     RunPolicyViolation,
     RunInputItems,
     cached_tokens_from_usage,
+    model_input_messages,
     request_parameters,
     serialized_characters,
-    to_chat_messages,
     tool_payload,
     usage_from_payload,
     Usage,
 )
+from backend.agents.responses import response_output_text, validate_response
 from backend.conversations.steering import (
     SteeringInbox,
     steering_message_ids,
@@ -874,8 +875,11 @@ class ContextBudgetPolicy:
         model_call_id = str(uuid.uuid4())
         try:
             with inference_priority("background"):
-                response = await binding.client.chat.completions.create(**parameters)
-            completed = True
+                endpoint = (
+                    binding.client.responses if binding.api_mode == "responses"
+                    else binding.client.chat.completions
+                )
+                response = await endpoint.create(**parameters)
             raw = response.model_dump() if hasattr(response, "model_dump") else dict(response)
             raw_usage = raw.get("usage") or {}
             cached_tokens = cached_tokens_from_usage(raw_usage)
@@ -894,6 +898,9 @@ class ContextBudgetPolicy:
                     and isinstance(value, (int, float)) and not isinstance(value, bool)
                     and math.isfinite(value) and value >= 0
                 }
+            if binding.api_mode == "responses":
+                validate_response(raw)
+            completed = True
         finally:
             await context.emit("model.telemetry", {
                 "model_call_id": model_call_id,
@@ -907,7 +914,10 @@ class ContextBudgetPolicy:
                 "timings": timings,
                 "completed": completed,
             })
-        summary = _response_text(response)
+        summary = (
+            response_output_text(response) if binding.api_mode == "responses"
+            else _response_text(response)
+        )
         if not summary:
             raise ModelBehaviorError(
                 "The context summarizer returned no final text. Reasoning-only output "
@@ -965,15 +975,13 @@ def _token_estimate_ratio(agent: AgentDefinition, context: ScholarWeaveContext) 
 def _request_tokens(
     agent: AgentDefinition, items: RunInputItems, instructions: str, context: ScholarWeaveContext
 ) -> int:
-    messages = to_chat_messages(
-        strip_steering_markers(items), instructions,
-        preserve_thinking=agent.binding.preserve_thinking, model_name=agent.binding.model_name,
-    )
+    messages = model_input_messages(agent, strip_steering_markers(items), instructions)
     parameters = request_parameters(agent, messages, agent.enabled_tools(context), stream=False)
     # Output limits are not prompt tokens; counting them changes the calibrated
     # input estimate when a truncated response is retried with a larger limit.
     parameters.pop("max_tokens", None)
     parameters.pop("max_completion_tokens", None)
+    parameters.pop("max_output_tokens", None)
     return math.ceil(
         (_estimated_tokens(parameters) + 8 * len(messages)) * _token_estimate_ratio(agent, context)
     )

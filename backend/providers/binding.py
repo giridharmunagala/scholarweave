@@ -1,4 +1,4 @@
-"""Provider clients and model bindings for the native Chat Completions harness."""
+"""Provider clients and model bindings for the native model harness."""
 
 from __future__ import annotations
 
@@ -90,4 +90,8 @@ class ProfileModelResolver:
             context_window_tokens=resolved.context_window_tokens,
             local_inference=resolved.local_inference,
             reasoning_efforts=resolved.reasoning_efforts,
+            default_reasoning_effort=resolved.default_reasoning_effort,
+            tool_reasoning_effort=resolved.tool_reasoning_effort,
+            api_mode=resolved.api_mode,
+            provider_profile_id=resolved.profile_id,
         )

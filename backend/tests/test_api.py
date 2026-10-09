@@ -436,6 +436,9 @@ def test_research_agent_uses_only_the_lean_tool_surface(
             "read_research_note",
             "save_research_note",
             "summarize_research_paper",
+            "read_research_track",
+            "write_research_track",
+            "organize_research_track",
             "read_tool_result",
         }
         record = app.state.services.runs.get(run["id"])

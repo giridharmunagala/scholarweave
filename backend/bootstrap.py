@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.agents.compiler import AgentCompiler
+from backend.brief.service import BriefService
 from backend.conversations.attachments import ConversationAttachmentService
 from backend.conversations.turns import (
     ConversationTurnService,
@@ -44,6 +45,8 @@ from backend.tools.runtime import ApplicationToolRuntime
 from backend.workspace.service import WorkspaceService
 from backend.workspace.repository import WorkspaceRepository
 from backend.workspace.upgrade import WorkspaceUpgrade
+from backend.tracks.repository import TrackRepository
+from backend.tracks.service import TrackService
 from backend.documents.summaries import (
     PAPER_SUMMARY_COMPLETION_POLICY_ID,
     PaperSummaryService,
@@ -65,6 +68,7 @@ class ApplicationServices:
     retrieval: RetrievalService
     research_search: ResearchSearchService
     source_downloads: SourceDownloadService
+    brief: BriefService
     document_repository: DocumentRepository
     document_ocr: DocumentOCR
     document_vision: VisionEnhancer
@@ -72,6 +76,7 @@ class ApplicationServices:
     document_ingestion: DocumentIngestion
     documents: DocumentService
     workspace: WorkspaceService
+    tracks: TrackService
     prompts: PromptRegistry
     skills: SkillService
     tool_catalog: Any
@@ -100,6 +105,7 @@ class ApplicationServices:
         await self.runs.recover_incomplete(self.compiler)
 
     async def close(self) -> None:
+        await self.brief.close()
         await self.documents.close()
         await self.runs.close()
         await self.research_search.close()
@@ -165,6 +171,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         document_ocr,
         workspace,
     )
+    tracks = TrackService(workspace, storage, documents, TrackRepository(session_factory))
     source_downloads = SourceDownloadService(
         resolved,
         documents,
@@ -191,6 +198,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         settings=resolved,
         documents=documents,
         workspace=workspace,
+        tracks=tracks,
         retrieval=retrieval,
         research_search=research_search,
         source_downloads=source_downloads,
@@ -224,6 +232,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         runs,
         conversation_attachments,
         prompts,
+        tracks=tracks,
     )
     summaries = PaperSummaryService(
         compiler,
@@ -253,6 +262,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         retrieval=retrieval,
         research_search=research_search,
         source_downloads=source_downloads,
+        brief=BriefService(storage, source_downloads, documents, workspace),
         document_repository=document_repository,
         document_ocr=document_ocr,
         document_vision=document_vision,
@@ -260,6 +270,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         document_ingestion=document_ingestion,
         documents=documents,
         workspace=workspace,
+        tracks=tracks,
         prompts=prompts,
         skills=skills,
         tool_catalog=tool_catalog,

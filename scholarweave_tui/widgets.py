@@ -16,7 +16,7 @@ from textual.widgets import Button, Checkbox, Input, Label, OptionList, Select, 
 from textual.widgets.option_list import Option
 
 from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
-from backend.providers.schemas import ProviderKind, ProviderResponse
+from backend.providers.schemas import ProviderApiMode, ProviderKind, ProviderResponse
 from backend.prompting.schemas import SKILL_NAME_PATTERN
 from scholarweave_tui.commands import COMMANDS
 from scholarweave_tui.markdown import Markdown
@@ -261,25 +261,32 @@ class ConfirmDiscard(ModalScreen[bool]):
 class NoteName(ModalScreen[str | None]):
     BINDINGS = [Binding("escape", "dismiss(None)", "Cancel")]
 
-    def __init__(self, *, skill: bool = False) -> None:
+    def __init__(self, *, skill: bool = False, track: bool = False) -> None:
         super().__init__()
         self.skill = skill
+        self.track = track
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog"):
-            yield Label("A recipe for recurring work." if self.skill else "A place for a new idea.", classes="dialog-title")
+            yield Label(
+                "A research notebook." if self.track else
+                "A recipe for recurring work." if self.skill else "A place for a new idea.",
+                classes="dialog-title",
+            )
             yield Static(
                 "Use a lowercase name like compare-notes. The model chooses when to use it."
-                if self.skill else "Notes are plain Markdown in your local workspace.",
+                if self.skill else
+                "Four Markdown sections track the problem, literature, experiments and results."
+                if self.track else "Notes are plain Markdown in your local workspace.",
                 classes="dialog-body",
             )
             yield Input(
-                placeholder="skill-name" if self.skill else "Name your note",
-                max_length=64 if self.skill else 300, id="note-name",
+                placeholder="skill-name" if self.skill else "Name your track" if self.track else "Name your note",
+                max_length=64 if self.skill else 120 if self.track else 300, id="note-name",
             )
             with Horizontal(classes="dialog-actions"):
                 yield Button("Cancel", id="cancel")
-                yield Button("Create skill" if self.skill else "Create note", id="create", variant="primary")
+                yield Button("Create skill" if self.skill else "Create track" if self.track else "Create note", id="create", variant="primary")
             yield Static("Enter  create        Esc  cancel", classes="dialog-hint")
 
     def on_mount(self) -> None:
@@ -312,6 +319,7 @@ class ProviderFormResult:
     kind: ProviderKind
     base_url: str
     api_key: str | None
+    api_mode: ProviderApiMode = "chat_completions"
 
 
 class ProviderForm(ModalScreen[ProviderFormResult | None]):
@@ -330,13 +338,15 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
 
     def compose(self) -> ComposeResult:
         provider = self._provider
-        with Vertical(classes="dialog provider-dialog"):
+        with VerticalScroll(classes="dialog provider-dialog"):
             yield Label(
                 "Configure provider." if provider else "Add a model provider.",
                 classes="dialog-title",
             )
             yield Static(
-                "ScholarWeave connects through the OpenAI-compatible Chat Completions protocol.",
+                "Choose Chat Completions for compatible servers, or Responses for supported "
+                "OpenAI/Azure deployments. Both use only ScholarWeave functions. "
+                "Keep the API base URL; do not append /responses.",
                 classes="dialog-body",
             )
             yield Label("Profile name", classes="form-label")
@@ -352,6 +362,13 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
                 value=provider.kind if provider else "ollama",
                 allow_blank=False,
                 id="provider-kind",
+            )
+            yield Label("Generation API", classes="form-label")
+            yield Select(
+                (("Chat Completions", "chat_completions"), ("Responses", "responses")),
+                value=provider.api_mode if provider else "chat_completions",
+                allow_blank=False,
+                id="provider-api-mode",
             )
             yield Label("Base URL", classes="form-label")
             yield Input(
@@ -392,6 +409,7 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
         base_url = self.query_one("#provider-url", Input).value.strip()
         kind = self.query_one("#provider-kind", Select).value
         api_key = self.query_one("#provider-key", Input).value.strip() or None
+        api_mode = self.query_one("#provider-api-mode", Select).value
         if not name:
             self.notify("Give this provider a profile name.", severity="warning")
             return
@@ -401,6 +419,12 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
         valid_kinds = {value for _, value in self.KINDS}
         if kind not in valid_kinds:
             self.notify("Choose a provider kind.", severity="warning")
+            return
+        if api_mode not in {"chat_completions", "responses"}:
+            self.notify("Choose a generation API.", severity="warning")
+            return
+        if kind == "ollama" and api_mode == "responses":
+            self.notify("Ollama requires Chat Completions.", severity="warning")
             return
         if (
             kind not in {"ollama", "openai_compatible"}
@@ -414,6 +438,7 @@ class ProviderForm(ModalScreen[ProviderFormResult | None]):
             kind=kind,
             base_url=base_url,
             api_key=api_key,
+            api_mode=api_mode,
         ))
 
 

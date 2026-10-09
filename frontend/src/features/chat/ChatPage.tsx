@@ -9,7 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
-import { Icon } from '../../shared/components/Icons';
+import { Icon, type IconName } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { ErrorNotice, IconButton, Loading } from '../../shared/components/Ui';
 import {
@@ -66,6 +66,7 @@ import { buildSessionObservability } from './sessionObservability';
 import { buildRunStages } from './runStages';
 import { RunActivity } from './RunActivity';
 import { SessionOverview } from './SessionMonitor';
+import { TrackChatSelector } from '../tracks/TrackChatSelector';
 
 const SUGGESTIONS = [
   'Help me think through an idea.',
@@ -73,6 +74,7 @@ const SUGGESTIONS = [
   'Compare the evidence in my local files.',
   'Look up a question on the web and discuss what you find.',
 ];
+const SUGGESTION_ICONS: IconName[] = ['bulb', 'sparkle', 'papers', 'globe'];
 const COMMON_CONTEXT_WINDOWS = [8_192, 16_384, 32_768, 65_536, 131_072, 262_144];
 const MAX_ATTACHMENTS = 10;
 const OVERLAY_WIDTH = 1_100;
@@ -207,6 +209,9 @@ export function ResearchChatPage() {
   const [initialDraft] = useState(
     () => new URLSearchParams(window.location.search).get('research')?.trim() ?? '',
   );
+  const [initialTrackId] = useState(() => new URLSearchParams(window.location.search).get('track') ?? '');
+  const [initialConversationId] = useState(() => new URLSearchParams(window.location.search).get('conversation'));
+  const [trackId, setTrackId] = useState(initialTrackId);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -392,6 +397,7 @@ export function ResearchChatPage() {
     const conversationRuns = runsForConversation(allRuns, id);
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
     setCurrent(conversation);
+    setTrackId(conversation.track_id ?? '');
     setModelReference(conversation.model_reference);
     setContextWindowTokens(
       latestRun?.context_window_tokens ?? configuredContextWindow(
@@ -431,8 +437,8 @@ export function ResearchChatPage() {
             nextSettings.agent_context_window_tokens,
           ),
         );
-        if (items[0] && !initialDraft) {
-          await open(items[0].id, nextProviders, nextSettings);
+        if (initialConversationId || (items[0] && !initialDraft && !initialTrackId)) {
+          await open(initialConversationId ?? items[0].id, nextProviders, nextSettings);
         }
       })
       .catch(setError)
@@ -655,6 +661,7 @@ export function ResearchChatPage() {
 
   const create = () => {
     setCurrent(null);
+    setTrackId('');
     setModelReference(preferredModelReference);
     setContextWindowTokens(
       configuredContextWindow(
@@ -785,7 +792,7 @@ export function ResearchChatPage() {
     try {
       let conversation = current;
       if (!conversation) {
-        const created = await chatApi.create(modelReference);
+        const created = await chatApi.create(modelReference, trackId || undefined);
         if (request !== openRequestRef.current) return;
         conversation = await chatApi.get(created.id);
         if (request !== openRequestRef.current) return;
@@ -836,6 +843,7 @@ export function ResearchChatPage() {
         .includes(needle),
     );
   }, [conversations, query]);
+  const groupedConversations = useMemo(() => groupByRecency(filtered), [filtered]);
 
   const observedRuns = useMemo(() => {
     const candidates = run ? mergeRun(runs, run) : runs;
@@ -976,33 +984,39 @@ export function ResearchChatPage() {
             </div>
           </div>
           <div className="conversation-scroll">
-            {filtered.map((conversation) => (
-              <div
-                className={current?.id === conversation.id ? 'conversation active' : 'conversation'}
-                key={conversation.id}
-              >
-                <button
-                  type="button"
-                  className="conversation-open"
-                  aria-current={current?.id === conversation.id ? 'page' : undefined}
-                  onClick={() => {
-                    void open(conversation.id).catch(setError);
-                    if (window.innerWidth <= OVERLAY_WIDTH) setSidebarOpen(false);
-                  }}
-                >
-                  <strong>{conversation.title}</strong>
-                  <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
-                </button>
-                <IconButton
-                  icon="trash"
-                  tone="danger"
-                  rowAction
-                  className="conversation-delete"
-                  label={`Delete ${conversation.title}`}
-                  disabled={current?.id === conversation.id && sending}
-                  onClick={() => void remove(conversation.id)}
-                />
-              </div>
+            {groupedConversations.map((group) => (
+              <section className="conversation-group" key={group.label} aria-label={group.label}>
+                <h2 className="conversation-group-label">{group.label}</h2>
+                {group.items.map((conversation) => (
+                  <div
+                    className={current?.id === conversation.id ? 'conversation active' : 'conversation'}
+                    key={conversation.id}
+                  >
+                    <button
+                      type="button"
+                      className="conversation-open"
+                      aria-current={current?.id === conversation.id ? 'page' : undefined}
+                      title={conversation.title}
+                      onClick={() => {
+                        void open(conversation.id).catch(setError);
+                        if (window.innerWidth <= OVERLAY_WIDTH) setSidebarOpen(false);
+                      }}
+                    >
+                      <strong>{conversation.title}</strong>
+                      <span className="conversation-time">{relativeTime(conversation.updated_at)}</span>
+                    </button>
+                    <IconButton
+                      icon="trash"
+                      tone="danger"
+                      rowAction
+                      className="conversation-delete"
+                      label={`Delete ${conversation.title}`}
+                      disabled={current?.id === conversation.id && sending}
+                      onClick={() => void remove(conversation.id)}
+                    />
+                  </div>
+                ))}
+              </section>
             ))}
             {!filtered.length ? (
               <p className="conversation-empty">
@@ -1044,6 +1058,12 @@ export function ResearchChatPage() {
               </button>
             ) : null}
             <h1>{current?.title ?? 'New chat'}</h1>
+            <TrackChatSelector conversationId={current?.id} trackId={trackId} disabled={sending || historyState === 'loading'}
+              onError={setError} onChange={(id) => {
+                setTrackId(id);
+                setCurrent((value) => value ? { ...value, track_id: id || null } : value);
+                void refreshList();
+              }} />
             {compaction ? (
               <span
                 className={`compaction-indicator ${compaction.state}`}
@@ -1111,13 +1131,16 @@ export function ResearchChatPage() {
             >
               {!hasTranscript ? (
                 <div className="chat-welcome">
+                  <span className="chat-welcome-mark" aria-hidden="true">
+                    <Icon name="sparkle" size={26} />
+                  </span>
                   <h2>What would you like to explore?</h2>
                   <p>
                     Chat, think through ideas, or look things up in your local files and on the web.
                     Ask when you want papers or notes saved.
                   </p>
                   <div className="suggestion-grid">
-                    {SUGGESTIONS.map((suggestion) => (
+                    {SUGGESTIONS.map((suggestion, index) => (
                       <button
                         type="button"
                         className="suggestion"
@@ -1128,6 +1151,7 @@ export function ResearchChatPage() {
                           composerRef.current?.focus();
                         }}
                       >
+                        <Icon name={SUGGESTION_ICONS[index] ?? 'sparkle'} size={17} className="suggestion-icon" />
                         {suggestion}
                       </button>
                     ))}
@@ -2060,6 +2084,33 @@ export function relativeTime(value: string): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
   if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
   return new Date(timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+const RECENCY_DAY_MS = 86_400_000;
+
+/** Buckets an already-sorted chat list under Today / Yesterday / ... headings, keeping its order. */
+export function groupByRecency<T extends { updated_at: string }>(
+  items: T[],
+  now: Date = new Date(),
+): { label: string; items: T[] }[] {
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const labelFor = (value: string) => {
+    const time = new Date(value).getTime();
+    if (Number.isNaN(time)) return 'Older';
+    if (time >= today) return 'Today';
+    if (time >= today - RECENCY_DAY_MS) return 'Yesterday';
+    if (time >= today - 7 * RECENCY_DAY_MS) return 'Previous 7 days';
+    if (time >= today - 30 * RECENCY_DAY_MS) return 'Previous 30 days';
+    return 'Older';
+  };
+  const groups: { label: string; items: T[] }[] = [];
+  for (const item of items) {
+    const label = labelFor(item.updated_at);
+    const existing = groups.find((group) => group.label === label);
+    if (existing) existing.items.push(item);
+    else groups.push({ label, items: [item] });
+  }
+  return groups;
 }
 
 async function copyToClipboard(content: string): Promise<void> {

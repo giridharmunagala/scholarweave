@@ -17,7 +17,7 @@ from backend.workspace.layout import WorkspaceLayout
 _MAX_TAGS = 32
 _MAX_TAG_LENGTH = 64
 _MAX_PAPER_NAME_LENGTH = 300
-WORKSPACE_KINDS = ("note", "paper_summary", "paper_notes", "paper_file", "file")
+WORKSPACE_KINDS = ("note", "paper_summary", "paper_notes", "paper_file", "track_section", "file")
 WORKSPACE_COLLECTIONS = {
     "notes": ["note", "paper_notes"],
     "summaries": ["paper_summary"],
@@ -59,6 +59,24 @@ class WorkspaceService:
         self._repository = repository
         if self._repository.count() == 0:
             self._index_existing_files()
+
+    @property
+    def mutation_lock(self):
+        """Serialize managed research mutations with ordinary workspace operations."""
+        return self._index_lock
+
+    def index_path(self, path: str) -> None:
+        with self._index_lock:
+            if self._storage.resolve_path(self._storage.settings.workspace_dir, path).exists():
+                self._index_file(path, existing=self._repository.get(path))
+            else:
+                self._repository.delete_path(path)
+
+    def _protect_track_path(self, path: str) -> None:
+        absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, path)
+        canonical = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix()
+        if WorkspaceLayout.is_track_path(canonical):
+            raise ValidationError("Managed track files are protected; use the revision-checked track section API.")
 
     def list_files(self, *, tags: list[str] | None = None) -> list[WorkspaceDocument]:
         requested = {tag.casefold() for tag in self._normalize_tags(tags or [])}
@@ -141,6 +159,7 @@ class WorkspaceService:
     ) -> WorkspaceDocument:
         normalized_tags = self._normalize_tags(tags) if tags is not None else None
         with self._index_lock:
+            self._protect_track_path(path)
             self._check_revision(path, expected_sha256)
             stored = self._storage.write_workspace_file(path, content)
             document = self._index_file(
@@ -212,6 +231,7 @@ class WorkspaceService:
 
     def delete_file(self, path: str) -> None:
         with self._index_lock:
+            self._protect_track_path(path)
             normalized_path = self._storage.workspace_file_info(path).relative_path
             self._storage.delete_workspace_file(normalized_path)
             self._repository.delete_path(normalized_path)
@@ -289,6 +309,7 @@ class WorkspaceService:
         if resolved.casefold() != normalized.casefold():
             raise ValidationError("Workspace organization does not follow symbolic links.")
         lowered = resolved.casefold().split("/")
+        self._protect_track_path(resolved)
         if lowered[0] == ".scholarweave" or lowered[:2] in [
             ["library", "papers"], ["inbox", "attachments"],
         ]:
@@ -298,7 +319,9 @@ class WorkspaceService:
         return resolved
 
     def delete_folder(self, path: str) -> None:
-        normalized_path = Path(path).as_posix().strip("/")
+        absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, path)
+        normalized_path = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix()
+        self._protect_track_path(normalized_path)
         if not normalized_path or normalized_path == ".":
             raise ValueError("The workspace root cannot be deleted.")
         if normalized_path in {"library", "knowledge", "projects", "inbox"} or (

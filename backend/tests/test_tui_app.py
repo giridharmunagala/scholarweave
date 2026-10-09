@@ -888,6 +888,9 @@ def test_provider_command_adds_and_discovers_profile() -> None:
                 "kind": "ollama",
                 "base_url": "http://127.0.0.1:8080/v1",
                 "api_key": None,
+                "api_mode": "chat_completions",
+                "default_reasoning_effort": None,
+                "tool_reasoning_effort": None,
                 "models": [],
                 "serialize_model_switches": None,
             }
@@ -913,6 +916,7 @@ def test_provider_command_updates_connection_without_clearing_saved_key() -> Non
             assert isinstance(app.screen, ProviderForm)
             app.screen.query_one("#provider-name", Input).value = "Renamed runtime"
             app.screen.query_one("#provider-url", Input).value = "http://127.0.0.1:9000/v1"
+            app.screen.query_one("#provider-api-mode", Select).value = "responses"
             await pilot.click("#save-provider")
             await settle(app, pilot)
 
@@ -924,9 +928,11 @@ def test_provider_command_updates_connection_without_clearing_saved_key() -> Non
                 "name": "Renamed runtime",
                 "kind": "openai_compatible",
                 "base_url": "http://127.0.0.1:9000/v1",
+                "api_mode": "responses",
             }
             assert server.providers[0]["api_key_set"] is True
             assert app.providers[0].name == "Renamed runtime"
+            assert app.providers[0].api_mode == "responses"
     asyncio.run(scenario())
 
 

@@ -1,0 +1,32 @@
+.tracks-page { padding: 28px; height: 100%; overflow: auto; }
+.tracks-layout { display: grid; grid-template-columns: minmax(200px, 260px) minmax(0, 1fr); gap: 24px; }
+.tracks-list form, .track-assist { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
+.track-link { display: flex; flex-direction: column; gap: 5px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; text-decoration: none; }
+.track-link.active { background: var(--accent-soft); border-color: var(--accent); }
+.tracks-page small, .track-revision, .track-overview p { color: var(--muted); }
+.track-detail { min-width: 0; }
+.track-overview { border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+.track-overview code { overflow-wrap: anywhere; }
+.track-overview details { margin-top: 12px; }
+.track-overview li { margin: 8px 0; }
+.track-overview li button { margin-left: 12px; }
+.track-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0; }
+.track-tabs [aria-selected="true"] { border-color: var(--accent); font-weight: 600; }
+.track-actions { margin-bottom: 16px; }
+.tracks-page textarea { width: 100%; min-height: 360px; resize: vertical; font-family: var(--font-mono, monospace); line-height: 1.6; padding: 14px; }
+.tracks-page pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 380px; overflow: auto; padding: 12px; background: var(--surface-inset); }
+.track-warnings, .track-import, .track-comparison, .track-history, .track-experiments { padding: 16px; margin: 16px 0; border: 1px solid var(--border); border-radius: 8px; }
+.track-history button { display: block; margin: 8px 0; }
+.track-import label { display: block; margin: 12px 0; }
+.track-import input[type="checkbox"] { width: auto; margin-right: 8px; }
+.track-diff { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.track-table-scroll { overflow-x: auto; }
+.track-experiments table { border-collapse: collapse; width: 100%; }
+.track-experiments th, .track-experiments td { padding: 10px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+.track-association { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.track-association select { max-width: 180px; }
+@media (max-width: 800px) {
+  .tracks-page { padding: 16px; }
+  .tracks-layout, .track-diff { grid-template-columns: 1fr; }
+  .track-association { flex-wrap: wrap; }
+}

@@ -10,7 +10,7 @@ class WorkspaceSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
 
-WorkspaceKind = Literal["note", "paper_summary", "paper_notes", "paper_file", "file"]
+WorkspaceKind = Literal["note", "paper_summary", "paper_notes", "paper_file", "track_section", "file"]
 
 
 class WorkspaceFileResponse(WorkspaceSchema):

@@ -1,0 +1,10 @@
+{
+  "label": "Update research track",
+  "description": "Requested sections only. Read first; preserve findings/citations/manual edits/IDs. Reconcile conflicts or uncertain outcomes before retrying. History retains prior content.",
+  "parameter_descriptions": {
+    "track_id": "ID or null for attached track.",
+    "section": "Main section or exploration/filename (no .md). Filenames: lowercase letters/digits, hyphens/underscores, max 80.",
+    "content": "Full preserved Markdown. States: Suggested, Planned, Running, Completed, Blocked, Cancelled.",
+    "expected_sha256": "Latest document read hash; null only to create a new exploration file, never overwrite."
+  }
+}

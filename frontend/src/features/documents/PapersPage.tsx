@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { apiUrl, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
-import { Link } from '../../app/router';
+import { Link, useLocation } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { EmptyState, ErrorNotice, IconButton, LibraryTabs, Loading, PageHeader, Panel, StatusPill } from '../../shared/components/Ui';
@@ -68,6 +68,8 @@ function ingestionDetail(document: Document): string {
 }
 
 export default function PapersPage() {
+  const { searchParams } = useLocation();
+  const linkedPaper = searchParams.get('paper');
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [folders, setFolders] = useState<PaperFolder[]>([]);
   const [activeFolder, setActiveFolder] = useState<string>('all');
@@ -102,8 +104,9 @@ export default function PapersPage() {
   };
 
   useEffect(() => {
-    load().catch(setError).finally(() => setLoading(false));
-  }, []);
+    setLoading(true);
+    load(linkedPaper ?? undefined).catch(setError).finally(() => setLoading(false));
+  }, [linkedPaper]);
 
   useEffect(() => {
     if (!selected || selected.status === 'processing') return;

@@ -4,6 +4,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import ChatPage from './ChatPage';
 import type { ConversationAttachment, ResponseEffort } from './api';
+import { RouterProvider } from '../../app/router';
 
 const MODEL = { provider_profile_id: 'local', model: 'research-model' };
 const SETTINGS = {
@@ -28,6 +29,7 @@ function conversation(id: string) {
     session_policy: {}, status: 'idle', last_message_preview: '',
     created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
     items: [],
+    track_id: null as string | null,
   };
 }
 
@@ -83,6 +85,7 @@ describe('chat attachments', () => {
       const method = init?.method ?? 'GET';
       if (url.endsWith('/api/providers')) return response(PROVIDERS);
       if (url.endsWith('/api/settings')) return response(SETTINGS);
+      if (url.endsWith('/api/tracks')) return response([]);
       if (url.endsWith('/api/agent/attachments')) {
         return upload((init!.body as FormData).get('file') as File, init?.signal);
       }
@@ -90,6 +93,7 @@ describe('chat attachments', () => {
         if (method === 'POST') {
           createRequests += 1;
           const created = conversation('created');
+          created.track_id = JSON.parse(String(init?.body)).track_id ?? null;
           conversations.push(created);
           return response(created, 201);
         }
@@ -115,7 +119,7 @@ describe('chat attachments', () => {
       const getMatch = /\/api\/agent\/conversations\/([^/]+)$/.exec(url);
       if (getMatch) {
         if (getMatch[1] === 'two' && openGate) return openGate;
-        return response(conversation(getMatch[1]));
+        return response(conversations.find((item) => item.id === getMatch[1]) ?? conversation(getMatch[1]));
       }
       if (url.includes('/api/runs?conversation_id=')) return response([]);
       throw new Error(`Unhandled request: ${method} ${url}`);
@@ -132,7 +136,7 @@ describe('chat attachments', () => {
   });
 
   async function mount() {
-    await act(async () => { root.render(<ChatPage />); });
+    await act(async () => { root.render(<RouterProvider><ChatPage /></RouterProvider>); });
   }
 
   function button(label: string) {
@@ -455,5 +459,24 @@ describe('chat attachments', () => {
     expect(button('Attach file').disabled).toBe(true);
     await click(button('Remove 0.txt'));
     expect(button('Attach file').disabled).toBe(false);
+  });
+
+  it('prepares an unsent track prompt and links the new chat without changing model, effort or attachments', async () => {
+    window.history.replaceState({}, '', '/?track=track-1&research=Discuss%20the%20problem%20section');
+    conversations = [conversation('existing')];
+    await mount();
+    expect(container.querySelector('textarea')!.value).toBe('Discuss the problem section');
+    expect(container.textContent).toContain('New chat');
+    expect(createRequests).toBe(0);
+    expect(messageRequests).toEqual([]);
+    await selectEffort('quick');
+    await selectFiles([new File(['evidence'], 'evidence.md')]);
+    await click(button('Send message'));
+    const create = vi.mocked(fetch).mock.calls.find(([input, init]) => String(input).endsWith('/agent/conversations') && init?.method === 'POST')!;
+    expect(JSON.parse(String(create[1]!.body))).toEqual({ model_reference: MODEL, track_id: 'track-1' });
+    expect(messageRequests[0]).toMatchObject({
+      content: 'Discuss the problem section', response_effort: 'quick', attachment_paths: ['research/uploads/evidence.md'],
+    });
+    expect(container.querySelector('a[href="/tracks?id=track-1"]')).not.toBeNull();
   });
 });

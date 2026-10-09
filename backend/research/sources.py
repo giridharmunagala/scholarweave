@@ -92,12 +92,18 @@ class _ReadableHTMLParser(HTMLParser):
         "ul",
     }
 
-    def __init__(self) -> None:
+    def __init__(self, *, prefer_main: bool = False) -> None:
         super().__init__(convert_charrefs=True)
+        self._prefer_main = prefer_main
+        self._skipped_tags = self._SKIPPED | ({"nav", "footer", "aside"} if prefer_main else set())
         self._skip_depth = 0
         self._in_title = False
         self._title_parts: list[str] = []
         self._parts: list[str] = []
+        self._main_parts: list[str] = []
+        self._article_parts: list[str] = []
+        self._main_depth = 0
+        self._article_depth = 0
 
     @property
     def title(self) -> str:
@@ -105,34 +111,56 @@ class _ReadableHTMLParser(HTMLParser):
 
     @property
     def text(self) -> str:
-        raw = "".join(self._parts).replace("\r", "\n")
+        parts = self._parts
+        if self._prefer_main:
+            parts = next(
+                (candidate for candidate in (self._article_parts, self._main_parts, self._parts)
+                 if "".join(candidate).strip()),
+                self._parts,
+            )
+        raw = "".join(parts).replace("\r", "\n")
         lines = [_normalize_inline(line) for line in raw.splitlines()]
         return _BLANK_LINES.sub("\n\n", "\n".join(line for line in lines if line)).strip()
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         del attrs
         tag = tag.casefold()
-        if tag in self._SKIPPED:
+        if tag == "main":
+            self._main_depth += 1
+        if tag == "article":
+            self._article_depth += 1
+        if tag in self._skipped_tags:
             self._skip_depth += 1
         if tag == "title":
             self._in_title = True
         if not self._skip_depth and tag in self._BREAKS:
-            self._parts.append("\n")
+            self._append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.casefold()
         if tag == "title":
             self._in_title = False
-        if tag in self._SKIPPED and self._skip_depth:
+        if tag in self._skipped_tags and self._skip_depth:
             self._skip_depth -= 1
         if not self._skip_depth and tag in self._BREAKS:
-            self._parts.append("\n")
+            self._append("\n")
+        if tag == "main":
+            self._main_depth = max(0, self._main_depth - 1)
+        if tag == "article":
+            self._article_depth = max(0, self._article_depth - 1)
 
     def handle_data(self, data: str) -> None:
         if self._in_title:
             self._title_parts.append(data)
         if not self._skip_depth and not self._in_title:
-            self._parts.append(data)
+            self._append(data)
+
+    def _append(self, text: str) -> None:
+        self._parts.append(text)
+        if self._main_depth:
+            self._main_parts.append(text)
+        if self._article_depth:
+            self._article_parts.append(text)
 
 
 class SourceDownloadService:
@@ -224,7 +252,23 @@ class SourceDownloadService:
         assert ready is not None
         return ready
 
-    async def download_web_page(self, url: str) -> WebSource:
+    async def fetch_resource(
+        self, url: str, *, max_bytes: int
+    ) -> tuple[bytes, str, httpx.Headers]:
+        """Fetch bounded public content without creating a library or cache entry."""
+        return await self._download(self._normalize_url(url), max_bytes)
+
+    async def fetch_pdf_bytes(self, url: str) -> bytes:
+        content, _, _ = await self.fetch_resource(
+            url, max_bytes=self._settings.max_upload_bytes
+        )
+        if not content.startswith(b"%PDF-"):
+            raise ValueError("The downloaded resource is not a PDF.")
+        return content
+
+    async def download_web_page(
+        self, url: str, *, cache: bool = True, prefer_main: bool = False
+    ) -> WebSource:
         normalized_url = self._normalize_url(url)
         content, final_url, headers = await self._download(
             normalized_url,
@@ -245,7 +289,7 @@ class SourceDownloadService:
                 final_url,
                 f"The page uses an unsupported character encoding: {encoding}.",
             ) from exc
-        parser = _ReadableHTMLParser()
+        parser = _ReadableHTMLParser(prefer_main=prefer_main)
         parser.feed(html)
         text = parser.text
         if not text:
@@ -262,12 +306,13 @@ class SourceDownloadService:
             created_at=now,
             expires_at=now + timedelta(minutes=self._settings.web_source_ttl_minutes),
         )
-        async with self._lock:
-            self._purge_expired()
-            if len(self._web_sources) >= self._settings.max_temporary_web_sources:
-                oldest = min(self._web_sources.values(), key=lambda item: item.created_at)
-                self._web_sources.pop(oldest.id, None)
-            self._web_sources[source.id] = source
+        if cache:
+            async with self._lock:
+                self._purge_expired()
+                if len(self._web_sources) >= self._settings.max_temporary_web_sources:
+                    oldest = min(self._web_sources.values(), key=lambda item: item.created_at)
+                    self._web_sources.pop(oldest.id, None)
+                self._web_sources[source.id] = source
         return source
 
     async def list_web_sources(self) -> list[WebSource]:

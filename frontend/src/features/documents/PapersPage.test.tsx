@@ -18,6 +18,40 @@ function noContent() {
   return new Response(null, { status: 204 });
 }
 
+it('opens the exact kept paper linked from the brief instead of the newest library item', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library?paper=kept-paper');
+  const papers = ['Newest paper', 'Kept paper'].map((title, index) => ({
+    id: index ? 'kept-paper' : 'newest-paper', title, status: 'uploaded',
+    source_filename: `${index}.pdf`, page_count: 1, metadata: {}, artifacts: [], chunks: [],
+  }));
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith('/api/documents')) return respond(papers);
+    if (url.endsWith('/api/paper-folders') || url.endsWith('/api/providers') || url.endsWith('/summaries')) return respond([]);
+    if (url.endsWith('/api/settings')) return respond({ default_model_references: {} });
+    if (url.endsWith('/ingestion-options')) return respond({
+      total_pages: 1, embedded_text_pages: 1, embedded_text_ratio: 1,
+      recommended_mode: 'embedded', ocr_available: true, ocr_engine: 'tesseract',
+    });
+    const paper = papers.find((item) => url.endsWith(`/documents/${item.id}`));
+    if (paper) return respond(paper);
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider><PapersPage /></RouterProvider>));
+    expect(container.querySelector('[aria-label="Delete paper Kept paper"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Delete paper Newest paper"]')).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+    vi.unstubAllGlobals();
+  }
+});
+
 it('expands preparation for unready papers and isolates delayed summary results when switching papers', async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
   const papers = ['ready', 'uploaded', 'failed'].map((status, index) => ({
