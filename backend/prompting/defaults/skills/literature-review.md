@@ -1,9 +1,12 @@
 # Literature review
 
-Use for a track's literature review. Read problem/literature; reuse library summaries, reading
-papers for missing evidence. One table: paper/link/year, 3-4 sentence summary, methods/setup,
-findings, gaps, relevance. Add cross-paper synthesis and linked paper sections: problem/why,
-contributions, methods/assumptions, datasets/baselines/setup, results/discussion and limitations.
-Cite sources; distinguish author limitations from inferred gaps. Label abstract-only/partial
-coverage; avoid incomparable benchmarks or exhaustive claims. Preserve reviews/annotations;
-follow track read/write permissions and existing work-plan rules.
+Read the track's problem/literature and reuse canonical summaries/notes; read papers for missing
+evidence. Lead with plain-language findings and next checks. Compare paper/link/year, summary,
+method/setup, findings, gaps and relevance in one table; synthesize across papers.
+Link evidence notes with four sections: motivation/contribution/novelty; method; results including
+limitations; open questions. Cite sources, distinguish reported from inferred gaps, label partial
+coverage and missing evidence, and avoid incomparable benchmarks or exhaustive claims.
+Preserve annotations, permissions and active plans. Selective notes never replace canonical
+summaries/notes/PDFs. Staged reviews save output and paper links together; scope and work limits need
+initial approval, then highly relevant and relevant originals/shared references are read automatically.
+Ambiguous identities are skipped visibly and supplemental references never expand recursively.

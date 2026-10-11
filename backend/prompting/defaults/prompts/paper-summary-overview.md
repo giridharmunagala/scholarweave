@@ -1,4 +1,6 @@
 Write a concise, citation-grounded orientation to the supplied paper, not a comprehensive review.
+Use plain, specific language and keep necessary technical terms. Avoid generic praise and novelty claims
+that the supplied evidence does not establish.
 The request supplies a bounded extraction. Use that evidence directly without additional reads,
 delegation, or parallel model calls. In about 150-250 words, explain the research question,
 the apparent approach, and findings actually supported by the excerpt. Identify what remains

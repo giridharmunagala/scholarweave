@@ -16,9 +16,11 @@ const shortDate = (value: string) => new Date(value).toLocaleDateString(undefine
 const draftKey = (id: string, section: TrackSection) => `${id}:${section}`;
 
 export default function TracksPage() {
-  const { searchParams } = useLocation();
+  const { searchParams, search } = useLocation();
   const navigate = useNavigate();
   const selectedId = searchParams.get('id');
+  const linkedSection = searchParams.get('section');
+  const linkedReview = searchParams.get('review');
   const [tracks, setTracks] = useState<Track[]>([]);
   const [track, setTrack] = useState<Track | null>(null);
   const [papers, setPapers] = useState<Paper[]>([]);
@@ -55,6 +57,13 @@ export default function TracksPage() {
       ? items.map((item) => item.id === value.id ? value : item) : [...items, value]);
   };
   useEffect(() => {
+    if (linkedSection && /^(problem|literature|experiments|results|exploration\/[a-z0-9][a-z0-9_-]{0,79})$/.test(linkedSection)) {
+      setSection(linkedSection);
+    } else if (linkedReview) {
+      setSection('literature');
+    }
+  }, [selectedId, linkedSection, linkedReview]);
+  useEffect(() => {
     let active = true;
     tracksApi.list().then((items) => { if (active) setTracks(items); }).catch(setError);
     request<Paper[]>('/documents').then((items) => { if (active) setPapers(items); }).catch(setError);
@@ -69,7 +78,7 @@ export default function TracksPage() {
     setError(null);
     if (selectedId) tracksApi.get(selectedId).then((value) => { if (active) updateTrack(value); }).catch((reason) => { if (active) setError(reason); });
     return () => { active = false; };
-  }, [selectedId]);
+  }, [selectedId, search]);
   useEffect(() => {
     let active = true;
     setLatest(null);
@@ -82,11 +91,15 @@ export default function TracksPage() {
     if (!drafts[key] || drafts[key].content === drafts[key].base.content) {
       setOpening(true);
       tracksApi.section(selectedId, section).then((value) => {
-        if (active) setDrafts((items) => ({ ...items, [key]: { base: value, content: value.content } }));
+        if (active) setDrafts((items) => {
+          const current = items[key];
+          if (current && current.content !== current.base.content) return items;
+          return { ...items, [key]: { base: value, content: value.content } };
+        });
       }).catch((reason) => { if (active) setError(reason); }).finally(() => { if (active) setOpening(false); });
     }
     return () => { active = false; };
-  }, [selectedId, section]);
+  }, [selectedId, section, search]);
 
   const perform = async (action: () => Promise<void>) => {
     if (busy) return;
@@ -216,6 +229,7 @@ export default function TracksPage() {
                 <code className="track-path" title="Workspace folder">{track.folder_path}</code>
               </div>
               <div className="button-row">
+                <Link className="button secondary small" to={`/deep-work?track=${encodeURIComponent(track.id)}`}>Deep Work</Link>
                 <button className="button secondary small" disabled={busy} onClick={() => void perform(() => tracksApi.download(track.id))}><Icon name="download" size={13} />Export track ZIP</button>
                 <button className="button secondary small" disabled={busy || !!preview} onClick={() => fileInput.current?.click()}><Icon name="upload" size={13} />Import Markdown or ZIP</button>
                 <input ref={fileInput} hidden type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" aria-label="Import track file" onChange={(event) => {
@@ -265,7 +279,7 @@ export default function TracksPage() {
                   {opening ? <Loading label="Loading section…" /> : draft ? <>
                     <div className={`track-document${editing ? ' editing' : ''}`}>
                       {editing ? <textarea aria-label={`${label(section)} Markdown`} className="track-textarea" spellCheck value={draft.content} disabled={busy || !!preview} onChange={(event) => setContent(event.target.value)} />
-                        : draft.content.trim() ? <MarkdownViewer content={draft.content} />
+                        : draft.content.trim() ? <MarkdownViewer content={draft.content} workspacePath={draft.base.path} onNavigate={navigate} />
                           : <p className="track-document-empty">This section is empty. Choose Edit to start writing.</p>}
                     </div>
                     <div className="track-doc-footer button-row">
@@ -304,7 +318,7 @@ export default function TracksPage() {
                             setNotice('Prior content recovered into an unsaved draft. Save explicitly to restore it.');
                           }
                         }}>Recover into draft</button></div>
-                      <div className="track-historical-body"><MarkdownViewer content={historical.content} /></div>
+                      <div className="track-historical-body"><MarkdownViewer content={historical.content} workspacePath={historical.path} onNavigate={navigate} /></div>
                     </div> : null}
                   </> : null}
                   {section === 'experiments' ? <section className="track-block track-experiments" aria-label="Saved experiment status">

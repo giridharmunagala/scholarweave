@@ -49,6 +49,12 @@ def anyio_backend():
         ("work.plan.read", None, True, False),
         ("research.sources.acquire", None, False, True),
         ("research.sources.search", None, True, False),
+        ("research.literature", "status", True, False),
+        ("research.literature", "candidates", True, False),
+        ("research.literature", "start", False, True),
+        ("research.literature", "pause", False, True),
+        ("research.literature", "stop_stage", False, True),
+        ("research.literature", "resume", False, True),
         ("unknown.read", None, False, True),
     ],
 )

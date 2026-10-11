@@ -5,6 +5,7 @@ import re
 import socket
 import uuid
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
@@ -20,6 +21,7 @@ from backend.utils import utcnow
 from backend.documents import DocumentService
 from backend.documents.models import Document
 from backend.workspace.service import WorkspaceDocument, WorkspaceService
+from backend.research.search import AsyncRateLimiter
 
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 _MAX_REDIRECTS = 5
@@ -172,6 +174,7 @@ class SourceDownloadService:
         workspace: WorkspaceService,
         *,
         client: httpx.AsyncClient | None = None,
+        arxiv_limiter: AsyncRateLimiter | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -187,6 +190,7 @@ class SourceDownloadService:
         self._web_sources: dict[str, WebSource] = {}
         self._lock = anyio.Lock()
         self._pdf_download_lock = anyio.Lock()
+        self._arxiv_limiter = arxiv_limiter or AsyncRateLimiter(settings.arxiv_search_requests_per_minute)
 
     async def close(self) -> None:
         async with self._lock:
@@ -200,6 +204,9 @@ class SourceDownloadService:
         *,
         title: str | None = None,
         arxiv_only: bool = False,
+        enhance_with_llm: bool | None = None,
+        match_title: bool = True,
+        owner_review_id: str | None = None,
     ) -> Document:
         normalized_url = self._normalize_url(url)
         if arxiv_only and (urlparse(normalized_url).hostname or "").casefold() not in _ARXIV_HOSTS:
@@ -209,6 +216,9 @@ class SourceDownloadService:
                 normalized_url,
                 title=title,
                 arxiv_only=arxiv_only,
+                enhance_with_llm=enhance_with_llm,
+                match_title=match_title,
+                owner_review_id=owner_review_id,
             )
 
     async def _download_pdf(
@@ -217,8 +227,11 @@ class SourceDownloadService:
         *,
         title: str | None,
         arxiv_only: bool,
+        enhance_with_llm: bool | None = None,
+        match_title: bool = True,
+        owner_review_id: str | None = None,
     ) -> Document:
-        existing = self.find_document(normalized_url, title=title)
+        existing = self.find_document(normalized_url, title=title if match_title else None)
         if existing is not None:
             return existing
         content, final_url, headers = await self._download(
@@ -242,13 +255,15 @@ class SourceDownloadService:
                 "resolved_source_url": final_url,
                 "downloaded_at": utcnow().isoformat(),
                 "source_kind": "arxiv" if arxiv_only else "remote_pdf",
+                **({"owner_review_id": owner_review_id} if owner_review_id else {}),
             },
         )
         options = await self._documents.ingestion_options(document.id)
         use_ocr = bool(
             options["recommended_mode"] == "ocr" and options.get("ocr_available")
         )
-        await self._documents.ingest_document(document.id, force_ocr=use_ocr)
+        options = {"enhance_with_llm": enhance_with_llm} if enhance_with_llm is not None else {}
+        await self._documents.ingest_document(document.id, force_ocr=use_ocr, **options)
         ready = self._documents.get_document(document.id)
         assert ready is not None
         return ready
@@ -452,7 +467,7 @@ class SourceDownloadService:
         for _ in range(_MAX_REDIRECTS + 1):
             await self._validate_public_url(current)
             try:
-                async with self._client.stream(
+                async with self._source_request(current), self._client.stream(
                     "GET",
                     current,
                     headers=request_headers,
@@ -489,6 +504,15 @@ class SourceDownloadService:
             except httpx.HTTPError as exc:
                 raise RuntimeError(f"Remote download failed: {exc}") from exc
         raise ValueError("Remote resource redirected too many times.")
+
+    @asynccontextmanager
+    async def _source_request(self, url: str):
+        host = (urlsplit(url).hostname or "").lower()
+        if host == "arxiv.org" or host.endswith(".arxiv.org"):
+            async with self._arxiv_limiter.request():
+                yield
+        else:
+            yield
 
     async def _validate_public_url(self, url: str) -> None:
         parsed = urlparse(url)

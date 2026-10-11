@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import re
 import webbrowser
+from urllib.parse import urlencode
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -32,6 +33,7 @@ from backend.providers.reasoning import REASONING_EFFORTS, ReasoningEffort
 from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderResponse, ProviderUpdate
 from backend.prompting.schemas import SkillResponse
 from backend.tracks.schemas import TrackDetailResponse, TrackSectionResponse
+from backend.research.reviews.schemas import ReviewControlRequest
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
 from backend.runs.schemas import RunResponse
 from backend.workspace.schemas import (
@@ -831,6 +833,8 @@ class ScholarWeaveApp(App[None]):
                 self.action_view("tracks")
             case "track":
                 self.choose_chat_track()
+            case "review":
+                self.choose_literature_review()
             case "chat":
                 self.action_view("chat")
             case "stop":
@@ -861,6 +865,58 @@ class ScholarWeaveApp(App[None]):
         self.notify(f"Effort: {value} — {EFFORT_SUMMARY[value]}.")
         return True
 
+    @work(group="literature-review", exclusive=True)
+    async def choose_literature_review(self) -> None:
+        track_id = self.track.id if self.view == "tracks" and self.track else self._chat_track_id
+        try:
+            reviews = await self.client.reviews(conversation_id=self.current_id, track_id=track_id)
+            selected = await self.push_screen_wait(ChoicePicker(
+                "Literature reviews", "Approve scope and paper/comparison limits; relevant papers are collected and read automatically.",
+                [("__web__", "Start or configure a review", "Open the review panel in your browser"), *[
+                    (review.id, review.title, f"{review.status} / {review.stage} - {review.selected_count} automatically selected papers")
+                    for review in reviews
+                ]],
+            ))
+            if selected is None:
+                return
+            review = next((item for item in reviews if item.id == selected), None)
+            action = "open"
+            if review is not None:
+                actions = [("open", "Open review and decisions", "Approve scope or budget and inspect automatic reading in the browser")]
+                if review.status not in {"completed", "paused"}:
+                    actions.append(("pause", "Pause review", "Preserve completed checkpoints"))
+                if review.status != "completed":
+                    actions.append(("stop_stage", "Stop stage", "Advance only if valid partial results are sufficient"))
+                if review.status in {"paused", "blocked"}:
+                    actions.append(("resume", "Resume review", "Continue the stage or return to pending approval"))
+                action = await self.push_screen_wait(ChoicePicker(
+                    review.title,
+                    f"{review.stage}: {review.status}. Screened {review.work_used.screened_papers}/"
+                    f"{review.work_budget.screened_papers if review.work_budget else 'unapproved'}; "
+                    f"collected/read {review.work_used.read_papers}/"
+                    f"{review.work_budget.read_papers if review.work_budget else 'unapproved'}; "
+                    f"comparison passes {review.work_used.comparison_passes}/"
+                    f"{review.work_budget.comparison_passes if review.work_budget else 'unapproved'}. "
+                    + (review.error or ""), actions,
+                ))
+            if action == "open":
+                query = {"view": "reviews"}
+                if track_id:
+                    query["track"] = track_id
+                if self.current_id:
+                    query["conversation"] = self.current_id
+                if review:
+                    query["review"] = review.id
+                if not webbrowser.open(f"{self.client.base_url}/deep-work?{urlencode(query)}"):
+                    self.notify("Could not open the browser. Open Deep Work in the web app.", severity="error")
+            elif action in {"pause", "stop_stage", "resume"} and review is not None:
+                current = await self.client.control_review(review.id, ReviewControlRequest(
+                    action=action, expected_revision=review.revision,
+                ))
+                self.notify(f"{current.stage}: {current.status}. {current.error or ''}", title=current.title, timeout=10)
+        except ApiError as exc:
+            self._error(exc)
+
     def _set_web(self, argument: str) -> bool:
         value = argument.casefold()
         if value not in {"on", "off"}:
@@ -877,6 +933,8 @@ class ScholarWeaveApp(App[None]):
             if provider.state == "archived":
                 continue
             for model in provider.models:
+                if "decision" in model.capabilities and "chat" not in model.capabilities:
+                    continue
                 hints = sorted(model.capabilities) or ["chat"]
                 levels = ", ".join(model.reasoning_efforts or []) or "no reasoning levels"
                 rows.append((

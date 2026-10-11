@@ -230,13 +230,14 @@ class ScheduledTransport(httpx.AsyncBaseTransport):
 
         body = _decode_body(request.content)
         model = body.get("model") if isinstance(body, dict) else None
-        endpoint = next(suffix for suffix in ("/chat/completions", "/embeddings", "/responses")
+        endpoint = next(suffix for suffix in ("/chat/completions", "/embeddings", "/responses", "/systemone")
                         if request.url.path.endswith(suffix))
         server_url = str(request.url.copy_with(
             path=request.url.path.removesuffix(endpoint), query=None, fragment=None,
         )).rstrip("/")
         lease = self._scheduler.request(
             profile_id=self._profile_id, model=model, server_url=server_url,
+            decision=endpoint == "/systemone",
         )
         queued = perf_counter()
         await report_inference_progress("queued")
@@ -282,7 +283,7 @@ class _ScheduledStream(httpx.AsyncByteStream):
 
 
 def _is_llm_endpoint(path: str) -> bool:
-    return path.endswith(("/chat/completions", "/embeddings", "/responses"))
+    return path.endswith(("/chat/completions", "/embeddings", "/responses", "/systemone"))
 
 
 def logged_http_client(

@@ -10,6 +10,42 @@ from backend.providers.logging import ScheduledTransport
 
 
 @pytest.mark.anyio
+async def test_native_decisions_admit_four_without_overlapping_generation():
+    scheduler = InferenceScheduler(decision_parallelism=lambda: 4)
+    leases = [await scheduler.request(profile_id="local", model="decision", decision=True).__aenter__() for _ in range(4)]
+    fifth = asyncio.create_task(scheduler.request(profile_id="local", model="decision", decision=True).__aenter__())
+    generation = asyncio.create_task(scheduler.request(profile_id="local", model="main").__aenter__())
+    await asyncio.sleep(0)
+    assert not fifth.done() and not generation.done()
+    assert scheduler.snapshot()["active_requests"] == 4
+    await leases.pop().release()
+    fifth_lease = await asyncio.wait_for(fifth, 1)
+    for lease in leases:
+        await lease.release()
+    assert not generation.done()
+    await fifth_lease.release()
+    await (await asyncio.wait_for(generation, 1)).release()
+    assert scheduler.snapshot()["active_requests"] == 0
+
+
+@pytest.mark.anyio
+async def test_decision_parallelism_changes_for_subsequent_admissions():
+    limit = [2]
+    scheduler = InferenceScheduler(decision_parallelism=lambda: limit[0])
+    leases = [await scheduler.request(model="decision", decision=True).__aenter__() for _ in range(2)]
+    waiting = asyncio.create_task(scheduler.request(model="decision", decision=True).__aenter__())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    limit[0] = 1
+    await leases.pop().release()
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    await leases.pop().release()
+    await (await asyncio.wait_for(waiting, 1)).release()
+    assert scheduler.snapshot()["active_requests"] == 0
+
+
+@pytest.mark.anyio
 async def test_request_progress_is_scoped_and_reports_queue_before_provider() -> None:
     scheduler = InferenceScheduler()
     first = await scheduler.request().__aenter__()

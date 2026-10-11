@@ -4,6 +4,37 @@ import { describe, expect, it } from 'vitest';
 import { MarkdownViewer } from './MarkdownViewer';
 
 describe('MarkdownViewer', () => {
+  it('opens track-relative canonical summaries, notes and PDFs through the existing library', () => {
+    const html = renderToStaticMarkup(<MarkdownViewer
+      workspacePath="projects/tracks/adaptive--track-1/literature.md"
+      content={'[summary](../../../library/papers/adaptive--paper-1/summary.md)\n\n[notes](../../../library/papers/adaptive--paper-1/notes.md)\n\n[PDF](../../../library/papers/adaptive--paper-1/source.pdf)\n\n[experiment](experiments.md#exp-001)'}
+    />);
+    expect(html).toContain('href="/library/notes?path=library%2Fpapers%2Fadaptive--paper-1%2Fsummary.md"');
+    expect(html).toContain('href="/library/notes?path=library%2Fpapers%2Fadaptive--paper-1%2Fnotes.md"');
+    expect(html).toContain('href="/library?paper=paper-1"');
+    expect(html).toContain('href="/tracks?id=track-1&amp;section=experiments#exp-001"');
+  });
+
+  it('keeps external sources and footnotes unchanged and rejects malformed or escaping workspace links', () => {
+    const html = renderToStaticMarkup(<MarkdownViewer workspacePath="knowledge/review.md"
+      content={'[source](https://example.org/paper)\n\n[footnote](#note)\n\n[escape](../../private.md)\n\n[bad](%C0%AF.md)'}
+    />);
+    expect(html).toContain('href="https://example.org/paper"');
+    expect(html).toContain('href="#note"');
+    expect(html).not.toContain('href="../../private.md"');
+    expect(html).not.toContain('href="%C0%AF.md"');
+    expect(html.match(/aria-disabled="true"/g)).toHaveLength(2);
+  });
+
+  it('preserves complete identifiers containing double hyphens in local reader links', () => {
+    const html = renderToStaticMarkup(<MarkdownViewer
+      workspacePath="projects/tracks/adaptive--track--one/literature.md"
+      content={'[PDF](../../../library/papers/adaptive--paper--one/source.pdf)\n\n[problem](problem.md)'}
+    />);
+    expect(html).toContain('href="/library?paper=paper--one"');
+    expect(html).toContain('href="/tracks?id=track--one&amp;section=problem"');
+  });
+
   it('renders GitHub-flavored markdown as document markup', () => {
     const html = renderToStaticMarkup(
       <MarkdownViewer

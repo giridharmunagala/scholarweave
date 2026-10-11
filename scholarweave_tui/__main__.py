@@ -28,8 +28,8 @@ def main() -> None:
     parser.add_argument("--check", action="store_true", help="Check startup, then stop any owned backend without opening the TUI.")
     parser.add_argument(
         "--api-url",
-        default="http://127.0.0.1:8000",
-        help="Local server origin (default: http://127.0.0.1:8000).",
+        default="http://127.0.0.1:1102",
+        help="Local server origin (default: http://127.0.0.1:1102).",
     )
     args = parser.parse_args()
     if not args.web and importlib.util.find_spec("textual") is None:

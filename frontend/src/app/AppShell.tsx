@@ -16,6 +16,7 @@ interface NavEntry {
  */
 const NAV_ITEMS: NavEntry[] = [
   { to: '/', label: 'Chat', icon: 'chat' },
+  { to: '/deep-work', label: 'Deep Work', icon: 'runs' },
   { to: '/brief', label: 'Morning Brief', icon: 'bulb' },
   { to: '/tracks', label: 'Research Tracks', icon: 'workspace' },
   { to: '/library', label: 'Library', icon: 'papers' },

@@ -9,6 +9,7 @@ from threading import Lock
 from typing import Iterator, Literal
 
 InferencePriority = Literal["interactive", "background"]
+DEFAULT_PARALLEL_DECISIONS = 8
 _priority: ContextVar[InferencePriority] = ContextVar("inference_priority", default="interactive")
 _progress: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar("inference_progress", default=None)
 
@@ -42,6 +43,7 @@ class _Request:
     profile_id: str | None
     model: str | None
     priority: InferencePriority
+    decision: bool = False
 
 
 @dataclass
@@ -53,17 +55,18 @@ class _ProviderQueue:
 class InferenceLease:
     def __init__(self, scheduler: InferenceScheduler, profile_id: str | None = None,
                  model: str | None = None, priority: InferencePriority | None = None,
-                 server_url: str | None = None) -> None:
+                 server_url: str | None = None, decision: bool = False) -> None:
         self._scheduler = scheduler
         self._profile_id = profile_id
         self._model = model
         self._priority = priority
+        self._decision = decision
         self._request: _Request | None = None
         self._released = False
 
     async def __aenter__(self) -> InferenceLease:
         self._request = await self._scheduler._acquire_request(
-            self._profile_id, self._model, self._priority,
+            self._profile_id, self._model, self._priority, self._decision,
         )
         return self
 
@@ -80,15 +83,16 @@ class InferenceLease:
 
 
 class InferenceScheduler:
-    """One application-wide inference lane, held only for a model response."""
+    """One generation lane, allowing bounded same-model native decision batches."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, decision_parallelism: Callable[[], int] | None = None) -> None:
+        self._decision_parallelism = decision_parallelism or (lambda: DEFAULT_PARALLEL_DECISIONS)
         self._providers: dict[str | None, _ProviderQueue] = {}
         self._policies: dict[str, bool] = {}
         self._policy_lock = Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._waiters: list[_Request] = []
-        self._active: _Request | None = None
+        self._active: list[_Request] = []
         self._interactive_streak = 0
         self._changed = asyncio.Event()
 
@@ -97,13 +101,20 @@ class InferenceScheduler:
         self._changed = asyncio.Event()
 
     def _next_request(self) -> _Request | None:
-        if self._active is not None or not self._waiters:
+        if not self._waiters:
             return None
         preferred = "background" if self._interactive_streak >= 3 else "interactive"
-        return next(
+        candidate = next(
             (item for item in self._waiters if item.priority == preferred),
             self._waiters[0],
         )
+        if self._active:
+            active = self._active[0]
+            if not (active.decision and candidate.decision
+                    and (active.profile_id, active.model) == (candidate.profile_id, candidate.model)
+                    and len(self._active) < self._decision_parallelism()):
+                return None
+        return candidate
 
     def configure(self, profile_id: str, *, serialize_model_switches: bool) -> None:
         with self._policy_lock:
@@ -135,8 +146,8 @@ class InferenceScheduler:
 
     def request(self, *, profile_id: str | None = None, model: str | None = None,
                 priority: InferencePriority | None = None,
-                server_url: str | None = None) -> InferenceLease:
-        return InferenceLease(self, profile_id, model, priority, server_url)
+                server_url: str | None = None, decision: bool = False) -> InferenceLease:
+        return InferenceLease(self, profile_id, model, priority, server_url, decision)
 
     def snapshot(self) -> dict:
         queued = [
@@ -160,18 +171,18 @@ class InferenceScheduler:
         }
 
     async def _acquire_request(self, profile_id: str | None, model: str | None,
-                               priority: InferencePriority | None) -> _Request:
+                               priority: InferencePriority | None, decision: bool = False) -> _Request:
         with self._policy_lock:
             self._loop = asyncio.get_running_loop()
             policy = self._policies.get(profile_id, False) if profile_id is not None else False
         state = self._providers.setdefault(profile_id, _ProviderQueue())
         state.serialize_model_switches = policy
-        item = _Request(profile_id, model, priority or _priority.get())
+        item = _Request(profile_id, model, priority or _priority.get(), decision)
         self._waiters.append(item)
         try:
             while self._next_request() is not item:
                 await self._changed.wait()
-            self._active = item
+            self._active.append(item)
             state.active[model] = state.active.get(model, 0) + 1
             self._interactive_streak = (
                 min(self._interactive_streak + 1, 3) if item.priority == "interactive" else 0
@@ -186,5 +197,5 @@ class InferenceScheduler:
         state.active[item.model] -= 1
         if state.active[item.model] == 0:
             del state.active[item.model]
-        self._active = None
+        self._active.remove(item)
         self._notify()

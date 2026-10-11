@@ -1,0 +1,13 @@
+{
+  "label": "Literature review",
+  "description": "Explicit saved literature reviews; inherits the main model, web permission and attached track. Uses saved notebook context and screens linked papers before human reading approval. Publication links canonical papers without replacing summaries or notes. Reconcile chat plans, report ID and end at handoff: no polling, duplicate workers or pending plans. Papers/allowance require human panel approval. Claim completion only after publication.",
+  "parameter_descriptions": {
+    "action": "Operation.",
+    "review_id": "Null for start.",
+    "title": "Start title; else null.",
+    "objective": "Standalone start question and requirements; else null.",
+    "expected_revision": "pause/stop_stage/resume revision; else null.",
+    "offset": "Shortlist offset.",
+    "limit": "Shortlist size."
+  }
+}

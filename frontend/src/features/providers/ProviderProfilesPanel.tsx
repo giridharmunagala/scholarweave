@@ -22,7 +22,7 @@ const emptyProvider: ProviderCreate = {
   api_mode: 'chat_completions',
   models: [],
 };
-const modelCapabilities = ['chat', 'tools', 'embedding', 'vision'] as const;
+const modelCapabilities = ['chat', 'tools', 'embedding', 'vision', 'decision'] as const;
 type ModelCapability = (typeof modelCapabilities)[number];
 const modelSwitchHelp =
   'One LLM call at a time across all providers, including chat, summaries, and context maintenance. Queued chat calls get priority between responses, with regular turns for background work. Your model server manages hot swaps; no manual confirmation is needed.';
@@ -560,9 +560,9 @@ export function ProviderProfilesPanel({
                           Context
                           <input
                             type="number"
-                            min={4096}
+                            min={model.capabilities?.includes('decision') && !model.capabilities.some((value) => ['chat', 'tools', 'vision'].includes(value)) ? 128 : 4096}
                             max={2000000}
-                            step={1024}
+                            step={128}
                             defaultValue={model.context_window_tokens ?? ''}
                             placeholder="fallback"
                             disabled={modelUpdateBusy}
@@ -577,7 +577,7 @@ export function ProviderProfilesPanel({
                                   nextValue === null
                                   || (
                                     Number.isInteger(nextValue)
-                                    && nextValue >= 4096
+                                    && nextValue >= (model.capabilities?.includes('decision') && !model.capabilities.some((value) => ['chat', 'tools', 'vision'].includes(value)) ? 128 : 4096)
                                     && nextValue <= 2000000
                                   )
                                 )

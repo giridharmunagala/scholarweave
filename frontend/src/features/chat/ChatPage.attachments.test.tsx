@@ -288,7 +288,7 @@ describe('chat attachments', () => {
   it('preserves the exact draft and attachments on a rejected send, then clears them on acceptance', async () => {
     failMessage = true;
     await mount();
-    await selectEffort('thorough');
+    await selectEffort('quick');
     await type('  Explain the assumptions in my notes  ');
     await selectFiles([new File(['notes'], 'notes.md')]);
     await click(button('Send message'));
@@ -297,13 +297,13 @@ describe('chat attachments', () => {
     expect(button('Remove notes.md')).not.toBeNull();
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not start research');
     expect(button('Send message').disabled).toBe(false);
-    expect(effortSelect().value).toBe('thorough');
+    expect(effortSelect().value).toBe('quick');
     expect(container.querySelector('[aria-label="Stop current run"]')).toBeNull();
     failMessage = false;
     await click(button('Send message'));
     expect(messageRequests).toHaveLength(2);
     expect(messageRequests[1].attachment_paths).toEqual(['research/uploads/notes.md']);
-    expect(messageRequests[1].response_effort).toBe('thorough');
+    expect(messageRequests[1].response_effort).toBe('quick');
     expect(upload).toHaveBeenCalledOnce();
     expect(container.querySelector('[aria-label="Attached files"]')).toBeNull();
     expect(effortSelect().value).toBe('auto');
@@ -313,16 +313,16 @@ describe('chat attachments', () => {
     const pending = deferred<Response>();
     messageGate = pending.promise;
     await mount();
-    await selectEffort('thorough');
+    await selectEffort('quick');
     await type('Explain my notes');
     await selectFiles([new File(['notes'], 'notes.md')]);
     await click(button('Send message'));
     expect(button('Remove notes.md').disabled).toBe(true);
-    expect(effortSelect().value).toBe('thorough');
+    expect(effortSelect().value).toBe('quick');
     await act(async () => { pending.resolve(response({ message: 'Try again' }, 503)); });
     expect(button('Remove notes.md').disabled).toBe(false);
     expect(container.querySelector('textarea')!.value).toBe('Explain my notes');
-    expect(effortSelect().value).toBe('thorough');
+    expect(effortSelect().value).toBe('quick');
   });
 
   it('shows failed upload errors without losing the draft or other uploaded files or starting a run', async () => {
@@ -375,12 +375,12 @@ describe('chat attachments', () => {
     conversations = [conversation('one'), conversation('two')];
     await mount();
     await selectFiles([new File(['first'], 'first.md')]);
-    await selectEffort('thorough');
+    await selectEffort('quick');
     await click(container.querySelector<HTMLButtonElement>('.new-chat')!);
     expect(container.querySelector('[aria-label="Attached files"]')).toBeNull();
     expect(effortSelect().value).toBe('auto');
     await selectFiles([new File(['second'], 'second.md')]);
-    await selectEffort('thorough');
+    await selectEffort('quick');
     const second = [...container.querySelectorAll<HTMLButtonElement>('.conversation button')]
       .find((candidate) => candidate.textContent?.includes('Chat two'))!;
     await click(second);

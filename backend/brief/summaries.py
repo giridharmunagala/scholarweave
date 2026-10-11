@@ -3,17 +3,14 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import json
-import logging
 import math
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from functools import lru_cache
 from typing import Any
-
-import tiktoken
 
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.agents.context_budget import model_context_budget
+from backend.agents.input_budget import InputBudget
 from backend.brief.schemas import BriefEditionResponse, BriefHighlightSummary
 from backend.core.errors import ValidationError
 from backend.persistence.files import SafeStorage
@@ -26,55 +23,10 @@ from backend.workspace.service import WorkspaceService
 MAX_INPUT_TOKENS = 32_768
 TEMP_FOLDER = ".scholarweave/brief-temp"
 ARCHIVE_TAG = "morning-brief-summary"
-_logger = logging.getLogger(__name__)
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-@lru_cache(maxsize=64)
-def _encoding(model: str) -> tiktoken.Encoding | None:
-    try:
-        return tiktoken.encoding_for_model(model)
-    except KeyError:
-        _logger.info("No tokenizer for %s; Morning Brief uses a conservative UTF-8 byte budget.", model)
-        return None
-
-
-class InputBudget:
-    def __init__(self, model: str, limit: int) -> None:
-        self.encoding = _encoding(model)
-        self.limit = limit
-        self.method = self.encoding.name if self.encoding else "utf8-byte-upper-bound"
-
-    def count(self, system: str, prompt: str) -> int:
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
-        # Count the envelope too, reserving additional protocol framing tokens.
-        serialized = _json(messages)
-        return 32 + (
-            len(self.encoding.encode(serialized, disallowed_special=()))
-            if self.encoding else len(serialized.encode("utf-8"))
-        )
-
-    def batches(self, records: Sequence[Any], system: str) -> list[list[Any]]:
-        result: list[list[Any]] = []
-        current: list[Any] = []
-        for record in records:
-            candidate = [*current, record]
-            if self.count(system, _json({"stage": "final", "records": candidate})) <= self.limit:
-                current = candidate
-                continue
-            if not current or self.count(system, _json({"stage": "final", "records": [record]})) > self.limit:
-                raise ValidationError(
-                    "One complete source or summary part exceeds the Morning Brief input budget. "
-                    "Choose a model with a larger context; records will not be cut or silently omitted."
-                )
-            result.append(current)
-            current = [record]
-        if current:
-            result.append(current)
-        return result
 
 
 class BriefSummaryService:

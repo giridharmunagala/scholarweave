@@ -158,6 +158,129 @@ Presentation is theme-driven: `scholarweave_tui/themes.py` registers the shipped
 `scholarweave_tui/preferences.py` persists only the chosen theme in `local_data/tui-preferences.json`;
 research behaviour stays in backend settings, and a read-only data directory degrades silently.
 
+### Staged literature-review lifecycle
+
+`backend/research/reviews/` owns durable review state, shortlist decisions, isolated job receipts,
+and scholarly metadata caches. `bootstrap.py` constructs the service; `/api/literature-reviews`
+shapes HTTP. The chat/track panels and terminal `/review` use this same API. The agent-callable
+`research.literature` tool can start/inspect/control a review but cannot approve papers, increase
+an allowance, or link a replacement source. It is not available to focused delegates or the
+legacy explicit `review` mode, whose canonical-summary contract is unchanged.
+
+Stages are scope, discovery, screening, reading plan, reading, references, reference screening,
+reference collection, synthesis and publication. The configured decision role owns page choices
+and bibliography-page identification; native calls share the scheduler's decision parallelism,
+while generation stays exclusive. Without a decision role an explicit notice names the main-model
+fallback. Isolated deferred pages between read pages receive contextual reconsideration, not
+automatic gap filling or an opening-page quota.
+
+The main model extracts verbatim-supported references only from automatically selected original paper sources.
+Revisioned job receipts retain source versions and distinct citing-paper provenance; resume
+recomputes counts rather than incrementing them. The references endpoint and CSV export expose
+the deduplicated table. References cited by more than one distinct original are automatically
+looked up on arXiv and screened by the configured decision role. HIGHLY_RELEVANT and RELEVANT
+originals and confirmed references are automatically collected, page-planned and actually read;
+SOMEWHAT_RELEVANT and IRRELEVANT records are not automatically collected or read.
+Ambiguous or unresolved arXiv matches are skipped with visible notices, never guessed. Supplemental
+papers contribute source-backed synthesis evidence but never join the original shortlist or any
+reference frontier. Their citations cannot inflate original citing counts.
+The lifecycle persists status, revision, pending approvals, current stage and stop outcomes.
+Scope and three work limits (distinct papers screened, papers collected/read including references,
+and comparison passes) require initial approval; cap extensions remain explicit. One pass is the
+existing synthesis/reduction/source-audit workflow for the read set against research questions,
+not pairwise charges or individual chunks. Durable admission receipts avoid double charging cached
+or resumed work; acquisition and model work check limits first. Tokens and context safeguards remain
+internal. Legacy token-only states migrate to work limits and legacy paper gates continue automatically.
+Identity resolution never adds a human gate; automatic original selection and its transition are transactional.
+Legacy pending paper gates continue with automatic selection on startup or resume.
+Approval waits are not pending chat runs. Pause cancels the current child request; stop-stage
+advances only with usable partial results. Failed/invalid outputs remain explicit and resumable.
+
+Track-linked creation captures a bounded prior-work snapshot in the existing review job store:
+notebook sections/exploration and linked canonical summaries/notes, with file hashes and explicit
+excerpt/omission markers. Scope and synthesis use this context as unverified leads, not source
+evidence. Existing workspace BM25 prioritizes matches; no second index is introduced. The snapshot
+also seeds linked papers into discovery without approving them. Recovery reuses the original
+snapshot instead of silently changing the approved question when notebook files change.
+
+Review workers are fresh, tool-free, one-turn native-harness runs with strict structured output.
+Input admission counts instructions, framing and schemas alongside source data, reserving output
+and safety space. Long pages split into contiguous, recorded spans; no full-corpus transcript
+accumulates. Model/profile/protocol/input/prompt provenance keys reuse completed jobs. Preallocated
+run IDs are recorded before execution, and completed results/usage are captured in review receipts
+before ordinary run retention can remove them. Startup captures outstanding receipts before
+run cleanup/recovery; shutdown preserves the durable continuation.
+
+The main and optional decision roles resolve independently. Native decisions use the official
+OpenAI client's `/systemone` endpoint, explicit decision capability/context, typed answer validation
+and no SDK retries. Structured generative decisions use the normal explicitly configured generation
+API. Both enter the existing scheduler; native decisions for the same profile/model can
+share its lane, while generation and model switches remain exclusive. Bounded screening batches
+cancel and await every child before pausing or clearing. Initial metadata screening uses grouped
+main-model fallbacks for records the optional decision role cannot handle. Configured page and
+reference decisions retain explicit failures rather than silently changing role ownership.
+Missing/interrupted usage retains conservative reservations.
+Metadata screening rates papers HIGHLY_RELEVANT, RELEVANT, SOMEWHAT_RELEVANT or IRRELEVANT.
+The main model screens when no separate decision role is configured. Irrelevant candidates are
+excluded before shortlist pagination and cannot be approved for reading; their metadata and decision
+receipts remain in exports. Relevance ordering puts the three retained categories in descending order.
+Older rating names remain readable without a database cutover. Missing metadata is not grounds for
+automatic exclusion. Review responses expose durable screened/excluded counts. The review-specific
+`/events` SSE stream emits `review.progress` after each completed screening result, starts with a
+current snapshot on reconnect, and refreshes stage/status every three seconds. Deep Work subscribes
+while the selected review runs, reports interruptions, and retains polling as a fallback. Older poll
+responses cannot overwrite newer streamed revisions. Disconnecting or clearing removes subscribers.
+The persisted `decision` model default is selectable in Settings and inherited by newly created
+reviews. Explicit review roles and existing review specifications are not silently replaced.
+The persisted `decision_parallel_requests` setting defaults to 8 and accepts 1–32. Both review
+screening batches and scheduler admission consult it, so changes affect subsequent requests without
+restart; lowering the limit lets already-active requests finish before admitting more.
+`POST /api/literature-reviews/{id}/clear` is revision-guarded and cancels active work before cleanup.
+New download metadata records the owning review before ingestion, so interrupted downloads can
+also be found. Cleanup removes owned papers only when not shared, filed, summarized, or annotated;
+legacy/unverified ownership is preserved. Publication receipts retain exact blocks and hashes:
+unchanged standalone output is deleted, exact track blocks are removed without rewriting other
+content, and edited output is kept. Run history and review rows are removed last; errors leave a
+paused review for retry. Shared scholarly caches are not task-owned and remain available.
+
+Discovery reuses the paper library and source metadata, not a new semantic index. Durable query
+receipts, per-work/query caches and source cooldown support paced continuation; discovery never
+recursively follows metadata references. Completed page decisions, including native answer
+scores/reasons, are visible through the papers endpoint and Deep Work alongside captured references.
+Each review admits at most 500 unique discovered papers, including local and track seeds.
+The cap counts excluded papers too: screening does not automatically refill the corpus. At the cap,
+discovery advances to screening without requesting further pages, providers or reference expansion.
+Existing larger corpora are preserved but cannot fetch more papers. Requests are sequential; arXiv
+uses pages of at most 100 (or the remaining capacity) and at least three seconds between starts.
+OpenAlex defaults off and review discovery skips it without a configured key, including older plans.
+DuckDuckGo retains its ten-result limit and one-request-per-second pacing; a durable per-review
+request counter also enforces the configured session request ceiling, including failed attempts.
+The same arXiv request-lifetime limiter covers search and PDF acquisition. Only automatically selected high/relevant papers go
+through existing guarded download/extraction services, with LLM OCR enhancement disabled in this
+batched workflow. Manual PDF linkage uses existing library IDs; it cannot confer relevance.
+
+Evidence receipts retain source hashes, span coverage and exact page quotations.
+Page admission uses substantive section content of already relevant papers, not objective matching.
+Reference-list detection remains independent. Versioned page-policy keys reject old objective-based
+decisions on resume. The main model groups admitted pages into bounded packets and produces genuine
+partial summaries, then combines and audits selective per-paper summaries against original claims.
+These durable summaries use the canonical four-section outline but never replace full-paper summaries.
+Receipt fingerprints/source versions invalidate changed summaries; live paper views and publication
+show the generated prose and coverage. Cross-paper synthesis receives summaries as leads alongside
+the original quoted evidence.
+Synthesis validates
+supporting/counter-evidence IDs and audits against source excerpts, not only summaries of summaries.
+Changed source versions invalidate reuse for publication. Selective evidence does not alter canonical
+summary completeness. Publication uses `TrackService` revision guards and its journal to commit
+literature text, linked-paper membership and FTS updates as one recoverable mutation, or
+`WorkspaceService` note creation with an idempotency key. Existing annotations and canonical paper
+files are preserved. Saved reviews lead with audited findings and concrete next checks; their
+per-paper evidence notes use the reviewed-summary outline with explicit missing/partial evidence,
+not a second canonical summary. Shared canonical links open the existing local readers, and
+publication navigation refreshes clean track content without replacing editor drafts.
+Existing FTS5 remains the saved-document index; JSON export is operational/evidence state. Four new
+tables are registered without changing existing-table schema generation.
+
 ### Morning Brief lifecycle
 
 `backend/brief/` owns the headline catalog, interest preferences, collection and transient reading
@@ -317,8 +440,20 @@ Compatibility: persisted `kind="deep_work"` does not lock future chat messages. 
 message endpoint defaults to Thorough but accepts an explicit effort. Legacy `deep_work=True` is
 per-message only; `fast_answer=True` retains its old bounded-web contract for older API callers.
 Explicit `response_effort` overrides both flags. Legacy response-style fields remain API-only;
-the UI uses Auto/Quick/Thorough and resets effort after sending or switching chats. Previously saved
+main chat exposes only Auto/Quick and resets effort after sending or switching chats. Previously saved
 run blueprints and completion policies remain available for recovery without a database migration.
+
+The `/deep-work` page owns long-running research. Literature reviews expose revision-guarded
+scope/work-limit approval, automatic paper decisions, live per-paper operations and source-backed
+main-model findings, source coverage and pause/resume controls. Evidence extraction is never labelled
+as canonical summary generation.
+Research tasks use the existing `/deep-work/conversations` endpoints with Thorough effort and
+show work plans, usage, findings, steering, stopping and durable event history. The page polls
+persisted state every three seconds; navigation does not cancel backend work. Old Deep Work
+conversation links open this page; mixed older chat histories remain readable and can be opened
+as research tasks explicitly. No history migration or second orchestration system is introduced.
+New interactive blueprints omit `literature_review` and direct background-review requests to
+Deep Work. Legacy API effort selectors and already-persisted active plans retain compatibility.
 
 ### Instruction-only skills
 
@@ -1044,8 +1179,10 @@ even when exposed under a read tool. Pure reads use bounded retry deadlines with
 jitter. Unknown write outcomes are reconciled, not blindly retried. Source-specific repeated
 failures pause that source rather than disabling access to unrelated papers or URLs.
 
-All model requests share one application-wide inference lane, even for the same model or different
-provider profiles. The transport holds it until the response is consumed or closed, not across tool
+Model generation shares one application-wide inference lane, even across provider profiles.
+The only concurrency exception is the configured native `/systemone` request limit for the same profile
+and model; a waiting model switch closes admission to the current batch. The transport holds
+capacity until the response is consumed or closed, not across tool
 execution or delegation, so child requests and compaction do not deadlock behind a coordinator.
 Interactive requests take priority between responses; a waiting background request is admitted
 after three interactive calls to prevent starvation. Queued cancellation does not interrupt an active

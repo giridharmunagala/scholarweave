@@ -32,10 +32,20 @@ from backend.providers.types import (
 from backend.providers.inference import InferenceScheduler
 from backend.providers.reasoning import REASONING_EFFORTS
 
-Capability = Literal["chat", "embedding", "vision", "tools"]
+Capability = Literal["chat", "embedding", "vision", "tools", "decision"]
 OLLAMA_PLACEHOLDER_KEY = "ollama"
 OPENAI_COMPATIBLE_PLACEHOLDER_KEY = "not-required"
 logger = logging.getLogger(__name__)
+
+
+def _compatible_capabilities(model: Any) -> set[Capability]:
+    architecture = model.get("architecture") if isinstance(model, dict) else getattr(model, "architecture", None)
+    if not isinstance(architecture, dict):
+        return set()
+    outputs = architecture.get("output_modalities") or []
+    if "decisions" not in outputs:
+        return set()
+    return {"decision", "chat"} if "text" in outputs else {"decision"}
 
 
 def uses_local_inference(provider_kind: str, base_url: str) -> bool:
@@ -173,6 +183,9 @@ class ModelRuntime:
             raise ProviderRuntimeError(
                 f"Model '{model}' is disabled for provider profile '{profile.name}'."
             )
+        declared_capabilities = set((declared_model or {}).get("capabilities") or [])
+        if capability in {"chat", "tools", "vision"} and "decision" in declared_capabilities and not declared_capabilities.intersection({"chat", "tools", "vision"}):
+            raise ProviderRuntimeError("A decision-only model cannot be used for text generation.")
         api_mode = (profile.config_json or {}).get("api_mode", "chat_completions")
         if api_mode not in {"chat_completions", "responses"} or (
             profile.kind == "ollama" and api_mode == "responses"
@@ -287,7 +300,7 @@ class ModelRuntime:
                 discovered = [
                     ProviderModelEntry(
                         name=item.id,
-                        capabilities=set(),
+                        capabilities=_compatible_capabilities(item),
                         context_window_tokens=_compatible_context_window(item),
                     )
                     for item in result.data
@@ -518,7 +531,8 @@ def _compatible_context_window(model: Any) -> int | None:
             value = int(arguments[index])
         except (TypeError, ValueError):
             continue
-        if 4_096 <= value <= 2_000_000:
+        minimum = 128 if _compatible_capabilities(model) == {"decision"} else 4_096
+        if minimum <= value <= 2_000_000:
             return value
     return None
 

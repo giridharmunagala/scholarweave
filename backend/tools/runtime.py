@@ -35,6 +35,7 @@ from backend.workspace.layout import WorkspaceLayout
 
 if TYPE_CHECKING:
     from backend.tracks.service import TrackService
+    from backend.research.reviews.service import LiteratureReviewService
 
 
 _WEB_SEARCH_USAGE_KEY = "web_search_requests_used"
@@ -319,9 +320,52 @@ class ApplicationToolRuntime:
         self._mutation_lock = asyncio.Lock()
         self._cache_lock = threading.RLock()
         self._summary_runner = None
+        self._review_service: LiteratureReviewService | None = None
 
     def set_summary_runner(self, runner: Any) -> None:
         self._summary_runner = runner
+
+    def set_review_service(self, service: LiteratureReviewService) -> None:
+        self._review_service = service
+
+    async def _literature_review(self, arguments: dict[str, Any], context: ScholarWeaveContext) -> dict:
+        from backend.agents.blueprint import AgentBlueprint
+        from backend.providers.types import ModelReference
+        from backend.research.reviews.schemas import ReviewControlRequest, ReviewCreateRequest
+
+        service = self._review_service
+        if service is None or self._runs is None:
+            raise RuntimeError("The literature review service is unavailable.")
+        action = arguments["action"]
+        identifier = arguments["review_id"]
+        if action == "start":
+            if identifier is not None or not arguments["title"] or not arguments["objective"]:
+                raise ToolInputError("Start needs a title and objective, with review_id set to null.")
+            parent = self._runs.get(context.run_id)
+            blueprint = AgentBlueprint.model_validate(parent.blueprint_json)
+            reference = next(agent.model for agent in blueprint.agents if agent.id == blueprint.entry_agent_id)
+            resolved = service.jobs.runtime.resolve("chat", model_reference=ModelReference.model_validate(reference.model_dump()))
+            request = ReviewCreateRequest(
+                title=arguments["title"], objective=arguments["objective"],
+                main_model={"provider_profile_id": resolved.profile_id, "model": resolved.model},
+                conversation_id=context.conversation_id, track_id=context.metadata.get("research_track_id"),
+                web_enabled=any(tool.catalog_id == "research.sources.search" for tool in blueprint.tools),
+            )
+            origin = hashlib.sha256(json.dumps([context.run_id, arguments], sort_keys=True).encode()).hexdigest()
+            review = await service.create(request, origin_key=origin)
+            return review.model_dump(mode="json")
+        if not identifier:
+            raise ToolInputError("An existing review_id is required.")
+        if action == "status":
+            return service.get(identifier).model_dump(mode="json")
+        if action == "candidates":
+            return service.candidates(identifier, offset=arguments["offset"], limit=arguments["limit"]).model_dump(mode="json")
+        if action not in {"pause", "stop_stage", "resume"} or arguments["expected_revision"] is None:
+            raise ToolInputError("Only pause, stop_stage and resume are agent controls, and they require a current revision.")
+        result = await service.control(identifier, ReviewControlRequest(
+            action=action, expected_revision=arguments["expected_revision"],
+        ))
+        return result.model_dump(mode="json")
 
     def _track_service(self) -> TrackService:
         if self._tracks is None:
@@ -1873,7 +1917,11 @@ class ApplicationToolRuntime:
         )
         document_id = paper_tag.removeprefix("paper:") if paper_tag else None
         document = self._documents.get_document(document_id) if document_id else None
-        reusable = len(content.strip()) >= 200 and not content.startswith("> Partial summary:")
+        has_body = any(
+            line.strip() and not re.match(r"^\s*#{1,6}(?:\s|$)", line)
+            for line in content.splitlines()
+        )
+        reusable = len(content.strip()) >= 200 and has_body and not content.startswith("> Partial summary:")
         reason = "Canonical summary contains substantive content." if reusable else (
             "Canonical summary is empty, still a template, partial, or lacks substantive content."
         )

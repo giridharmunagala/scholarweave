@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import SettingsPage from './SettingsPage';
 
 const runtimeSettings = {
+  decision_parallel_requests: 8,
   default_model_references: {}, agent_context_window_tokens: 32768,
   agent_context_use_model_window: true,
   agent_working_context_tokens: 12000, agent_context_response_reserve_tokens: 2048,
@@ -17,6 +18,47 @@ const runtimeSettings = {
 };
 
 describe('runtime context settings', () => {
+  it('saves an enabled System One default without offering chat-only models', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    let saved: Record<string, unknown> | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
+      const providers = [{ id: 'local', name: 'Local', kind: 'openai_compatible', models: [
+        { name: 'system-one', enabled: true, capabilities: ['decision'] },
+        { name: 'main-chat', enabled: true, capabilities: ['chat'] },
+      ] }];
+      return new Response(JSON.stringify(String(input).endsWith('/providers') ? providers : { ...runtimeSettings, ...(saved ?? {}) }));
+    }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SettingsPage />));
+      const picker = container.querySelector<HTMLButtonElement>('[aria-label="Default System One decisions model"]');
+      expect(picker).not.toBeNull();
+      await act(async () => picker!.click());
+      const options = [...container.querySelectorAll<HTMLElement>('[role="option"]')];
+      expect(options.some((option) => option.textContent?.includes('main-chat'))).toBe(false);
+      const decision = options.find((option) => option.textContent?.includes('system-one'));
+      await act(async () => decision!.click());
+      const parallel = container.querySelector<HTMLInputElement>('[aria-label="Parallel decision calls"]')!;
+      expect(parallel.value).toBe('8');
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(parallel, '12');
+        parallel.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const save = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Save changes'));
+      await act(async () => save!.click());
+      expect(saved).toMatchObject({
+        decision_parallel_requests: 12,
+        default_model_references: { decision: { provider_profile_id: 'local', model: 'system-one' } },
+      });
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('saves the initial response allowance without obsolete fixed caps', async () => {
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     const settings = { ...runtimeSettings, agent_context_use_model_window: false };

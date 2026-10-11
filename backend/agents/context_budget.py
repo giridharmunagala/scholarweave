@@ -154,7 +154,9 @@ class ContextBudgetPolicy:
         instructions = "\n\n".join(filter(None, (instructions, _REFERENCE_LIFETIME_INSTRUCTIONS)))
         context_window_tokens = self.context_window_tokens(agent)
         token_ratio = _token_estimate_ratio(agent, context)
-        summary_job = bool(context.metadata.get("paper_summary_document_id"))
+        summary_job = bool(
+            context.metadata.get("paper_summary_document_id") or context.metadata.get("literature_review_id")
+        )
         safety_tokens = 0
         response_tokens = agent.model_settings.max_tokens or self._settings.agent_context_response_reserve_tokens
         if summary_job:

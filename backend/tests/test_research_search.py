@@ -423,6 +423,7 @@ def test_research_tools_are_cataloged_and_bound_to_researchers() -> None:
     assert not summary_writer_tools.intersection(tool.catalog_id for tool in autonomous.tools)
     assert autonomous.agents[0].instructions == (
         default_prompt_registry().render("research")
+        + "\n\n" + default_prompt_registry().render_skills()
         + "\n\nSelected research mode: research.\nSelected response effort: auto."
     )
     assert {agent.id for agent in autonomous.agents} == {"researcher"}

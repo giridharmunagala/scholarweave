@@ -1,4 +1,24 @@
 import { apiUrl } from './client';
+import type { components } from './schema.generated';
+
+export const REVIEW_PROGRESS_EVENT = 'review.progress';
+
+export function subscribeToReview(
+  reviewId: string,
+  onProgress: (review: components['schemas']['ReviewResponse']) => void,
+  onError: () => void,
+): () => void {
+  const source = new EventSource(apiUrl(`/literature-reviews/${encodeURIComponent(reviewId)}/events`));
+  source.addEventListener(REVIEW_PROGRESS_EVENT, (message) => {
+    try {
+      onProgress(JSON.parse((message as MessageEvent<string>).data) as components['schemas']['ReviewResponse']);
+    } catch {
+      onError();
+    }
+  });
+  source.onerror = onError;
+  return () => source.close();
+}
 
 export interface RunStreamEvent {
   sequence: number;

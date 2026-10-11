@@ -73,18 +73,33 @@ def test_working_context_settings_reject_unusable_limits():
         SettingsUpdate(agent_context_response_reserve_tokens=0)
 
 
-def test_optional_compaction_default_persists_and_can_be_unset(test_settings):
+def test_decision_parallelism_default_validation_and_persistence(test_settings):
+    assert test_settings.decision_parallel_requests == 8
+    factory = create_session_factory(test_settings)
+    service = SettingsService(test_settings, factory)
+    assert service.update(SettingsUpdate(decision_parallel_requests=2)).decision_parallel_requests == 2
+    reloaded = test_settings.model_copy(update={"decision_parallel_requests": 8})
+    SettingsService(reloaded, factory).load()
+    assert reloaded.decision_parallel_requests == 2
+    assert service.update(SettingsUpdate(decision_parallel_requests=None)).decision_parallel_requests == 2
+    for value in (0, 33):
+        with pytest.raises(ValidationError):
+            SettingsUpdate(decision_parallel_requests=value)
+
+
+@pytest.mark.parametrize("capability", ["compaction", "decision"])
+def test_optional_compaction_default_persists_and_can_be_unset(test_settings, capability):
     factory = create_session_factory(test_settings)
     service = SettingsService(test_settings, factory)
     reference = {"provider_profile_id": "local-profile", "model": "gemma4-12b"}
     response = service.update(SettingsUpdate(default_model_references={
-        "compaction": reference, "chat": {"model": "main-model"},
+        capability: reference, "chat": {"model": "main-model"},
     }))
-    assert response.default_model_references["compaction"].model == "gemma4-12b"
+    assert response.default_model_references[capability].model == "gemma4-12b"
     reloaded = test_settings.model_copy(update={"default_model_references": {}})
     SettingsService(reloaded, factory).load()
-    assert reloaded.default_model_references["compaction"] == reference
+    assert reloaded.default_model_references[capability] == reference
     service.update(SettingsUpdate(default_model_references={"chat": {"model": "main-model"}}))
     SettingsService(reloaded, factory).load()
-    assert "compaction" not in reloaded.default_model_references
+    assert capability not in reloaded.default_model_references
     assert reloaded.default_model_references["chat"]["model"] == "main-model"

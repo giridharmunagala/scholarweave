@@ -72,3 +72,4 @@ export const chatApi = {
     });
   },
 };
+export const deepWorkApi = conversationApi('/deep-work/conversations');

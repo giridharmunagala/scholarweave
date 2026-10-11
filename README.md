@@ -15,8 +15,8 @@ Your library is stored on your machine; model inference runs with the provider y
 - Ask questions about papers, compare findings, and follow citations back to the evidence.
 - Attach Markdown, plain-text, or PDF files in chat and request a summary, document Q&A, or supported research tasks from the file.
 - Chat, brainstorm, draft text, or ask for an explanation without a mandatory research workflow.
-- Choose per-message effort: **Auto**, **Quick**, or **Thorough**. Quick can use local files and
-  attachments as well as the web; Thorough enables focused workers without permanently changing the chat.
+- Choose **Auto** or **Quick** for turn-based chat. Both retain local files, attachments and optional
+  web access. Long-running research has its own **Deep Work** page instead of a Thorough chat toggle.
 - Ordinary conversation and targeted lookups need no plan. Longer assignments can use a tracked plan.
 - Reuse single-file Markdown [skills](docs/skills.md) for recurring tasks with the existing tools.
   The bundled `web-synthesis` skill can combine multiple webpages into one sourced document.
@@ -48,9 +48,18 @@ web access is controlled separately. Code execution, computational data analysis
 are not supported.
 
 New conversations get a title from the first message locally, without an extra model call. Existing
-Deep Work conversations can use any effort through the same chat interface. Response effort controls
+Deep Work conversations open in the dedicated workspace with their history intact. Response effort controls
 the requested scope, not a fixed latency guarantee; model speed, context size, and source retrieval
 still affect response time.
+
+**Deep Work** separates two workflows: literature reviews with initial scope/constraints and
+paper/comparison work-limit approval, followed by automatic high/relevant paper reading; and
+open-ended research tasks with work plans, usage, findings, steering and
+stop controls. Both use the existing local backend and track artifacts. Leaving the page does not
+cancel work. Return to pending decisions, inspect the evidence, or continue a stopped task.
+Reviews show screened/read-paper and comparison-pass counters, live per-paper operations and
+source-backed findings. Shared references are screened and read within the same limits; ambiguous
+identities are skipped visibly and supplemental papers never trigger recursive reference expansion.
 
 The default limits are 10 attachments per message, 2 MiB per UTF-8 Markdown/text file, and 40 MiB per
 PDF. A PDF's extracted workspace text must also fit the 2 MiB text limit; oversized extraction returns
@@ -164,6 +173,36 @@ Files remain under `workspace\projects\tracks\<title--id>\`; refresh the workspa
 external edits. [Research track organization](docs/research-tracks.md) describes the document
 format and round-trip workflow.
 
+### Agentic Literature Reviews
+
+Open **Deep Work > Literature reviews**, or follow a research track's **Deep Work** link, to build a source-backed review document.
+Choose a main model and a System One decision model under **Settings > Default models**.
+New reviews inherit that decision default, with a per-review override available. Approve the proposed
+scope and one overall token allowance, then review the ranked shortlist before any new PDF
+downloads or detailed reading. Discovery reuses the library, searches arXiv/web/optional OpenAlex,
+and follows model-selected reference lists in cached, paced waves.
+
+Fresh, bounded jobs plan page coverage, extract verifiable quotations, compare findings, and audit
+gap hypotheses against the sources. Appendices and ablations are deferred by relevance, not excluded
+by a fixed rule; workers can request follow-up pages. The final Markdown preserves coverage limits
+and saves to the track's Literature section or a local note. Evidence, page decisions, provenance,
+and usage can be exported as JSON.
+
+**Pause**, **Stop stage and use valid partial results**, and **Resume review** preserve completed
+work across restarts. If partial results cannot support the next stage, the review stops explicitly.
+**Clear review** stops its active work, removes review history and task-owned downloads, and opens
+fresh setup with the previous objective. Pre-existing, shared, annotated, or unverified papers and
+edited outputs are preserved and reported. Download ownership is recorded for new acquisitions;
+older downloads without ownership evidence are not deleted automatically.
+Native llama.cpp `/v1/systemone` screening defaults to eight same-model requests in parallel.
+Change **Parallel decision calls** in **Settings > Default models** (1–32). The saved limit applies
+to subsequent requests without restarting. Screening progress streams after each completed decision,
+with automatic reconnect and a three-second polling fallback.
+Generation and model switches remain serialized. Main-model fallback screens batches, not one
+generation per paper. Native ratings are metadata judgments, not proof of
+scientific quality or novelty. See [review setup and controls](docs/research-tracks.md#staged-literature-reviews)
+for decision-model limits, source keys, missing PDFs, and recovery. Terminal users can open `/review`.
+
 ### Your Choice Of Models
 
 Add provider profiles for Ollama, self-hosted OpenAI-compatible servers such as llama.cpp, or hosted
@@ -216,10 +255,10 @@ npm.cmd install
 npm.cmd run build
 Set-Location ..
 
-.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 8000
+.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 1102
 ```
 
-Open [ScholarWeave](http://127.0.0.1:8000), add your provider in **Settings**, and select a chat model.
+Open [ScholarWeave](http://127.0.0.1:1102), add your provider in **Settings**, and select a chat model.
 The backend serves both the API and the built frontend.
 
 **Windows web launcher (not the terminal cockpit):**

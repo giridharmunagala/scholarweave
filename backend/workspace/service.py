@@ -384,15 +384,31 @@ class WorkspaceService:
         name: str,
         content: str,
         tags: list[str] | None = None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceDocument:
         note_name = self._normalize_note_name(name)
-        note_id = str(uuid.uuid4())
+        note_id = str(uuid.uuid5(uuid.NAMESPACE_URL, idempotency_key)) if idempotency_key else str(uuid.uuid4())
         path = WorkspaceLayout.knowledge_note(note_id, note_name)
         body = f"# {note_name}\n"
         if content.strip():
             body += f"\n{content.strip()}\n"
         with self._index_lock:
-            document = self.write_file(path, body, tags=["note", *(tags or [])])
+            document = None
+            if idempotency_key:
+                try:
+                    document = self.read_file(path)
+                except FileNotFoundError:
+                    pass
+                if document is not None:
+                    if document.content != body:
+                        raise ConflictError("The previously created note was edited; retry cannot overwrite it.")
+                    existing = self._repository.get(path)
+                    self._index_file(
+                        path, tags=["note", *(existing.tags_json if existing else []), *(tags or [])],
+                        existing=existing,
+                    )
+            if document is None:
+                document = self.write_file(path, body, tags=["note", *(tags or [])])
             entry = self._repository.get(path)
             assert entry is not None
             entry.note_id = note_id
@@ -417,21 +433,36 @@ class WorkspaceService:
         with self._index_lock:
             return self._ensure_paper_folder(document_id, title)
 
+    @staticmethod
+    def _paper_templates(folder: str, title: str) -> dict[str, str]:
+        return {
+            f"{folder}/summary.md": (
+                f"# {title}\n\n"
+                "## Motivation, contribution, and novelty\n\n"
+                "## Method\n\n"
+                "## Results\n\n"
+                "## Open questions\n"
+            ),
+            f"{folder}/notes.md": f"# Notes: {title}\n",
+        }
+
+    def paper_has_annotations(self, document_id: str, title: str) -> bool:
+        with self._index_lock:
+            folder = self.paper_folder(document_id)
+            for path, template in self._paper_templates(folder, title).items():
+                try:
+                    if self.read_file(path).content != template:
+                        return True
+                except FileNotFoundError:
+                    return True
+            return False
+
     def _ensure_paper_folder(self, document_id: str, title: str) -> dict[str, Any]:
         paper = self._repository.paper(document_id, self._normalize_paper_name(title))
         folder = paper.folder
         paper_tag = f"paper:{document_id}"
         paper_name = paper.name
-        templates = {
-            f"{folder}/summary.md": (
-                f"# {title}\n\n"
-                "## Contribution\n\n"
-                "## Detailed contributions\n\n"
-                "## Experiments and results\n\n"
-                "## Open research areas\n"
-            ),
-            f"{folder}/notes.md": f"# Notes: {title}\n",
-        }
+        templates = self._paper_templates(folder, title)
         created: list[str] = []
         for path, content in templates.items():
             existing = self._repository.get(path)

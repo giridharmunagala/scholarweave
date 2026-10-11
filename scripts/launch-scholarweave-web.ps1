@@ -1,5 +1,5 @@
 param(
-    [string]$ApiUrl = "http://127.0.0.1:8000",
+    [string]$ApiUrl = "http://127.0.0.1:1102",
     [switch]$Check,
     [switch]$NoPause
 )

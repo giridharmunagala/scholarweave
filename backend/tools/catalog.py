@@ -34,6 +34,22 @@ ApplicationToolDefinition = tuple[str, str, str, dict[str, Any], bool, str]
 
 APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
+        "research.literature",
+        "literature_review",
+        "Start or inspect a durable literature review; pause, stop a stage, or resume. Human approvals stay in the review panel.",
+        _object_schema({
+            "action": {"type": "string", "enum": ["start", "status", "candidates", "pause", "stop_stage", "resume"]},
+            "review_id": {"type": ["string", "null"], "minLength": 1},
+            "title": {"type": ["string", "null"], "minLength": 1, "maxLength": 200},
+            "objective": {"type": ["string", "null"], "minLength": 1, "maxLength": 20000},
+            "expected_revision": {"type": ["integer", "null"], "minimum": 1},
+            "offset": {"type": "integer", "minimum": 0},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        }, required=["action", "review_id", "title", "objective", "expected_revision", "offset", "limit"]),
+        True,
+        "_literature_review",
+    ),
+    (
         "research.tracks.read",
         "read_research_track",
         "List notebooks, inspect exploration files, or read one track document and revision.",

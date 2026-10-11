@@ -1971,12 +1971,13 @@ async def test_reading_substantive_canonical_summary_reuses_it(test_settings) ->
 
 
 @pytest.mark.anyio
-async def test_reading_summary_template_requires_regeneration(test_settings) -> None:
+@pytest.mark.parametrize("title", ["Summary template", "T" * 90])
+async def test_reading_summary_template_requires_regeneration(test_settings, title) -> None:
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
         b"%PDF-1.4\n%%EOF",
         filename="summary-template.pdf",
-        title="Summary template",
+        title=title,
     )
     paper = services.workspace.ensure_paper_folder(document.id, document.title)
     context = ScholarWeaveContext(

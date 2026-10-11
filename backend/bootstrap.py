@@ -35,6 +35,11 @@ from backend.providers.service import ProviderService
 from backend.prompting import PromptRegistry
 from backend.prompting.service import SkillService
 from backend.research import ResearchSearchService, SourceDownloadService
+from backend.research.search import AsyncRateLimiter
+from backend.research.reviews.discovery import ScholarlyDiscovery
+from backend.research.reviews.jobs import ReviewJobs
+from backend.research.reviews.repository import ReviewRepository
+from backend.research.reviews.service import LiteratureReviewService
 from backend.documents.retrieval import RetrievalService
 from backend.runs.repository import RunRepository
 from backend.runs.service import RunService
@@ -90,6 +95,7 @@ class ApplicationServices:
     conversation_turns: ConversationTurnService
     conversation_attachments: ConversationAttachmentService
     summaries: PaperSummaryService
+    reviews: LiteratureReviewService
     runtime_version: str = RUNTIME_VERSION
 
     async def start(self) -> None:
@@ -100,12 +106,15 @@ class ApplicationServices:
                 "'python -m scripts.upgrade_workspace --apply --offline'. "
                 "Research files are preserved; old conversations are retired."
             )
+        await self.reviews.recover()
         await self.runs.start()
         for document in self.documents.list_documents():
             self.workspace.ensure_paper_folder(document.id, document.title)
         await self.runs.recover_incomplete(self.compiler)
+        await self.reviews.start()
 
     async def close(self) -> None:
+        await self.reviews.close()
         await self.brief.close()
         await self.documents.close()
         await self.runs.close()
@@ -127,7 +136,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
 
     provider_repository = ProviderRepository(session_factory)
     default_ollama = provider_repository.ensure_default_ollama(base_url=resolved.ollama_base_url)
-    inference_scheduler = InferenceScheduler()
+    inference_scheduler = InferenceScheduler(decision_parallelism=lambda: resolved.decision_parallel_requests)
     ollama = OllamaClient(
         resolved, inference_scheduler=inference_scheduler, profile_id=default_ollama.id,
     )
@@ -145,7 +154,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
     skills = SkillService(prompts.skills, storage)
     workspace = WorkspaceService(storage, WorkspaceRepository(session_factory))
     retrieval = RetrievalService(session_factory, resolved)
-    research_search = ResearchSearchService(resolved)
+    arxiv_limiter = AsyncRateLimiter(resolved.arxiv_search_requests_per_minute)
+    research_search = ResearchSearchService(resolved, arxiv_limiter=arxiv_limiter)
     document_repository = DocumentRepository(session_factory, resolved, storage)
     document_repository.recover_stale_ingestions()
     document_ocr = DocumentOCR(resolved)
@@ -177,6 +187,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         resolved,
         documents,
         workspace,
+        arxiv_limiter=arxiv_limiter,
     )
 
     tool_catalog = create_tool_catalog(prompts)
@@ -243,6 +254,13 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         prompts,
     )
     tool_runtime.set_summary_runner(summaries.run_for_agent)
+    review_repository = ReviewRepository(session_factory)
+    reviews = LiteratureReviewService(
+        review_repository, ReviewJobs(review_repository, runs, compiler, model_runtime, prompts),
+        ScholarlyDiscovery(resolved, research_search, review_repository),
+        documents, source_downloads, workspace, tracks,
+    )
+    tool_runtime.set_review_service(reviews)
     providers = ProviderService(
         provider_repository,
         model_runtime,
@@ -287,4 +305,5 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         conversation_turns=conversation_turns,
         conversation_attachments=conversation_attachments,
         summaries=summaries,
+        reviews=reviews,
     )

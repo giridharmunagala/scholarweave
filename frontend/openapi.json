@@ -683,6 +683,225 @@
         "title": "BriefTopicResponse",
         "type": "object"
       },
+      "Candidate": {
+        "additionalProperties": false,
+        "properties": {
+          "abstract": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Abstract"
+          },
+          "arxiv_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arxiv Id"
+          },
+          "authors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authors",
+            "type": "array"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "discovery": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Discovery",
+            "type": "array"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "doi": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "openalex_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Openalex Id"
+          },
+          "pdf_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pdf Url"
+          },
+          "references": {
+            "items": {
+              "type": "string"
+            },
+            "title": "References",
+            "type": "array"
+          },
+          "screening": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Screening"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selected": {
+            "default": false,
+            "title": "Selected",
+            "type": "boolean"
+          },
+          "source_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Kind"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "required": [
+          "id",
+          "title"
+        ],
+        "title": "Candidate",
+        "type": "object"
+      },
+      "CandidatePage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "selected_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Selected Ids",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "next_offset",
+          "selected_ids"
+        ],
+        "title": "CandidatePage",
+        "type": "object"
+      },
       "ConversationAttachmentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1002,6 +1221,35 @@
           "updated_at"
         ],
         "title": "ConversationResponse",
+        "type": "object"
+      },
+      "DecisionRole": {
+        "additionalProperties": false,
+        "properties": {
+          "input_tokens": {
+            "default": 8192,
+            "maximum": 131072.0,
+            "minimum": 128.0,
+            "title": "Input Tokens",
+            "type": "integer"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "protocol": {
+            "default": "systemone",
+            "enum": [
+              "systemone",
+              "generation"
+            ],
+            "title": "Protocol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_reference"
+        ],
+        "title": "DecisionRole",
         "type": "object"
       },
       "DocumentChunkResponse": {
@@ -1660,6 +1908,40 @@
         "title": "ModelReferenceSpec",
         "type": "object"
       },
+      "PageChoice": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "read",
+              "defer"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "page": {
+            "minimum": 1.0,
+            "title": "Page",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "reference_page": {
+            "default": false,
+            "title": "Reference Page",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "page",
+          "action",
+          "reason"
+        ],
+        "title": "PageChoice",
+        "type": "object"
+      },
       "PaperFolderAssignmentRequest": {
         "additionalProperties": false,
         "properties": {
@@ -1726,6 +2008,105 @@
           "updated_at"
         ],
         "title": "PaperFolderResponse",
+        "type": "object"
+      },
+      "PaperReview": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "evidence_count": {
+            "title": "Evidence Count",
+            "type": "integer"
+          },
+          "findings": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Findings",
+            "type": "array"
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation"
+          },
+          "pages": {
+            "items": {
+              "$ref": "#/components/schemas/PageChoice"
+            },
+            "title": "Pages",
+            "type": "array"
+          },
+          "partial_pages": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Partial Pages",
+            "type": "array"
+          },
+          "partial_summaries": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Partial Summaries",
+            "type": "array"
+          },
+          "read_pages": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Read Pages",
+            "type": "array"
+          },
+          "selective_summary": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selective Summary"
+          },
+          "source_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Version"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "source_version",
+          "pages",
+          "read_pages",
+          "partial_pages",
+          "evidence_count"
+        ],
+        "title": "PaperReview",
         "type": "object"
       },
       "PaperSummaryBatchRequest": {
@@ -2376,7 +2757,8 @@
                 "chat",
                 "embedding",
                 "vision",
-                "tools"
+                "tools",
+                "decision"
               ],
               "type": "string"
             },
@@ -2388,7 +2770,7 @@
             "anyOf": [
               {
                 "maximum": 2000000.0,
-                "minimum": 4096.0,
+                "minimum": 128.0,
                 "type": "integer"
               },
               {
@@ -2887,6 +3269,715 @@
         "title": "ResearchConversationCreateRequest",
         "type": "object"
       },
+      "ReviewClearRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "title": "ReviewClearRequest",
+        "type": "object"
+      },
+      "ReviewClearResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted_document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Deleted Document Ids",
+            "type": "array"
+          },
+          "preserved_document_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preserved Document Ids",
+            "type": "array"
+          },
+          "preserved_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Preserved Paths",
+            "type": "array"
+          }
+        },
+        "required": [
+          "deleted_document_ids",
+          "preserved_document_ids",
+          "preserved_paths"
+        ],
+        "title": "ReviewClearResponse",
+        "type": "object"
+      },
+      "ReviewControlRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "approve_plan",
+              "approve_papers",
+              "select_references",
+              "approve_reference_pdfs",
+              "pause",
+              "stop_stage",
+              "resume",
+              "extend_budget",
+              "link_paper"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "allowance_tokens": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowance Tokens"
+          },
+          "candidate_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Ids"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "expected_revision": {
+            "minimum": 1.0,
+            "title": "Expected Revision",
+            "type": "integer"
+          },
+          "reference_matches": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Matches"
+          },
+          "stage": {
+            "anyOf": [
+              {
+                "enum": [
+                  "scope",
+                  "discovery",
+                  "screening",
+                  "reading_plan",
+                  "reading",
+                  "references",
+                  "reference_screening",
+                  "reference_collection",
+                  "synthesis",
+                  "publication"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stage"
+          },
+          "work_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "expected_revision",
+          "action"
+        ],
+        "title": "ReviewControlRequest",
+        "type": "object"
+      },
+      "ReviewCreateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "decision_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "main_model": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "objective": {
+            "maxLength": 20000,
+            "minLength": 1,
+            "title": "Objective",
+            "type": "string"
+          },
+          "openalex_enabled": {
+            "default": false,
+            "title": "Openalex Enabled",
+            "type": "boolean"
+          },
+          "title": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          },
+          "track_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Id"
+          },
+          "web_enabled": {
+            "default": true,
+            "title": "Web Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "title",
+          "objective",
+          "main_model"
+        ],
+        "title": "ReviewCreateRequest",
+        "type": "object"
+      },
+      "ReviewReference": {
+        "additionalProperties": false,
+        "properties": {
+          "arxiv_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arxiv Id"
+          },
+          "authors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Authors",
+            "type": "array"
+          },
+          "citations": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "citing_count": {
+            "title": "Citing Count",
+            "type": "integer"
+          },
+          "citing_paper_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Citing Paper Ids",
+            "type": "array"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "document_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document Id"
+          },
+          "doi": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doi"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "matches": {
+            "items": {
+              "$ref": "#/components/schemas/Candidate"
+            },
+            "title": "Matches",
+            "type": "array"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Candidate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "screening": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Screening"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "selected": {
+            "default": false,
+            "title": "Selected",
+            "type": "boolean"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Year"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "citing_paper_ids",
+          "citing_count",
+          "citations"
+        ],
+        "title": "ReviewReference",
+        "type": "object"
+      },
+      "ReviewResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "active_run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Active Run Id"
+          },
+          "allowance_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowance Tokens"
+          },
+          "approval": {
+            "anyOf": [
+              {
+                "enum": [
+                  "plan",
+                  "papers",
+                  "budget",
+                  "references",
+                  "reference_pdfs"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval"
+          },
+          "candidate_count": {
+            "title": "Candidate Count",
+            "type": "integer"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decision_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "evidence_count": {
+            "title": "Evidence Count",
+            "type": "integer"
+          },
+          "excluded_count": {
+            "default": 0,
+            "title": "Excluded Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "main_model": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "notices": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notices",
+            "type": "array"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "output_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Path"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "integer"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReviewScope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "screened_count": {
+            "default": 0,
+            "title": "Screened Count",
+            "type": "integer"
+          },
+          "selected_count": {
+            "title": "Selected Count",
+            "type": "integer"
+          },
+          "stage": {
+            "enum": [
+              "scope",
+              "discovery",
+              "screening",
+              "reading_plan",
+              "reading",
+              "references",
+              "reference_screening",
+              "reference_collection",
+              "synthesis",
+              "publication"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "stage_history": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Stage History",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "awaiting_approval",
+              "paused",
+              "blocked",
+              "completed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "suggested_allowance_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Suggested Allowance Tokens"
+          },
+          "suggested_work_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "track_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Track Id"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "usage_estimated": {
+            "title": "Usage Estimated",
+            "type": "boolean"
+          },
+          "used_tokens": {
+            "title": "Used Tokens",
+            "type": "integer"
+          },
+          "work_budget": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkBudget"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "work_used": {
+            "$ref": "#/components/schemas/WorkUsage"
+          }
+        },
+        "required": [
+          "id",
+          "revision",
+          "title",
+          "objective",
+          "status",
+          "stage",
+          "approval",
+          "main_model",
+          "decision_model",
+          "conversation_id",
+          "track_id",
+          "scope",
+          "allowance_tokens",
+          "used_tokens",
+          "usage_estimated",
+          "suggested_allowance_tokens",
+          "candidate_count",
+          "selected_count",
+          "evidence_count",
+          "active_run_id",
+          "stage_history",
+          "notices",
+          "error",
+          "output_path",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ReviewResponse",
+        "type": "object"
+      },
+      "ReviewScope": {
+        "additionalProperties": false,
+        "properties": {
+          "exclusion_criteria": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Exclusion Criteria",
+            "type": "array"
+          },
+          "inclusion_criteria": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Inclusion Criteria",
+            "type": "array"
+          },
+          "queries": {
+            "items": {
+              "$ref": "#/components/schemas/SearchQuery"
+            },
+            "minItems": 1,
+            "title": "Queries",
+            "type": "array"
+          },
+          "questions": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Questions",
+            "type": "array"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          },
+          "suggested_allowance_tokens": {
+            "default": 1000000,
+            "minimum": 1.0,
+            "title": "Suggested Allowance Tokens",
+            "type": "integer"
+          },
+          "suggested_work_budget": {
+            "$ref": "#/components/schemas/WorkBudget"
+          }
+        },
+        "required": [
+          "questions",
+          "inclusion_criteria",
+          "exclusion_criteria",
+          "queries",
+          "rationale"
+        ],
+        "title": "ReviewScope",
+        "type": "object"
+      },
       "RevisionResponse": {
         "additionalProperties": false,
         "properties": {
@@ -3257,6 +4348,83 @@
         "title": "SavedWebSourceNoteResponse",
         "type": "object"
       },
+      "Screening": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "research",
+              "review",
+              "other",
+              "unknown"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "matched_questions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched Questions",
+            "type": "array"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "relevance": {
+            "enum": [
+              "HIGHLY_RELEVANT",
+              "RELEVANT",
+              "SOMEWHAT_RELEVANT",
+              "IRRELEVANT"
+            ],
+            "title": "Relevance",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "relevance",
+          "reason",
+          "matched_questions"
+        ],
+        "title": "Screening",
+        "type": "object"
+      },
+      "SearchQuery": {
+        "additionalProperties": false,
+        "properties": {
+          "pages": {
+            "minimum": 1.0,
+            "title": "Pages",
+            "type": "integer"
+          },
+          "provider": {
+            "enum": [
+              "library",
+              "arxiv",
+              "web",
+              "openalex"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "query": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "query",
+          "pages"
+        ],
+        "title": "SearchQuery",
+        "type": "object"
+      },
       "SectionMetadata": {
         "additionalProperties": false,
         "properties": {
@@ -3409,6 +4577,10 @@
             "title": "Database Path",
             "type": "string"
           },
+          "decision_parallel_requests": {
+            "title": "Decision Parallel Requests",
+            "type": "integer"
+          },
           "default_model_references": {
             "additionalProperties": {
               "$ref": "#/components/schemas/ModelReferenceSpec"
@@ -3492,6 +4664,7 @@
           }
         },
         "required": [
+          "decision_parallel_requests",
           "data_dir",
           "workspace_dir",
           "artifacts_dir",
@@ -3651,6 +4824,19 @@
               }
             ],
             "title": "Agent Working Context Tokens"
+          },
+          "decision_parallel_requests": {
+            "anyOf": [
+              {
+                "maximum": 32.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Parallel Requests"
           },
           "default_model_references": {
             "anyOf": [
@@ -4429,6 +5615,56 @@
           "expires_at"
         ],
         "title": "WebSourceResponse",
+        "type": "object"
+      },
+      "WorkBudget": {
+        "additionalProperties": false,
+        "properties": {
+          "comparison_passes": {
+            "default": 1,
+            "maximum": 100.0,
+            "minimum": 1.0,
+            "title": "Comparison Passes",
+            "type": "integer"
+          },
+          "read_papers": {
+            "default": 20,
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Read Papers",
+            "type": "integer"
+          },
+          "screened_papers": {
+            "default": 100,
+            "maximum": 5000.0,
+            "minimum": 1.0,
+            "title": "Screened Papers",
+            "type": "integer"
+          }
+        },
+        "title": "WorkBudget",
+        "type": "object"
+      },
+      "WorkUsage": {
+        "additionalProperties": false,
+        "properties": {
+          "comparison_passes": {
+            "default": 0,
+            "title": "Comparison Passes",
+            "type": "integer"
+          },
+          "read_papers": {
+            "default": 0,
+            "title": "Read Papers",
+            "type": "integer"
+          },
+          "screened_papers": {
+            "default": 0,
+            "title": "Screened Papers",
+            "type": "integer"
+          }
+        },
+        "title": "WorkUsage",
         "type": "object"
       },
       "WorkspaceFileContentResponse": {
@@ -6627,6 +7863,603 @@
         "summary": "Health",
         "tags": [
           "application"
+        ]
+      }
+    },
+    "/api/literature-reviews": {
+      "get": {
+        "operationId": "list_reviews_api_literature_reviews_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "conversation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "track_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Track Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewResponse"
+                  },
+                  "title": "Response List Reviews Api Literature Reviews Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Reviews",
+        "tags": [
+          "literature reviews"
+        ]
+      },
+      "post": {
+        "operationId": "create_review_api_literature_reviews_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}": {
+      "get": {
+        "operationId": "get_review_api_literature_reviews__review_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/candidates": {
+      "get": {
+        "operationId": "review_candidates_api_literature_reviews__review_id__candidates_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "relevance",
+              "enum": [
+                "relevance",
+                "year",
+                "title"
+              ],
+              "title": "Sort",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandidatePage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Candidates",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/clear": {
+      "post": {
+        "operationId": "clear_review_api_literature_reviews__review_id__clear_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewClearRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewClearResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clear Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/control": {
+      "post": {
+        "operationId": "control_review_api_literature_reviews__review_id__control_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewControlRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Control Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/events": {
+      "get": {
+        "operationId": "review_events_api_literature_reviews__review_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Events",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/export": {
+      "get": {
+        "operationId": "export_review_api_literature_reviews__review_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/papers": {
+      "get": {
+        "operationId": "review_papers_api_literature_reviews__review_id__papers_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PaperReview"
+                  },
+                  "title": "Response Review Papers Api Literature Reviews  Review Id  Papers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Papers",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/papers/{candidate_id}": {
+      "get": {
+        "operationId": "paper_review_api_literature_reviews__review_id__papers__candidate_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "candidate_id",
+            "required": true,
+            "schema": {
+              "title": "Candidate Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperReview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Paper Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/references": {
+      "get": {
+        "operationId": "review_references_api_literature_reviews__review_id__references_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ReviewReference"
+                  },
+                  "title": "Response Review References Api Literature Reviews  Review Id  References Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review References",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/references.csv": {
+      "get": {
+        "operationId": "export_references_api_literature_reviews__review_id__references_csv_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Export References",
+        "tags": [
+          "literature reviews"
         ]
       }
     },

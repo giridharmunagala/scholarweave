@@ -36,6 +36,7 @@ PROMPT_DEFINITIONS = {
     for item in (
         PromptDefinition("global"),
         PromptDefinition("research"),
+        PromptDefinition("chat-turn"),
         PromptDefinition("skills"),
         PromptDefinition("deep-work-coordinator"),
         PromptDefinition("deep-work-worker"),
@@ -55,6 +56,15 @@ PROMPT_DEFINITIONS = {
         PromptDefinition("paper-summary-overview"),
         PromptDefinition("brief-highlights"),
         PromptDefinition("brief-highlights-combine"),
+        PromptDefinition("literature-scope"),
+        PromptDefinition("literature-screen"),
+        PromptDefinition("literature-seeds"),
+        PromptDefinition("literature-pages"),
+        PromptDefinition("literature-references"),
+        PromptDefinition("literature-evidence"),
+        PromptDefinition("literature-page-groups"),
+        PromptDefinition("literature-paper-summary"),
+        PromptDefinition("literature-synthesis"),
     )
 }
 

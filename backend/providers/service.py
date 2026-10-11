@@ -208,6 +208,26 @@ class ProviderService:
             None,
         )
         capabilities = set((declared or {}).get("capabilities") or [])
+        if "decision" in capabilities and not capabilities.intersection({"chat", "tools", "vision"}):
+            from backend.providers.decisions import score_decisions
+
+            try:
+                await score_decisions(
+                    self._runtime, ModelReference(profile.id, selected),
+                    "The document is a research paper.",
+                    {"paper": {"type": "noul", "instructions": "Is this a research paper?"}},
+                    input_tokens=512,
+                )
+            except (OpenAIError, ValueError, RuntimeError) as exc:
+                return ProviderVerifyResponse(
+                    provider=profile.kind, base_url=profile.base_url, model=selected,
+                    reachable=False, tool_calling=False, detail=f"{type(exc).__name__}: {exc}",
+                )
+            return ProviderVerifyResponse(
+                provider=profile.kind, base_url=profile.base_url, model=selected,
+                reachable=True, tool_calling=False,
+                detail="Provider returned a validated System One decision; this is not a chat model.",
+            )
         if "embedding" in capabilities and not capabilities.intersection({"chat", "tools"}):
             try:
                 resolved = self._runtime.resolve(

@@ -35,6 +35,9 @@ assumptions, evaluation setup, results, and discussion. Cross-paper synthesis id
 connections, disagreements, and experiments motivated by gaps. Cite underlying paper evidence;
 label abstract-only coverage and distinguish author-stated limitations from assistant inferences.
 Reuse existing summaries and source files before acquiring or generating duplicate artifacts.
+Paper evidence notes follow the same four-part outline as reviewed summaries: motivation,
+contribution and novelty; method; results (including limitations); and open questions. Missing
+information stays explicitly unestablished, rather than being invented to fill the outline.
 
 **Experiments** records external work. Its canonical tracker table uses:
 
@@ -99,6 +102,160 @@ An agent work plan describes tasks ScholarWeave is executing in its current run.
 experiment table describes the researcher's external work over time. Planned or Running
 experiments must not cause an agent run to continue indefinitely or poll for outside progress.
 
+## Staged literature reviews
+
+Use **Deep Work > Literature reviews** when you explicitly want a saved review document,
+rather than an ordinary answer or a canonical single-paper summary. Track pages link to this
+dedicated workspace with the track selected. It shows stage progress, usage, source coverage,
+pending decisions, and pause/stop/resume controls without occupying main chat. The Deep Work
+coordinator can propose a review through `literature_review`; ordinary chat cannot start one.
+Scope, constraints and paper/comparison limits require your initial approval. Highly relevant and
+relevant papers are then collected and read automatically. Research tasks in the same
+workspace expose open-ended coordinator work, steering, stop controls, findings and run history.
+
+An attached track is working context, not just the final save destination. A review started from
+a track-linked chat inherits that track when no other destination is selected. Before proposing
+scope, it snapshots bounded excerpts of the saved problem, literature, experiments, results,
+exploration, and linked papers' canonical summaries/notes. Workspace BM25 helps prioritize relevant
+material; long excerpts and omitted files are labelled, not treated as complete coverage.
+These are prior-work leads, not verified current PDF evidence. Nothing is saved to the notebook
+at this step, and unsaved editor drafts are not included.
+
+The exact excerpts and file hashes are retained in the review's existing job records and evidence
+JSON export. Resume uses that original context, so later notebook edits cannot silently change an
+approved review. Start a new review when the question or prior-work context has changed.
+
+| Stage | Work and approval boundary |
+| --- | --- |
+| Scope | One isolated main-model job proposes questions, criteria, searches, and three work limits: papers screened, papers collected/read (including references), and cross-paper comparison passes. Approve these before discovery proceeds. |
+| Discovery | Seed the shortlist with linked papers and run approved local/external searches. Track membership alone does not establish relevance. No recursive metadata-reference frontier. |
+| Screening | Classify and rank every admitted paper. HIGHLY_RELEVANT and RELEVANT papers are automatically selected; SOMEWHAT_RELEVANT and IRRELEVANT papers are not automatically acquired or read. |
+| Reading plan | Automatically acquire selected PDFs within the read limit, reuse extraction, and assign every page a reasoned read/defer decision. The configured decision role owns page choices. |
+| Reading | Fresh no-tool workers read bounded source spans, retain verbatim quotations and source versions, and request real follow-up pages within approved papers. |
+| References | Extract citation-supported bibliographies only from original papers; count distinct original citing papers. Shared references (more than one original) are automatically looked up on arXiv and screened. |
+| Reference collection | Verified highly relevant and relevant references are collected, page-planned and actually read within the same limits. Ambiguous/unresolved identities are skipped with visible notices, not guessed. Supplemental evidence contributes to synthesis, never to recursive reference discovery or original citing counts. |
+| Synthesis | Bounded comparisons and reduction produce themes and gap hypotheses, followed by audits against the original quoted evidence. |
+| Publication | Save Markdown led by findings and next checks, followed by comparison, four-part paper evidence notes, coverage limits, and source footnotes. Link the local papers to the track; export operational/evidence JSON separately. |
+
+Relevance labels are metadata-based leads, not calibrated probabilities or paper-quality ratings.
+Page triage does not categorically skip appendices, ablations, negative results or supplementary
+methods. Such pages can contain essential qualifiers and can be requested later. The coverage
+viewer distinguishes fully read, partially read and deferred pages. Targeted review evidence never
+marks a canonical full-paper summary as complete.
+The review does not generate duplicate canonical summaries or overwrite paper notes. Its selective
+evidence notes link the existing summary, notes and PDF. Full-paper summary generation remains the
+separate, explicitly requested reviewed-summary workflow.
+
+### Models and work limits
+
+Choose the main research model independently from the optional decision role. Supported generative
+provider profiles can be mixed: local/local, hosted/local, or local/hosted. **Structured generation**
+uses an ordinary generative model through its explicitly selected Chat Completions or Responses API.
+Set **Settings > Default models > System One decisions** to have new reviews inherit a native
+decision model. An explicit role in review setup overrides that default; existing reviews keep
+their saved roles. Without either, the main model screens in batches, not one generation per paper.
+
+For **Native llama.cpp System One**, configure an OpenAI-compatible profile with the server root
+or a base URL ending in `/v1`, enable the model's **decision** capability in Settings, declare its actual supported context,
+and use Verify. Native calls target `/v1/systemone` on llama.cpp (adding `/v1` for a server-root
+base URL), not a chat-completion prompt disguised as a classifier.
+Decision-only models can declare contexts below 4096, but are not chat models. Set the review's
+**Verified decision input allowance** conservatively; it cannot enlarge the model's declared context.
+
+At a pending approval, **Resume from** can return to an earlier stage without discarding the
+review. Returning to discovery or screening rates unfinished candidates and automatically updates
+the selected set. The shortlist is read-only: rows expose metadata and abstracts, not approval
+controls. Legacy pending paper/reference gates continue automatically on startup or resume.
+
+Small contexts matter: the English Laya model card advertises 512 tokens; model variants differ.
+Julia's advertised runtime context is larger, but a long context is not evidence of equally reliable
+long-context decisions. ScholarWeave admits complete metadata plus rubric and framing using a
+conservative UTF-8-byte upper bound for unknown decision tokenizers. A small model may therefore
+fall back frequently. Oversized, uncertain, unavailable, or invalid native decisions go to grouped
+main-model work with notices; they do not silently discard candidate papers. Decision models do
+not determine scientific truth, research novelty, or the final gap analysis.
+
+The shared inference scheduler defaults to eight same-model native decisions in parallel.
+Change **Parallel decision calls** in Settings > Default models from 1 to 32; no restart is needed.
+The progress bar receives a live update after each completed screening decision. If the event stream
+disconnects, the page reconnects and continues polling persisted state every three seconds.
+Generation and model switches remain exclusive. Screening and page triage are grouped by model
+role, with interactive work allowed between jobs. Request scheduling
+does not manage your GPU residency or guarantee server-side cancellation: when using llama.cpp's
+model router, configure `--models-max 1` yourself if only one model may remain loaded.
+
+**Clear review** asks for confirmation, stops its active requests, removes review history and
+verified task-owned downloads, and opens fresh setup with the objective retained. Pre-existing,
+shared, annotated, and unverified-ownership papers are kept and counted in the result. Exact
+published review blocks and unchanged output notes are removed; edited outputs are preserved.
+Automatically added track membership is removed only when no remaining literature text or other
+review requires it. Older downloads without ownership metadata are not deleted automatically.
+
+The three used/max counters measure distinct admitted screening papers, distinct papers acquired/read
+(originals and supplemental references together), and comparison passes. Retries, cached receipts,
+page chunks and resumed work do not double-charge a paper. One comparison pass is the genuine
+synthesis/reduction/audit workflow comparing the current read set against the research questions;
+it is not an N-squared pair count or a charge per model chunk. Changed evidence requiring a new
+comparison consumes a new pass. Limits are checked before acquisition/model work, and exhaustion
+offers an explicit work-limit extension. Pause/stop remain available. Tokens and context admission
+are tracked internally with provenance and conservative interrupted-usage accounting, not exposed
+as the user's budget. Existing token-budget reviews migrate without stranding old approvals.
+External source pricing/credits remain subject to their providers. Actual speed and quality depend
+on your models, hardware, switching cost, and corpus; native decision support has no promised
+end-to-end speedup.
+
+Primary references: [llama.cpp decision models](https://huggingface.co/blog/ggml-org/decision-models-in-llamacpp),
+[server protocol](https://github.com/ggml-org/llama.cpp/tree/master/tools/server),
+[Laya](https://huggingface.co/convaiinnovations/laya), and
+[Julia](https://huggingface.co/SupersonicLabs/Julia-1).
+
+### Discovery, approval, and recovery
+
+External discovery can be disabled independently. OpenAlex is optional and can use
+`SCHOLARWEAVE_OPENALEX_API_KEY` from your process environment or uncommitted `.env`; restart the
+backend after changing it. A compatible API base can be set with `SCHOLARWEAVE_OPENALEX_API_URL`.
+This is a source-provider key, not a ScholarWeave account.
+
+arXiv search and downloads share one active request and at least three seconds between starts.
+OpenAlex uses conservative 30/minute pacing, cursor pages of at most 100 works, and reference-ID
+batches of at most 100. Metadata queries and works are cached; overlapping bibliographies reuse
+the same work records. Reference discovery uses original PDF citations only, never recursive expansion.
+Rate-limit responses stop that source and retain a cooldown rather than immediately retrying it.
+Completed search receipts are reused on resume; resume is continuation, not a fresh literature update.
+OpenAlex reference coverage can be incomplete, and this workflow does not claim to parse every
+PDF bibliography or exhaust a field.
+
+Shortlist sorting applies across all pages. Newly discovered papers are screened and automatically
+selected only at high/relevant ratings within the work limits. Similar titles alone never establish
+paper identity; ambiguous arXiv matches are skipped visibly. If a PDF is
+unavailable, upload it through the existing library, pause the review, expand that candidate's
+details, **Find local copy**, explicitly **Link local paper**, then resume. Linking a source does
+not approve an unselected paper.
+
+**Pause review** preserves the current stage. **Stop stage and use valid partial results** advances
+only if that stage has sufficient valid output; otherwise it reports that the researcher stopped it
+and remains resumable. Neither control bypasses a required approval. Resume continues unfinished
+jobs or lets you revisit an earlier stage after a stop/completion. Changed source versions invalidate
+old evidence for new synthesis/publication. Work that was running at shutdown recovers when the
+single-worker backend restarts; intentionally paused reviews stay paused.
+
+Track publication saves the literature text, paper membership and workspace index together under
+the existing revision guard and recovery journal. A failed save rolls them back together. No new
+database tables or competing artifact catalog are needed. Publication preserves existing literature
+text and annotations; only a completely untouched literature template is replaced with the first
+review instead of leaving an empty comparison table above it. Standalone
+publication creates a tagged workspace note. Stable publication identities recover a write interrupted
+before its checkpoint/index update without creating a second copy or overwriting your edits. Revisited
+reviews can append a new edition; footnote IDs are namespaced so earlier editions retain their citations.
+Gap hypotheses distinguish author-stated limitations, inferences and coverage gaps, and include
+caveats, counter-evidence when present, and concrete next checks. This is a selective review requiring
+researcher judgment, not a guarantee of novelty or an exhaustive systematic review.
+
+**Open saved review** opens the literature document, not the track's problem tab. Clean content
+reloads when opening a new publication; unsaved annotations are retained for reconciliation.
+Relative links to canonical summaries, notes and PDFs open the existing local readers. The
+shortlist also links directly to each available local paper.
+
 ## Import, export, and recovery
 
 Export a single section as Markdown or a whole notebook as a ZIP. The whole-track package
@@ -135,3 +292,8 @@ Discuss prepares a track-linked chat draft. `/track` attaches or detaches the cu
 association changes are disabled while its run is active. Import/export opens the local web
 editor, which handles file selection, preview/confirmation, downloads, and paper membership.
 The terminal accesses all research state through the typed HTTP API.
+
+`/review` lists the current chat/track's staged reviews and offers pause, stop-stage and resume.
+It opens the web review panel for model setup, scope/work-limit approval, live per-paper activity
+and source-backed findings. Reading/evidence extraction icons name actual work; canonical summary
+generation is never implied by selective extraction.

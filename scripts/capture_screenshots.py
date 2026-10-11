@@ -5,7 +5,7 @@ Install the optional capture tools with:
     python -m playwright install chromium
 
 Run against an existing server with:
-    python -m scripts.capture_screenshots --base-url http://127.0.0.1:8000
+    python -m scripts.capture_screenshots --base-url http://127.0.0.1:1102
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ OUTPUT_DIR = Path(__file__).resolve().parents[1] / "docs" / "screenshots"
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://127.0.0.1:8000")
+    parser.add_argument("--base-url", default="http://127.0.0.1:1102")
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
 

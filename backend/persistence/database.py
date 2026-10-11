@@ -164,6 +164,7 @@ def _register_models() -> None:
     from backend.runs import models as run_models  # noqa: F401
     from backend.workspace import models as workspace_models  # noqa: F401
     from backend.tracks import models as track_models  # noqa: F401
+    from backend.research.reviews import models as review_models  # noqa: F401
 
 
 def _cut_over_schema(engine: Engine, settings: Settings) -> bool:

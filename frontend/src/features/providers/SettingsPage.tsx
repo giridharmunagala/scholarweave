@@ -71,6 +71,7 @@ export default function SettingsPage() {
     try {
       const next = await providersApi.updateSettings({
         default_model_references: settings.default_model_references,
+        decision_parallel_requests: settings.decision_parallel_requests,
         agent_context_window_tokens: settings.agent_context_window_tokens,
         agent_context_response_reserve_tokens: settings.agent_context_response_reserve_tokens,
         agent_context_model_summary_enabled: settings.agent_context_model_summary_enabled,

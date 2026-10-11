@@ -28,6 +28,7 @@ class Settings(BaseSettings):
 
     ollama_base_url: str = "http://127.0.0.1:11434"
     default_model_references: dict[str, dict[str, str | None]] = Field(default_factory=dict)
+    decision_parallel_requests: int = Field(default=8, ge=1, le=32)
     last_chat_model_reference: dict[str, str | None] = Field(default_factory=dict)
     request_timeout_seconds: float = 300.0
     agent_context_window_tokens: int = Field(default=32_768, ge=4_096, le=2_000_000)
@@ -70,6 +71,8 @@ class Settings(BaseSettings):
     tool_read_retry_attempts: int = Field(default=2, ge=1, le=5)
 
     arxiv_api_url: str = "https://export.arxiv.org/api/query"
+    openalex_api_url: str = "https://api.openalex.org"
+    openalex_api_key: str | None = Field(default=None, repr=False)
     wikipedia_api_url: str = "https://en.wikipedia.org/w/api.php"
     search_user_agent: str = (
         "ScholarWeave/0.1 (+https://github.com/giridharmunagala/scholarweave)"

@@ -41,6 +41,7 @@ RESEARCH_TOOL_IDS = (
     ("read-track", "research.tracks.read"),
     ("write-track", "research.tracks.write"),
     ("organize-track", "research.tracks.organize"),
+    ("literature-review", "research.literature"),
 )
 WORK_PLAN_TOOL_IDS = (
     ("create-work-plan", "work.plan.create"),
@@ -378,6 +379,7 @@ class ConversationTurnService:
 def _application_tools(
     *,
     web_enabled: bool = True,
+    legacy_review: bool = False,
 ) -> list[dict[str, str]]:
     return [
         {
@@ -387,6 +389,7 @@ def _application_tools(
         }
         for tool_id, catalog_id in (*RESEARCH_TOOL_IDS, *WORK_PLAN_TOOL_IDS)
         if web_enabled or tool_id not in EXTERNAL_TOOL_IDS
+        if not legacy_review or tool_id != "literature-review"
     ]
 
 
@@ -495,9 +498,11 @@ def research_blueprint(
     if fast_answer and not web_enabled:
         raise ValueError("Fast-answer mode requires web access.")
     prompts = _resolve_prompts(prompts)
-    tools = _application_tools(web_enabled=web_enabled)
+    tools = _application_tools(web_enabled=web_enabled, legacy_review=research_mode == "review")
+    tools = [tool for tool in tools if tool["id"] != "literature-review"]
     instructions = (
         f"{prompts.render('research')}\n\n"
+        f"{prompts.render('chat-turn')}\n\n"
         f"{prompts.render_skills() if not fast_answer else ''}\n\n"
         f"Selected research mode: {research_mode}."
         f"\nSelected response effort: {response_effort}."
@@ -541,11 +546,11 @@ def deep_work_blueprint(
     research_mode = _resolve_research_mode(research_mode, deep_work=True)
     prompts = _resolve_prompts(prompts)
     skill_instructions = prompts.render_skills()
-    tools = _application_tools(web_enabled=web_enabled)
+    tools = _application_tools(web_enabled=web_enabled, legacy_review=research_mode == "review")
     coordinator_tool_ids = [tool["id"] for tool in tools]
     worker_tool_ids = [
         tool_id for tool_id in coordinator_tool_ids
-        if tool_id != "create-work-plan"
+        if tool_id not in {"create-work-plan", "literature-review"}
     ]
     return AgentBlueprint.model_validate(
         {

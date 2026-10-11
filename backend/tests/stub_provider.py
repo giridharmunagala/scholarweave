@@ -12,6 +12,7 @@ import socket
 import threading
 import time
 from typing import Any
+from contextlib import contextmanager
 
 import pytest
 import uvicorn
@@ -62,12 +63,42 @@ class StubProvider:
         self.base_url = ""
         self.reject_reasoning_with_tools = False
         self.response_api_requests: list[dict[str, Any]] = []
+        self.decision_requests: list[dict[str, Any]] = []
+        self.request_order: list[str] = []
+        self.decision_delay_seconds = 0.0
+        self.active_inference = 0
+        self.max_active_inference = 0
+
+    @contextmanager
+    def inference(self):
+        self.active_inference += 1
+        self.max_active_inference = max(self.max_active_inference, self.active_inference)
+        try:
+            yield
+        finally:
+            self.active_inference -= 1
+
+    def decisions(self, payload: dict) -> dict:
+        self.decision_requests.append(payload)
+        self.request_order.append(payload["model"])
+        answers = {}
+        for name, question in payload["questions"].items():
+            kind = question["type"]
+            if kind == "noul":
+                answers[name] = {"type": kind, "noul": 0.8}
+                continue
+            keys = list(question["criteria"]) if kind == "choice" else [str(index) for index in range(len(question["criteria"]))]
+            answer = {"type": kind, "probabilities": {key: 1.0 if index == 0 else 0.0 for index, key in enumerate(keys)}, "confidence": 1.0}
+            answer.update({"choice": keys[0]} if kind == "choice" else {"score": 0.0})
+            answers[name] = answer
+        return {"answers": answers, "usage": {"input_tokens": 100, "output_tokens": 0}}
 
     def _reply_for(self, _payload: dict[str, Any]) -> str:
         return self.reply
 
     def responses(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.requests.append(payload)
+        self.request_order.append(payload.get("model", "stub-model"))
         prompt = json.dumps(payload.get("messages") or [])
         called_tools = [
             call.get("function", {}).get("name")
@@ -244,12 +275,23 @@ def stub_provider():
             }})
         if payload.get("stream"):
             async def chunks():
-                if provider.stream_delay_seconds:
-                    await asyncio.sleep(provider.stream_delay_seconds)
-                yield provider.stream(payload)
+                with provider.inference():
+                    if provider.stream_delay_seconds:
+                        await asyncio.sleep(provider.stream_delay_seconds)
+                    yield provider.stream(payload)
 
             return StreamingResponse(chunks(), media_type="text/event-stream")
-        return provider.responses(payload)
+        with provider.inference():
+            return provider.responses(payload)
+
+    @app.post("/v1/systemone")
+    async def decisions(request: Request):
+        payload = await request.json()
+        provider.request_started.set()
+        with provider.inference():
+            if provider.decision_delay_seconds:
+                await asyncio.sleep(provider.decision_delay_seconds)
+            return provider.decisions(payload)
 
     @app.get("/v1/models")
     async def models() -> dict[str, Any]:
@@ -261,12 +303,14 @@ def stub_provider():
         provider.request_started.set()
         if payload.get("stream"):
             async def chunks():
-                if provider.stream_delay_seconds:
-                    await asyncio.sleep(provider.stream_delay_seconds)
-                yield provider.response_api_stream(payload)
+                with provider.inference():
+                    if provider.stream_delay_seconds:
+                        await asyncio.sleep(provider.stream_delay_seconds)
+                    yield provider.response_api_stream(payload)
 
             return StreamingResponse(chunks(), media_type="text/event-stream")
-        return provider.response_api(payload)
+        with provider.inference():
+            return provider.response_api(payload)
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request) -> dict[str, Any]:

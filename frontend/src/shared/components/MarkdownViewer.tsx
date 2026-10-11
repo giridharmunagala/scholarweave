@@ -50,7 +50,28 @@ const SAFE_HTML_SCHEMA = {
   },
 };
 
-export const MarkdownViewer = memo(function MarkdownViewer({ content }: { content: string }) {
+export const MarkdownViewer = memo(function MarkdownViewer({ content, workspacePath, onNavigate }: {
+  content: string;
+  workspacePath?: string;
+  onNavigate?: (to: string) => void;
+}) {
+  const components: Components = workspacePath ? {
+    ...MARKDOWN_COMPONENTS,
+    a: ({ href, children, node: _node, ...props }) => {
+      const target = href ? workspaceLink(href, workspacePath) : href;
+      const internal = !!target && /^\/(tracks\?|library(?:\/notes)?\?)/.test(target);
+      return <a {...props} href={target}
+        aria-disabled={href && !target ? true : undefined}
+        title={href && !target ? 'Invalid workspace link: the path leaves the workspace or is malformed.' : props.title}
+        onClick={(event) => {
+          if (internal && onNavigate && target && !props.target && !event.defaultPrevented && event.button === 0
+            && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+            event.preventDefault();
+            onNavigate(target);
+          }
+        }}>{children}</a>;
+    },
+  } : MARKDOWN_COMPONENTS;
   return (
     <article className="markdown-viewer">
       <ReactMarkdown
@@ -60,13 +81,43 @@ export const MarkdownViewer = memo(function MarkdownViewer({ content }: { conten
           [rehypeSanitize, SAFE_HTML_SCHEMA],
           rehypeKatex,
         ]}
-        components={MARKDOWN_COMPONENTS}
+        components={components}
       >
         {normalizeModelMath(content)}
       </ReactMarkdown>
     </article>
   );
 });
+
+function workspaceLink(href: string, fromPath: string): string | undefined {
+  if (/^(?:[a-z][a-z0-9+.-]*:|[/?#])/i.test(href)) return href;
+  const hashAt = href.indexOf('#');
+  const hash = hashAt < 0 ? '' : href.slice(hashAt);
+  const rawPath = (hashAt < 0 ? href : href.slice(0, hashAt)).split('?')[0];
+  let relative: string;
+  try {
+    relative = decodeURIComponent(rawPath).replace(/\\/g, '/');
+  } catch (error) {
+    if (error instanceof URIError) return undefined;
+    throw error;
+  }
+  if (relative.startsWith('/') || /^[a-z]+:/i.test(relative)) return undefined;
+  const parts = fromPath.replace(/\\/g, '/').split('/').slice(0, -1);
+  for (const part of relative.split('/')) {
+    if (!part || part === '.') continue;
+    if (part === '..') {
+      if (!parts.length) return undefined;
+      parts.pop();
+    } else parts.push(part);
+  }
+  const path = parts.join('/');
+  const track = /^projects\/tracks\/[^/]+?--([a-zA-Z0-9_-]+)\/(problem|literature|experiments|results|exploration\/[a-z0-9][a-z0-9_-]{0,79})\.md$/.exec(path);
+  if (track) return `/tracks?id=${encodeURIComponent(track[1])}&section=${encodeURIComponent(track[2])}${hash}`;
+  const paper = /^library\/papers\/[^/]+?--([a-zA-Z0-9_-]+)\/[^/]+\.pdf$/i.exec(path);
+  if (paper) return `/library?paper=${encodeURIComponent(paper[1])}${hash}`;
+  if (/\.md$/i.test(path)) return `/library/notes?path=${encodeURIComponent(path)}${hash}`;
+  return href;
+}
 
 function normalizeModelMath(content: string): string {
   let fence: string | null = null;

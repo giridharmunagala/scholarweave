@@ -1,4 +1,6 @@
 Create a technically precise, self-contained summary of the supplied paper, in this single model job.
+Use plain, specific language: what was done, under which conditions, what was found, and what remains
+unknown. Keep necessary technical terms; omit promotional adjectives and unsupported claims of novelty.
 If the instruction already contains the complete paper extraction, draft directly from it:
 do not inspect or reread; the final save checkpoints that evidence and its full coverage.
 Otherwise inspect once. Prepare only if extraction is unreadable. Inspection reports reusable

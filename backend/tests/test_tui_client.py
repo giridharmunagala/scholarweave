@@ -113,7 +113,7 @@ def test_client_contracts_use_existing_routes_models_and_explicit_message_effort
     async def scenario() -> None:
         client = ScholarWeaveClient(transport=httpx.MockTransport(respond))
         try:
-            assert client.base_url == "http://127.0.0.1:8000"
+            assert client.base_url == "http://127.0.0.1:1102"
             assert isinstance((await client.conversations())[0], ConversationResponse)
             assert isinstance(await client.conversation("chat-1"), ConversationDetailResponse)
             assert isinstance(await client.create_conversation(), ConversationResponse)

@@ -335,6 +335,7 @@ class RunService:
         conversation_id: str | None,
         reasoning_effort: ReasoningEffort | None = None,
         runtime_metadata: dict[str, Any] | None = None,
+        run_id: str | None = None,
     ):
         compiled = with_reasoning_effort(compiled, reasoning_effort)
         _validate_completion_policy(compiled)
@@ -354,6 +355,7 @@ class RunService:
                 _persistable_runtime_metadata(runtime_metadata or {})
             ),
             completion_policy_id=compiled.completion_policy_id,
+            run_id=run_id,
         )
         if conversation_id is not None:
             self._steering_inboxes[record.id] = SteeringInbox()

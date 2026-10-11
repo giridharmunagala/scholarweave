@@ -29,6 +29,7 @@ Paths below are relative to `backend/`.
 | Agent tools | `tools/catalog.py`, `tools/runtime.py` (named handler), `tools/policy.py` | `test_agent_tools.py`, `test_tool_policy.py`, `test_prompting.py` |
 | Workspace discovery / BM25 / files | `workspace/router.py`, `workspace/service.py`, `workspace/repository.py` | `test_storage.py`, `test_api.py` |
 | Paper acquisition / web sources | `research/router.py`, `research/search.py`, `research/sources.py` | `test_research_search.py`, `test_source_downloads.py` |
+| Staged literature review / approvals / evidence | `research/reviews/service.py`, `research/reviews/jobs.py`, `research/reviews/discovery.py` | `test_literature_reviews.py` |
 | PDF / OCR / retrieval / summaries | `documents/ingestion.py`, `documents/ocr.py`, `documents/summaries.py` | `test_documents.py`, `test_tesseract_ocr.py`, `test_summaries.py` |
 | Providers / inference / settings | `providers/runtime.py`, `providers/inference.py`, `core/settings_service.py` | `test_providers.py`, `test_inference_scheduler.py`, `test_context_settings.py` |
 | Storage / schema / wiring | `persistence/database.py`, `persistence/files.py`, `bootstrap.py` | `test_persistence_cutover.py`, `test_storage.py`, `test_architecture.py` |
@@ -58,6 +59,10 @@ colocated tests. Avoid reading all of the large tool runtime or run state machin
 
 ## Research behavior
 
+- The web UI keeps Auto/Quick chat separate from `/deep-work`: staged review decisions and
+  Thorough research-task observability belong on that dedicated page. Reuse existing review
+  and conversation APIs. Chat blueprints cannot start staged reviews; legacy API effort selectors
+  and persisted active plans remain supported.
 - Auto/Quick/Thorough effort is per-message, never a permanent conversation upgrade. Quick retains
   local sources and attachments. The **LLM** judges intent directly; no classifier calls or keyword
   triggers. General chat, clarification, and narrow lookups can finish without a plan.
@@ -65,6 +70,10 @@ colocated tests. Avoid reading all of the large tool runtime or run state machin
   going at any effort. Completed/blocked items need an honest outcome. Do not bypass an active plan.
 - Summaries belong in chat unless saving is requested; legacy explicit `review` retains its artifact
   contract. Code execution and computational data analysis remain unsupported.
+- Staged reviews approve scope/constraints and work limits once (papers screened, papers collected/read
+  including references, and comparison passes). High/relevant originals and shared references are
+  collected and read automatically; ambiguous matches are skipped visibly. Supplemental papers
+  never expand references. Token/context safety remains internal; only exhausted work caps need extension.
 - Delegation is explicit through `agent_tools`; workers see only the request, not the coordinator
   transcript. Maximum depth: coordinator -> sub-agent -> nested helper.
 - Canonical paper `notes.md` and `summary.md` are workspace files; summary versions are immutable.
@@ -93,4 +102,4 @@ npm run check:api
 
 Frontend changes also require `npm test` and `npm run build` from `frontend/`.
 Run the local backend with
-`.\.venv\Scripts\python.exe -m uvicorn backend.app:app --reload --host 127.0.0.1 --port 8000`.
+`.\.venv\Scripts\python.exe -m uvicorn backend.app:app --reload --host 127.0.0.1 --port 1102`.

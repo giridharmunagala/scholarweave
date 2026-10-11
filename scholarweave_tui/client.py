@@ -28,6 +28,7 @@ from backend.providers.schemas import (
 from backend.prompting.schemas import SkillResponse
 from backend.tracks.schemas import TrackDetailResponse, TrackHistoryEntry, TrackSectionResponse
 from backend.research.schemas import DocumentResponse, DocumentSummaryResponse
+from backend.research.reviews.schemas import ReviewControlRequest, ReviewResponse
 from backend.runs.schemas import RunResponse, SteeringMessageResponse
 from backend.workspace.schemas import (
     WorkspaceFileContentResponse,
@@ -57,7 +58,7 @@ class StreamEvent(BaseModel):
 def _local_origin(value: str) -> str:
     error = (
         "API URL must be an http loopback server root, such as "
-        "http://127.0.0.1:8000 (no credentials, /api, query, or fragment)."
+        "http://127.0.0.1:1102 (no credentials, /api, query, or fragment)."
     )
     if not isinstance(value, str) or any(char.isspace() for char in value):
         raise ValueError(error)
@@ -124,7 +125,7 @@ class ScholarWeaveClient:
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8000",
+        base_url: str = "http://127.0.0.1:1102",
         *,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -163,6 +164,16 @@ class ScholarWeaveClient:
 
     async def conversations(self) -> list[ConversationResponse]:
         return await self._request("GET", "/agent/conversations", list[ConversationResponse])
+
+    async def reviews(self, *, conversation_id: str | None = None, track_id: str | None = None) -> list[ReviewResponse]:
+        params = {"track_id": track_id} if track_id else {"conversation_id": conversation_id} if conversation_id else {}
+        return await self._request("GET", "/literature-reviews", list[ReviewResponse], params=params)
+
+    async def control_review(self, review_id: str, request: ReviewControlRequest) -> ReviewResponse:
+        return await self._request(
+            "POST", f"/literature-reviews/{_segment(review_id)}/control", ReviewResponse,
+            json=request.model_dump(mode="json"),
+        )
 
     async def skills(self) -> list[SkillResponse]:
         return await self._request("GET", "/skills", list[SkillResponse])

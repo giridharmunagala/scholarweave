@@ -18,6 +18,7 @@ from backend.core.router import router as core_router
 from backend.providers.router import router as providers_router
 from backend.prompting.router import router as skills_router
 from backend.research.router import router as research_router, summary_router
+from backend.research.reviews.router import router as reviews_router
 from backend.runs.router import router as runs_router
 from backend.workspace.router import router as workspace_router
 from backend.tracks.router import router as tracks_router
@@ -50,6 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         conversations_router,
         runs_router,
         research_router,
+        reviews_router,
         workspace_router,
         tracks_router,
         skills_router,

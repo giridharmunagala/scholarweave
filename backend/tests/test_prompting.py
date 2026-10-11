@@ -14,6 +14,7 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
     assert set(PROMPT_DEFINITIONS) == {
         "global",
         "research",
+        "chat-turn",
         "skills",
         "deep-work-coordinator",
         "deep-work-worker",
@@ -30,6 +31,15 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
         "paper-summary-overview",
         "brief-highlights",
         "brief-highlights-combine",
+        "literature-scope",
+        "literature-seeds",
+        "literature-screen",
+        "literature-pages",
+        "literature-references",
+        "literature-page-groups",
+        "literature-evidence",
+        "literature-paper-summary",
+        "literature-synthesis",
     }
     assert "evidence-backed answer" in registry.render("research")
     assert registry.render("fast-answer", web_search_limit=2).startswith(

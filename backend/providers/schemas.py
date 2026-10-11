@@ -14,7 +14,7 @@ ProviderKind = Literal[
     "azure_foundry",
     "openai_compatible",
 ]
-ModelCapability = Literal["chat", "embedding", "vision", "tools"]
+ModelCapability = Literal["chat", "embedding", "vision", "tools", "decision"]
 ProviderApiMode = Literal["chat_completions", "responses"]
 
 
@@ -27,8 +27,15 @@ class ProviderModel(ProviderSchema):
     capabilities: set[ModelCapability] = Field(default_factory=set)
     reasoning_efforts: list[ReasoningEffort] | None = None
     preserve_thinking: bool = False
-    context_window_tokens: int | None = Field(default=None, ge=4_096, le=2_000_000)
+    context_window_tokens: int | None = Field(default=None, ge=128, le=2_000_000)
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_context_window(self) -> ProviderModel:
+        decision_only = "decision" in self.capabilities and not self.capabilities.intersection({"chat", "tools", "vision"})
+        if not decision_only and self.context_window_tokens is not None and self.context_window_tokens < 4_096:
+            raise ValueError("Generative models require a context window of at least 4096 tokens.")
+        return self
 
     @field_validator("reasoning_efforts")
     @classmethod

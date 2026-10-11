@@ -360,7 +360,7 @@ export default function WorkspacePage() {
               ) : null}
               {view === 'preview' && isMarkdown(selected?.media_type, selected?.path ?? newPath) ? (
                 <div className="workspace-preview">
-                  <MarkdownViewer content={draft} />
+                  <MarkdownViewer content={draft} workspacePath={selected?.path} onNavigate={navigate} />
                 </div>
               ) : (
                 <textarea aria-label="Note content" className="workspace-editor mono" disabled={saving || opening} value={draft} onChange={(event) => { setDraft(event.target.value); setSaveState(''); }} />

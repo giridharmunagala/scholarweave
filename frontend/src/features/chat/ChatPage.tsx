@@ -67,6 +67,7 @@ import { buildRunStages } from './runStages';
 import { RunActivity } from './RunActivity';
 import { SessionOverview } from './SessionMonitor';
 import { TrackChatSelector } from '../tracks/TrackChatSelector';
+import { Link, useNavigate } from '../../app/router';
 
 const SUGGESTIONS = [
   'Help me think through an idea.',
@@ -88,11 +89,6 @@ const RESPONSE_EFFORTS: { value: ResponseEffort; label: string; description: str
     value: 'quick',
     label: 'Quick',
     description: 'Keep the scope small, using local files, attachments, or the web as needed.',
-  },
-  {
-    value: 'thorough',
-    label: 'Thorough',
-    description: 'Take more time and use focused workers when helpful. Discussion need not become a project.',
   },
 ];
 
@@ -206,6 +202,7 @@ function PaneResizer({
 }
 
 export function ResearchChatPage() {
+  const navigate = useNavigate();
   const [initialDraft] = useState(
     () => new URLSearchParams(window.location.search).get('research')?.trim() ?? '',
   );
@@ -393,6 +390,10 @@ export function ResearchChatPage() {
     setHistoryState(runsResult.status === 'fulfilled' ? 'ready' : 'unavailable');
     if (runsResult.status === 'rejected') setError(runsResult.reason);
     const conversation = conversationResult.value;
+    if (conversation.kind === 'deep_work') {
+      navigate(`/deep-work?view=tasks&conversation=${encodeURIComponent(conversation.id)}`, { replace: true });
+      return;
+    }
     const allRuns = runsResult.status === 'fulfilled' ? runsResult.value : [];
     const conversationRuns = runsForConversation(allRuns, id);
     const latestRun = conversationRuns[conversationRuns.length - 1] ?? null;
@@ -437,8 +438,10 @@ export function ResearchChatPage() {
             nextSettings.agent_context_window_tokens,
           ),
         );
-        if (initialConversationId || (items[0] && !initialDraft && !initialTrackId)) {
-          await open(initialConversationId ?? items[0].id, nextProviders, nextSettings);
+        const firstChat = items.find((item) => item.kind !== 'deep_work');
+        const openId = initialConversationId ?? (!initialDraft && !initialTrackId ? firstChat?.id : undefined);
+        if (openId) {
+          await open(openId, nextProviders, nextSettings);
         }
       })
       .catch(setError)
@@ -1058,6 +1061,11 @@ export function ResearchChatPage() {
               </button>
             ) : null}
             <h1>{current?.title ?? 'New chat'}</h1>
+            <Link className="button ghost small" to={`/deep-work?${new URLSearchParams({
+              view: 'tasks',
+              ...(current ? { conversation: current.id } : {}),
+              ...(trackId ? { track: trackId } : {}),
+            })}`}>Deep Work</Link>
             <TrackChatSelector conversationId={current?.id} trackId={trackId} disabled={sending || historyState === 'loading'}
               onError={setError} onChange={(id) => {
                 setTrackId(id);

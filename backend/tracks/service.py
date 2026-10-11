@@ -282,7 +282,7 @@ class TrackService:
                 self.storage.delete_stored_file(self.storage.settings.data_dir, self._journal_path(track_id))
             except Exception as rollback_error:
                 raise ConflictError(
-                    "Track import failed and rollback needs recovery from section history; no success was recorded."
+                    "Track update failed and rollback needs recovery from section history; no success was recorded."
                 ) from rollback_error
             raise error
         try:
@@ -327,6 +327,65 @@ class TrackService:
             "section", "path", "content", "sha256", "modified_at",
         )})
 
+    def paper_links(self, document_id: str, *, from_path: str) -> str:
+        document = self.documents.get_document(document_id)
+        if document is None:
+            raise NotFoundError("Paper was not found.")
+        canonical = self.workspace.ensure_paper_folder(document_id, document.title)
+        parent = self.storage.resolve_path(self.storage.settings.workspace_dir, from_path).parent
+        folder = self.storage.resolve_path(self.storage.settings.workspace_dir, canonical["folder"])
+        relative = os.path.relpath(folder, parent).replace("\\", "/")
+        links = f"[summary]({quote(relative + '/summary.md')}) · [notes]({quote(relative + '/notes.md')})"
+        source = next((artifact for artifact in self.documents.get_document_artifacts(document_id)
+                       if artifact.kind == "source_pdf"), None)
+        if source is not None:
+            area = source.metadata_json.get("storage_area", "documents")
+            base = self.storage.settings.workspace_dir if area == "workspace" else self.storage.settings.documents_dir
+            pdf_path = os.path.relpath(self.storage.resolve_path(base, source.relative_path), parent).replace("\\", "/")
+            links += f" · [PDF]({quote(pdf_path)})"
+        return links
+
+    def append_literature_review(
+        self, track_id: str, content: str, *, marker: str, paper_ids: list[str],
+    ) -> TrackSectionResponse:
+        with self.workspace.mutation_lock:
+            record = self._track(track_id)
+            if not marker or marker not in content:
+                raise ValidationError("A saved review needs its publication marker.")
+            for document_id in paper_ids:
+                if self.documents.get_document(document_id) is None:
+                    raise NotFoundError("A reviewed paper no longer exists.")
+            current = self.read_section(track_id, "literature")
+            previous_papers = self.repository.paper_ids(track_id)
+            papers = sorted(set(previous_papers) | set(paper_ids))
+            if marker in current.content:
+                body = current.content
+                if papers == sorted(previous_papers):
+                    return current
+            else:
+                prefix = "# Literature" if current.content == templates(record.title)["literature"] else current.content.rstrip()
+                body = f"{prefix}\n\n{content.rstrip()}\n"
+            self._apply_sections(
+                track_id, {"literature": body}, {"literature": current}, paper_ids=papers,
+            )
+            return self.read_section(track_id, "literature")
+
+    def remove_literature_review(self, track_id: str, content: str, *, remove_paper_ids: list[str]) -> bool:
+        with self.workspace.mutation_lock:
+            current = self.read_section(track_id, "literature")
+            block = content.rstrip() + "\n"
+            if block not in current.content:
+                return False
+            if current.content.count(block) != 1:
+                raise ConflictError("The published review occurs more than once; cleanup cannot safely identify it.")
+            body = current.content.replace(block, "", 1)
+            papers = [
+                identifier for identifier in self.repository.paper_ids(track_id)
+                if identifier not in remove_paper_ids or identifier in body
+            ]
+            self._apply_sections(track_id, {"literature": body}, {"literature": current}, paper_ids=papers)
+            return True
+
     def add_paper(self, track_id: str, document_id: str) -> TrackDetailResponse:
         with self.workspace.mutation_lock:
             self._track(track_id)
@@ -340,19 +399,8 @@ class TrackService:
                     self.repository.set_papers(track_id, sorted([*papers, document_id]))
                     self.repository.touch(track_id)
                     return self.get(track_id)
-                canonical = self.workspace.ensure_paper_folder(document_id, document.title)
-                path = self.storage.resolve_path(self.storage.settings.workspace_dir, literature.path).parent
-                folder = self.storage.resolve_path(self.storage.settings.workspace_dir, canonical["folder"])
-                relative = os.path.relpath(folder, path).replace("\\", "/")
                 safe_title = document.title.replace("|", r"\|").replace("\n", " ")
-                links = f"[summary]({quote(relative + '/summary.md')}) · [notes]({quote(relative + '/notes.md')})"
-                source = next((artifact for artifact in self.documents.get_document_artifacts(document_id)
-                               if artifact.kind == "source_pdf"), None)
-                if source is not None:
-                    area = source.metadata_json.get("storage_area", "documents")
-                    base = self.storage.settings.workspace_dir if area == "workspace" else self.storage.settings.documents_dir
-                    pdf_path = os.path.relpath(self.storage.resolve_path(base, source.relative_path), path).replace("\\", "/")
-                    links += f" · [PDF]({quote(pdf_path)})"
+                links = self.paper_links(document_id, from_path=literature.path)
                 lines = literature.content.splitlines()
                 header = next((index for index, line in enumerate(lines) if line.strip().startswith("| Paper |")), None)
                 if header is not None:

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { RUN_EVENT_TYPES } from '../../api/events';
+import { RouterProvider } from '../../app/router';
 
 /**
  * Long research turns emit several assistant messages and a burst of tool calls, and later
@@ -433,7 +434,7 @@ describe('chat transcript detail', () => {
   const mount = async (ChatPage: () => JSX.Element) => {
     root = createRoot(container);
     await act(async () => {
-      root.render(<ChatPage />);
+      root.render(<RouterProvider><ChatPage /></RouterProvider>);
     });
     await flush();
   };
@@ -519,7 +520,7 @@ describe('chat transcript detail', () => {
     expect(container.querySelector<HTMLSelectElement>('[aria-label="Context size"]')!.value).toBe('65536');
   });
 
-  it.each(['auto', 'quick', 'thorough'])('sends %s effort with reasoning and context controls but no legacy selectors', async (effort) => {
+  it.each(['auto', 'quick'])('sends %s effort with reasoning and context controls but no legacy selectors', async (effort) => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
@@ -529,7 +530,7 @@ describe('chat transcript detail', () => {
     const responseEffort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
     expect(responseEffort.value).toBe('auto');
     expect(Array.from(responseEffort.options, (option) => option.text)).toEqual([
-      'Auto', 'Quick', 'Thorough',
+      'Auto', 'Quick',
     ]);
     const contextSize = container.querySelector<HTMLSelectElement>(
       '[aria-label="Context size"]',
@@ -557,20 +558,20 @@ describe('chat transcript detail', () => {
     expect(responseEffort.disabled).toBe(true);
   });
 
-  it('resets Thorough to Auto after acceptance without upgrading the conversation', async () => {
+  it('resets Quick to Auto after acceptance without upgrading the conversation', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
 
     const effort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
     await act(async () => {
-      effort.value = 'thorough';
+      effort.value = 'quick';
       effort.dispatchEvent(new Event('change', { bubbles: true }));
     });
     expect(container.querySelector('[aria-label="Toggle deep work"]')).toBeNull();
     expect(container.querySelector('[aria-label="Toggle fast answer"]')).toBeNull();
     expect(container.querySelector('[aria-label="Research mode"]')).toBeNull();
     await runTurn(0);
-    expect(lastMessageRequest).toMatchObject({ response_effort: 'thorough' });
+    expect(lastMessageRequest).toMatchObject({ response_effort: 'quick' });
     expect(effort.value).toBe('auto');
     expect(effort.disabled).toBe(false);
     expect(container.querySelector('.chat-mode-badge')).toBeNull();
@@ -579,38 +580,26 @@ describe('chat transcript detail', () => {
     expect(lastMessageRequest).toMatchObject({ response_effort: 'auto' });
   });
 
-  it.each(['auto', 'quick'])('allows %s in an old Deep Work chat without a badge or lock', async (selected) => {
+  it('opens old Deep Work conversations in the dedicated workspace', async () => {
     conversationKind = 'deep_work';
+    window.history.replaceState({}, '', '/?conversation=conv-1');
+    vi.stubGlobal('scrollTo', vi.fn());
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
-    const effort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
-    expect(effort.value).toBe('auto');
-    expect(effort.disabled).toBe(false);
-    expect(container.querySelector('.chat-mode-badge')).toBeNull();
-    expect(container.querySelector('.conversation-mode')).toBeNull();
-    await act(async () => {
-      effort.value = selected;
-      effort.dispatchEvent(new Event('change', { bubbles: true }));
-      container.querySelector<HTMLButtonElement>('[aria-label="Toggle web access"]')!.click();
-    });
-    await runTurn(0);
-    expect(lastMessageRequest).toMatchObject({
-      response_effort: selected,
-      web_enabled: false,
-    });
-    expect(effort.disabled).toBe(false);
-    expect(effort.value).toBe('auto');
+    expect(window.location.pathname).toBe('/deep-work');
+    expect(window.location.search).toBe('?view=tasks&conversation=conv-1');
+    expect(lastMessageRequest).toBeNull();
   });
 
-  it('starts a new chat at Auto even after selecting Thorough', async () => {
+  it('starts a new chat at Auto even after selecting Quick', async () => {
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     const effort = container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')!;
     await act(async () => {
-      effort.value = 'thorough';
+      effort.value = 'quick';
       effort.dispatchEvent(new Event('change', { bubbles: true }));
     });
-    expect(effort.value).toBe('thorough');
+    expect(effort.value).toBe('quick');
     await act(async () => {
       container.querySelector<HTMLButtonElement>('.new-chat')!.click();
     });
@@ -890,7 +879,7 @@ describe('chat transcript detail', () => {
     vi.useFakeTimers();
     server.startRun('Inspect source').status = 'running';
     root = createRoot(container);
-    await act(async () => root.render(<ChatPage />));
+    await act(async () => root.render(<RouterProvider><ChatPage /></RouterProvider>));
     await act(async () => vi.advanceTimersByTimeAsync(200));
     expect(server.listeners.has('run-1')).toBe(true);
     server.runs[0].events = [{

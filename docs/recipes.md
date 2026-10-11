@@ -33,6 +33,7 @@ Represent optional values with a nullable type.
 ## Change chat effort or research behavior
 
 - Main research prompt: `backend/prompting/defaults/prompts/research.md`
+- Turn-based chat boundary: `backend/prompting/defaults/prompts/chat-turn.md`
 - Deep Work coordinator: `backend/prompting/defaults/prompts/deep-work-coordinator.md`
 - Focused worker: `backend/prompting/defaults/prompts/deep-work-worker.md`
 - Blueprint/tool assignment and delegation: `backend/conversations/turns.py`
@@ -42,7 +43,12 @@ Represent optional values with a nullable type.
 Use the local stub provider for behavior tests. Script real tool calls through it rather than
 mocking the compiler or the harness.
 
-Auto, Quick, and Thorough are per-message effort settings; never infer them from persistent
+The web UI separates Auto/Quick chat from Thorough tasks on `/deep-work`. Keep review setup,
+human decisions and long-running controls on that dedicated page, not in chat or the track editor.
+Reuse existing review/task APIs and observability helpers; navigation must not cancel work.
+Keep old task/history links accessible. New chat blueprints must not launch staged reviews.
+
+At the API level, Auto, Quick, and Thorough are per-message effort settings; never infer them from persistent
 conversation kind. Quick retains local files, attachments, and optional web access. Let the main
 model judge intent; do not add a classifier call or keyword routing. Test one-model-call discussion,
 switching effort in an old Deep Work chat, and continuation of pending plans at every effort.
@@ -54,6 +60,65 @@ notes. Response styles and the old bounded-web shortcut are legacy API controls,
 Summaries requested in chat need not be saved. Test saved-summary discussion, candidate screening, requested writes, supplied citations,
 and steering as well as explicit review enforcement. Persisted older run snapshots retain their
 original completion policy; prompt changes apply to newly compiled turns.
+
+## Change staged literature reviews
+
+Isolated schema/evidence validation failures get at most two automatic repairs with precise
+feedback and separate durable, usage-accounted receipts. Repairs obey the same context,
+allowance, inference scheduling, pause and cancellation controls as the original request.
+Invalid evidence is never published. Exhausted page grouping alone uses a noticed, recorded
+`FALLBACK` to bounded source-order packets retaining every admitted page; it does not synthesize
+evidence. Other exhausted invalid outputs block honestly. Explicit resume can start another
+bounded attempt cycle. Startup continues only the exact legacy blocked grouping error once,
+without changing approved budgets or restarting paused reviews.
+
+- `backend/research/reviews/`: revisioned lifecycle, approvals, cached discovery/references, bounded
+  jobs, source evidence, synthesis audits and publication.
+- `backend/providers/decisions.py`: native System One admission/protocol/answer validation.
+- `backend/research/search.py` and `sources.py`: shared request-lifetime pacing and guarded acquisition.
+- `frontend/src/features/reviews/` and terminal `/review`: the same review API and human decisions.
+
+Keep scope and budget approval separate from automatic paper selection. Only HIGHLY_RELEVANT
+and RELEVANT originals and confirmed shared references are automatically collected and read.
+Replacement sources invalidate receipts; ambiguous identities are skipped with visible notices. Do not expose approval or budget extension through model
+tools. Stop-stage must either advance with valid partial output or report an explicit resumable stop.
+Do not mark targeted evidence as a canonical full-paper summary.
+Page admission for already relevant papers is based on substantive content and section function,
+never the review objective. Read abstract/introduction/core methods/main results/discussion/conclusion
+and meaningful limitations; generally defer peripheral appendices, extra ablations and trailing
+diagram-only pages, but read uncertain pages or the only core evidence. Detect reference lists
+independently for the existing one-pass shared-reference flow; reconsider only isolated holes.
+Version page-policy caches when these criteria change. The main model groups admitted pages into
+bounded source packets, writes source-grounded partial summaries in the shared four-section outline,
+then combines and audits a selective per-paper summary. Keep original quotes, source versions and
+receipt IDs; invalidate summaries when their receipts change. Show actual partial/combined prose
+in live paper views and publication, without touching canonical full-paper summaries.
+
+Every model job must fit its role's declared input/output/context limits, use a fresh transcript,
+retain durable usage and provenance, and use the shared inference scheduler. Only native System One
+decisions may run in parallel (the persisted `decision_parallel_requests` limit, default 8, range 1–32,
+for the same profile/model); generation and model switches
+stay exclusive. Clear must cancel/await all children before deleting owned artifacts, preserve
+shared/edited/unknown-ownership files, and retain resumable cleanup state on errors. Keep source versions
+and verbatim page evidence through reduction/audit. Reuse prior query/job receipts; do not retry
+rate-limited sources immediately or replace existing workspace indexing with a review JSON index.
+Publication must survive interruption before its state/index checkpoint without duplicate files.
+Keep track context in bounded, hash-labelled review receipts and reuse the original snapshot on
+resume. Linked papers seed discovery and are screened before automatic reading. Existing summaries
+and notes are prior-work leads, never substitutes for current source evidence. Track publication
+must journal literature text and paper membership together, reuse canonical source links, and
+preserve annotations. Keep selective paper notes on the same four-part outline as reviewed
+summaries without claiming full coverage or generating a duplicate canonical summary.
+
+Run `test_literature_reviews.py` with relevant source/provider/tool/run/storage tests and the
+architecture guard. Use the actual local stub endpoints, not a mocked harness. Regenerate contracts
+for schema changes; run frontend tests/build and focused TUI controls.
+
+Reference workflows must test distinct-original-paper counts across resume, source-version
+invalidation, isolated page-gap reconsideration, automatic relevant original/reference reading,
+low-relevance exclusion, budget gates and automatic ambiguous-identity skipping.
+Never expand references from supplemental collected papers. Inspect captured page reasons,
+reference quotes and unresolved matches in Deep Work, not just the running indicator.
 
 ## Change workspace discovery or search
 
@@ -115,6 +180,9 @@ Test stale saves, externally edited files, revision history, paper reuse, import
 ZIP validation, round-trip preservation, and track-aware chat using the local stub provider.
 Run track and relevant storage/API/agent tests with the architecture guard; regenerate contracts.
 Frontend changes require `npm test` and `npm run build`, and terminal changes need the focused TUI tests.
+Saved review links must open the literature document and refresh clean content without replacing
+unsaved drafts. Render relative workspace links with their source file path so canonical summaries,
+notes and PDFs open through the existing local readers.
 
 ## Add an instruction-only skill
 

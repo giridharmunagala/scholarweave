@@ -56,6 +56,7 @@ class RunRepository:
         context_window_tokens: int | None = None,
         runtime_metadata: dict[str, Any] | None = None,
         completion_policy_id: str | None = None,
+        run_id: str | None = None,
     ) -> AgentRunRecord:
         with self._sessions() as session:
             record = AgentRunRecord(
@@ -67,6 +68,8 @@ class RunRepository:
                 runtime_metadata_json=runtime_metadata or {},
                 completion_policy_id=completion_policy_id,
             )
+            if run_id is not None:
+                record.id = run_id
             session.add(record)
             session.commit()
             session.refresh(record)

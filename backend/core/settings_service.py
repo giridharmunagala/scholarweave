@@ -12,6 +12,7 @@ from backend.core.models import AppSetting
 from backend.utils import utcnow
 
 PERSISTED_SETTING_KEYS = {
+    "decision_parallel_requests",
     "ollama_base_url",
     "default_model_references",
     "last_chat_model_reference",
@@ -41,6 +42,7 @@ MODEL_DEFAULT_CAPABILITIES = {
     "embedding",
     "vision",
     "compaction",
+    "decision",
 }
 OPTIONAL_MODEL_SETTING_KEYS = {"ocr_llm_model", "ocr_llm_triage_model"}
 
@@ -62,6 +64,7 @@ class SettingsSchema(BaseModel):
 
 
 class SettingsResponse(SettingsSchema):
+    decision_parallel_requests: int
     data_dir: str
     workspace_dir: str
     artifacts_dir: str
@@ -94,6 +97,7 @@ class SettingsResponse(SettingsSchema):
 
 
 class SettingsUpdate(SettingsSchema):
+    decision_parallel_requests: int | None = Field(default=None, ge=1, le=32)
     ollama_base_url: str | None = None
     default_model_references: dict[str, ModelReferenceSpec] | None = None
     last_chat_model_reference: ModelReferenceSpec | None = None
@@ -161,6 +165,7 @@ class SettingsService:
 
     def response(self) -> SettingsResponse:
         return SettingsResponse(
+            decision_parallel_requests=self.settings.decision_parallel_requests,
             data_dir=str(self.settings.data_dir),
             workspace_dir=str(self.settings.workspace_dir),
             artifacts_dir=str(self.settings.artifacts_dir),
@@ -206,6 +211,7 @@ class SettingsService:
         normalized: dict[str, Any] = {}
         for key, value in values.items():
             if key in {
+                "decision_parallel_requests",
                 "agent_working_context_tokens", "agent_context_response_reserve_tokens",
                 "agent_context_model_summary_enabled",
                 "agent_context_use_model_window",

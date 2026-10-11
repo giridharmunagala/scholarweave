@@ -8,6 +8,9 @@ import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Protocol
 
 import httpx
@@ -17,7 +20,7 @@ from ddgs.exceptions import DDGSException, RatelimitException
 
 from backend.core.config import Settings
 
-_ATOM = {"atom": "http://www.w3.org/2005/Atom"}
+_ATOM = {"atom": "http://www.w3.org/2005/Atom", "arxiv": "http://arxiv.org/schemas/atom"}
 _WHITESPACE = re.compile(r"\s+")
 _HTML_TAG = re.compile(r"<[^>]+>")
 _MAX_RESULTS = 10
@@ -38,6 +41,26 @@ class DuckDuckGoClient(Protocol):
     def text(self, query: str, **kwargs: Any) -> list[dict[str, Any]]: ...
 
 
+def rate_limit_delay(headers: httpx.Headers) -> float:
+    now = datetime.now(timezone.utc)
+    delay = 60.0
+    retry, reset = headers.get("Retry-After"), headers.get("X-RateLimit-Reset")
+    try:
+        if retry:
+            try:
+                delay = float(retry)
+            except ValueError:
+                delay = (parsedate_to_datetime(retry) - now).total_seconds()
+        elif reset:
+            value = float(reset)
+            delay = value - now.timestamp() if value > now.timestamp() else value
+    except (TypeError, ValueError, OverflowError):
+        delay = 60.0
+    if not math.isfinite(delay) or delay < 0 or delay > 31_536_000:
+        return 86_400.0
+    return max(60.0, delay)
+
+
 class AsyncRateLimiter:
     def __init__(
         self,
@@ -53,6 +76,18 @@ class AsyncRateLimiter:
         self._sleep = sleep
         self._next_request_at = 0.0
         self._lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def request(self):
+        async with self._request_lock:
+            await self.acquire()
+            try:
+                yield
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in {429, 503}:
+                    self._next_request_at = max(self._next_request_at, self._clock() + rate_limit_delay(exc.response.headers))
+                raise
 
     async def acquire(self) -> None:
         async with self._lock:
@@ -73,6 +108,7 @@ class ResearchSearchService:
         duckduckgo_client: DuckDuckGoClient | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        arxiv_limiter: AsyncRateLimiter | None = None,
     ) -> None:
         self._settings = settings
         self._owns_client = client is None
@@ -82,7 +118,7 @@ class ResearchSearchService:
             follow_redirects=True,
         )
         self._limiters = {
-            "arxiv": AsyncRateLimiter(
+            "arxiv": arxiv_limiter or AsyncRateLimiter(
                 settings.arxiv_search_requests_per_minute,
                 clock=clock,
                 sleep=sleep,
@@ -174,12 +210,18 @@ class ResearchSearchService:
 
     async def search_arxiv(self, query: str, limit: int = _MAX_RESULTS) -> dict[str, Any]:
         query, limit = self._validated_request(query, limit)
+        return await self.search_arxiv_page(query, limit=limit)
+
+    async def search_arxiv_page(self, query: str, *, start: int = 0, limit: int = 100) -> dict[str, Any]:
+        query = _clean_text(query)
+        if not query or not 1 <= limit <= 100 or start < 0:
+            raise ValueError("Supply an arXiv query, nonnegative start and page size from 1 to 100.")
         response = await self._get(
             "arxiv",
             self._settings.arxiv_api_url,
             params={
                 "search_query": f"all:{query}",
-                "start": 0,
+                "start": start,
                 "max_results": limit,
                 "sortBy": "relevance",
                 "sortOrder": "descending",
@@ -212,6 +254,7 @@ class ResearchSearchService:
                     "updated_at": _element_text(entry, "atom:updated"),
                     "url": links.get("alternate") or entry_url,
                     "pdf_url": links.get("pdf") or None,
+                    "doi": _element_text(entry, "arxiv:doi") or None,
                     "categories": [
                         category.attrib["term"]
                         for category in entry.findall("atom:category", _ATOM)
@@ -219,7 +262,10 @@ class ResearchSearchService:
                     ],
                 }
             )
-        return {"query": query, "provider": "arxiv", "results": results[:limit]}
+        return {
+            "query": query, "provider": "arxiv", "results": results[:limit],
+            "next_start": start + len(results) if len(results) == limit else None,
+        }
 
     async def search_wikipedia(
         self,
@@ -286,10 +332,10 @@ class ResearchSearchService:
         *,
         params: dict[str, Any],
     ) -> httpx.Response:
-        await self._limiters[provider].acquire()
         try:
-            response = await self._client.get(url, params=params)
-            response.raise_for_status()
+            async with self._limiters[provider].request():
+                response = await self._client.get(url, params=params)
+                response.raise_for_status()
         except httpx.HTTPError as exc:
             raise RuntimeError(f"{provider} search request failed: {exc}") from exc
         return response

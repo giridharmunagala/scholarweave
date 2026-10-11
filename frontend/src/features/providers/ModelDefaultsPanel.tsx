@@ -15,6 +15,12 @@ const CAPABILITIES = [
     description: 'Drives agent conversations, tool calling, and generated research notes.',
   },
   {
+    key: 'decision',
+    label: 'System One decisions',
+    icon: 'search',
+    description: 'Screens Deep Work papers with parallel native decisions. Choose an enabled System One model.',
+  },
+  {
     key: 'embedding',
     label: 'Embeddings',
     icon: 'search',
@@ -77,6 +83,7 @@ export function ModelDefaultsPanel({
                 </div>
               </div>
               <ModelSelect
+                ariaLabel={`Default ${capability.label} model`}
                 options={options}
                 value={current}
                 emptyOptionLabel={capability.key === 'compaction' ? 'Use main agent model' : 'Not configured'}
@@ -90,6 +97,17 @@ export function ModelDefaultsPanel({
                   No enabled {capability.key} models. Discover and enable models below.
                 </small>
               ) : null}
+              {capability.key === 'decision' ? <label className="field-hint">
+                Parallel decision calls
+                <input aria-label="Parallel decision calls" type="number" min={1} max={32} step={1}
+                  value={settings.decision_parallel_requests} onChange={(event) => {
+                    const value = Number(event.target.value);
+                    if (Number.isInteger(value) && value >= 1 && value <= 32) {
+                      onChange({ ...settings, decision_parallel_requests: value });
+                    }
+                  }} />
+                <small>1–32 concurrent calls. Default: 8. Changes apply to subsequent requests without restarting.</small>
+              </label> : null}
             </div>
           );
         })}
@@ -103,15 +121,16 @@ export type ModelCapability =
   | 'embedding'
   | 'vision'
   | 'tools'
+  | 'decision'
   | 'compaction';
 
 export function capabilityOptions(providers: Provider[], capability: ModelCapability): ModelOption[] {
-  return providers.flatMap((provider) =>
+  return providers.filter((provider) => capability !== 'decision' || provider.kind === 'openai_compatible').flatMap((provider) =>
     provider.models
       .filter(
         (model) =>
           modelIsEnabled(model)
-          && (!model.capabilities?.length || model.capabilities.includes(
+          && ((capability !== 'decision' && !model.capabilities?.length) || model.capabilities?.includes(
             capability === 'compaction' ? 'chat' : capability,
           )),
       )

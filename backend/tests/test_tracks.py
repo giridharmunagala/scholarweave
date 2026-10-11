@@ -225,6 +225,44 @@ def test_invalid_experiment_tracker_never_mutates(container, content):
     assert container.tracks.history(track.id, "experiments") == []
 
 
+def test_review_publication_links_papers_atomically_and_is_replay_safe(container, monkeypatch):
+    paper = container.document_repository.create_from_bytes(b"%PDF-local", filename="paper.pdf", title="Existing evidence")
+    track = container.tracks.create("Publication")
+    before = container.tracks.read_section(track.id, "literature")
+    marker = "<!-- scholarweave-literature-review:test:edition -->"
+    body = f"{marker}\n# Findings\n\nA source-backed result."
+    original_index = container.workspace.index_path
+    fail = True
+
+    def index(path):
+        nonlocal fail
+        if fail and path == before.path:
+            fail = False
+            raise StorageError("Interrupted publication indexing")
+        return original_index(path)
+
+    monkeypatch.setattr(container.workspace, "index_path", index)
+    with pytest.raises(StorageError, match="Interrupted"):
+        container.tracks.append_literature_review(track.id, body, marker=marker, paper_ids=[paper.id])
+    assert container.tracks.read_section(track.id, "literature").content == before.content
+    assert container.tracks.get(track.id).paper_ids == []
+    saved = container.tracks.append_literature_review(track.id, body, marker=marker, paper_ids=[paper.id])
+    assert container.tracks.get(track.id).paper_ids == [paper.id]
+    assert "| Paper |" not in saved.content
+    assert container.workspace.search(query="source-backed", kinds=["track_section"])[0].path == saved.path
+    edited = container.tracks.write_section(track.id, "literature", saved.content + "\nResearcher's note.", saved.sha256)
+    replayed = container.tracks.append_literature_review(track.id, body, marker=marker, paper_ids=[paper.id])
+    assert replayed.content == edited.content
+    assert replayed.content.count(marker) == 1
+    assert before.content in [
+        container.tracks.read_history(track.id, "literature", item.revision).content
+        for item in container.tracks.history(track.id, "literature")
+    ]
+    with pytest.raises(NotFoundError):
+        container.tracks.append_literature_review(track.id, body, marker=marker, paper_ids=["missing"])
+    assert container.tracks.read_section(track.id, "literature").content == edited.content
+
+
 def test_paper_associations_link_canonical_sources_without_copying(container):
     paper = container.document_repository.create_from_bytes(
         b"%PDF-local", filename="paper.pdf", title="Existing evidence",

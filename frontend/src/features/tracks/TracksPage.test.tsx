@@ -107,6 +107,34 @@ async function upload(name: string) {
   await act(async () => input.dispatchEvent(new Event('change', { bubbles: true })));
 }
 
+it('opens the requested saved section rather than defaulting to the problem', async () => {
+  window.history.replaceState({}, '', '/tracks?id=track-1&section=literature&review=review-1');
+  saved.literature = 'Published findings with canonical source links.';
+  await mount();
+  expect(container.textContent).toContain(saved.literature);
+  expect(button('Literature').getAttribute('aria-selected')).toBe('true');
+  expect(container.querySelector('[aria-label="Literature review workspace"]')).toBeNull();
+});
+
+it('refreshes a clean section after publication but never overwrites an unsaved draft', async () => {
+  await act(async () => root.render(<RouterProvider>
+    <Link to="/tracks?id=track-1&section=literature&review=review-1">Open first review</Link>
+    <Link to="/tracks?id=track-1&section=literature&review=review-2">Open second review</Link>
+    <TracksPage />
+  </RouterProvider>));
+  await click('Literature');
+  saved.literature = 'Published first review';
+  await act(async () => container.querySelector<HTMLAnchorElement>('a[href$="review=review-1"]')!.click());
+  expect(container.textContent).toContain('Published first review');
+  await click('Edit');
+  await change('[aria-label="Literature Markdown"]', 'Keep my unsaved review annotation');
+  saved.literature = 'Published second review';
+  confirm.mockReturnValue(true);
+  await act(async () => container.querySelector<HTMLAnchorElement>('a[href$="review=review-2"]')!.click());
+  expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Literature Markdown"]')!.value).toBe('Keep my unsaved review annotation');
+  expect(writes).toHaveLength(0);
+});
+
 it('creates multiple exploration files and preserves their drafts while editing main sections', async () => {
   await mount();
   expect(container.textContent).toContain('Exploration · 0 files');

@@ -41,6 +41,8 @@ def operation_policy(
     if catalog_id == "research.summary.run":
         # The child run owns its writes; holding the mutation lock here deadlocks its tools.
         return ToolOperationPolicy(False, False)
+    if catalog_id == "research.literature":
+        return _LOCAL_READ if arguments.get("action") in {"status", "candidates"} else _WRITE
     if catalog_id in _LOCAL_READS:
         return _LOCAL_READ
     if catalog_id == "research.notes.save":
