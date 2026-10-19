@@ -8,9 +8,11 @@ import { capabilityOptions } from '../providers/ModelDefaultsPanel';
 import { providersApi, type Provider } from '../providers/api';
 import {
   reviewsApi, REVIEW_STAGES, type Candidate, type CandidatePage, type CandidateSort,
-  type LocalPaper, type PaperReview, type Review, type ReviewControl, type ReviewReference,
+  type LocalPaper, type PaperProgressPage, type PaperReview, type Review, type ReviewControl, type ReviewReference, type SummaryRole,
 } from './api';
 import './reviews.css';
+import { ProgressTiming } from './ProgressTiming';
+import { ReviewActivityPanel } from './ReviewActivityPanel';
 
 const label = (value: string) => value.replace(/_/g, ' ');
 
@@ -27,7 +29,9 @@ export function LiteratureReviews({
   const [selectedId, setSelectedId] = useState(() => new URLSearchParams(window.location.search).get('review') ?? '');
   const [providers, setProviders] = useState<Provider[]>([]);
   const [main, setMain] = useState(initialModel);
+  const [mainParallelRequests, setMainParallelRequests] = useState(1);
   const [decision, setDecision] = useState<ModelSelectValue>({});
+  const [summary, setSummary] = useState<SummaryRole | null>(null);
   const [protocol, setProtocol] = useState<'off' | 'systemone' | 'generation'>('off');
   const [inputTokens, setInputTokens] = useState(8192);
   const [title, setTitle] = useState('Literature review');
@@ -123,6 +127,8 @@ export function LiteratureReviews({
   };
   const start = () => perform(() => reviewsApi.create({
     title: title.trim(), objective: objective.trim(), main_model: main,
+    main_parallel_requests: mainParallelRequests,
+    summary_model: summary,
     decision_model: protocol === 'off' ? null : {
       model_reference: decision, protocol, input_tokens: inputTokens,
     },
@@ -156,6 +162,8 @@ export function LiteratureReviews({
     }
   };
   const validModels = !!main.provider_profile_id && !!main.model
+    && validParallelRequests(mainParallelRequests)
+    && validSummary(summary)
     && (protocol === 'off' || (!!decision.provider_profile_id && !!decision.model));
   const decisionOptions = capabilityOptions(providers, protocol === 'systemone' ? 'decision' : 'chat')
     .filter((option) => protocol !== 'systemone' || option.providerKind === 'openai_compatible');
@@ -185,6 +193,8 @@ export function LiteratureReviews({
         placeholder="Define the field, research question and relevant constraints." onChange={(event) => setObjective(event.target.value)} /></label>
       <div className="review-models">
         <label>Main research model<ModelSelect ariaLabel="Main research model" options={capabilityOptions(providers, 'chat')} value={main} onChange={setMain} /></label>
+        <label>Main model parallel requests<input type="number" min={1} max={32} step={1} required
+          value={mainParallelRequests} onChange={(event) => setMainParallelRequests(Number(event.target.value))} /></label>
         <label>Decision role<select value={protocol} onChange={(event) => {
           const value = event.target.value;
           if (value === 'off' || value === 'systemone' || value === 'generation') { setProtocol(value); setDecision({}); }
@@ -197,7 +207,8 @@ export function LiteratureReviews({
         {protocol === 'systemone' ? <label>Verified decision input allowance<input type="number" min={128} max={131072} step={1}
           value={inputTokens} required onChange={(event) => setInputTokens(Number(event.target.value))} /></label> : null}
       </div>
-      <p className="field-hint">System One screens up to {parallelCalls} papers in parallel. <Link to="/settings">Choose the decision model and parallel-call limit in Settings.</Link> Main-model fallback uses batches, not one generation per paper.</p>
+      <SummaryModelFields providers={providers} value={summary} onChange={setSummary} disabled={busy} />
+      <p className="field-hint">The main model defaults to one request at a time; increase its limit only when the selected server can safely run concurrent requests. System One screens up to {parallelCalls} papers in parallel. <Link to="/settings">Choose the decision model and parallel-call limit in Settings.</Link> Main-model fallback uses batches, not one generation per paper.</p>
       <details className="review-technical"><summary>Model and source limits</summary>
       <p className="field-hint">Native probabilities are not calibrated relevance or scientific-quality scores; oversized or uncertain inputs use the main model. Generation and model switches remain serialized. To keep only one model resident in a llama.cpp router, configure its server with <code>--models-max 1</code>.</p>
       <p className="field-hint">Every paper is rated before the shortlist: highly relevant, relevant, or somewhat relevant. Irrelevant papers are automatically excluded; the strongest matches appear first.</p>
@@ -219,19 +230,67 @@ export function LiteratureReviews({
         </button>)}
       </nav>
       {selected ? <ReviewDetails key={selected.id} review={selected} busy={busy} clear={clear}
+        providers={providers}
         control={(payload) => perform(() => reviewsApi.control(selected.id, { ...payload, expected_revision: selected.revision }))} /> : null}
     </div> : null}
   </section>;
 }
 
-function ReviewDetails({ review, busy, control, clear }: {
+const validSummary = (role: SummaryRole | null) => !role || (
+  !!role.model_reference.provider_profile_id && !!role.model_reference.model
+  && Number.isSafeInteger(role.max_output_tokens) && role.max_output_tokens >= 512 && role.max_output_tokens <= 26214
+  && Number.isSafeInteger(role.parallel_requests ?? 1) && (role.parallel_requests ?? 1) >= 1 && (role.parallel_requests ?? 1) <= 32
+);
+const validParallelRequests = (value: number) => Number.isSafeInteger(value) && value >= 1 && value <= 32;
+
+function SummaryModelFields({ providers, value, onChange, disabled }: {
+  providers: Provider[];
+  value: SummaryRole | null;
+  onChange: (value: SummaryRole | null) => void;
+  disabled: boolean;
+}) {
+  const efforts = providers.find((provider) => provider.id === value?.model_reference.provider_profile_id)
+    ?.models.find((model) => model.name === value?.model_reference.model)?.reasoning_efforts ?? [];
+  return <fieldset disabled={disabled}>
+    <legend>Paper summaries</legend>
+    <label><input type="checkbox" checked={!!value} onChange={(event) => onChange(event.target.checked
+      ? { model_reference: {}, max_output_tokens: 26214, parallel_requests: 1, reasoning_effort: null } : null)} />
+      Use a separate compact summary model</label>
+    {value ? <div className="review-models">
+      <label>Summary model<ModelSelect ariaLabel="Summary model" options={capabilityOptions(providers, 'chat')}
+        value={value.model_reference} disabled={disabled}
+        onChange={(model_reference) => onChange({ ...value, model_reference, reasoning_effort: null })} /></label>
+      <label>Summary output token limit<input type="number" min={512} max={26214} step={1} required
+        value={value.max_output_tokens} onChange={(event) => onChange({ ...value, max_output_tokens: Number(event.target.value) })} /></label>
+      <label>Parallel summaries<input type="number" min={1} max={32} step={1} required
+        value={value.parallel_requests ?? 1} onChange={(event) => onChange({ ...value, parallel_requests: Number(event.target.value) })} /></label>
+      <label>Summary reasoning<select value={value.reasoning_effort ?? ''}
+        onChange={(event) => {
+          const effort = efforts.find((item) => item === event.target.value);
+          onChange({ ...value, reasoning_effort: effort ?? null });
+        }}>
+        <option value="">Provider default</option>
+        {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+      </select></label>
+    </div> : null}
+    <p className="field-hint">{value
+      ? 'Plain-text summaries with flexible section and sentence guidance, without content checks or repair calls. Context is capped at 128K (131,072 tokens) per request, or the smaller configured model context; 20% is reserved for output, up to 26,214 tokens including reasoning. Safety and prompt overhead also reduce available input. Papers can run concurrently on the same summary model; other models wait. Your server must support the selected parallel slots and context per slot. Oversized papers use bounded packets combined locally. Choose low or no reasoning when supported.'
+      : 'Uses the existing main-model reading, combination and audit workflow. Discovery, screening and page selection are unchanged in either mode.'}</p>
+  </fieldset>;
+}
+
+function ReviewDetails({ review, busy, control, clear, providers }: {
   review: Review;
   busy: boolean;
   control: (payload: Omit<ReviewControl, 'expected_revision'>) => Promise<void>;
   clear: () => Promise<void>;
+  providers: Provider[];
 }) {
   const [workBudget, setWorkBudget] = useState({ screened_papers: 100, read_papers: 20, comparison_passes: 1 });
   const [resumeStage, setResumeStage] = useState(review.stage);
+  const [main, setMain] = useState<ModelSelectValue>(review.main_model);
+  const [mainParallelRequests, setMainParallelRequests] = useState(review.main_parallel_requests ?? 1);
+  const [summary, setSummary] = useState<SummaryRole | null>(review.summary_model ?? null);
   const [offset, setOffset] = useState(0);
   const [sort, setSort] = useState<CandidateSort>('relevance');
   const [page, setPage] = useState<CandidatePage | null>(null);
@@ -242,12 +301,23 @@ function ReviewDetails({ review, busy, control, clear }: {
   const pendingOffset = offset;
   const visibleCandidates = page?.items ?? [];
   const pendingTotal = page?.total ?? 0;
+  const budget = review.suggested_work_budget ?? review.work_budget ?? review.scope?.suggested_work_budget;
+  const screenedPapers = budget?.screened_papers ?? 100;
+  const readPapers = budget?.read_papers ?? 20;
+  const comparisonPasses = budget?.comparison_passes ?? 1;
+  const canChangeModels = ['paused', 'blocked', 'completed'].includes(review.status);
 
   useEffect(() => {
-    setWorkBudget({ screened_papers: 100, read_papers: 20, comparison_passes: 1,
-      ...(review.suggested_work_budget ?? review.work_budget ?? review.scope?.suggested_work_budget ?? {}) });
-  }, [review.approval, review.suggested_work_budget, review.work_budget, review.scope?.suggested_work_budget]);
+    setWorkBudget({ screened_papers: screenedPapers, read_papers: readPapers, comparison_passes: comparisonPasses });
+  }, [review.approval, screenedPapers, readPapers, comparisonPasses]);
   useEffect(() => { setResumeStage(review.stage); }, [review.stage]);
+  useEffect(() => { setMain(review.main_model); },
+    [review.main_model.provider_profile_id, review.main_model.model]);
+  useEffect(() => { setMainParallelRequests(review.main_parallel_requests ?? 1); },
+    [review.main_parallel_requests]);
+  useEffect(() => { setSummary(review.summary_model ?? null); },
+    [review.summary_model?.model_reference.provider_profile_id, review.summary_model?.model_reference.model,
+      review.summary_model?.max_output_tokens, review.summary_model?.reasoning_effort, review.summary_model?.parallel_requests]);
   useEffect(() => {
     if (!review.candidate_count) { setPage(null); return; }
     let active = true;
@@ -271,7 +341,7 @@ function ReviewDetails({ review, busy, control, clear }: {
     </div>
     <div className="review-budget">
       <span>Screened papers: {review.work_used?.screened_papers ?? 0} / {review.work_budget?.screened_papers ?? 'not approved'}</span>
-      <span>Collected/read papers: {review.work_used?.read_papers ?? 0} / {review.work_budget?.read_papers ?? 'not approved'}</span>
+      <span>Collection/read allowance used: {review.work_used?.read_papers ?? 0} / {review.work_budget?.read_papers ?? 'not approved'}</span>
       <span>Comparison passes: {review.work_used?.comparison_passes ?? 0} / {review.work_budget?.comparison_passes ?? 'not approved'}</span>
     </div>
     <p className="review-objective">{review.objective}</p>
@@ -281,13 +351,46 @@ function ReviewDetails({ review, busy, control, clear }: {
       <div><dt>Excluded</dt><dd>{review.excluded_count}</dd></div>
       <div><dt>Automatically selected</dt><dd>{review.selected_count}</dd></div>
     </dl>
-    <p className="field-hint">Main: {review.main_model.model}. Decision: {review.decision_model?.model_reference.model ?? 'main model (batched)'}. {review.evidence_count} verified source excerpts.</p>
+    <p className="field-hint">Main: {review.main_model.model} (up to {review.main_parallel_requests ?? 1} parallel). Decision: {review.decision_model?.model_reference.model ?? 'main model (batched)'}. {review.evidence_count} verified source excerpts.</p>
+    <p className="field-hint">Paper summaries: {review.summary_model
+      ? `${review.summary_model.model_reference.model} (up to ${review.summary_model.parallel_requests ?? 1} parallel, ${review.summary_model.max_output_tokens} output tokens maximum, 128K context maximum)`
+      : 'main model, multi-pass source auditing'}.</p>
+    <section aria-label="Main model settings">
+      <h3>Main model for remaining research</h3>
+      <label>Main research model<ModelSelect ariaLabel="Resume main research model"
+        options={capabilityOptions(providers, 'chat')} value={main} onChange={setMain}
+        disabled={busy || !canChangeModels} /></label>
+      <label>Main model parallel requests<input type="number" min={1} max={32} step={1} required
+        value={mainParallelRequests} disabled={busy || !canChangeModels}
+        onChange={(event) => setMainParallelRequests(Number(event.target.value))} /></label>
+      {canChangeModels
+        ? <p className="field-hint">Choose a model, then Resume review to continue from the saved stage. Collected papers, completed summaries, verified evidence and approved work limits are retained. Earlier outputs keep their original model provenance.</p>
+        : <><p className="field-hint">Pause before switching the main model. Completed work is retained, and pending scope or work-limit approvals still apply.</p>
+          <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'pause' })}>
+            Pause to switch main model
+          </button></>}
+    </section>
+    <section aria-label="Summary model settings">
+      <h3>Summary model for unfinished papers</h3>
+      <SummaryModelFields providers={providers} value={summary} onChange={setSummary}
+        disabled={busy || !canChangeModels} />
+      {canChangeModels
+        ? <p className="field-hint">Choose the summary model above, then Resume review to apply it. Completed paper summaries and earlier exploration are retained.</p>
+        : <><p className="field-hint">Pause the review to choose a separate summary model. The current request is stopped safely; completed work is retained. Your selection applies when you resume.</p>
+          <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'pause' })}>
+            Pause to choose summary model
+          </button></>}
+    </section>
     {review.status === 'running' ? <div className="review-progress" role="status" aria-live="polite">
       <Loading label={`${label(review.stage)} in progress...`} />
       {review.stage === 'screening' && review.candidate_count > 0
         ? <><progress aria-label="Paper screening progress" value={review.screened_count} max={review.candidate_count} />
-          <span>{review.screened_count} of {review.candidate_count} papers rated</span></>
+          <span>{review.screened_count} of {review.candidate_count} papers rated</span>
+          <ProgressTiming key={`${review.id}:${review.stage}`} count={review.screened_count}
+            total={review.candidate_count} running /></>
         : <progress aria-label={`${label(review.stage)} progress`} />}
+      {review.stage !== 'screening' || !review.candidate_count
+        ? <p className="field-hint">Time remaining unavailable: this stage has no fixed progress total.</p> : null}
       <p className="field-hint">Updates after each completed decision. You can leave this page without stopping the review.</p>
     </div> : null}
     {review.screened_count > 0 ? <p className="field-hint">
@@ -325,6 +428,16 @@ function ReviewDetails({ review, busy, control, clear }: {
       </button>
     </div> : null}
     <div className="button-row review-controls">
+      {review.approval === 'analysis' && review.status === 'awaiting_approval' ? <>
+        <button className="button primary" disabled={busy}
+          onClick={() => void control({ action: 'extend_analysis' })}>Approve up to 20 more source pages</button>
+        <button className="button secondary" disabled={busy || review.evidence_count === 0}
+          onClick={() => void control({ action: 'write_report' })}>Write report with current evidence</button>
+      </> : null}
+      {!review.references_skipped && review.status !== 'completed'
+        && REVIEW_STAGES.indexOf(review.stage) <= REVIEW_STAGES.indexOf('reference_collection')
+        ? <button className="button secondary" disabled={busy}
+          onClick={() => void control({ action: 'skip_references' })}>Skip references</button> : null}
       {review.status !== 'completed' && review.status !== 'paused' ? <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'pause' })}>Pause review</button> : null}
       {review.status !== 'completed' ? <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'stop_stage' })}>Stop stage and use valid partial results</button> : null}
       {(['paused', 'blocked', 'completed'].includes(review.status) || (review.status === 'awaiting_approval' && review.approval !== 'budget')) ? <>
@@ -332,11 +445,22 @@ function ReviewDetails({ review, busy, control, clear }: {
           const stage = REVIEW_STAGES.find((item) => item === event.target.value);
           if (stage) setResumeStage(stage);
         }}>{REVIEW_STAGES.slice(0, REVIEW_STAGES.indexOf(review.stage) + 1).map((stage) => <option key={stage} value={stage}>{label(stage)}</option>)}</select></label> : null}
-        <button className="button primary" disabled={busy} onClick={() => void control({ action: 'resume', stage: review.approval === 'budget' ? null : resumeStage })}>
-          {review.approval === 'plan' || review.approval === 'budget' ? 'Return to pending approval' : 'Resume review'}
+        <button className="button primary" disabled={busy || !validSummary(summary)
+          || !validParallelRequests(mainParallelRequests) || !main.provider_profile_id || !main.model} onClick={() => void control({
+          action: 'resume', stage: review.approval === 'budget' ? null : resumeStage,
+          ...(canChangeModels && (main.provider_profile_id !== review.main_model.provider_profile_id
+            || main.model !== review.main_model.model) ? { main_model: main } : {}),
+          ...(canChangeModels && mainParallelRequests !== (review.main_parallel_requests ?? 1)
+            ? { main_parallel_requests: mainParallelRequests } : {}),
+          ...(['paused', 'blocked', 'completed'].includes(review.status) ? { summary_model: summary } : {}),
+        })}>
+          {review.approval === 'plan' || review.approval === 'budget' || review.approval === 'analysis'
+            ? 'Return to pending approval' : 'Resume review'}
         </button>
       </> : null}
     </div>
+    {review.references_skipped ? <p className="field-hint">Reference expansion skipped. Initial-paper work and completed results are retained; the review continues to synthesis without further reference lookup or collection.</p> : null}
+    <ReviewActivityPanel key={`activity:${review.id}`} review={review} />
     {review.output_path ? <div className="review-saved">
       <Link className="button primary small" to={review.track_id
         ? `/tracks?id=${encodeURIComponent(review.track_id)}&section=literature&review=${encodeURIComponent(review.id)}&revision=${review.revision}`
@@ -344,7 +468,7 @@ function ReviewDetails({ review, busy, control, clear }: {
       <p className="field-hint">{review.output_path}</p>
     </div> : null}
     {review.selected_count > 0 && REVIEW_STAGES.indexOf(review.stage) >= REVIEW_STAGES.indexOf('reading_plan')
-      ? <CapturedPages review={review} /> : null}
+      ? <CapturedPages key={review.id} review={review} /> : null}
     {REVIEW_STAGES.indexOf(review.stage) >= REVIEW_STAGES.indexOf('references')
       ? <ReferenceTable review={review} busy={busy} control={control} /> : null}
     {review.candidate_count ? <section className="review-shortlist" aria-label="Paper shortlist">
@@ -371,16 +495,17 @@ function ReviewDetails({ review, busy, control, clear }: {
 }
 
 function PaperSummaries({ paper }: { paper: PaperReview }) {
+  const [showPackets, setShowPackets] = useState(false);
   const renderSummary = (summary: Record<string, unknown>) => {
-    const sections = (summary.sections ?? []) as { title: string; content: string; evidence_ids: string[] }[];
+    const sections = (summary.sections ?? []) as { title: string; content: string }[];
     const limitations = (summary.limitations ?? []) as string[];
     return <>
       {sections.map((section, index) => <div key={index}>
         <MarkdownViewer content={`#### ${section.title}\n\n${section.content}`} />
-        <small>Source pages: {[...new Set((paper.findings ?? []).filter((claim) =>
-          section.evidence_ids.includes(String(claim.id))).map((claim) => String(claim.page)))].join(', ') || 'see verified excerpts'}</small>
       </div>)}
-      {limitations.length ? <ul>{limitations.map((value, index) => <li key={index}>{value}</li>)}</ul> : null}
+      {limitations.length ? <details><summary>Limitations and coverage</summary>
+        <ul>{limitations.map((value, index) => <li key={index}>{value}</li>)}</ul>
+      </details> : null}
     </>;
   };
   return <>
@@ -389,41 +514,157 @@ function PaperSummaries({ paper }: { paper: PaperReview }) {
       <p>Admitted source spans only; not a canonical full-paper summary.</p>
       {renderSummary(paper.selective_summary)}
     </section> : null}
-    {(paper.partial_summaries ?? []).length ? <details><summary>Source-grounded partial summaries ({paper.partial_summaries?.length})</summary>
-      {(paper.partial_summaries ?? []).map((summary, index) => <section key={index}>
+    {(paper.partial_summaries ?? []).length ? <details onToggle={(event) => setShowPackets(event.currentTarget.open)}>
+      <summary>Paper summary packets ({paper.partial_summaries?.length})</summary>
+      {showPackets ? (paper.partial_summaries ?? []).map((summary, index) => <section key={index}>
         <h4>Source packet {index + 1}</h4>{renderSummary(summary)}
-      </section>)}
+      </section>) : null}
     </details> : null}
   </>;
 }
 
-function CapturedPages({ review }: { review: Review }) {
-  const [papers, setPapers] = useState<PaperReview[]>([]);
+function PaperReader({ reviewId, candidateId, title, onClose }: {
+  reviewId: string; candidateId: string; title: string; onClose: () => void;
+}) {
+  const [paper, setPaper] = useState<PaperReview | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [refresh, setRefresh] = useState(0);
+  const [showSources, setShowSources] = useState(false);
+  const reader = useRef<HTMLElement>(null);
+  useEffect(() => {
+    reader.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    reader.current?.focus({ preventScroll: true });
+  }, []);
   useEffect(() => {
     let active = true;
-    void reviewsApi.papers(review.id).then((items) => {
-      if (active) { setPapers(items); setError(null); }
-    }).catch((reason) => { if (active) setError(reason); });
+    setPaper(null);
+    setError(null);
+    setShowSources(false);
+    void reviewsApi.paper(reviewId, candidateId).then((result) => {
+      if (active) setPaper(result);
+    }).catch((reason: unknown) => {
+      if (active) setError(reason);
+    });
     return () => { active = false; };
-  }, [review.id, review.revision]);
-  return <section aria-label="Captured page decisions">
-    <h3>Completed page decisions and reading</h3>
+  }, [reviewId, candidateId, refresh]);
+  return <section className="review-paper-reader" aria-label={`Summary for ${title}`} ref={reader} tabIndex={-1}>
+    <div className="review-heading">
+      <h3>{title}</h3>
+      <div className="button-row">
+        <button className="button ghost small" onClick={() => setRefresh((value) => value + 1)}>Refresh paper</button>
+        <button className="button ghost small" onClick={onClose}>Close paper</button>
+      </div>
+    </div>
     <ErrorNotice error={error} />
-    {papers.filter((paper) => paper.pages.length > 0 || paper.operation).map((paper) => <details key={paper.candidate_id} open>
-      <summary>{paper.title || paper.candidate_id}: {paper.pages.length} captured decisions, {paper.evidence_count} verified excerpts</summary>
-      {paper.operation ? <p role="status"><span aria-hidden="true">◌</span> {paper.operation}: {paper.title}</p> : null}
-      <p>Source version: {paper.source_version}. Read pages: {paper.read_pages.join(', ') || 'none'}.
-        Partial pages: {paper.partial_pages.join(', ') || 'none'}.</p>
-      <ul>{paper.pages.map((page) => <li key={page.page}>Page {page.page}: {page.action}
-        {page.reference_page ? ' · reference page' : ''} — {page.reason}</li>)}</ul>
-      {(paper.findings ?? []).length ? <details><summary>Main-model source-backed findings</summary>
-        {(paper.findings ?? []).map((finding, index) => <div key={index}><p>{String(finding.finding ?? '')}</p>
-          <blockquote>{String(finding.quote ?? '')}</blockquote><small>Page {String(finding.page ?? '')}</small></div>)}
-      </details> : null}
-      <PaperSummaries paper={paper} />
-    </details>)}
-    {!papers.some((paper) => paper.pages.length > 0) ? <p>No completed page decisions yet.</p> : null}
+    {!paper && !error ? <Loading label="Loading paper summary..." /> : null}
+    {paper ? <>
+      <ErrorNotice error={paper.error} />
+      {paper.selective_summary ? <PaperSummaries paper={paper} /> : <p>No summary saved yet.</p>}
+      <details onToggle={(event) => setShowSources(event.currentTarget.open)}>
+        <summary>Source details and page decisions</summary>
+        {showSources ? <>
+          {paper.operation ? <p role="status">{paper.operation}</p> : null}
+          <p>Source version: {paper.source_version}. Read pages: {paper.read_pages.join(', ') || 'none'}.
+            Partial pages: {paper.partial_pages.join(', ') || 'none'}.</p>
+          <p>{paper.evidence_count} verified excerpts. Summary prose itself is not verified source evidence.</p>
+          <ul>{paper.pages.map((page) => <li key={page.page}>Page {page.page}: {page.action}
+            {page.reference_page ? ' · reference page' : ''} — {page.reason}</li>)}</ul>
+          {(paper.findings ?? []).map((finding, index) => <div key={index}><p>{String(finding.finding ?? '')}</p>
+            {finding.quote ? <blockquote>{String(finding.quote)}</blockquote>
+              : <p>Source quotation pending; verify against the original page during analysis.</p>}
+            <small>Page {String(finding.page ?? '')}</small></div>)}
+        </> : null}
+      </details>
+    </> : null}
+  </section>;
+}
+
+function CapturedPages({ review }: { review: Review }) {
+  const [page, setPage] = useState<PaperProgressPage | null>(null);
+  const [error, setError] = useState<unknown>(null);
+  const [offset, setOffset] = useState(0);
+  const [summariesOnly, setSummariesOnly] = useState(true);
+  const [selected, setSelected] = useState<{ candidate_id: string; title: string } | null>(null);
+  const revision = useRef(review.revision);
+  revision.current = review.revision;
+  useEffect(() => {
+    let active = true;
+    let inFlight = false;
+    let loadedRevision = -1;
+    setPage(null);
+    const load = async () => {
+      if (inFlight || loadedRevision === revision.current) return;
+      inFlight = true;
+      const requestedRevision = revision.current;
+      try {
+        const result = await reviewsApi.paperProgress(review.id, offset, summariesOnly);
+        if (active) {
+          if (offset > 0 && offset >= result.total) {
+            setOffset(Math.floor(Math.max(0, result.total - 1) / 25) * 25);
+          } else {
+            setPage(result); setError(null); loadedRevision = requestedRevision;
+          }
+        }
+      } catch (reason) {
+        if (active) setError(reason);
+      } finally {
+        inFlight = false;
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [review.id, offset, summariesOnly]);
+  const total = page?.counts.total ?? 0;
+  return <section aria-label="Paper summaries and progress">
+    <h3>Paper collection and reading progress</h3>
+    <ErrorNotice error={error} />
+    {!page && !error ? <Loading label="Loading paper progress..." /> : null}
+    {page && total ? <div className="review-progress" aria-label="Paper progress">
+      {([
+        ['PDFs collected or reused', page.counts.collected],
+        ['Source text prepared', page.counts.prepared],
+        ['Page decisions complete', page.counts.plan_complete],
+        ['Papers read and summarized', page.counts.summarized],
+      ] as const).map(([title, count]) => <div key={title}>
+        <span>{title}: {count} / {total}</span>
+        <progress aria-label={title} value={count} max={total} />
+        <ProgressTiming key={`${review.id}:${title}`} count={count} total={total} running={review.status === 'running'} />
+      </div>)}
+      <p className="field-hint">Counts refer to selected papers, not the work allowance. Collection and extraction happen before page decisions and selective reading; collected does not mean read.</p>
+      {page.counts.failed ? <p role="status">{page.counts.failed} {page.counts.failed === 1 ? 'paper needs' : 'papers need'} attention; choose All papers to inspect errors.</p> : null}
+      {page.operations.map((paper) => <p role="status" key={paper.candidate_id}>{paper.operation}: {paper.title}</p>)}
+    </div> : null}
+    {selected ? <PaperReader key={`${review.id}:${selected.candidate_id}`} reviewId={review.id}
+      candidateId={selected.candidate_id} title={selected.title} onClose={() => setSelected(null)} /> : null}
+    <div className="review-heading">
+      <h3>Paper summaries</h3>
+      <label>Show <select value={summariesOnly ? 'summaries' : 'all'} onChange={(event) => {
+        setSummariesOnly(event.target.value === 'summaries'); setOffset(0);
+      }}>
+        <option value="summaries">Summaries ready</option>
+        <option value="all">All papers</option>
+      </select></label>
+    </div>
+    <p className="field-hint">Summary text loads only when you open a paper.</p>
+    <ul className="review-paper-list">
+      {page?.items.map((paper) => <li key={paper.candidate_id}>
+        <div><strong>{paper.title || paper.candidate_id}</strong><small>
+          {paper.error ? 'Needs attention' : paper.summary_complete ? 'Summary ready' : paper.operation
+            || (paper.plan_complete ? 'Waiting for summary' : paper.prepared ? 'Prepared' : paper.collected ? 'Collected' : 'Queued')}
+        </small></div>
+        <button className="button ghost small" aria-label={`${paper.summary_complete ? 'View summary' : 'View progress'} for ${paper.title}`}
+          onClick={() => setSelected(paper)}>{paper.summary_complete ? 'View summary' : 'View progress'}</button>
+      </li>)}
+    </ul>
+    {page && !page.total ? <p>{summariesOnly ? 'No summaries saved yet. Reading progress appears above.' : 'No selected papers yet.'}</p> : null}
+    <div className="button-row">
+      <button className="button ghost small" disabled={!page || offset === 0}
+        onClick={() => setOffset(Math.max(0, offset - 25))}>Previous summaries</button>
+      <span>{page?.total ? `${offset + 1}-${offset + page.items.length} of ${page.total}` : '0 papers'}</span>
+      <button className="button ghost small" disabled={!page || page.next_offset == null}
+        onClick={() => { if (page?.next_offset != null) setOffset(page.next_offset); }}>Next summaries</button>
+    </div>
   </section>;
 }
 

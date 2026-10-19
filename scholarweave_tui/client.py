@@ -172,7 +172,7 @@ class ScholarWeaveClient:
     async def control_review(self, review_id: str, request: ReviewControlRequest) -> ReviewResponse:
         return await self._request(
             "POST", f"/literature-reviews/{_segment(review_id)}/control", ReviewResponse,
-            json=request.model_dump(mode="json"),
+            json=request.model_dump(mode="json", exclude_unset=True),
         )
 
     async def skills(self) -> list[SkillResponse]:

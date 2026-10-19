@@ -4,9 +4,14 @@ import type { components } from '../../api/schema.generated';
 export type Review = components['schemas']['ReviewResponse'];
 export type ReviewCreate = components['schemas']['ReviewCreateRequest'];
 export type ReviewControl = components['schemas']['ReviewControlRequest'];
+export type SummaryRole = NonNullable<Review['summary_model']>;
 export type CandidatePage = components['schemas']['CandidatePage'];
 export type Candidate = components['schemas']['Candidate'];
 export type PaperReview = components['schemas']['PaperReview'];
+export type PaperProgressPage = components['schemas']['PaperProgressPage'];
+export type AnalysisProgress = components['schemas']['AnalysisProgress'];
+export type ReviewActivityPage = components['schemas']['ReviewActivityPage'];
+export type ReviewActivityDetail = components['schemas']['ReviewActivityDetail'];
 export type ReviewReference = components['schemas']['ReviewReference'];
 export type LocalPaper = components['schemas']['DocumentSearchResponse'];
 export type CandidateSort = 'relevance' | 'year' | 'title';
@@ -42,6 +47,14 @@ export const reviewsApi = {
   paper: (id: string, candidateId: string) =>
     request<PaperReview>(`${path(id)}/papers/${encodeURIComponent(candidateId)}`),
   papers: (id: string) => request<PaperReview[]>(`${path(id)}/papers`),
+  paperProgress: (id: string, offset: number, summariesOnly: boolean) =>
+    request<PaperProgressPage>(`${path(id)}/paper-progress?limit=25&offset=${offset}&summaries_only=${summariesOnly}`),
+  analysis: (id: string, offset: number) =>
+    request<AnalysisProgress | null>(`${path(id)}/analysis?limit=25&offset=${offset}`),
+  activity: (id: string, offset: number) =>
+    request<ReviewActivityPage>(`${path(id)}/activity?limit=25&offset=${offset}`),
+  activityDetail: (id: string, key: string) =>
+    request<ReviewActivityDetail>(`${path(id)}/activity/detail?${new URLSearchParams({ key })}`),
   references: (id: string) => request<ReviewReference[]>(`${path(id)}/references`),
   referencesExportUrl: (id: string) => apiUrl(`${path(id)}/references.csv`),
   localPapers: (query: string) => request<LocalPaper[]>(`/documents/search?query=${encodeURIComponent(query)}&limit=25`),

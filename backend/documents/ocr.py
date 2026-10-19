@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import os
 import shutil
 import time
@@ -13,10 +14,15 @@ import pypdfium2
 import pytesseract
 from PIL import Image
 from pypdf import PdfReader
+from pypdf.errors import PyPdfError
 
 from backend.core.config import Settings
 from backend.core.errors import DocumentProcessingError
 from backend.utils import ProgressCallback, report_progress
+
+_logger = logging.getLogger(__name__)
+_PAGE_ERRORS = (PyPdfError, pypdfium2.PdfiumError, OSError, ValueError, DocumentProcessingError)
+
 
 class DocumentOCR:
     def __init__(self, settings: Settings) -> None:
@@ -41,11 +47,14 @@ class DocumentOCR:
     def inspect_text_layer(self, pdf_path: Path) -> dict[str, int | float | str]:
         reader = PdfReader(str(pdf_path))
         total_pages = len(reader.pages)
-        embedded_text_pages = sum(
-            1
-            for page in reader.pages
-            if len((page.extract_text() or "").strip()) >= self.settings.pdf_min_text_chars
-        )
+        embedded_text_pages = 0
+        for index in range(total_pages):
+            try:
+                text = self._extract_native_text(reader, index)
+            except _PAGE_ERRORS as exc:
+                _logger.warning("Cannot inspect PDF page %s: %s", index + 1, exc)
+                continue
+            embedded_text_pages += int(len(text) >= self.settings.pdf_min_text_chars)
         embedded_text_ratio = (
             embedded_text_pages / total_pages if total_pages else 0.0
         )
@@ -92,25 +101,20 @@ class DocumentOCR:
                 "total_pages": total_pages,
             },
         )
-        availability_checked = False
+        ocr_available: bool | None = None
         for index in range(1, total_pages + 1):
-            embedded_text = await anyio.to_thread.run_sync(
-                self._extract_native_text, reader, index - 1,
-            )
+            native_error = None
+            try:
+                embedded_text = await anyio.to_thread.run_sync(
+                    self._extract_native_text, reader, index - 1,
+                )
+            except _PAGE_ERRORS as exc:
+                native_error = f"Native text extraction failed for page {index}: {exc}"
+                _logger.warning("%s", native_error)
+                embedded_text = ""
             text = embedded_text
             page_image = b""
             needs_ocr = force_ocr or len(text) < self.settings.pdf_min_text_chars
-            if needs_ocr:
-                if not availability_checked:
-                    availability_checked = True
-                    if not await anyio.to_thread.run_sync(self.available):
-                        raise self._unavailable_error(index)
-                page_image = await anyio.to_thread.run_sync(
-                    self.render_page_png,
-                    pdf_path,
-                    index - 1,
-                )
-
             entry: dict[str, Any] = {
                 "page": index,
                 "raw_text": text,
@@ -118,31 +122,53 @@ class DocumentOCR:
                 "ocr_used": False,
                 "llm_enhanced": False,
             }
+            if native_error:
+                entry["native_extraction_note"] = native_error
             if needs_ocr:
                 try:
-                    ocr_text = await self._tesseract_image(page_image, index)
-                except DocumentProcessingError as exc:
-                    if not embedded_text:
-                        raise
-                    entry["ocr_fallback_note"] = (
-                        f"OCR failed for page {index}; the PDF's embedded text was "
-                        f"used instead. Details: {exc}"
-                    )
-                else:
-                    if ocr_text.strip():
-                        entry["raw_text"] = ocr_text.strip()
-                        entry["text"] = ocr_text.strip()
-                        entry["ocr_used"] = True
-                        entry["ocr_engine"] = "tesseract"
-
-            if retain_page_images:
-                if not page_image:
+                    if ocr_available is None:
+                        ocr_available = await anyio.to_thread.run_sync(self.available)
+                    if not ocr_available:
+                        raise self._unavailable_error(index)
                     page_image = await anyio.to_thread.run_sync(
-                        self.render_page_png,
-                        pdf_path,
-                        index - 1,
+                        self.render_page_png, pdf_path, index - 1,
                     )
-                entry["_image_png"] = page_image
+                    ocr_text = await self.ocr_image(page_image, index)
+                    if not ocr_text.strip():
+                        raise DocumentProcessingError(f"OCR produced no readable text for page {index}")
+                except _PAGE_ERRORS as exc:
+                    if embedded_text:
+                        entry["ocr_fallback_note"] = (
+                            f"OCR failed for page {index}; the PDF's embedded text was "
+                            f"used instead. Details: {exc}"
+                        )
+                    else:
+                        entry["ocr_skipped"] = True
+                        entry["ocr_fallback_note"] = (
+                            f"Skipped unreadable page {index}; no native or OCR text "
+                            f"could be recovered. Details: {exc}"
+                        )
+                    _logger.warning("%s", entry["ocr_fallback_note"])
+                else:
+                    entry["raw_text"] = ocr_text.strip()
+                    entry["text"] = ocr_text.strip()
+                    entry["ocr_used"] = True
+                    entry["ocr_engine"] = "tesseract"
+
+            if retain_page_images and not entry.get("ocr_skipped"):
+                if not page_image:
+                    try:
+                        page_image = await anyio.to_thread.run_sync(
+                            self.render_page_png, pdf_path, index - 1,
+                        )
+                    except _PAGE_ERRORS as exc:
+                        entry["llm_enhancement_note"] = (
+                            f"Could not render page {index}; keeping extracted text "
+                            f"without vision enhancement. Details: {exc}"
+                        )
+                        _logger.warning("%s", entry["llm_enhancement_note"])
+                if page_image:
+                    entry["_image_png"] = page_image
             pages.append(entry)
             await self._report_page_progress(
                 progress,

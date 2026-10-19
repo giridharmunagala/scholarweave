@@ -63,6 +63,42 @@ original completion policy; prompt changes apply to newly compiled turns.
 
 ## Change staged literature reviews
 
+Pause before changing a review's main model, then send an explicit `main_model` with the existing
+revision-guarded `resume` control. Validate all supplied model roles before saving any changes.
+Keep collected papers, summaries, source-verified evidence, job provenance and approved work limits;
+only unfinished requests use the replacement model. Switching models must not charge another
+comparison pass, reset source-page admissions/extensions, or bypass pending approvals. The web
+Deep Work model picker and terminal `/review` use the same control. Reuse completed jobs only when
+their logical task, prompt and input hashes match, and revalidate structured evidence.
+
+For separate-summary-model synthesis, preserve the durable `analysis-plan` job: summary batch
+selection, page/reason/status entries and distinct-page admissions survive pause/resume.
+Enforce the initial 20-page cap and explicit 20-page extensions on original source reads,
+including follow-ups. At the `analysis` gate, **Write report with current evidence** skips
+pending reads, not source audits; it requires verified evidence and records incomplete coverage.
+The live activity UI pages through saved jobs and loads outputs on demand. Keep its source-page
+and summary-batch bars distinct from whole-report completion.
+For large summary-selection batches, keep the configured main-model context and normal output
+reserve. Unknown compatible model names use model-scoped provider tokenization when available;
+do not substitute UTF-8 bytes for actual token counts or infer a tokenizer from a model name.
+Keep the packet admission and isolated harness context checks aligned, and test a real stub
+request with over 60K input tokens fitting a 128K window. Unsupported tokenization must remain
+visible; invalid counts cannot authorize an oversized request.
+Tokenize an already serialized harness request directly: wrapping it in another user message
+duplicates instructions and inflates escaped page-decision JSON enough to reject admitted batches.
+
+The Deep Work **Skip references** control durably disables reference expansion for a review,
+including across resume and restart. Before that phase it leaves initial-paper work running;
+during reference extraction, screening or collection it cancels and awaits active work before
+continuing to synthesis. Completed work is retained, and scope/work-limit approvals for the
+remaining initial-paper and synthesis work are not bypassed.
+
+Deep Work progress bars show observed paper throughput (papers/min and papers/s) and
+task-local remaining-time estimates after new completions are observed. These are not
+model-request RPM/RPS. Measurements start when the page opens and reset on pause/resume
+or counter rollback; waiting time is included. Stages without a fixed total cannot
+provide a completion estimate.
+
 Isolated schema/evidence validation failures get at most two automatic repairs with precise
 feedback and separate durable, usage-accounted receipts. Repairs obey the same context,
 allowance, inference scheduling, pause and cancellation controls as the original request.
@@ -95,10 +131,15 @@ receipt IDs; invalidate summaries when their receipts change. Show actual partia
 in live paper views and publication, without touching canonical full-paper summaries.
 
 Every model job must fit its role's declared input/output/context limits, use a fresh transcript,
-retain durable usage and provenance, and use the shared inference scheduler. Only native System One
+retain durable usage and provenance, and use the shared inference scheduler. Native System One
 decisions may run in parallel (the persisted `decision_parallel_requests` limit, default 8, range 1–32,
-for the same profile/model); generation and model switches
-stay exclusive. Clear must cancel/await all children before deleting owned artifacts, preserve
+for the same profile/model). Explicit same-model review-summary groups use their saved
+`parallel_requests` limit (default 1, range 1–32); when the summary role names the exact main
+provider/model binding, they use the review's saved `main_parallel_requests` limit instead
+(default 1, range 1–32). Ordinary main-model stages remain sequential and model switches stay
+exclusive. Summary groups finish missing page plans first, cancel/await/account every child,
+and keep parallelism out of content-cache keys.
+Clear must cancel/await all children before deleting owned artifacts, preserve
 shared/edited/unknown-ownership files, and retain resumable cleanup state on errors. Keep source versions
 and verbatim page evidence through reduction/audit. Reuse prior query/job receipts; do not retry
 rate-limited sources immediately or replace existing workspace indexing with a review JSON index.

@@ -889,6 +889,7 @@ class ScholarWeaveApp(App[None]):
                     actions.append(("stop_stage", "Stop stage", "Advance only if valid partial results are sufficient"))
                 if review.status in {"paused", "blocked"}:
                     actions.append(("resume", "Resume review", "Continue the stage or return to pending approval"))
+                    actions.append(("switch_main", "Switch main model and resume", "Keep collected papers, summaries, evidence and approved limits"))
                 action = await self.push_screen_wait(ChoicePicker(
                     review.title,
                     f"{review.stage}: {review.status}. Screened {review.work_used.screened_papers}/"
@@ -909,6 +910,19 @@ class ScholarWeaveApp(App[None]):
                     query["review"] = review.id
                 if not webbrowser.open(f"{self.client.base_url}/deep-work?{urlencode(query)}"):
                     self.notify("Could not open the browser. Open Deep Work in the web app.", severity="error")
+            elif action == "switch_main" and review is not None:
+                selected_model = await self.push_screen_wait(ChoicePicker(
+                    "Main research model", "Continue unfinished work with this model; completed work is retained.",
+                    self._chat_models(),
+                ))
+                if selected_model is None:
+                    return
+                profile_id, model = selected_model.split("\t", 1)
+                current = await self.client.control_review(review.id, ReviewControlRequest(
+                    action="resume", expected_revision=review.revision,
+                    main_model=ModelReferenceSpec(provider_profile_id=profile_id, model=model),
+                ))
+                self.notify(f"{current.stage}: {current.status}. {current.error or ''}", title=current.title, timeout=10)
             elif action in {"pause", "stop_stage", "resume"} and review is not None:
                 current = await self.client.control_review(review.id, ReviewControlRequest(
                     action=action, expected_revision=review.revision,

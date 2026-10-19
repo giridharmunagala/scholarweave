@@ -62,6 +62,8 @@ PROMPT_DEFINITIONS = {
         PromptDefinition("literature-pages"),
         PromptDefinition("literature-references"),
         PromptDefinition("literature-evidence"),
+        PromptDefinition("literature-compact-summary"),
+        PromptDefinition("literature-analysis-sources"),
         PromptDefinition("literature-page-groups"),
         PromptDefinition("literature-paper-summary"),
         PromptDefinition("literature-synthesis"),

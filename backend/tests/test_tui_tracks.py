@@ -11,6 +11,8 @@ from textual.widgets import Button, ContentSwitcher, Input, OptionList, TextArea
 from textual.worker import WorkerCancelled
 
 from backend.app import create_app
+from backend.providers.schemas import ProviderCreate, ProviderModel
+from backend.research.reviews.schemas import ReviewCreateRequest
 from scholarweave_tui.app import ScholarWeaveApp
 from scholarweave_tui.client import ScholarWeaveClient
 from scholarweave_tui.preferences import Preferences
@@ -43,6 +45,49 @@ async def wait_for_screen(app, pilot, screen_type):
 
     await asyncio.wait_for(wait(), timeout=5)
     await pilot.pause()
+
+
+def test_terminal_switches_review_main_model_without_changing_chat_model(test_settings, monkeypatch):
+    async def scenario():
+        backend = create_app(test_settings)
+        services = backend.state.services
+        monkeypatch.setattr(services.reviews, "_schedule", lambda review_id: None)
+        provider = services.providers.create(ProviderCreate(
+            name="Local models", kind="openai_compatible", base_url="http://127.0.0.1:12345/v1",
+            models=[ProviderModel(name=name, capabilities={"chat"}) for name in ("original", "replacement")],
+        ))
+        spec = ReviewCreateRequest(
+            title="Saved research", objective="Compare methods.",
+            main_model={"provider_profile_id": provider.id, "model": "original"},
+        )
+        services.reviews.repository.create("terminal-review", spec.model_dump(mode="json"), {
+            "status": "paused", "stage": "reading", "stage_history": {"discovery": "completed"},
+            "work_budget": {"screened_papers": 100, "read_papers": 20, "comparison_passes": 1},
+        })
+        client = ScholarWeaveClient(transport=httpx.ASGITransport(app=backend))
+        app = ScholarWeaveApp(client, Preferences(test_settings.data_dir / "tui-preferences.json"))
+        try:
+            async with app.run_test(size=(160, 48)) as pilot:
+                await settle(app, pilot)
+                chat_model = app.model_reference
+                app.choose_literature_review()
+                await wait_for_screen(app, pilot, ChoicePicker)
+                await pilot.press("down", "enter")
+                await wait_for_screen(app, pilot, ChoicePicker)
+                await pilot.press("end", "enter")
+                await wait_for_screen(app, pilot, ChoicePicker)
+                await pilot.press("end", "enter")
+                await settle(app, pilot)
+                review = services.reviews.get("terminal-review")
+                assert review.main_model.model == "replacement"
+                assert review.status == "running" and review.stage == "reading"
+                assert review.stage_history == {"discovery": "completed"}
+                assert app.model_reference == chat_model
+        finally:
+            await client.close()
+            await services.close()
+
+    asyncio.run(scenario())
 
 
 def test_terminal_exploration_editor_history_and_discussion(test_settings):

@@ -84,11 +84,17 @@ remains the only owner of inference, run lifecycle, persistence, and workspace i
 
 The launcher checks backend health and library identity before reusing a server. If absent, it
 reserves an IPv4 loopback socket **before** spawning a separate backend process, passing the socket
-through Python multiprocessing (including on Windows). Concurrent launchers cannot initialize a
-second backend on that port. Readiness is bounded, startup logs are retained on failure, and closing
+through Python multiprocessing (including on Windows). Port 1102 (or `--api-url`) is preferred,
+not mandatory: occupied ports fall back to an OS-assigned free port while retaining the bound socket.
+A database-keyed OS file lock serializes concurrent launchers through readiness and atomic
+publication of `data_dir/backend-runtime.json`. Subsequent launchers verify the saved origin's
+health/library identity and reuse it rather than starting another backend on a different port.
+Stale addresses are reprobed, unrelated services are left alone, and an incompatible backend
+already using the same database blocks startup rather than creating a second writer.
+Readiness is bounded, startup logs are retained on failure, and closing
 the launcher requests graceful shutdown of only its own child. The child also watches its parent
 so an unexpectedly terminated TUI does not leave an owned backend behind. Pre-existing servers
-are never stopped. `--connect-only` disables autostart.
+are never stopped. `--connect-only` disables autostart and discovery fallback, requiring the exact requested origin.
 
 `install-windows-launcher.ps1` at the repository root installs desktop/Start Menu shortcuts pointing to the small
 `scripts/launch-scholarweave.ps1` wrapper in this checkout. It runs the same Python entry point with
@@ -103,6 +109,12 @@ same entry point with `--web --build-frontend`, without importing or requiring T
 The shell wrapper uses the checkout's `.venv/bin/python` and forwards arguments with `exec`,
 just like the TUI wrapper. Web mode checks HTML availability before opening the browser and keeps
 an owned backend alive until the launcher is closed; reused backends are left running.
+Browser and terminal clients use the session's actual selected origin. Built HTML uses relative
+`/api` requests, so UI and API share the chosen port. For separate frontend development, Vite
+allows a free frontend port and rereads backend discovery metadata for every proxied request,
+including SSE; repository `.env`/environment data-directory overrides are respected. Only loopback
+HTTP discovery URLs are accepted. npm scripts explicitly load `vite.config.ts` rather than stale
+TypeScript-emitted JavaScript configuration.
 
 Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
 only: `/model` selects a configured model, its per-message reasoning budget, and context window;
@@ -170,7 +182,7 @@ legacy explicit `review` mode, whose canonical-summary contract is unchanged.
 Stages are scope, discovery, screening, reading plan, reading, references, reference screening,
 reference collection, synthesis and publication. The configured decision role owns page choices
 and bibliography-page identification; native calls share the scheduler's decision parallelism,
-while generation stays exclusive. Without a decision role an explicit notice names the main-model
+while ordinary generation stays exclusive outside explicit summary groups. Without a decision role an explicit notice names the main-model
 fallback. Isolated deferred pages between read pages receive contextual reconsideration, not
 automatic gap filling or an opening-page quota.
 
@@ -195,6 +207,33 @@ Identity resolution never adds a human gate; automatic original selection and it
 Legacy pending paper gates continue with automatic selection on startup or resume.
 Approval waits are not pending chat runs. Pause cancels the current child request; stop-stage
 advances only with usable partial results. Failed/invalid outputs remain explicit and resumable.
+Paused or blocked reviews can select an explicit replacement `main_model` through the revision-guarded
+resume control in Deep Work or terminal `/review`. The override persists in existing review state,
+leaving the original specification and completed receipts' model provenance intact. Collected
+papers, summaries, verified evidence, stage checkpoints and work limits survive. Pending approvals
+still apply; switching models does not admit another comparison pass. Completed logical jobs with
+matching prompt/input hashes are reused and revalidated rather than regenerated under the new model.
+
+Compact-summary synthesis persists a source-reading plan in the existing review job store.
+Summary-selection batches, ordered paper/page selections and reasons, admissions and completed reads
+are checkpointed. At most 20 distinct pages (including evidence-worker follow-ups) are admitted
+automatically. Exhaustion pauses at an `analysis` approval: the researcher can approve another
+20 pages or write from current verified evidence, retaining explicit coverage limitations.
+Retries/resume reuse the saved plan and admissions; source/input changes replace it visibly.
+The plan fingerprints its source inputs independently of the active main model. Completed selection
+batches record their candidate IDs so a different model context can repack unfinished selections
+without losing completed reads, approved page extensions or the decision to write from current evidence.
+The Deep Work activity view exposes paginated saved jobs, on-demand outputs and source-plan progress,
+without exposing provider configuration or requiring raw database access. Drafting, reduction and
+per-unit source audits remain bounded model jobs; their outputs are inspectable independently.
+Summary selection packs complete summaries against the main model's configured context, retaining
+the normal 25% output reserve and 10% safety reserve. For unknown OpenAI-compatible model tokenizers,
+it uses the provider's model-scoped `/tokenize` endpoint instead of treating bytes as tokens.
+The same measured sizing reaches the isolated harness's context guard, including wire parameters,
+so a second byte heuristic cannot reject an admitted batch. An unavailable tokenizer produces a
+visible conservative-fallback notice; malformed tokenizer responses block rather than guessing.
+Source or selection-prompt changes invalidate saved selection plans visibly. Model/context/tokenizer
+changes repack unfinished selection batches without resetting saved reads or the approved source-reading cap.
 
 Track-linked creation captures a bounded prior-work snapshot in the existing review job store:
 notebook sections/exploration and linked canonical summaries/notes, with file hashes and explicit
@@ -203,7 +242,57 @@ evidence. Existing workspace BM25 prioritizes matches; no second index is introd
 also seeds linked papers into discovery without approving them. Recovery reuses the original
 snapshot instead of silently changing the approved question when notebook files change.
 
-Review workers are fresh, tool-free, one-turn native-harness runs with strict structured output.
+Review workers are fresh, tool-free, one-turn native-harness runs. Evidence/planning workers use
+strict structured output; the optional compact summary worker returns unrestricted plain text.
+An opt-in `summary_model` role selects a separate compact paper summarizer without changing
+scope, discovery, screening, page decisions, references or synthesis. The role stores its explicit
+provider/model, output cap (default 26214 including reasoning), optional reasoning effort and
+`parallel_requests` (default 1, range 1--32).
+Each review also stores `main_parallel_requests` (default 1, range 1--32). It controls compact
+summary fan-out when that role uses the exact main provider/model binding; ordinary main-model
+stages remain sequential.
+Paused reviews can update it on resume through revision-guarded state; older reviews without the
+role keep the existing multi-pass reader. Completed summaries remain reusable.
+Compact mode skips model grouping, combination and per-paper semantic audits. Selected source
+spans enter one request when they fit that model's context; overflow uses source-order packets,
+an explicit notice and deterministic local assembly. The four-section style uses soft sentence
+targets (motivation 5--8, method 10--15, results about 15, open questions 3--6), not hard word or
+sentence limits; the explicit token cap bounds generation independently of context size.
+Existing reviews retain their saved output caps until changed on resume.
+Summary context is capped at 131072 or the smaller resolved model window; 20% of that effective
+window is reserved for output, in addition to the existing safety margin and request overhead.
+The actual generation cap is the smaller of that reservation and the saved role output cap.
+All missing page plans complete before a bounded worker pool starts same-model summary requests.
+The scheduler admits only requests carrying the same explicit review-summary group, profile/model
+and limit. Ordinary generation and other groups remain exclusive, with existing queue fairness.
+Parallelism is excluded from source packet identities, so changing it cannot invalidate cached work.
+Pause/failure cancels each worker once, awaits its child and accounts for usage; completed summaries survive.
+The compact output is plain Markdown, saved verbatim without a JSON schema, format/content checks,
+or validation repairs. Section counts, headings and sentence lengths are prompt guidance only.
+It has no required claims,
+quotations, claim indexes, page references or follow-up requests to validate. The application
+records admitted source packet pages/spans and versions alongside the summary; these are packet
+provenance, not attributed or verified evidence. Summary prose never increases verified-evidence
+counts or enters the evidence corpus.
+Legacy prose rejected for non-verbatim quotes or invalid claim links can be reused when its input
+hash and model/profile match, including retry-requested receipts after resume. Completed/settled
+legacy worker output is also reusable, preserving existing usage accounting.
+No enhancement or semantic audit runs during summarization.
+At synthesis, the main model selects useful original paper pages from the summaries, then reads
+bounded original transcripts with the existing evidence worker and strict source validation.
+These `analysis_evidence` receipts feed synthesis/audits without invalidating or rewriting the
+compact summaries. Selection and source reads are cached, revision-bound and restricted to the
+approved corpus, including explicit follow-up pages. A comparison pass is admitted before this
+analysis work; summary wording alone never becomes evidence. Source versions, role configuration,
+prompt and packet hashes distinguish compact
+receipts; shared job execution retains inference scheduling, bounded repairs, cancellation and
+usage accounting. Summaries live in review receipts, not new canonical paper files.
+The UI polls a paginated `paper-progress` endpoint for counts and lightweight paper metadata,
+without reading original transcripts or returning summary/evidence bodies. Opening a paper fetches
+its existing single-paper endpoint. The default list shows ready summaries; full source/page
+diagnostics are an optional disclosure in the selected reader. The legacy full `papers` endpoint
+remains available for existing consumers.
+
 Input admission counts instructions, framing and schemas alongside source data, reserving output
 and safety space. Long pages split into contiguous, recorded spans; no full-corpus transcript
 accumulates. Model/profile/protocol/input/prompt provenance keys reuse completed jobs. Preallocated
@@ -215,7 +304,7 @@ The main and optional decision roles resolve independently. Native decisions use
 OpenAI client's `/systemone` endpoint, explicit decision capability/context, typed answer validation
 and no SDK retries. Structured generative decisions use the normal explicitly configured generation
 API. Both enter the existing scheduler; native decisions for the same profile/model can
-share its lane, while generation and model switches remain exclusive. Bounded screening batches
+share its lane, while generation outside explicit summary groups and model switches remain exclusive. Bounded screening batches
 cancel and await every child before pausing or clearing. Initial metadata screening uses grouped
 main-model fallbacks for records the optional decision role cannot handle. Configured page and
 reference decisions retain explicit failures rather than silently changing role ownership.
@@ -1180,8 +1269,10 @@ jitter. Unknown write outcomes are reconciled, not blindly retried. Source-speci
 failures pause that source rather than disabling access to unrelated papers or URLs.
 
 Model generation shares one application-wide inference lane, even across provider profiles.
-The only concurrency exception is the configured native `/systemone` request limit for the same profile
-and model; a waiting model switch closes admission to the current batch. The transport holds
+Concurrency exceptions are the configured native `/systemone` limit and explicitly scoped
+review-summary groups for the same profile/model. Separate summary models obey their role limit;
+groups using the main binding obey the review's main-model limit. A waiting
+model switch closes admission to the current batch. Other generation remains exclusive. The transport holds
 capacity until the response is consumed or closed, not across tool
 execution or delegation, so child requests and compaction do not deadlock behind a coordinator.
 Interactive requests take priority between responses; a waiting background request is admitted

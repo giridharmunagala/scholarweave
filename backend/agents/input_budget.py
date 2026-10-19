@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Sequence
@@ -27,12 +28,28 @@ class InputBudget:
         self.encoding = _encoding(model)
         self.limit = limit
         self.method = self.encoding.name if self.encoding else "utf8-byte-upper-bound"
+        self._provider_counts: dict[str, int] = {}
 
-    def count(self, system: str, prompt: str) -> int:
-        serialized = json.dumps(
+    @staticmethod
+    def serialize(system: str, prompt: str) -> str:
+        return json.dumps(
             [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             ensure_ascii=False, separators=(",", ":"),
         )
+
+    def cached_count(self, system: str, prompt: str) -> int | None:
+        key = hashlib.sha256(self.serialize(system, prompt).encode("utf-8")).hexdigest()
+        return self._provider_counts.get(key)
+
+    def remember_count(self, system: str, prompt: str, tokens: int) -> None:
+        key = hashlib.sha256(self.serialize(system, prompt).encode("utf-8")).hexdigest()
+        self._provider_counts[key] = tokens
+
+    def count(self, system: str, prompt: str) -> int:
+        cached = self.cached_count(system, prompt)
+        if cached is not None:
+            return cached
+        serialized = self.serialize(system, prompt)
         return 32 + (
             len(self.encoding.encode(serialized, disallowed_special=()))
             if self.encoding else len(serialized.encode("utf-8"))

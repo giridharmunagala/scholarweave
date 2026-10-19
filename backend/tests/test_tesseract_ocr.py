@@ -7,6 +7,8 @@ import anyio
 import pytest
 
 from backend.documents.ocr import DocumentOCR
+from backend.core.errors import DocumentProcessingError
+from pypdf.errors import PdfReadError
 
 
 class FakePage:
@@ -254,3 +256,110 @@ async def test_retaining_page_images_does_not_force_ocr(
     assert pages[0]["text"] == ("Native paper text " * 10).strip()
     assert pages[0]["ocr_used"] is False
     assert pages[0]["_image_png"] == b"page-image"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", ["native", "ocr", "render", "empty", "unavailable"])
+async def test_unrecoverable_page_does_not_stop_later_pages(
+    test_settings, monkeypatch, failure, caplog,
+) -> None:
+    class BrokenPage(FakePage):
+        def extract_text(self) -> str:
+            if failure == "native":
+                raise PdfReadError("Malformed page text")
+            return ""
+
+    native_text = ("Readable later page. " * 10).strip()
+    FakeReader.pages = [BrokenPage(""), FakePage(native_text)]
+    ocr = DocumentOCR(test_settings)
+    completed = []
+
+    async def recognize(_image, _page):
+        if failure == "empty":
+            return ""
+        raise DocumentProcessingError("Cannot recognize page")
+
+    def render(_path, index):
+        if failure == "render" and index == 0:
+            raise ValueError("Cannot render page")
+        return b"page-image"
+
+    async def progress(payload):
+        completed.append(payload["completed_pages"])
+
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", FakeReader)
+    monkeypatch.setattr(ocr, "available", lambda: failure != "unavailable")
+    monkeypatch.setattr(ocr, "render_page_png", render)
+    monkeypatch.setattr(ocr, "ocr_image", recognize)
+
+    pages = await ocr.extract_pages(
+        Path("paper.pdf"), retain_page_images=True, progress=progress,
+    )
+
+    assert [page["page"] for page in pages] == [1, 2]
+    assert pages[0]["text"] == ""
+    assert pages[0]["ocr_skipped"] is True
+    assert "Skipped unreadable page 1" in pages[0]["ocr_fallback_note"]
+    assert "_image_png" not in pages[0]
+    assert pages[1]["text"] == native_text
+    assert pages[1]["_image_png"] == b"page-image"
+    assert completed == [0, 1, 2]
+    assert "Skipped unreadable page 1" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_native_extraction_error_recovers_with_ocr(test_settings, monkeypatch) -> None:
+    class BrokenPage(FakePage):
+        def extract_text(self):
+            raise PdfReadError("Malformed text")
+
+    FakeReader.pages = [BrokenPage("")]
+    ocr = DocumentOCR(test_settings)
+
+    async def recognize(_image, _page):
+        return "Recovered text"
+
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", FakeReader)
+    monkeypatch.setattr(ocr, "available", lambda: True)
+    monkeypatch.setattr(ocr, "render_page_png", lambda *_args: b"page-image")
+    monkeypatch.setattr(ocr, "ocr_image", recognize)
+
+    pages = await ocr.extract_pages(Path("paper.pdf"))
+
+    assert pages[0]["text"] == "Recovered text"
+    assert pages[0]["ocr_used"] is True
+    assert "Malformed text" in pages[0]["native_extraction_note"]
+    assert not pages[0].get("ocr_skipped")
+
+
+@pytest.mark.anyio
+async def test_render_failure_preserves_native_text_without_enhancement(test_settings, monkeypatch):
+    native_text = ("Native paper text. " * 10).strip()
+    FakeReader.pages = [FakePage(native_text)]
+    ocr = DocumentOCR(test_settings)
+
+    def render(*_args):
+        raise ValueError("Broken page image")
+
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", FakeReader)
+    monkeypatch.setattr(ocr, "render_page_png", render)
+
+    pages = await ocr.extract_pages(Path("paper.pdf"), retain_page_images=True)
+
+    assert pages[0]["text"] == native_text
+    assert "Broken page image" in pages[0]["llm_enhancement_note"]
+    assert "_image_png" not in pages[0]
+
+
+def test_text_layer_inspection_continues_after_bad_page(test_settings, monkeypatch):
+    class BrokenPage(FakePage):
+        def extract_text(self):
+            raise PdfReadError("Malformed text")
+
+    FakeReader.pages = [BrokenPage(""), FakePage("Readable page. " * 10)]
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", FakeReader)
+
+    result = DocumentOCR(test_settings).inspect_text_layer(Path("paper.pdf"))
+
+    assert result["total_pages"] == 2
+    assert result["embedded_text_pages"] == 1

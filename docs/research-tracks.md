@@ -112,6 +112,17 @@ coordinator can propose a review through `literature_review`; ordinary chat cann
 Scope, constraints and paper/comparison limits require your initial approval. Highly relevant and
 relevant papers are then collected and read automatically. Research tasks in the same
 workspace expose open-ended coordinator work, steering, stop controls, findings and run history.
+Edit the proposed paper/comparison limits before approving the plan or extending its budget;
+unchanged background status refreshes preserve those edits until you submit them.
+The progress panel separates PDFs collected/reused, prepared source text, completed page decisions,
+and papers selectively read and summarized. Its denominator is the selected paper set, not the
+approved allowance; admitting a paper against that allowance does not mean it has been read.
+Current collection/reading operations and source errors remain visible. Expand an individual
+paper to load its page decisions, findings, and summaries into the view.
+
+Paper progress refreshes are single-flight, so slow responses do not accumulate on each live
+event. The backend shares one job snapshot across the paper list and does not load extracted
+manifests for papers with no reading receipts.
 
 An attached track is working context, not just the final save destination. A review started from
 a track-linked chat inherits that track when no other destination is selected. Before proposing
@@ -148,6 +159,43 @@ separate, explicitly requested reviewed-summary workflow.
 
 ### Models and work limits
 
+The optional **separate compact summary model** changes only the paper-reading/summary work.
+Select it in review setup or in the always-visible **Summary model for unfinished papers** section.
+For running work, use **Pause to choose summary model**, choose the model, then resume from reading.
+Existing summaries and exploration receipts are retained.
+Without this role, the existing main-model grouping, reading, combination and summary-audit
+workflow remains unchanged. Terminal `/review` opens the browser for model configuration and
+retains the saved role when resuming.
+
+The compact model only needs plain chat generation, not structured JSON or tools. It receives all selected
+source text in one fresh, tool-free request when it fits. Four supported sections use approximate
+sentence targets: motivation/contribution 5--8, method 10--15, results about 15, open questions 3--6.
+These guide detail without hard word/sentence limits or padding unsupported content.
+The output is plain Markdown prose and limitations: no JSON schema, claims, quotations, claim indexes, or citation
+bookkeeping. Source packet pages and versions are recorded by the application, not reconstructed
+by the model. There is no enhancement pass during summarization. Context is the smaller of the
+model's configured context and 128K (131072). Twenty percent is reserved for output, with a default
+generation cap of 26214 tokens (512--26214), including reasoning; smaller contexts lower that ceiling.
+Prompt overhead and the existing safety margin also reduce input. Select low/no reasoning when supported.
+**Parallel summaries** selects 1--32 same-model paper requests, default 1. Missing page decisions
+finish before the parallel group starts; packets within each paper stay sequential and assemble locally.
+Every child is cancelled/awaited/accounted on pause or failure, retaining completed results.
+Server slots and context must support each request independently, not divide one 128K window.
+Existing reviews keep their saved cap; change it to 26214 and choose parallelism on resume.
+
+Oversized inputs split into bounded packets with no text omitted and an explicit notice;
+packet summaries are combined locally rather than through more model passes. Output is stored
+verbatim with no format/content checks or validation retries; headings and sentence targets are
+guidance only. Summary prose is an unverified lead, not a direct quotation or verified
+evidence. Previously generated prose rejected for quote mismatches or invalid claim indexes is
+reusable, including after pause/resume.
+Original extracted text, page coverage and source versions remain available. When analysis begins,
+the main model chooses useful papers/pages from the summaries and reads their original transcripts
+for source-backed evidence. It does not enhance every summary or repeat exploration. These reads
+remain context-bounded, cached and within the approved corpus; cross-paper synthesis still audits
+original evidence. Compact results are saved in review
+receipts, never promoted to canonical full-paper summaries automatically.
+
 Choose the main research model independently from the optional decision role. Supported generative
 provider profiles can be mixed: local/local, hosted/local, or local/hosted. **Structured generation**
 uses an ordinary generative model through its explicitly selected Chat Completions or Responses API.
@@ -179,7 +227,8 @@ The shared inference scheduler defaults to eight same-model native decisions in 
 Change **Parallel decision calls** in Settings > Default models from 1 to 32; no restart is needed.
 The progress bar receives a live update after each completed screening decision. If the event stream
 disconnects, the page reconnects and continues polling persisted state every three seconds.
-Generation and model switches remain exclusive. Screening and page triage are grouped by model
+Other generation and model switches remain exclusive; explicit same-model summary groups can
+share the lane up to their review's selected parallelism. Screening and page triage are grouped by model
 role, with interactive work allowed between jobs. Request scheduling
 does not manage your GPU residency or guarantee server-side cancellation: when using llama.cpp's
 model router, configure `--models-max 1` yourself if only one model may remain loaded.
@@ -217,6 +266,10 @@ backend after changing it. A compatible API base can be set with `SCHOLARWEAVE_O
 This is a source-provider key, not a ScholarWeave account.
 
 arXiv search and downloads share one active request and at least three seconds between starts.
+Known-ID metadata requests use the same arXiv API and are not exempt from its
+[one-request-per-three-seconds policy](https://info.arxiv.org/help/api/tou.html).
+Direct PDF retrieval is not treated as an unlimited-throughput exemption; arXiv's
+[automated-download guidance](https://info.arxiv.org/help/robots.html) still applies.
 OpenAlex uses conservative 30/minute pacing, cursor pages of at most 100 works, and reference-ID
 batches of at most 100. Metadata queries and works are cached; overlapping bibliographies reuse
 the same work records. Reference discovery uses original PDF citations only, never recursive expansion.

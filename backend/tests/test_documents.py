@@ -1199,3 +1199,44 @@ async def test_forced_ocr_uses_embedded_text_when_tesseract_fails(
     assert pages[0]["raw_text"] == "Reliable embedded page text"
     assert pages[0]["ocr_used"] is False
     assert "embedded text was used instead" in pages[0]["ocr_fallback_note"]
+
+
+@pytest.mark.anyio
+async def test_ingestion_persists_skipped_pages_without_losing_readable_text(
+    test_settings, monkeypatch,
+) -> None:
+    services = create_services(test_settings)
+    document = services.documents.create_document_from_bytes(
+        b"%PDF-1.4\n%%EOF", filename="partial.pdf", title="Partly readable paper",
+    )
+    readable = "This later page contains recoverable scientific evidence. " * 4
+
+    class Page:
+        def __init__(self, text):
+            self.text = text
+
+        def extract_text(self):
+            return self.text
+
+    class Reader:
+        pages = [Page(""), Page(readable)]
+
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", lambda _: Reader())
+    monkeypatch.setattr(services.document_ocr, "available", lambda: False)
+
+    await services.documents.ingest_document(document.id, enhance_with_llm=False)
+
+    details = services.documents.get_document_details(document.id)
+    saved, artifacts, chunks = details
+    assert saved.status == "ready"
+    assert saved.page_count == 2
+    assert saved.metadata_json["ocr_skipped_pages"] == [1]
+    assert "requires OCR" in saved.metadata_json["ocr_fallback_notes"]["1"]
+    manifest = services.documents.artifact_content(
+        next(artifact for artifact in artifacts if artifact.kind == "extracted_manifest")
+    )
+    assert manifest["pages"][0]["ocr_skipped"] is True
+    assert manifest["pages"][0]["text"] == ""
+    assert manifest["pages"][1]["citation"] == "p.2"
+    assert manifest["content"]["nonempty_page_count"] == 1
+    assert chunks and all(chunk.page_start == 2 for chunk in chunks)

@@ -640,6 +640,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/literature-reviews/{review_id}/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Review Activity */
+        get: operations["review_activity_api_literature_reviews__review_id__activity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/literature-reviews/{review_id}/activity/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Review Activity Detail */
+        get: operations["review_activity_detail_api_literature_reviews__review_id__activity_detail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/literature-reviews/{review_id}/analysis": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Review Analysis */
+        get: operations["review_analysis_api_literature_reviews__review_id__analysis_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/literature-reviews/{review_id}/candidates": {
         parameters: {
             query?: never;
@@ -717,6 +768,23 @@ export interface paths {
         };
         /** Export Review */
         get: operations["export_review_api_literature_reviews__review_id__export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/literature-reviews/{review_id}/paper-progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Paper Progress */
+        get: operations["paper_progress_api_literature_reviews__review_id__paper_progress_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1524,6 +1592,55 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AnalysisPage */
+        AnalysisPage: {
+            /**
+             * Admitted
+             * @default false
+             */
+            admitted: boolean;
+            /** Candidate Id */
+            candidate_id: string;
+            /** Page */
+            page: number;
+            /** Reason */
+            reason: string;
+            /** Source Version */
+            source_version: string;
+            /**
+             * Status
+             * @default pending
+             * @enum {string}
+             */
+            status: "pending" | "reading" | "completed" | "skipped";
+            /** Title */
+            title: string;
+        };
+        /** AnalysisProgress */
+        AnalysisProgress: {
+            /** Admitted Pages */
+            admitted_pages: number;
+            /** Completed Pages */
+            completed_pages: number;
+            /** Items */
+            items: components["schemas"]["AnalysisPage"][];
+            /** Next Offset */
+            next_offset: number | null;
+            /** Page Limit */
+            page_limit: number;
+            /** Pending Pages */
+            pending_pages: number;
+            /** Phase */
+            phase: string;
+            /** Report Requested */
+            report_requested: boolean;
+            /** Selection Completed */
+            selection_completed: number;
+            /** Selection Total */
+            selection_total: number;
+            /** Total */
+            total: number;
+        };
         /** ArtifactContentResponse */
         ArtifactContentResponse: {
             artifact: components["schemas"]["ArtifactResponse"];
@@ -2268,10 +2385,63 @@ export interface components {
              */
             updated_at: string;
         };
+        /** PaperProgress */
+        PaperProgress: {
+            /** Candidate Id */
+            candidate_id: string;
+            /** Collected */
+            collected: boolean;
+            /** Error */
+            error: string | null;
+            /** Operation */
+            operation: string | null;
+            /** Plan Complete */
+            plan_complete: boolean;
+            /** Prepared */
+            prepared: boolean;
+            /** Summary Complete */
+            summary_complete: boolean;
+            /** Title */
+            title: string;
+        };
+        /** PaperProgressCounts */
+        PaperProgressCounts: {
+            /** Collected */
+            collected: number;
+            /** Failed */
+            failed: number;
+            /** Plan Complete */
+            plan_complete: number;
+            /** Prepared */
+            prepared: number;
+            /** Summarized */
+            summarized: number;
+            /** Total */
+            total: number;
+        };
+        /** PaperProgressPage */
+        PaperProgressPage: {
+            counts: components["schemas"]["PaperProgressCounts"];
+            /** Items */
+            items: components["schemas"]["PaperProgress"][];
+            /** Next Offset */
+            next_offset: number | null;
+            /** Operations */
+            operations: components["schemas"]["PaperProgress"][];
+            /** Total */
+            total: number;
+        };
         /** PaperReview */
         PaperReview: {
             /** Candidate Id */
             candidate_id: string;
+            /**
+             * Collected
+             * @default false
+             */
+            collected: boolean;
+            /** Error */
+            error?: string | null;
             /** Evidence Count */
             evidence_count: number;
             /** Findings */
@@ -2288,6 +2458,16 @@ export interface components {
             partial_summaries?: {
                 [key: string]: unknown;
             }[];
+            /**
+             * Plan Complete
+             * @default false
+             */
+            plan_complete: boolean;
+            /**
+             * Prepared
+             * @default false
+             */
+            prepared: boolean;
             /** Read Pages */
             read_pages: number[];
             /** Selective Summary */
@@ -2638,6 +2818,46 @@ export interface components {
             /** Track Id */
             track_id?: string | null;
         };
+        /** ReviewActivity */
+        ReviewActivity: {
+            /** Error */
+            error?: string | null;
+            /** Key */
+            key: string;
+            /** Model */
+            model?: string | null;
+            /** Stage */
+            stage: string;
+            /** Status */
+            status: string;
+            /**
+             * Tokens
+             * @default 0
+             */
+            tokens: number;
+        };
+        /** ReviewActivityDetail */
+        ReviewActivityDetail: {
+            /** Error */
+            error?: string | null;
+            /** Key */
+            key: string;
+            /** Result */
+            result: {
+                [key: string]: unknown;
+            } | string | null;
+            /** Status */
+            status: string;
+        };
+        /** ReviewActivityPage */
+        ReviewActivityPage: {
+            /** Items */
+            items: components["schemas"]["ReviewActivity"][];
+            /** Next Offset */
+            next_offset: number | null;
+            /** Total */
+            total: number;
+        };
         /** ReviewClearRequest */
         ReviewClearRequest: {
             /** Expected Revision */
@@ -2658,7 +2878,7 @@ export interface components {
              * Action
              * @enum {string}
              */
-            action: "approve_plan" | "approve_papers" | "select_references" | "approve_reference_pdfs" | "pause" | "stop_stage" | "resume" | "extend_budget" | "link_paper";
+            action: "approve_plan" | "approve_papers" | "select_references" | "approve_reference_pdfs" | "pause" | "stop_stage" | "skip_references" | "extend_analysis" | "write_report" | "resume" | "extend_budget" | "link_paper";
             /** Allowance Tokens */
             allowance_tokens?: number | null;
             /** Candidate Ids */
@@ -2667,12 +2887,16 @@ export interface components {
             document_id?: string | null;
             /** Expected Revision */
             expected_revision: number;
+            main_model?: components["schemas"]["ModelReferenceSpec"] | null;
+            /** Main Parallel Requests */
+            main_parallel_requests?: number | null;
             /** Reference Matches */
             reference_matches?: {
                 [key: string]: string;
             } | null;
             /** Stage */
             stage?: ("scope" | "discovery" | "screening" | "reading_plan" | "reading" | "references" | "reference_screening" | "reference_collection" | "synthesis" | "publication") | null;
+            summary_model?: components["schemas"]["SummaryRole"] | null;
             work_budget?: components["schemas"]["WorkBudget"] | null;
         };
         /** ReviewCreateRequest */
@@ -2681,6 +2905,11 @@ export interface components {
             conversation_id?: string | null;
             decision_model?: components["schemas"]["DecisionRole"] | null;
             main_model: components["schemas"]["ModelReferenceSpec"];
+            /**
+             * Main Parallel Requests
+             * @default 1
+             */
+            main_parallel_requests: number;
             /** Objective */
             objective: string;
             /**
@@ -2688,6 +2917,7 @@ export interface components {
              * @default false
              */
             openalex_enabled: boolean;
+            summary_model?: components["schemas"]["SummaryRole"] | null;
             /** Title */
             title: string;
             /** Track Id */
@@ -2745,7 +2975,7 @@ export interface components {
             /** Allowance Tokens */
             allowance_tokens: number | null;
             /** Approval */
-            approval: ("plan" | "papers" | "budget" | "references" | "reference_pdfs") | null;
+            approval: ("plan" | "papers" | "budget" | "references" | "reference_pdfs" | "analysis") | null;
             /** Candidate Count */
             candidate_count: number;
             /** Conversation Id */
@@ -2768,12 +2998,19 @@ export interface components {
             /** Id */
             id: string;
             main_model: components["schemas"]["ModelReferenceSpec"];
+            /** Main Parallel Requests */
+            main_parallel_requests: number;
             /** Notices */
             notices: string[];
             /** Objective */
             objective: string;
             /** Output Path */
             output_path: string | null;
+            /**
+             * References Skipped
+             * @default false
+             */
+            references_skipped: boolean;
             /** Revision */
             revision: number;
             scope: components["schemas"]["ReviewScope"] | null;
@@ -2801,6 +3038,7 @@ export interface components {
             /** Suggested Allowance Tokens */
             suggested_allowance_tokens: number | null;
             suggested_work_budget?: components["schemas"]["WorkBudget"] | null;
+            summary_model?: components["schemas"]["SummaryRole"] | null;
             /** Title */
             title: string;
             /** Track Id */
@@ -3176,6 +3414,22 @@ export interface components {
         StopAndAnswerResponse: {
             answer_run: components["schemas"]["RunResponse"];
             stopped_run: components["schemas"]["RunResponse"];
+        };
+        /** SummaryRole */
+        SummaryRole: {
+            /**
+             * Max Output Tokens
+             * @default 26214
+             */
+            max_output_tokens: number;
+            model_reference: components["schemas"]["ModelReferenceSpec"];
+            /**
+             * Parallel Requests
+             * @default 1
+             */
+            parallel_requests: number;
+            /** Reasoning Effort */
+            reasoning_effort?: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") | null;
         };
         /** ToolAttemptResponse */
         ToolAttemptResponse: {
@@ -4875,6 +5129,107 @@ export interface operations {
             };
         };
     };
+    review_activity_api_literature_reviews__review_id__activity_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewActivityPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_activity_detail_api_literature_reviews__review_id__activity_detail_get: {
+        parameters: {
+            query: {
+                key: string;
+            };
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewActivityDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_analysis_api_literature_reviews__review_id__analysis_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnalysisProgress"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     review_candidates_api_literature_reviews__review_id__candidates_get: {
         parameters: {
             query?: {
@@ -5029,6 +5384,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    paper_progress_api_literature_reviews__review_id__paper_progress_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+                offset?: number;
+                summaries_only?: boolean;
+            };
+            header?: never;
+            path: {
+                review_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperProgressPage"];
                 };
             };
             /** @description Validation Error */

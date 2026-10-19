@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse, StreamingResponse, Response
 
 from backend.core.http import services
-from backend.research.reviews.schemas import CandidatePage, PaperReview, ReviewClearRequest, ReviewClearResponse, ReviewControlRequest, ReviewCreateRequest, ReviewResponse, ReviewReference
+from backend.research.reviews.schemas import CandidatePage, PaperProgressPage, PaperReview, ReviewClearRequest, ReviewClearResponse, ReviewControlRequest, ReviewCreateRequest, ReviewResponse, ReviewReference
+from backend.research.reviews.schemas import AnalysisProgress, ReviewActivityPage, ReviewActivityDetail
 
 router = APIRouter(prefix="/literature-reviews", tags=["literature reviews"])
 
@@ -75,9 +76,38 @@ def paper_review(review_id: str, candidate_id: str, container=Depends(services))
     return container.reviews.paper(review_id, candidate_id)
 
 
+@router.get("/{review_id}/paper-progress", response_model=PaperProgressPage)
+def paper_progress(
+    review_id: str, limit: int = Query(default=25, ge=1, le=100), offset: int = Query(default=0, ge=0),
+    summaries_only: bool = True, container=Depends(services),
+) -> PaperProgressPage:
+    return container.reviews.paper_progress(review_id, limit=limit, offset=offset, summaries_only=summaries_only)
+
+
 @router.get("/{review_id}/papers", response_model=list[PaperReview])
 def review_papers(review_id: str, container=Depends(services)) -> list[PaperReview]:
     return container.reviews.papers(review_id)
+
+
+@router.get("/{review_id}/analysis", response_model=AnalysisProgress | None)
+def review_analysis(
+    review_id: str, limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0), container=Depends(services),
+) -> AnalysisProgress | None:
+    return container.reviews.analysis_progress(review_id, limit=limit, offset=offset)
+
+
+@router.get("/{review_id}/activity", response_model=ReviewActivityPage)
+def review_activity(
+    review_id: str, limit: int = Query(default=25, ge=1, le=100),
+    offset: int = Query(default=0, ge=0), container=Depends(services),
+) -> ReviewActivityPage:
+    return container.reviews.activity(review_id, limit=limit, offset=offset)
+
+
+@router.get("/{review_id}/activity/detail", response_model=ReviewActivityDetail)
+def review_activity_detail(review_id: str, key: str, container=Depends(services)) -> ReviewActivityDetail:
+    return container.reviews.activity_detail(review_id, key)
 
 
 @router.post("/{review_id}/control", response_model=ReviewResponse)

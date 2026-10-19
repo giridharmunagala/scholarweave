@@ -7,6 +7,8 @@ import os
 import shutil
 from argparse import ArgumentTypeError
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+import json
 
 import httpx
 import pytest
@@ -66,7 +68,7 @@ def test_unrelated_or_incompatible_server_is_not_reused(
     isolated_library, monkeypatch, changes, status,
 ) -> None:
     client = install_health(monkeypatch, isolated_library, changes=changes, status=status)
-    session = BackendSession("http://127.0.0.1:8000", ROOT_DIR)
+    session = BackendSession("http://127.0.0.1:8000", ROOT_DIR, connect_only=True)
     with pytest.raises(LaunchError):
         with session:
             pytest.fail("Should not launch a TUI against another service/library")
@@ -197,16 +199,65 @@ def test_startup_timeout_stops_owned_child(isolated_library, monkeypatch) -> Non
             session.log_path.unlink(missing_ok=True)
 
 
-def test_occupied_port_does_not_start_a_second_backend(isolated_library) -> None:
+def test_occupied_port_uses_free_port_and_reuses_discovered_backend(isolated_library, monkeypatch) -> None:
+    from scholarweave_tui import __main__ as entry
+
+    assets = isolated_library.frontend_dist_dir / "assets"
+    assets.mkdir(parents=True)
+    (isolated_library.frontend_dist_dir / "index.html").write_text("<!doctype html><title>Dynamic port</title>")
+    opened = []
+    monkeypatch.setattr(entry.webbrowser, "open", lambda url: opened.append(url) or True)
     with socket.socket() as occupied:
         occupied.bind(("127.0.0.1", 0))
         occupied.listen(1)
         origin = f"http://127.0.0.1:{occupied.getsockname()[1]}"
-        session = BackendSession(origin, ROOT_DIR, timeout=0.2)
-        with pytest.raises(LaunchError, match="port may be occupied"):
-            with session:
-                pytest.fail("The occupied port should not create another backend")
+        with BackendSession(origin, ROOT_DIR, timeout=20) as session:
+            assert session.base_url != origin
+            assert session.process is not None and session.process.is_alive()
+            record = json.loads(session.runtime_path.read_text())
+            assert record["url"] == session.base_url
+            with httpx.Client(trust_env=False) as http:
+                assert http.get(f"{session.base_url}/api/health").json()["status"] == "ok"
+                assert "Dynamic port" in http.get(session.base_url).text
+            with BackendSession(free_origin(), ROOT_DIR) as second:
+                assert second.base_url == session.base_url and second.process is None
+            monkeypatch.setattr("sys.argv", ["scholarweave", "--web", "--api-url", origin])
+            entry.main()
+            assert opened == [session.base_url]
         assert session.process is None
+
+
+def test_concurrent_launchers_discover_one_backend(isolated_library):
+    origin = free_origin()
+    sessions = [BackendSession(origin, ROOT_DIR, timeout=20) for _ in range(2)]
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list(executor.map(lambda session: session.__enter__(), sessions))
+        assert sum(session.process is not None for session in sessions) == 1
+        assert sessions[0].base_url == sessions[1].base_url
+        with httpx.Client(trust_env=False) as http:
+            assert http.get(f"{sessions[0].base_url}/api/health").status_code == 200
+    finally:
+        for session in sessions:
+            session.close()
+
+
+def test_stale_discovery_is_replaced_when_backend_is_absent(isolated_library):
+    record = isolated_library.data_dir / "backend-runtime.json"
+    record.write_text(json.dumps({"url": free_origin(), "database_path": str(isolated_library.database_path)}))
+    preferred = free_origin()
+    with BackendSession(preferred, ROOT_DIR, timeout=20) as session:
+        assert session.base_url == preferred and session.process is not None
+        assert json.loads(record.read_text())["url"] == preferred
+
+
+def test_incompatible_backend_for_same_database_does_not_fall_back(isolated_library, monkeypatch):
+    install_health(monkeypatch, isolated_library, changes={"runtime_version": "old-runtime"})
+    session = BackendSession(free_origin(), ROOT_DIR)
+    with pytest.raises(LaunchError, match="a second backend will not be started"):
+        with session:
+            pytest.fail("Must not start another backend on the same database")
+    assert session.process is None
 
 
 def test_frontend_build_uses_checkout_and_explicit_npm_path(tmp_path, monkeypatch) -> None:

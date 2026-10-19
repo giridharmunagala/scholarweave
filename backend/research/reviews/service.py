@@ -16,14 +16,17 @@ from backend.documents import DocumentService
 from backend.documents.formatting import manifest_pages
 from backend.persistence.files import StorageError
 from backend.providers.types import ModelReference, ProviderRuntimeError
+from backend.providers.inference import inference_parallel_group
 from backend.research.reviews.discovery import ScholarlyDiscovery, candidate_key, normalize_candidate, normalized_doi, source_url
 from backend.research.sources import _arxiv_key
 from backend.research.reviews.jobs import InvalidReviewOutput, ReviewJobs, ReviewPaused, digest, json_text
 from backend.research.reviews.repository import ReviewRepository
 from backend.research.reviews.schemas import (
-    STAGES, Candidate, CandidatePage, EvidencePacket, PaperReview, ReadingPlan, ReadingGroups, SelectiveSummary,
+    STAGES, AnalysisProgress, AnalysisSources, Candidate, CandidatePage, EvidencePacket, PaperProgress, PaperProgressCounts, PaperProgressPage,
+    PaperReview, ReadingPlan, ReadingGroups, SelectiveSummary,
     DecisionRole, ReviewClearResponse, ReviewControlRequest, ReviewCreateRequest, ReviewResponse, ReviewScope, Screening,
-    ScreeningBatch, Synthesis, ReferenceExtraction, ReviewReference, WorkBudget,
+    ScreeningBatch, SummaryRole, Synthesis, ReferenceExtraction, ReviewReference, WorkBudget,
+    ReviewActivity, ReviewActivityPage, ReviewActivityDetail,
 )
 from backend.research.sources import SourceDownloadService
 from backend.tracks.service import TrackService
@@ -33,6 +36,7 @@ from backend.workspace.service import WorkspaceService
 
 _logger = logging.getLogger(__name__)
 _MAX_DISCOVERED_PAPERS = 500
+_ANALYSIS_PAGE_BATCH = 20
 _AUTO_RELEVANCE = {"HIGHLY_RELEVANT", "RELEVANT"}
 _SCREEN_QUESTIONS = {
     "kind": {
@@ -108,7 +112,9 @@ class LiteratureReviewService:
                 )
                 self._notice(record.id, "Automatically continuing a legacy invalid page-grouping task; prior approvals and budgets are retained.")
                 record = self.repository.get(record.id)
-            if record.state.get("control") == "stop_stage":
+            if record.state.get("control") == "skip_references":
+                self._skip_references(record.id)
+            elif record.state.get("control") == "stop_stage":
                 self._stop_stage(record.id)
                 continue
             if record.state["status"] == "awaiting_approval" and record.state.get("approval") in {"papers", "references", "reference_pdfs"}:
@@ -175,6 +181,8 @@ class LiteratureReviewService:
                 "track_id": self.tracks.conversation_track_id(request.conversation_id),
             })
         self.jobs.runtime.resolve("chat", model_reference=ModelReference.model_validate(request.main_model.model_dump()))
+        if request.summary_model:
+            self._prepare_summary(request.summary_model)
         if request.decision_model:
             capability = "decision" if request.decision_model.protocol == "systemone" else "chat"
             resolved = self.jobs.runtime.resolve(
@@ -196,7 +204,7 @@ class LiteratureReviewService:
 
     def get(self, review_id: str) -> ReviewResponse:
         record = self.repository.get(review_id)
-        spec = ReviewCreateRequest.model_validate(record.specification)
+        spec = self._spec(review_id)
         state = record.state
         _, total = self.repository.candidates(review_id, limit=1)
         _, selected = self.repository.candidates(review_id, limit=1, selected=True)
@@ -204,7 +212,8 @@ class LiteratureReviewService:
         used, estimated = self.jobs.usage(review_id)
         return ReviewResponse(
             id=record.id, revision=record.revision, title=spec.title, objective=spec.objective,
-            main_model=spec.main_model, decision_model=spec.decision_model,
+            main_model=spec.main_model, main_parallel_requests=spec.main_parallel_requests,
+            decision_model=spec.decision_model, summary_model=spec.summary_model,
             conversation_id=spec.conversation_id, track_id=spec.track_id,
             status=state["status"], stage=state["stage"], approval=state.get("approval"),
             work_budget=state.get("work_budget"), work_used=self.jobs.work_usage(review_id),
@@ -215,8 +224,54 @@ class LiteratureReviewService:
             candidate_count=total, selected_count=selected, evidence_count=len(self._evidence(review_id)),
             screened_count=screened, excluded_count=excluded,
             active_run_id=state.get("active_run_id"), stage_history=state.get("stage_history", {}),
+            references_skipped=state.get("references_skipped", False),
             notices=state.get("notices", []), error=state.get("error"), output_path=state.get("output_path"),
             created_at=as_utc(record.created_at), updated_at=as_utc(record.updated_at),
+        )
+
+    def analysis_progress(self, review_id: str, *, limit: int = 25, offset: int = 0) -> AnalysisProgress | None:
+        self.repository.get(review_id)
+        plan = self.repository.job(review_id, "analysis-plan")
+        if plan is None:
+            return None
+        pages = plan["pages"]
+        total = len(pages)
+        return AnalysisProgress(
+            phase=plan["phase"], page_limit=plan["page_limit"],
+            admitted_pages=sum(page["admitted"] for page in pages),
+            completed_pages=sum(page["status"] == "completed" for page in pages),
+            pending_pages=sum(page["status"] == "pending" for page in pages),
+            selection_completed=len(plan["selection_done"]), selection_total=plan["selection_total"],
+            report_requested=plan.get("report_requested", False),
+            items=pages[offset:offset + limit], total=total,
+            next_offset=offset + limit if offset + limit < total else None,
+        )
+
+    def activity(self, review_id: str, *, limit: int = 25, offset: int = 0) -> ReviewActivityPage:
+        self.repository.get(review_id)
+        rows, total = self.repository.activity_page(review_id, limit=limit, offset=offset)
+        return ReviewActivityPage(
+            items=[ReviewActivity(
+                key=row["key"], stage=row["stage"], status=row.get("status", "saved"),
+                model=row.get("provenance", {}).get("model"), tokens=row.get("tokens_spent", 0),
+                error=row.get("validation_error"),
+            ) for row in rows],
+            total=total, next_offset=offset + limit if offset + limit < total else None,
+        )
+
+    def activity_detail(self, review_id: str, key: str) -> ReviewActivityDetail:
+        self.repository.get(review_id)
+        job = self.repository.job(review_id, key)
+        if job is None:
+            raise NotFoundError("Review activity was not found.")
+        result = job.get("result", job.get("raw_result"))
+        if result is None:
+            result = {name: job[name] for name in (
+                "summary", "partial_summary", "claims", "pages", "references", "follow_up_pages",
+                "limitations", "candidate_id", "source_version", "spans",
+            ) if name in job} or None
+        return ReviewActivityDetail(
+            key=key, status=job.get("status", "saved"), result=result, error=job.get("validation_error"),
         )
 
     def list(self, *, conversation_id: str | None = None, track_id: str | None = None) -> list[ReviewResponse]:
@@ -309,22 +364,35 @@ class LiteratureReviewService:
     def paper(self, review_id: str, candidate_id: str) -> PaperReview:
         candidate = next((row for row in self._supplemental_candidates(review_id) if row.id == candidate_id), None)
         candidate = candidate or self.repository.candidate(review_id, candidate_id)
+        jobs = {job["key"]: job for job in self.repository.paper_jobs(review_id, candidate_id)}
+        return self._paper_review(candidate, jobs, running=self.repository.get(review_id).state["status"] == "running")
+
+    def _paper_review(
+        self, candidate: Candidate, jobs: dict[str, dict], *, running: bool, include_details: bool = True,
+    ) -> PaperReview:
         version = None
         pages = []
         document = self.documents.get_document(candidate.document_id) if candidate.document_id else None
         if candidate.selected and document and document.status == "ready":
-            pages, _, revision = self._paper(candidate)
-            version = revision["source_version"]
-        plan = self.repository.job(review_id, f"reading-plan:{candidate.id}:{version}:{_READING_POLICY}") or {}
+            version = self.documents.source_revision(document.id)["source_version"]
+        plan = jobs.get(f"reading-plan:{candidate.id}:{version}:{_READING_POLICY}", {})
         receipts = [
-            job for job in self.repository.jobs(review_id, "reading")
-            if job.get("kind") == "evidence" and job["candidate_id"] == candidate_id and job["source_version"] == version
+            job for job in jobs.values()
+            if job.get("kind") == "evidence" and job["candidate_id"] == candidate.id and job["source_version"] == version
+            and job.get("reading_policy") == _READING_POLICY
+        ]
+        if receipts and include_details:
+            pages, _, _ = self._paper(candidate)
+        analysis_receipts = [
+            job for job in jobs.values() if job.get("kind") == "analysis_evidence"
+            and job["candidate_id"] == candidate.id and job["source_version"] == version
             and job.get("reading_policy") == _READING_POLICY
         ]
         read, partial = [], []
         for page in pages:
             spans = sorted(
-                (span["start"], span["end"]) for job in receipts for span in job["spans"] if span["page"] == page["page"]
+                (span["start"], span["end"]) for job in [*receipts, *analysis_receipts]
+                for span in job["spans"] if span["page"] == page["page"]
             )
             end = 0
             for start, stop in spans:
@@ -334,16 +402,17 @@ class LiteratureReviewService:
             if spans:
                 (read if end >= len(page["text"]) else partial).append(page["page"])
         return PaperReview(
-            candidate_id=candidate_id, title=candidate.title, source_version=version, pages=plan.get("pages", []),
+            candidate_id=candidate.id, title=candidate.title, source_version=version, pages=plan.get("pages", []),
+            collected=document is not None, prepared=version is not None,
+            plan_complete=plan.get("status") == "completed", error=candidate.error,
             read_pages=read, partial_pages=partial,
-            evidence_count=sum(len(job["claims"]) for job in receipts),
-            findings=[claim for job in receipts for claim in job["claims"]],
+            evidence_count=sum(bool(claim["quote"]) for job in [*receipts, *analysis_receipts] for claim in job["claims"]),
+            findings=[claim for job in [*receipts, *analysis_receipts] for claim in job["claims"]] if include_details else [],
             partial_summaries=[{
                 "sections": job["partial_summary"], "spans": job["spans"], "limitations": job["limitations"],
-            } for job in receipts if job.get("partial_summary")],
-            selective_summary=self._current_summary(review_id, candidate_id, version, receipts),
-            operation=(self.repository.job(review_id, f"paper-operation:{candidate_id}") or {}).get("operation")
-            if self.repository.get(review_id).state["status"] == "running" else None,
+            } for job in receipts if job.get("partial_summary")] if include_details else [],
+            selective_summary=jobs.get(f"paper-summary:{candidate.id}:{version}:{_SUMMARY_POLICY}:{digest(receipts)}", {}).get("summary"),
+            operation=jobs.get(f"paper-operation:{candidate.id}", {}).get("operation") if running else None,
         )
 
     def _paper_operation(self, review_id: str, candidate_id: str, operation: str | None) -> None:
@@ -353,10 +422,39 @@ class LiteratureReviewService:
         self._publish_progress(review_id)
 
     def papers(self, review_id: str) -> list[PaperReview]:
-        self.repository.get(review_id)
-        return [self.paper(review_id, identifier) for identifier in [
-            *self.repository.selected_ids(review_id), *(row.id for row in self._supplemental_candidates(review_id)),
-        ]]
+        running = self.repository.get(review_id).state["status"] == "running"
+        candidates = [*self._candidates(review_id, selected=True), *self._supplemental_candidates(review_id)]
+        jobs = {job["key"]: job for job in self.repository.jobs(review_id) if "key" in job}
+        return [self._paper_review(candidate, jobs, running=running) for candidate in candidates]
+
+    def paper_progress(
+        self, review_id: str, *, limit: int = 25, offset: int = 0, summaries_only: bool = True,
+    ) -> PaperProgressPage:
+        running = self.repository.get(review_id).state["status"] == "running"
+        candidates = [*self._candidates(review_id, selected=True), *self._supplemental_candidates(review_id)]
+        jobs = {job["key"]: job for job in self.repository.paper_jobs(review_id)}
+        progress = []
+        for candidate in candidates:
+            paper = self._paper_review(candidate, jobs, running=running, include_details=False)
+            progress.append(PaperProgress(
+                candidate_id=paper.candidate_id, title=paper.title, collected=paper.collected,
+                prepared=paper.prepared, plan_complete=paper.plan_complete,
+                summary_complete=paper.selective_summary is not None, operation=paper.operation, error=paper.error,
+            ))
+        counts = PaperProgressCounts(
+            total=len(progress), collected=sum(paper.collected for paper in progress),
+            prepared=sum(paper.prepared for paper in progress), plan_complete=sum(paper.plan_complete for paper in progress),
+            summarized=sum(paper.summary_complete for paper in progress), failed=sum(bool(paper.error) for paper in progress),
+        )
+        items = sorted(
+            (paper for paper in progress if not summaries_only or paper.summary_complete),
+            key=lambda paper: (not paper.summary_complete, not bool(paper.operation), paper.title.casefold(), paper.candidate_id),
+        )
+        page = items[offset:offset + limit]
+        return PaperProgressPage(
+            items=page, total=len(items), next_offset=offset + len(page) if offset + len(page) < len(items) else None,
+            counts=counts, operations=[paper for paper in progress if paper.operation],
+        )
 
     def export(self, review_id: str) -> dict:
         return {
@@ -373,11 +471,15 @@ class LiteratureReviewService:
 
     def references(self, review_id: str) -> list[ReviewReference]:
         state = self.repository.get(review_id).state
+        extractions = [job for job in self.repository.jobs(review_id, "references")
+                       if job.get("kind") == "reference_extraction"]
+        if not extractions:
+            return []
         originals = {row.id: row for row in self._candidates(review_id, selected=True)}
         versions = {row.id: self.documents.source_revision(row.document_id)["source_version"]
                     for row in originals.values() if row.document_id and self.documents.get_document(row.document_id)}
         entries = []
-        for job in self.repository.jobs(review_id, "references"):
+        for job in extractions:
             if job.get("kind") != "reference_extraction" or job.get("source_version") != versions.get(job.get("candidate_id")):
                 continue
             for reference in job["references"]:
@@ -634,7 +736,8 @@ class LiteratureReviewService:
                 units.append(("read_papers", self._work_identity(review_id, row)))
         if state.get("synthesis"):
             units.append(("comparison_passes", digest([
-                self._evidence(review_id), self._frame(review_id), self._spec(review_id).main_model.model_dump(),
+                self._analysis_summaries(review_id) if self._spec(review_id).summary_model else self._evidence(review_id),
+                self._frame(review_id), self.repository.get(review_id).specification["main_model"],
             ])))
         for kind, identifier in units:
             key = f"work:{kind}:{digest(identifier)}"
@@ -658,7 +761,46 @@ class LiteratureReviewService:
             action = command.action
             if state.get("control") == "clear":
                 raise ConflictError("Review cleanup is incomplete. Retry Clear review before starting fresh.")
-            if action in {"pause", "stop_stage"}:
+            if action in {"extend_analysis", "write_report"}:
+                self._require_approval(state, "analysis")
+                if state["stage"] != "synthesis":
+                    raise ConflictError("Synthesis reading is not awaiting a decision.")
+                plan = self.repository.job(review_id, "analysis-plan")
+                if plan is None:
+                    raise ValidationError("The saved synthesis reading plan is missing.")
+                if action == "extend_analysis":
+                    plan["page_limit"] += _ANALYSIS_PAGE_BATCH
+                    plan["phase"] = "reading"
+                else:
+                    if not self._evidence(review_id):
+                        raise ValidationError("Read source evidence before writing the report; summaries alone cannot support it.")
+                    plan["report_requested"] = True
+                    plan["phase"] = "drafting"
+                    for page in plan["pages"]:
+                        if page["status"] == "pending":
+                            page["status"] = "skipped"
+                    self._notice(review_id, "The researcher chose to write the report from current evidence; pending source reads were skipped.")
+                self._save_analysis_plan(review_id, plan)
+                self.jobs.checkpoint(review_id, status="running", approval=None, error=None)
+                self._schedule(review_id)
+            elif action == "skip_references":
+                if state["status"] == "completed" or STAGES.index(state["stage"]) > STAGES.index("reference_collection"):
+                    raise ConflictError("The reference phase has already ended.")
+                in_references = state["stage"] in {"references", "reference_screening", "reference_collection"}
+                state["references_skipped"] = True
+                if in_references:
+                    state.update(status="paused", control="skip_references")
+                self.repository.update(review_id, state, record.revision)
+                if in_references:
+                    task = self._tasks.get(review_id)
+                    if task and not task.done():
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    self._skip_references(review_id)
+                    self._schedule(review_id)
+                else:
+                    self._notice(review_id, "The researcher skipped reference expansion. Initial-paper work will continue before synthesis.")
+            elif action in {"pause", "stop_stage"}:
                 if state["status"] == "completed":
                     raise ConflictError("This review is already completed.")
                 state["status"] = "paused"
@@ -730,6 +872,28 @@ class LiteratureReviewService:
             elif action == "resume":
                 if state["status"] == "running":
                     raise ConflictError("The review is already running.")
+                if command.stage and STAGES.index(command.stage) > STAGES.index(state["stage"]):
+                    raise ValidationError("Resume cannot skip a required stage.")
+                model_updates = {}
+                if command.main_model is not None:
+                    self.jobs.runtime.resolve(
+                        "chat", model_reference=ModelReference.model_validate(command.main_model.model_dump()),
+                    )
+                    model_updates["main_model"] = command.main_model.model_dump(mode="json")
+                    if command.main_model != self._spec(review_id).main_model:
+                        model_updates["notices"] = [*state.get("notices", []),
+                            f"Main model changed to {command.main_model.model}. Completed research and original "
+                            "model provenance are retained; unfinished jobs use the new model."]
+                if command.main_parallel_requests is not None:
+                    model_updates["main_parallel_requests"] = command.main_parallel_requests
+                if "summary_model" in command.model_fields_set:
+                    if command.summary_model:
+                        self._prepare_summary(command.summary_model)
+                    model_updates["summary_model"] = (
+                        command.summary_model.model_dump(mode="json") if command.summary_model else None
+                    )
+                if model_updates:
+                    self.jobs.checkpoint(review_id, **model_updates)
                 self._migrate_work_budget(review_id)
                 state = dict(self.repository.get(review_id).state)
                 if state["status"] == "running":
@@ -748,8 +912,6 @@ class LiteratureReviewService:
                 if state.get("approval") and (not rewinding or state["approval"] == "budget"):
                     self.jobs.checkpoint(review_id, status="awaiting_approval", error=None, control=None)
                     return self.get(review_id)
-                if STAGES.index(stage) > STAGES.index(state["stage"]):
-                    raise ValidationError("Resume cannot skip a required stage.")
                 history = dict(state.get("stage_history", {}))
                 for later in STAGES[STAGES.index(stage):]:
                     history.pop(later, None)
@@ -788,6 +950,9 @@ class LiteratureReviewService:
                     self.repository.save_job(review_id, job["key"], "progress", {**job, "operation": None})
             while self.repository.get(review_id).state["status"] == "running":
                 stage = self.repository.get(review_id).state["stage"]
+                if stage in {"references", "reference_screening", "reference_collection"} and self.repository.get(review_id).state.get("references_skipped"):
+                    self._skip_references(review_id)
+                    continue
                 await getattr(self, f"_{stage}")(review_id)
                 current = self.repository.get(review_id).state
                 if current["status"] != "running":
@@ -830,6 +995,18 @@ class LiteratureReviewService:
             if approval in {"papers", "references"}:
                 self._continue_paper_gate(review_id)
 
+    def _skip_references(self, review_id: str) -> None:
+        state = self.repository.get(review_id).state
+        history = dict(state.get("stage_history", {}))
+        for stage in ("references", "reference_screening", "reference_collection"):
+            if history.get(stage) != "completed":
+                history[stage] = "skipped"
+        self.jobs.checkpoint(
+            review_id, references_skipped=True, stage="synthesis", status="running",
+            approval=None, control=None, error=None, active_run_id=None, stage_history=history,
+        )
+        self._notice(review_id, "Reference expansion skipped by the researcher. No further reference extraction, lookup or collection will run; completed work is retained.")
+
     def _stop_stage(self, review_id: str) -> None:
         state = self.repository.get(review_id).state
         stage = state["stage"]
@@ -841,7 +1018,9 @@ class LiteratureReviewService:
                 any(page.action == "read" for page in self.paper(review_id, candidate.id).pages)
                 for candidate in self._candidates(review_id, selected=True)
             ),
-            "reading": lambda: bool(self._evidence(review_id)),
+            "reading": lambda: bool(self._evidence(review_id)) or bool(
+                self._spec(review_id).summary_model and self._analysis_summaries(review_id)
+            ),
             "references": lambda: False,
             "reference_screening": lambda: False,
             "reference_collection": lambda: False,
@@ -872,7 +1051,21 @@ class LiteratureReviewService:
             self.jobs.checkpoint(review_id, notices=[*notices, message])
 
     def _spec(self, review_id: str) -> ReviewCreateRequest:
-        return ReviewCreateRequest.model_validate(self.repository.get(review_id).specification)
+        record = self.repository.get(review_id)
+        return ReviewCreateRequest.model_validate({
+            **record.specification,
+            **({"main_model": record.state["main_model"]} if "main_model" in record.state else {}),
+            **({"main_parallel_requests": record.state["main_parallel_requests"]}
+               if "main_parallel_requests" in record.state else {}),
+            **({"summary_model": record.state["summary_model"]} if "summary_model" in record.state else {}),
+        })
+
+    def _prepare_summary(self, role: SummaryRole) -> tuple:
+        return self.jobs.prepare(
+            role.model_reference, "literature-compact-summary",
+            max_output_tokens=role.max_output_tokens, reasoning_effort=role.reasoning_effort,
+            context_window_tokens=131072, output_reserve_fraction=0.2,
+        )
 
     def _frame(self, review_id: str) -> dict:
         record = self.repository.get(review_id)
@@ -1245,7 +1438,7 @@ class LiteratureReviewService:
         prepared_papers: list[tuple[Candidate, list[dict], dict]] = []
         for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
             try:
-                self._paper_operation(review_id, candidate.id, "Preparing source and deciding pages")
+                self._paper_operation(review_id, candidate.id, "Collecting PDF and extracting source text")
                 if candidates is None:
                     candidate = await self._prepare_paper(review_id, candidate)
                 pages, manifest, revision = await asyncio.to_thread(self._paper, candidate)
@@ -1262,8 +1455,10 @@ class LiteratureReviewService:
             except (ValueError, RuntimeError, httpx.HTTPError) as exc:
                 if candidates is not None:
                     raise
-                self.repository.update_candidate(review_id, candidate.model_copy(update={"error": str(exc)}))
+                current = self.repository.candidate(review_id, candidate.id)
+                self.repository.update_candidate(review_id, current.model_copy(update={"error": str(exc)}))
                 self._notice(review_id, f"{candidate.title}: {exc}")
+                self._paper_operation(review_id, candidate.id, None)
         if not prepared_papers:
             raise ValidationError("None of the approved papers is readable. Available metadata is not full-paper evidence.")
         role = spec.decision_model
@@ -1384,8 +1579,215 @@ class LiteratureReviewService:
                 offset += fits
         return self.jobs.packets(spans, frame, prepared)
 
+    @staticmethod
+    def _validate_evidence(result: dict, packet: dict, page_map: dict) -> None:
+        for claim in result["claims"]:
+            if not any(span["page"] == claim["page"] for span in packet["records"]):
+                raise ValidationError("A finding must reference an admitted source page.")
+            if not claim["quote"].strip() or not any(
+                span["page"] == claim["page"] and claim["quote"] in span["text"] for span in packet["records"]
+            ):
+                raise ValidationError("An evidence claim did not quote the admitted source page verbatim.")
+        if any(number not in page_map for number in result["follow_up_pages"]):
+            raise ValidationError("The evidence worker requested a nonexistent page.")
+        for section in result["partial_summary"]:
+            if not section["claim_indexes"] or any(
+                index < 0 or index >= len(result["claims"]) for index in section["claim_indexes"]
+            ):
+                raise ValidationError("A partial summary must cite claims from its own source packet.")
+        if result["claims"] and not result["partial_summary"]:
+            raise ValidationError("Substantive evidence requires a genuine partial summary.")
+
+    def _save_evidence_receipt(
+        self, review_id: str, candidate: Candidate, revision: dict, packet: dict, result: dict,
+        *, kind: Literal["evidence", "analysis_evidence"] = "evidence",
+    ) -> dict:
+        key = f"{kind}-receipt:{candidate.id}:{revision['source_version']}:{_SUMMARY_POLICY}:{digest(packet)}"
+        claims = [{
+            **claim, "id": digest([key, index]), "candidate_id": candidate.id,
+            "document_id": candidate.document_id, "source_version": revision["source_version"],
+            "title": candidate.title, "citation": f"p.{claim['page']}",
+        } for index, claim in enumerate(result["claims"])]
+        receipt = {
+            "key": key, "kind": kind, "status": "completed",
+            "candidate_id": candidate.id, "document_id": candidate.document_id, **revision,
+            "spans": [{name: value for name, value in span.items() if name != "text"} for span in packet["records"]],
+            "claims": claims, "limitations": result["limitations"], "follow_up_pages": result["follow_up_pages"],
+            "reading_policy": _READING_POLICY, "summary_policy": _SUMMARY_POLICY,
+            "partial_summary": [{
+                "title": section["title"], "content": section["content"],
+                "evidence_ids": [claims[index]["id"] for index in section["claim_indexes"]],
+                **({"source_pages": section["source_pages"]} if "source_pages" in section else {}),
+            } for section in result["partial_summary"]],
+            **({"summary_role": packet["summary_role"], "summary_method": "compact-v1"}
+               if "summary_role" in packet else {}),
+        }
+        self.repository.save_job(review_id, key, "reading", receipt)
+        self.jobs.checkpoint(review_id)
+        self._publish_progress(review_id)
+        return receipt
+
+    async def _compact_reading(
+        self, review_id: str, role: SummaryRole, *, candidates: list[Candidate] | None = None,
+    ) -> None:
+        prepared = self._prepare_summary(role)
+        completed_summary = False
+        pending = []
+        for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
+            try:
+                paper = self.paper(review_id, candidate.id)
+                if paper.selective_summary:
+                    completed_summary = True
+                    continue
+                if not paper.plan_complete:
+                    await self._reading_plan(review_id, candidates=[candidate])
+                pending.append(candidate)
+            except (ValueError, RuntimeError) as exc:
+                if candidates is not None:
+                    raise
+                self._notice(review_id, f"{candidate.title} remains unread: {exc}")
+                self._paper_operation(review_id, candidate.id, None)
+
+        async def summarize(candidate: Candidate) -> bool:
+            self._paper_operation(review_id, candidate.id, "Preparing compact paper summary")
+            try:
+                pages, _, revision = await asyncio.to_thread(self._paper, candidate)
+            except (ValueError, RuntimeError) as exc:
+                if candidates is not None:
+                    raise
+                self._notice(review_id, f"{candidate.title} remains unread: {exc}")
+                self._paper_operation(review_id, candidate.id, None)
+                return False
+            if self.paper(review_id, candidate.id).selective_summary:
+                self._paper_operation(review_id, candidate.id, None)
+                return True
+            plan_key = f"reading-plan:{candidate.id}:{revision['source_version']}:{_READING_POLICY}"
+            plan = self.repository.job(review_id, plan_key)
+            if not plan or plan.get("status") != "completed":
+                raise ValidationError("A paper's source or page plan changed before summarization. Resume page decisions.")
+            selected = {row["page"] for row in plan["pages"] if row["action"] == "read"}
+            frame = {
+                "title": candidate.title, "page_count": len(pages), **revision,
+                "reading_policy": _READING_POLICY, "summary_method": "compact-v1",
+                "summary_role": role.model_dump(mode="json", exclude={"parallel_requests"}),
+            }
+            packets = self._source_packets(
+                [page for page in pages if page["page"] in selected and page["text"].strip()],
+                frame, prepared,
+            )
+            if len(packets) > 1:
+                self._notice(review_id, f"{candidate.title}: selected source text needs {len(packets)} compact summary packets; "
+                             "the complete text does not fit one request. Packet summaries are combined locally.")
+            compact_receipts = []
+            for index, packet in enumerate(packets):
+                self._paper_operation(review_id, candidate.id, f"Summarizing source packet {index + 1}/{len(packets)}")
+
+                previous = next((
+                    job for job in reversed(self.repository.jobs(
+                        review_id, "reading", key_prefix=f"compact-summary:{candidate.document_id}:",
+                    ))
+                    if job.get("key", "").startswith(f"compact-summary:{candidate.document_id}:")
+                    and job.get("status") in {"invalid", "retry_requested", "completed", "settled"}
+                    and isinstance(job.get("raw_result"), dict) and job["raw_result"].get("partial_summary")
+                    and job.get("provenance", {}).get("input_hash") == digest(packet)
+                    and job.get("provenance", {}).get("model") == role.model_reference.model
+                    and job.get("provenance", {}).get("provider_profile_id") == role.model_reference.provider_profile_id
+                ), None)
+                if previous:
+                    raw = previous["raw_result"]
+                    result = {
+                        "sections": [{"title": section["title"], "content": section["content"]}
+                                     for section in raw["partial_summary"]],
+                        "limitations": raw["limitations"],
+                    }
+                    self._notice(review_id, f"{candidate.title}: reused saved summary prose previously rejected for "
+                                 "evidence bookkeeping; no regeneration was needed.")
+                else:
+                    text = await self.jobs.call(
+                        review_id, "reading", f"compact-summary:{candidate.document_id}", packet,
+                        prepared,
+                    )
+                    result = {"sections": [{"title": "Paper summary", "content": text}], "limitations": []}
+                source_pages = sorted({span["page"] for span in packet["records"]})
+                receipt_result = {
+                    "claims": [], "follow_up_pages": [], "limitations": result["limitations"],
+                    "partial_summary": [
+                        {**section, "claim_indexes": [], "source_pages": source_pages} for section in result["sections"]
+                    ],
+                }
+                compact_receipts.append(self._save_evidence_receipt(review_id, candidate, revision, packet, receipt_result))
+            sections = []
+            for title in dict.fromkeys(section["title"] for receipt in compact_receipts for section in receipt["partial_summary"]):
+                parts = [section for receipt in compact_receipts for section in receipt["partial_summary"]
+                         if section["title"] == title]
+                if parts:
+                    sections.append({
+                        "title": title, "content": "\n\n".join(dict.fromkeys(part["content"] for part in parts)),
+                        "evidence_ids": list(dict.fromkeys(identifier for part in parts for identifier in part["evidence_ids"])),
+                        "source_pages": sorted({page for part in parts for page in part.get("source_pages", [])}),
+                    })
+            if sections:
+                receipts = [
+                    job for job in self.repository.paper_jobs(review_id, candidate.id)
+                    if job.get("kind") == "evidence" and job["candidate_id"] == candidate.id
+                    and job["source_version"] == revision["source_version"] and job.get("reading_policy") == _READING_POLICY
+                ]
+                key = f"paper-summary:{candidate.id}:{revision['source_version']}:{_SUMMARY_POLICY}:{digest(receipts)}"
+                self.repository.save_job(review_id, key, "reading", {
+                    "key": key, "kind": "selective_summary", "status": "completed",
+                    "candidate_id": candidate.id, **revision, "summary_policy": _SUMMARY_POLICY,
+                    "reading_policy": _READING_POLICY, "summary_role": role.model_dump(mode="json"),
+                    "summary_method": "compact-v1", "receipt_keys": [job["key"] for job in compact_receipts],
+                    "summary": {
+                        "sections": sections, "limitations": list(dict.fromkeys([
+                            "Compact summary of selected source spans, not full-paper coverage. Approximate wording "
+                            "is a retrieval lead, not verified evidence. Source packet pages are recorded by the application; "
+                            "source verification is deferred to analysis and there are no required quotations or claim indexes; "
+                            "summary interpretations have not received a separate model audit.",
+                            *(item for receipt in compact_receipts for item in receipt["limitations"]),
+                        ])),
+                    },
+                })
+                self.jobs.checkpoint(review_id)
+            else:
+                self._notice(review_id, f"{candidate.title}: no supported compact summary was produced.")
+            self._paper_operation(review_id, candidate.id, None)
+            return bool(sections)
+
+        queue = iter(pending)
+
+        async def worker() -> bool:
+            completed = False
+            for candidate in queue:
+                completed = await summarize(candidate) or completed
+            return completed
+
+        spec = self._spec(review_id)
+        same_as_main = (
+            role.model_reference.provider_profile_id == spec.main_model.provider_profile_id
+            and role.model_reference.model == spec.main_model.model
+        )
+        parallel_requests = spec.main_parallel_requests if same_as_main else role.parallel_requests
+        with inference_parallel_group(f"review-summaries:{review_id}", parallel_requests):
+            tasks = [asyncio.create_task(worker()) for _ in range(min(parallel_requests, len(pending)))]
+        group = asyncio.gather(*tasks)
+        try:
+            # Cancel workers once so child-run cleanup and usage accounting can finish.
+            results = await asyncio.shield(group)
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(group, *tasks, return_exceptions=True)
+            raise
+        if not completed_summary and not any(results):
+            raise ValidationError("No compact paper summaries were produced; resume reading or adjust the approved set.")
+
     async def _reading(self, review_id: str, *, candidates: list[Candidate] | None = None) -> None:
         spec = self._spec(review_id)
+        if spec.summary_model:
+            await self._compact_reading(review_id, spec.summary_model, candidates=candidates)
+            return
         prepared = self.jobs.prepare(spec.main_model, "literature-evidence", EvidencePacket)
         for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
             self._paper_operation(review_id, candidate.id, "Reading source packets and writing partial summaries")
@@ -1450,44 +1852,13 @@ class LiteratureReviewService:
                     source_pages = ", ".join(str(number) for number in dict.fromkeys(span["page"] for span in packet["records"]))
                     self._paper_operation(review_id, candidate.id, f"Reading pages {source_pages} and writing a partial summary")
                     def validate(result: dict) -> None:
-                        for claim in result["claims"]:
-                            if not claim["quote"].strip() or not any(
-                                span["page"] == claim["page"] and claim["quote"] in span["text"] for span in packet["records"]
-                            ):
-                                raise ValidationError("An evidence claim did not quote the admitted source page verbatim.")
-                        if any(number not in page_map for number in result["follow_up_pages"]):
-                            raise ValidationError("The evidence worker requested a nonexistent page.")
-                        for section in result["partial_summary"]:
-                            if not section["claim_indexes"] or any(
-                                index < 0 or index >= len(result["claims"]) for index in section["claim_indexes"]
-                            ):
-                                raise ValidationError("A partial summary must cite claims from its own source packet.")
-                        if result["claims"] and not result["partial_summary"]:
-                            raise ValidationError("Substantive evidence requires a genuine partial summary.")
+                        self._validate_evidence(result, packet, page_map)
 
                     result = await self.jobs.call(
                         review_id, "reading", f"read:{candidate.document_id}", packet, prepared, EvidencePacket, validate,
                     )
                     queue.extend(result["follow_up_pages"])
-                    key = f"evidence-receipt:{candidate.id}:{revision['source_version']}:{_SUMMARY_POLICY}:{digest(packet)}"
-                    claims = [{
-                        **claim, "id": digest([key, index]), "candidate_id": candidate.id,
-                        "document_id": candidate.document_id, "source_version": revision["source_version"],
-                        "title": candidate.title, "citation": f"p.{claim['page']}",
-                    } for index, claim in enumerate(result["claims"])]
-                    self.repository.save_job(review_id, key, "reading", {
-                        "key": key, "kind": "evidence", "status": "completed",
-                        "candidate_id": candidate.id, "document_id": candidate.document_id, **revision,
-                        "spans": [{name: value for name, value in span.items() if name != "text"} for span in packet["records"]],
-                        "claims": claims, "limitations": result["limitations"], "follow_up_pages": result["follow_up_pages"],
-                        "reading_policy": _READING_POLICY, "summary_policy": _SUMMARY_POLICY,
-                        "partial_summary": [{
-                            "title": section["title"], "content": section["content"],
-                            "evidence_ids": [claims[index]["id"] for index in section["claim_indexes"]],
-                        } for section in result["partial_summary"]],
-                    })
-                    self.jobs.checkpoint(review_id)
-                    self._publish_progress(review_id)
+                    self._save_evidence_receipt(review_id, candidate, revision, packet, result)
                 seen.update(numbers)
             await self._summarize_paper(review_id, candidate, revision)
             self._paper_operation(review_id, candidate.id, None)
@@ -1571,6 +1942,11 @@ class LiteratureReviewService:
         self._publish_progress(review_id)
 
     def _evidence(self, review_id: str) -> list[dict]:
+        receipts = [job for job in self.repository.jobs(review_id, "reading")
+                    if job.get("kind") in {"evidence", "analysis_evidence"}
+                    and job.get("reading_policy") == _READING_POLICY]
+        if not receipts:
+            return []
         candidates = {item.id: item for item in [*self._candidates(review_id, selected=True),
                                                 *self._supplemental_candidates(review_id)]}
         versions: dict[str, str] = {}
@@ -1579,10 +1955,10 @@ class LiteratureReviewService:
             if document and document.status == "ready":
                 versions[item.id] = self.documents.source_revision(item.document_id)["source_version"]
         return [
-            claim for job in self.repository.jobs(review_id, "reading")
-            if job.get("kind") == "evidence" and job.get("source_version") == versions.get(job.get("candidate_id"))
+            claim for job in receipts
+            if job.get("source_version") == versions.get(job.get("candidate_id"))
             and job.get("reading_policy") == _READING_POLICY
-            for claim in job["claims"]
+            for claim in job["claims"] if claim["quote"]
         ]
 
     def _validate_synthesis(self, result: dict, evidence_ids: set[str]) -> None:
@@ -1595,14 +1971,211 @@ class LiteratureReviewService:
             if not gap["caveat"].strip() or not gap["next_check"].strip():
                 raise ValidationError("A gap hypothesis needs an uncertainty caveat and a next check.")
 
+    def _analysis_summaries(self, review_id: str) -> list[dict]:
+        summaries = []
+        for paper in self.papers(review_id):
+            if paper.selective_summary:
+                summary_ids = {identifier for section in paper.selective_summary["sections"]
+                               for identifier in section["evidence_ids"]}
+                summaries.append({
+                    "candidate_id": paper.candidate_id, "title": paper.title, "source_version": paper.source_version,
+                    "summary": paper.selective_summary,
+                    "findings": [{"finding": claim["finding"], "page": claim["page"]} for claim in paper.findings
+                                 if claim["id"] in summary_ids],
+                    "available_pages": [page.page for page in paper.pages],
+                    "page_decisions": [page.model_dump(mode="json") for page in paper.pages],
+                })
+        return summaries
+
+    def _save_analysis_plan(self, review_id: str, plan: dict) -> None:
+        self.repository.save_job(review_id, "analysis-plan", "synthesis", plan)
+        self.jobs.checkpoint(review_id)
+        self._publish_progress(review_id)
+
+    def _analysis_phase(self, review_id: str, phase: str) -> None:
+        plan = self.repository.job(review_id, "analysis-plan")
+        if plan is not None:
+            self._save_analysis_plan(review_id, {**plan, "phase": phase})
+
+    async def _analysis_sources(self, review_id: str, summaries: list[dict]) -> None:
+        main = self._spec(review_id).main_model
+        selector = self.jobs.prepare(main, "literature-analysis-sources", AnalysisSources)
+        reader = self.jobs.prepare(main, "literature-evidence", EvidencePacket)
+        candidates = {candidate.id: candidate for candidate in [
+            *self._candidates(review_id, selected=True), *self._supplemental_candidates(review_id),
+        ]}
+        versions = {summary["candidate_id"]: summary["source_version"] for summary in summaries}
+        input_fingerprint = digest([summaries, self._frame(review_id)])
+        plan = self.repository.job(review_id, "analysis-plan")
+        # Older plans lack a model-independent input fingerprint. Keep their admitted
+        # source reads on an explicit model switch when those sources are unchanged.
+        legacy_model_switch = (
+            plan is not None and "input_fingerprint" not in plan
+            and "main_model" in self.repository.get(review_id).state
+            and all(versions.get(page["candidate_id"]) == page["source_version"] for page in plan["pages"])
+        )
+        same_inputs = plan is not None and (
+            plan.get("input_fingerprint") == input_fingerprint or legacy_model_switch
+        ) and plan.get("selection_prompt_hash", digest(selector[0].entry_agent.instructions)) == digest(
+            selector[0].entry_agent.instructions
+        )
+        completed_candidates = {
+            candidate_id
+            for packet_key, identifiers in (plan.get("selection_records", {}) if same_inputs else {}).items()
+            if packet_key in plan["selection_done"]
+            for candidate_id in identifiers
+        }
+        pending_summaries = [summary for summary in summaries if summary["candidate_id"] not in completed_candidates]
+        packets = await self.jobs.summary_packets(
+            review_id, pending_summaries, {**self._frame(review_id), "stage": "analysis-source-selection"}, selector,
+        ) if pending_summaries else []
+        fingerprint = digest([
+            summaries, self._frame(review_id), main.model_dump(), packets,
+            selector[0].entry_agent.instructions, selector[1].limit, selector[1].method,
+        ])
+        if plan is None or (not same_inputs and plan.get("fingerprint") != fingerprint):
+            if plan is not None:
+                self._notice(review_id, "Synthesis inputs changed; a new bounded source-reading plan replaces the previous plan.")
+            plan = {
+                "key": "analysis-plan", "fingerprint": fingerprint, "phase": "selecting",
+                "page_limit": _ANALYSIS_PAGE_BATCH, "selection_done": [],
+                "selection_total": len(packets), "pages": [], "report_requested": False,
+            }
+        plan["input_fingerprint"] = input_fingerprint
+        plan["selection_prompt_hash"] = digest(selector[0].entry_agent.instructions)
+        plan.setdefault("selection_records", {})
+        plan["selection_total"] = len(plan["selection_done"]) + sum(
+            digest(packet) not in plan["selection_done"] for packet in packets
+        )
+        self._save_analysis_plan(review_id, plan)
+        if plan["report_requested"]:
+            return
+        for packet in packets:
+            packet_key = digest(packet)
+            if packet_key in plan["selection_done"]:
+                continue
+            plan["selection_records"][packet_key] = [row["candidate_id"] for row in packet["records"]]
+            self._save_analysis_plan(review_id, plan)
+            offered = {row["candidate_id"]: set(row["available_pages"]) for row in packet["records"]}
+
+            def validate_selection(result: dict) -> None:
+                for source in result["sources"]:
+                    if source["candidate_id"] not in offered or not set(source["pages"]) <= offered[source["candidate_id"]]:
+                        raise ValidationError("Analysis must select only offered papers and available original pages.")
+                    if not source["reason"].strip():
+                        raise ValidationError("Analysis source selection needs a specific reason.")
+
+            result = await self.jobs.call(
+                review_id, "synthesis", "analysis-source-selection", packet, selector, AnalysisSources, validate_selection,
+            )
+            for source in result["sources"]:
+                for number in source["pages"]:
+                    if not any(page["candidate_id"] == source["candidate_id"] and page["page"] == number
+                               for page in plan["pages"]):
+                        candidate = candidates[source["candidate_id"]]
+                        plan["pages"].append({
+                            "candidate_id": candidate.id, "title": candidate.title,
+                            "source_version": versions[candidate.id], "page": number, "reason": source["reason"],
+                            "status": "pending", "admitted": False,
+                        })
+            plan["selection_done"].append(packet_key)
+            self._save_analysis_plan(review_id, plan)
+        plan["phase"] = "reading"
+        self._save_analysis_plan(review_id, plan)
+        while True:
+            unfinished = [page for page in plan["pages"] if page["status"] in {"pending", "reading"}]
+            if not unfinished:
+                break
+            remaining = plan["page_limit"] - sum(page["admitted"] for page in plan["pages"])
+            admitted = [page for page in unfinished if page["admitted"]]
+            if not admitted and remaining <= 0:
+                plan["phase"] = "awaiting_extension"
+                self._save_analysis_plan(review_id, plan)
+                self.jobs.checkpoint(
+                    review_id, status="awaiting_approval", approval="analysis", active_run_id=None,
+                    error=f"Synthesis source-reading limit reached ({plan['page_limit']} pages). "
+                    "Approve another 20 pages or write the report from current evidence.",
+                )
+                raise ReviewPaused()
+            candidate_id = (admitted or unfinished)[0]["candidate_id"]
+            selected = [page for page in unfinished if page["candidate_id"] == candidate_id and page["admitted"]]
+            for page in unfinished:
+                if page["candidate_id"] == candidate_id and not page["admitted"] and remaining > 0:
+                    page["admitted"] = True
+                    remaining -= 1
+                    selected.append(page)
+            for page in selected:
+                page["status"] = "reading"
+            self._save_analysis_plan(review_id, plan)
+            candidate = candidates[candidate_id]
+            pages, _, revision = await asyncio.to_thread(self._paper, candidate)
+            if revision["source_version"] != versions[candidate_id]:
+                raise ValidationError("An original paper changed after summary selection; resume reading before analysis.")
+            page_map = {page["page"]: page for page in pages}
+            numbers = {page["page"] for page in selected}
+            frame = {
+                "title": candidate.title, "page_count": len(pages), **revision,
+                "reading_policy": _READING_POLICY, "analysis_source": True,
+            }
+            source_packets = self._source_packets(
+                [page for page in pages if page["page"] in numbers and page["text"].strip()], frame, reader,
+            )
+            for source_packet in source_packets:
+                self._paper_operation(review_id, candidate.id, "Analysis: reading original paper content")
+
+                def validate_evidence(result: dict) -> None:
+                    self._validate_evidence(result, source_packet, page_map)
+
+                result = await self.jobs.call(
+                    review_id, "synthesis", f"analysis-read:{candidate.document_id}", source_packet,
+                    reader, EvidencePacket, validate_evidence,
+                )
+                self._save_evidence_receipt(
+                    review_id, candidate, revision, source_packet, result, kind="analysis_evidence",
+                )
+                for number in result["follow_up_pages"]:
+                    if not any(page["candidate_id"] == candidate_id and page["page"] == number for page in plan["pages"]):
+                        plan["pages"].append({
+                            "candidate_id": candidate_id, "title": candidate.title,
+                            "source_version": revision["source_version"], "page": number,
+                            "reason": "Follow-up requested by the evidence reader to check supporting context.",
+                            "status": "pending", "admitted": False,
+                        })
+                self._save_analysis_plan(review_id, plan)
+            for page in selected:
+                page["status"] = "completed"
+                if not page_map[page["page"]]["text"].strip():
+                    self._notice(review_id, f"{candidate.title}, page {page['page']}: no extractable source text; no evidence added.")
+            self._save_analysis_plan(review_id, plan)
+            self._paper_operation(review_id, candidate.id, None)
+
     async def _synthesis(self, review_id: str) -> None:
-        evidence = self._evidence(review_id)
-        if not evidence:
-            raise ValidationError("Current source evidence is missing or changed. Resume reading before synthesizing.")
         spec = self._spec(review_id)
-        self.jobs.admit_work(review_id, "comparison_passes", digest([evidence, self._frame(review_id), spec.main_model.model_dump()]))
+        evidence = self._evidence(review_id)
+        summaries = self._analysis_summaries(review_id) if spec.summary_model else []
+        if not evidence and not summaries:
+            raise ValidationError("Current source evidence is missing or changed. Resume reading before synthesizing.")
+        self.jobs.admit_work(review_id, "comparison_passes", digest([
+            summaries if spec.summary_model else evidence, self._frame(review_id),
+            self.repository.get(review_id).specification["main_model"],
+        ]))
+        if summaries:
+            await self._analysis_sources(review_id, summaries)
+            evidence = self._evidence(review_id)
+        if not evidence:
+            raise ValidationError("Summaries are saved, but analysis has no verified original-source evidence. "
+                                  "Resume synthesis to select and read original paper pages.")
+        self._analysis_phase(review_id, "drafting")
         prepared = self.jobs.prepare(spec.main_model, "literature-synthesis", Synthesis)
         frame = {**self._frame(review_id), "stage": "synthesis", "coverage": "Selective approved corpus; not exhaustive."}
+        analysis_plan = self.repository.job(review_id, "analysis-plan")
+        if analysis_plan is not None:
+            frame["analysis_coverage"] = {
+                "page_limit": analysis_plan["page_limit"],
+                "completed_pages": sum(page["status"] == "completed" for page in analysis_plan["pages"]),
+                "skipped_pages": sum(page["status"] == "skipped" for page in analysis_plan["pages"]),
+                "report_requested": analysis_plan["report_requested"],
+            }
         context = self.repository.job(review_id, "track-context")
         if context is not None:
             frame["track_context"] = context["context"]
@@ -1631,6 +2204,7 @@ class LiteratureReviewService:
             )
             parts.append(result)
         while len(parts) > 1:
+            self._analysis_phase(review_id, "combining")
             packets = self.jobs.packets(parts, {**frame, "stage": "reduction"}, prepared)
             if len(packets) >= len(parts):
                 raise ValidationError("Synthesis cannot be reduced within the selected context; use a larger model context.")
@@ -1654,6 +2228,7 @@ class LiteratureReviewService:
         by_id = {row["id"]: row for row in evidence}
         units = [("section", section) for section in synthesis["sections"]] + [("gap", gap) for gap in synthesis["gaps"]]
         for kind, unit in units:
+            self._analysis_phase(review_id, "auditing")
             ids = list(dict.fromkeys([*unit["evidence_ids"], *unit.get("counter_evidence_ids", [])]))
             audit_frame = {**frame, "stage": "audit", "proposal": {kind: unit}}
             audit_packets = self.jobs.packets([by_id[identifier] for identifier in ids], audit_frame, prepared)
@@ -1668,11 +2243,14 @@ class LiteratureReviewService:
                 limitations.extend(result["limitations"])
         if not audited_sections:
             raise ValidationError("Source auditing retained no supported review sections.")
+        if analysis_plan and analysis_plan["report_requested"]:
+            limitations.append("The researcher chose to write from current source evidence; pending synthesis source reads were skipped.")
         self.jobs.checkpoint(review_id, synthesis={
             "sections": list({digest(item): item for item in audited_sections}.values()),
             "gaps": list({digest(item): item for item in audited_gaps}.values()),
             "limitations": list(dict.fromkeys(limitations)),
         })
+        self._analysis_phase(review_id, "ready_to_publish")
 
     async def _publication(self, review_id: str) -> None:
         record = self.repository.get(review_id)
@@ -1813,11 +2391,24 @@ class LiteratureReviewService:
             ])
             if coverage.selective_summary:
                 details.extend(["> Selective paper summary; not full-paper coverage.", ""])
-                for heading in ("Motivation, contribution, and novelty", "Method", "Results", "Open questions"):
+                headings = (dict.fromkeys(section["title"] for section in coverage.selective_summary["sections"])
+                            if spec.summary_model else
+                            ("Motivation, contribution, and novelty", "Method", "Results", "Open questions"))
+                for heading in headings:
                     details.extend([f"#### {heading}", ""])
                     sections = [section for section in coverage.selective_summary["sections"] if section["title"] == heading]
                     for section in sections:
-                        details.extend([section["content"], "", citations(section["evidence_ids"]), ""])
+                        verified_ids = [identifier for identifier in section["evidence_ids"] if identifier in by_id]
+                        details.extend([section["content"], "", citations(verified_ids), ""])
+                        if "source_pages" in section or len(verified_ids) != len(section["evidence_ids"]):
+                            pages = section.get("source_pages", sorted({
+                                claim["page"] for claim in coverage.findings
+                                if claim["id"] in section["evidence_ids"] and not claim["quote"]
+                            }))
+                            details.extend([
+                                f"Unverified summary lead; original page references: {', '.join(map(str, pages))}. "
+                                "Approximate wording is not a direct quotation or verified evidence.", "",
+                            ])
                     if not sections:
                         details.extend(["Not established from the inspected pages.", ""])
                 details.extend(f"- {value}" for value in coverage.selective_summary["limitations"])

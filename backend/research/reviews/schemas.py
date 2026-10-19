@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from backend.agents.blueprint import ModelReferenceSpec
+from backend.providers.reasoning import ReasoningEffort
 
 ReviewStage = Literal["scope", "discovery", "screening", "reading_plan", "reading", "references", "reference_screening", "reference_collection", "synthesis", "publication"]
 ReviewStatus = Literal["running", "awaiting_approval", "paused", "blocked", "completed"]
@@ -36,15 +37,30 @@ class DecisionRole(ReviewSchema):
     input_tokens: int = Field(default=8192, ge=128, le=131_072)
 
 
+class SummaryRole(ReviewSchema):
+    model_reference: ModelReferenceSpec
+    max_output_tokens: int = Field(default=26214, ge=512, le=26214)
+    parallel_requests: int = Field(default=1, ge=1, le=32)
+    reasoning_effort: ReasoningEffort | None = None
+
+    @model_validator(mode="after")
+    def explicit_model(self) -> SummaryRole:
+        if not self.model_reference.provider_profile_id or not self.model_reference.model:
+            raise ValueError("Select an explicit provider and model for paper summaries.")
+        return self
+
+
 class ReviewCreateRequest(ReviewSchema):
     title: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=20_000)
     main_model: ModelReferenceSpec
     decision_model: DecisionRole | None = None
+    summary_model: SummaryRole | None = None
     conversation_id: str | None = None
     track_id: str | None = None
     web_enabled: bool = True
     openalex_enabled: bool = False
+    main_parallel_requests: int = Field(default=1, ge=1, le=32)
 
     @model_validator(mode="after")
     def explicit_models(self) -> ReviewCreateRequest:
@@ -60,13 +76,28 @@ class ReviewCreateRequest(ReviewSchema):
 
 class ReviewControlRequest(ReviewSchema):
     expected_revision: int = Field(ge=1)
-    action: Literal["approve_plan", "approve_papers", "select_references", "approve_reference_pdfs", "pause", "stop_stage", "resume", "extend_budget", "link_paper"]
+    action: Literal["approve_plan", "approve_papers", "select_references", "approve_reference_pdfs", "pause", "stop_stage", "skip_references", "extend_analysis", "write_report", "resume", "extend_budget", "link_paper"]
     candidate_ids: list[str] | None = None
     reference_matches: dict[str, str] | None = None
     document_id: str | None = None
     allowance_tokens: int | None = Field(default=None, ge=1)
     work_budget: WorkBudget | None = None
     stage: ReviewStage | None = None
+    main_model: ModelReferenceSpec | None = None
+    main_parallel_requests: int | None = Field(default=None, ge=1, le=32)
+    summary_model: SummaryRole | None = None
+
+    @model_validator(mode="after")
+    def model_change_on_resume(self) -> ReviewControlRequest:
+        if "main_model" in self.model_fields_set or "main_parallel_requests" in self.model_fields_set:
+            if self.action != "resume":
+                raise ValueError("Change main-model settings only when resuming a paused review.")
+        if "main_model" in self.model_fields_set:
+            if not self.main_model or not self.main_model.provider_profile_id or not self.main_model.model:
+                raise ValueError("Select an explicit provider and main model.")
+        if "summary_model" in self.model_fields_set and self.action != "resume":
+            raise ValueError("Change the summary model only when resuming a paused review.")
+        return self
 
 
 class SearchQuery(ReviewSchema):
@@ -214,6 +245,10 @@ class SelectiveSummary(ReviewSchema):
 class PaperReview(ReviewSchema):
     candidate_id: str
     title: str = ""
+    collected: bool = False
+    prepared: bool = False
+    plan_complete: bool = False
+    error: str | None = None
     source_version: str | None
     pages: list[PageChoice]
     read_pages: list[int]
@@ -223,6 +258,34 @@ class PaperReview(ReviewSchema):
     findings: list[dict] = Field(default_factory=list)
     partial_summaries: list[dict] = Field(default_factory=list)
     selective_summary: dict | None = None
+
+
+class PaperProgress(ReviewSchema):
+    candidate_id: str
+    title: str
+    collected: bool
+    prepared: bool
+    plan_complete: bool
+    summary_complete: bool
+    operation: str | None
+    error: str | None
+
+
+class PaperProgressCounts(ReviewSchema):
+    total: int
+    collected: int
+    prepared: int
+    plan_complete: int
+    summarized: int
+    failed: int
+
+
+class PaperProgressPage(ReviewSchema):
+    items: list[PaperProgress]
+    total: int
+    next_offset: int | None
+    counts: PaperProgressCounts
+    operations: list[PaperProgress]
 
 
 class EvidenceClaim(ReviewSchema):
@@ -237,6 +300,62 @@ class EvidencePacket(ReviewSchema):
     limitations: list[str]
     follow_up_pages: list[int]
     partial_summary: list[PartialSummarySection]
+
+
+class AnalysisSource(ReviewSchema):
+    candidate_id: str
+    pages: list[int] = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class AnalysisSources(ReviewSchema):
+    sources: list[AnalysisSource]
+
+
+class AnalysisPage(ReviewSchema):
+    candidate_id: str
+    title: str
+    source_version: str
+    page: int
+    reason: str
+    status: Literal["pending", "reading", "completed", "skipped"] = "pending"
+    admitted: bool = False
+
+
+class AnalysisProgress(ReviewSchema):
+    phase: str
+    page_limit: int
+    admitted_pages: int
+    completed_pages: int
+    pending_pages: int
+    selection_completed: int
+    selection_total: int
+    report_requested: bool
+    items: list[AnalysisPage]
+    total: int
+    next_offset: int | None
+
+
+class ReviewActivity(ReviewSchema):
+    key: str
+    stage: str
+    status: str
+    model: str | None = None
+    tokens: int = 0
+    error: str | None = None
+
+
+class ReviewActivityPage(ReviewSchema):
+    items: list[ReviewActivity]
+    total: int
+    next_offset: int | None
+
+
+class ReviewActivityDetail(ReviewSchema):
+    key: str
+    status: str
+    result: dict[str, Any] | str | None
+    error: str | None = None
 
 
 class SynthesisSection(ReviewSchema):
@@ -267,9 +386,11 @@ class ReviewResponse(ReviewSchema):
     objective: str
     status: ReviewStatus
     stage: ReviewStage
-    approval: Literal["plan", "papers", "budget", "references", "reference_pdfs"] | None
+    approval: Literal["plan", "papers", "budget", "references", "reference_pdfs", "analysis"] | None
     main_model: ModelReferenceSpec
+    main_parallel_requests: int
     decision_model: DecisionRole | None
+    summary_model: SummaryRole | None = None
     conversation_id: str | None
     track_id: str | None
     scope: ReviewScope | None
@@ -287,6 +408,7 @@ class ReviewResponse(ReviewSchema):
     evidence_count: int
     active_run_id: str | None
     stage_history: dict[str, str]
+    references_skipped: bool = False
     notices: list[str]
     error: str | None
     output_path: str | None

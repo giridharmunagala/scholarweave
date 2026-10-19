@@ -38,6 +38,8 @@ def test_shipped_prompts_are_complete(test_settings) -> None:
         "literature-references",
         "literature-page-groups",
         "literature-evidence",
+        "literature-compact-summary",
+        "literature-analysis-sources",
         "literature-paper-summary",
         "literature-synthesis",
     }

@@ -11,9 +11,11 @@ hard model-window pressure requires a readable archive and a fitting preview.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import uuid
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from typing import Any
 
@@ -128,12 +130,14 @@ class ContextBudgetPolicy:
         prompt_registry: PromptRegistry | None = None,
         compaction_model: ModelBinding | None = None,
         compaction_model_error: dict[str, str] | None = None,
+        request_token_counter: Callable[[dict], Awaitable[int | None]] | None = None,
     ) -> None:
         self._settings = settings
         self._windows = dict(context_window_tokens_by_agent or {})
         self._prompts = prompt_registry
         self._compaction_model = compaction_model
         self._compaction_model_error = compaction_model_error
+        self._request_token_counter = request_token_counter
 
     def context_window_tokens(self, agent: AgentDefinition) -> int:
         return (
@@ -178,6 +182,13 @@ class ContextBudgetPolicy:
 
         # Apply pending guidance before measuring; it must never escape the budget.
         model_items = await _apply_steering(prepared, context, present_steering_ids)
+        if self._request_token_counter is not None:
+            parameters, _ = _counted_request(agent, model_items, instructions, context)
+            counted = await self._request_token_counter(parameters)
+            if counted is not None:
+                context.metadata["_context_exact_request_tokens"] = {
+                    "key": _request_count_key(parameters), "tokens": counted,
+                }
         if not summary_job:
             protected_tokens = _request_tokens(
                 agent, _protected_history_items(model_items), instructions, context,
@@ -974,9 +985,9 @@ def _token_estimate_ratio(agent: AgentDefinition, context: ScholarWeaveContext) 
     return max(1.0, float(ratio))
 
 
-def _request_tokens(
+def _counted_request(
     agent: AgentDefinition, items: RunInputItems, instructions: str, context: ScholarWeaveContext
-) -> int:
+) -> tuple[dict, int]:
     messages = model_input_messages(agent, strip_steering_markers(items), instructions)
     parameters = request_parameters(agent, messages, agent.enabled_tools(context), stream=False)
     # Output limits are not prompt tokens; counting them changes the calibrated
@@ -984,8 +995,24 @@ def _request_tokens(
     parameters.pop("max_tokens", None)
     parameters.pop("max_completion_tokens", None)
     parameters.pop("max_output_tokens", None)
+    return parameters, len(messages)
+
+
+def _request_count_key(parameters: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        to_jsonable(parameters), ensure_ascii=False, sort_keys=True,
+    ).encode("utf-8")).hexdigest()
+
+
+def _request_tokens(
+    agent: AgentDefinition, items: RunInputItems, instructions: str, context: ScholarWeaveContext
+) -> int:
+    parameters, message_count = _counted_request(agent, items, instructions, context)
+    exact = context.metadata.get("_context_exact_request_tokens")
+    if isinstance(exact, dict) and exact.get("key") == _request_count_key(parameters):
+        return math.ceil(exact["tokens"] * _token_estimate_ratio(agent, context))
     return math.ceil(
-        (_estimated_tokens(parameters) + 8 * len(messages)) * _token_estimate_ratio(agent, context)
+        (_estimated_tokens(parameters) + 8 * message_count) * _token_estimate_ratio(agent, context)
     )
 
 

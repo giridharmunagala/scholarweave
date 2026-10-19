@@ -5,8 +5,48 @@ import asyncio
 import httpx
 import pytest
 
-from backend.providers.inference import InferenceScheduler, inference_priority, inference_progress
+from backend.providers.inference import InferenceScheduler, inference_parallel_group, inference_priority, inference_progress
 from backend.providers.logging import ScheduledTransport
+
+
+@pytest.mark.anyio
+async def test_summary_group_admits_bounded_same_model_requests_and_drains_before_switching():
+    scheduler = InferenceScheduler()
+    with inference_parallel_group("review-one", 2):
+        first = await scheduler.request(profile_id="local", model="summary").__aenter__()
+        second = await scheduler.request(profile_id="local", model="summary").__aenter__()
+        third = asyncio.create_task(scheduler.request(profile_id="local", model="summary").__aenter__())
+    switch = asyncio.create_task(scheduler.request(profile_id="local", model="main").__aenter__())
+    await asyncio.sleep(0)
+    assert scheduler.snapshot()["active_requests"] == 2
+    assert not third.done() and not switch.done()
+    await first.release()
+    third_lease = await asyncio.wait_for(third, 1)
+    await second.release()
+    assert not switch.done()
+    await third_lease.release()
+    await (await asyncio.wait_for(switch, 1)).release()
+    assert scheduler.snapshot()["active_requests"] == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("group,profile,model", [
+    (None, "local", "summary"), ("another-review", "local", "summary"),
+    ("review-one", "another-profile", "summary"), ("review-one", "local", "main"),
+])
+async def test_summary_parallelism_does_not_leak_to_other_requests(group, profile, model):
+    scheduler = InferenceScheduler()
+    with inference_parallel_group("review-one", 4):
+        active = await scheduler.request(profile_id="local", model="summary").__aenter__()
+    if group:
+        with inference_parallel_group(group, 4):
+            waiting = asyncio.create_task(scheduler.request(profile_id=profile, model=model).__aenter__())
+    else:
+        waiting = asyncio.create_task(scheduler.request(profile_id=profile, model=model).__aenter__())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    await active.release()
+    await (await asyncio.wait_for(waiting, 1)).release()
 
 
 @pytest.mark.anyio

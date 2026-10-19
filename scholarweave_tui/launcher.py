@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import errno
+import hashlib
+import json
 import multiprocessing
 import os
 import shutil
@@ -8,6 +10,8 @@ import socket
 import subprocess
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Event
 from pathlib import Path
@@ -22,6 +26,10 @@ from scholarweave_tui.server import serve
 
 class LaunchError(RuntimeError):
     """Actionable startup or shutdown failure."""
+
+
+class OccupiedOrigin(LaunchError):
+    """A different application/library occupies a potential listening address."""
 
 
 def build_frontend(root: Path) -> None:
@@ -66,6 +74,79 @@ class BackendSession:
         self._failed = False
         self._http = httpx.Client(trust_env=False, follow_redirects=False, timeout=1)
         self._settings = Settings(_env_file=self.root / ".env")
+        self.runtime_path = self._settings.data_dir / "backend-runtime.json"
+
+    @contextmanager
+    def _startup_lock(self) -> Iterator[None]:
+        identity = hashlib.sha256(os.path.normcase(str(self._settings.database_path)).encode()).hexdigest()
+        path = Path(tempfile.gettempdir()) / f"scholarweave-startup-{identity}.lock"
+        with path.open("a+b") as lock:
+            if lock.tell() == 0:
+                lock.write(b"\0")
+                lock.flush()
+            deadline = time.monotonic() + self.timeout
+            while True:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        lock.seek(0)
+                        msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise LaunchError(f"Could not lock backend startup: {exc}") from exc
+                    if time.monotonic() >= deadline:
+                        raise LaunchError("Another launcher is still starting this library's backend. Try again shortly.") from exc
+                    time.sleep(0.1)
+            try:
+                yield
+            finally:
+                if os.name == "nt":
+                    lock.seek(0)
+                    msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _saved_origin(self) -> str | None:
+        try:
+            record = json.loads(self.runtime_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise LaunchError(f"Could not read backend discovery file {self.runtime_path}: {exc}") from exc
+        if not isinstance(record, dict) or record.get("database_path") != str(self._settings.database_path):
+            raise LaunchError(f"Backend discovery file {self.runtime_path} does not match this library.")
+        try:
+            if not isinstance(record.get("url"), str):
+                raise ValueError("Missing URL")
+            return _local_origin(record["url"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise LaunchError(f"Backend discovery file {self.runtime_path} has an invalid local URL.") from exc
+
+    def _publish_origin(self) -> None:
+        temporary = None
+        try:
+            self.runtime_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.runtime_path.parent,
+                prefix=".backend-runtime-", suffix=".tmp", delete=False,
+            ) as file:
+                temporary = Path(file.name)
+                json.dump({
+                    "url": self.base_url, "database_path": str(self._settings.database_path),
+                    "data_dir": str(self._settings.data_dir),
+                }, file)
+            temporary.replace(self.runtime_path)
+        except OSError as exc:
+            raise LaunchError(f"Could not publish the backend address in {self.runtime_path}: {exc}") from exc
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def _ready(self) -> bool:
         try:
@@ -77,75 +158,98 @@ class BackendSession:
         try:
             health = response.json()
         except ValueError as exc:
-            raise LaunchError(f"{self.base_url} is occupied by a service that is not ScholarWeave.") from exc
+            raise OccupiedOrigin(f"{self.base_url} is occupied by a service that is not ScholarWeave.") from exc
         if (
-            response.status_code != 200
-            or not isinstance(health, dict)
-            or health.get("status") != "ok"
-            or health.get("runtime_version") != RUNTIME_VERSION
+            not isinstance(health, dict)
             or not isinstance(health.get("database_path"), str)
             or not isinstance(health.get("data_dir"), str)
         ):
-            raise LaunchError(f"{self.base_url} is not a compatible ScholarWeave backend.")
+            raise OccupiedOrigin(f"{self.base_url} is not a compatible ScholarWeave backend.")
+        if Path(health["database_path"]).resolve() != self._settings.database_path:
+            raise OccupiedOrigin(
+                f"{self.base_url} belongs to a different ScholarWeave library. "
+                "It will not be reused or stopped."
+            )
         if (
-            Path(health["database_path"]).resolve() != self._settings.database_path
-            or Path(health["data_dir"]).resolve() != self._settings.data_dir
+            Path(health["data_dir"]).resolve() != self._settings.data_dir
+            or response.status_code != 200 or health.get("status") != "ok"
+            or health.get("runtime_version") != RUNTIME_VERSION
         ):
             raise LaunchError(
-                f"{self.base_url} belongs to a different ScholarWeave library. "
-                "Use its matching checkout/configuration or choose a different --api-url port."
+                f"{self.base_url} already uses this library's database with incompatible settings or runtime. "
+                "Stop that backend before restarting; a second backend will not be started."
             )
         return True
 
     def __enter__(self) -> BackendSession:
         try:
-            if self._ready():
+            if self.connect_only:
+                if not self._ready():
+                    raise LaunchError(f"No ready backend at {self.base_url}; --connect-only will not start one.")
                 print(f"Using the existing backend at {self.base_url}; it will stay running.", flush=True)
                 return self
-            if self.connect_only:
-                raise LaunchError(f"No ready backend at {self.base_url}; --connect-only will not start one.")
-            parsed = urlsplit(self.base_url)
-            if parsed.hostname == "::1":
-                raise LaunchError("Automatic startup binds to 127.0.0.1. Use an IPv4 loopback --api-url.")
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            try:
-                if os.name == "nt":
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-                try:
-                    sock.bind(("127.0.0.1", parsed.port or 80))
-                except OSError as exc:
-                    if exc.errno not in {errno.EADDRINUSE, errno.EACCES}:
-                        raise LaunchError(f"Could not reserve the backend port: {exc}") from exc
-                    print("The backend port is occupied; waiting for that server to become ready...", flush=True)
-                    self._wait_ready()
-                    print("Using the existing backend; it will stay running.", flush=True)
-                    return self
-                sock.listen(128)
-                log = tempfile.NamedTemporaryFile(prefix="scholarweave-backend-", suffix=".log", delete=False)
-                self.log_path = Path(log.name)
-                log.close()
-                context = multiprocessing.get_context("spawn")
-                self.stop = context.Event()
-                self.process = context.Process(
-                    target=serve, args=(sock, self.stop, self.root, self.log_path),
-                    name="scholarweave-backend",
-                )
-                try:
-                    self.process.start()
-                except OSError as exc:
-                    self.process = None
-                    raise LaunchError(f"Could not start the backend process: {exc}") from exc
-            finally:
-                sock.close()
-            print(f"Starting the backend at {self.base_url}...", flush=True)
-            self._wait_ready()
-            print("Backend ready. Closing this launcher will stop this backend.", flush=True)
+            with self._startup_lock():
+                self._start_or_reuse()
+                self._publish_origin()
             return self
         except BaseException:
             # Context managers are not exited when __enter__ fails.
             self._failed = True
             self.close()
             raise
+
+    def _start_or_reuse(self) -> None:
+        preferred = self.base_url
+        saved = self._saved_origin()
+        for origin in dict.fromkeys([saved, preferred]):
+            if origin is None:
+                continue
+            self.base_url = origin
+            try:
+                if self._ready():
+                    print(f"Using the existing backend at {self.base_url}; it will stay running.", flush=True)
+                    return
+            except OccupiedOrigin as exc:
+                print(f"{exc} Checking for an available local port.", flush=True)
+        self.base_url = preferred
+        parsed = urlsplit(self.base_url)
+        if parsed.hostname == "::1":
+            raise LaunchError("Automatic startup binds to 127.0.0.1. Use an IPv4 loopback --api-url.")
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if os.name == "nt":
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            try:
+                sock.bind(("127.0.0.1", parsed.port or 80))
+            except OSError as exc:
+                if exc.errno not in {errno.EADDRINUSE, errno.EACCES}:
+                    raise LaunchError(f"Could not reserve the backend port: {exc}") from exc
+                try:
+                    sock.bind(("127.0.0.1", 0))
+                except OSError as fallback_error:
+                    raise LaunchError(f"Could not reserve an available backend port: {fallback_error}") from fallback_error
+                print(f"Preferred backend port is unavailable; using port {sock.getsockname()[1]}.", flush=True)
+            self.base_url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+            sock.listen(128)
+            log = tempfile.NamedTemporaryFile(prefix="scholarweave-backend-", suffix=".log", delete=False)
+            self.log_path = Path(log.name)
+            log.close()
+            context = multiprocessing.get_context("spawn")
+            self.stop = context.Event()
+            self.process = context.Process(
+                target=serve, args=(sock, self.stop, self.root, self.log_path),
+                name="scholarweave-backend",
+            )
+            try:
+                self.process.start()
+            except OSError as exc:
+                self.process = None
+                raise LaunchError(f"Could not start the backend process: {exc}") from exc
+        finally:
+            sock.close()
+        print(f"Starting the backend at {self.base_url}...", flush=True)
+        self._wait_ready()
+        print("Backend ready. Closing this launcher will stop this backend.", flush=True)
 
     def _wait_ready(self) -> None:
         deadline = time.monotonic() + self.timeout

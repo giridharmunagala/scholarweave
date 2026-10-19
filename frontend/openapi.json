@@ -1,6 +1,130 @@
 {
   "components": {
     "schemas": {
+      "AnalysisPage": {
+        "additionalProperties": false,
+        "properties": {
+          "admitted": {
+            "default": false,
+            "title": "Admitted",
+            "type": "boolean"
+          },
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "page": {
+            "title": "Page",
+            "type": "integer"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "source_version": {
+            "title": "Source Version",
+            "type": "string"
+          },
+          "status": {
+            "default": "pending",
+            "enum": [
+              "pending",
+              "reading",
+              "completed",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "title",
+          "source_version",
+          "page",
+          "reason"
+        ],
+        "title": "AnalysisPage",
+        "type": "object"
+      },
+      "AnalysisProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "admitted_pages": {
+            "title": "Admitted Pages",
+            "type": "integer"
+          },
+          "completed_pages": {
+            "title": "Completed Pages",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AnalysisPage"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "page_limit": {
+            "title": "Page Limit",
+            "type": "integer"
+          },
+          "pending_pages": {
+            "title": "Pending Pages",
+            "type": "integer"
+          },
+          "phase": {
+            "title": "Phase",
+            "type": "string"
+          },
+          "report_requested": {
+            "title": "Report Requested",
+            "type": "boolean"
+          },
+          "selection_completed": {
+            "title": "Selection Completed",
+            "type": "integer"
+          },
+          "selection_total": {
+            "title": "Selection Total",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "phase",
+          "page_limit",
+          "admitted_pages",
+          "completed_pages",
+          "pending_pages",
+          "selection_completed",
+          "selection_total",
+          "report_requested",
+          "items",
+          "total",
+          "next_offset"
+        ],
+        "title": "AnalysisProgress",
+        "type": "object"
+      },
       "ArtifactContentResponse": {
         "additionalProperties": false,
         "properties": {
@@ -2010,12 +2134,176 @@
         "title": "PaperFolderResponse",
         "type": "object"
       },
+      "PaperProgress": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate_id": {
+            "title": "Candidate Id",
+            "type": "string"
+          },
+          "collected": {
+            "title": "Collected",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "operation": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation"
+          },
+          "plan_complete": {
+            "title": "Plan Complete",
+            "type": "boolean"
+          },
+          "prepared": {
+            "title": "Prepared",
+            "type": "boolean"
+          },
+          "summary_complete": {
+            "title": "Summary Complete",
+            "type": "boolean"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "candidate_id",
+          "title",
+          "collected",
+          "prepared",
+          "plan_complete",
+          "summary_complete",
+          "operation",
+          "error"
+        ],
+        "title": "PaperProgress",
+        "type": "object"
+      },
+      "PaperProgressCounts": {
+        "additionalProperties": false,
+        "properties": {
+          "collected": {
+            "title": "Collected",
+            "type": "integer"
+          },
+          "failed": {
+            "title": "Failed",
+            "type": "integer"
+          },
+          "plan_complete": {
+            "title": "Plan Complete",
+            "type": "integer"
+          },
+          "prepared": {
+            "title": "Prepared",
+            "type": "integer"
+          },
+          "summarized": {
+            "title": "Summarized",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "collected",
+          "prepared",
+          "plan_complete",
+          "summarized",
+          "failed"
+        ],
+        "title": "PaperProgressCounts",
+        "type": "object"
+      },
+      "PaperProgressPage": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/PaperProgressCounts"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/PaperProgress"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/PaperProgress"
+            },
+            "title": "Operations",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "next_offset",
+          "counts",
+          "operations"
+        ],
+        "title": "PaperProgressPage",
+        "type": "object"
+      },
       "PaperReview": {
         "additionalProperties": false,
         "properties": {
           "candidate_id": {
             "title": "Candidate Id",
             "type": "string"
+          },
+          "collected": {
+            "default": false,
+            "title": "Collected",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
           },
           "evidence_count": {
             "title": "Evidence Count",
@@ -2061,6 +2349,16 @@
             },
             "title": "Partial Summaries",
             "type": "array"
+          },
+          "plan_complete": {
+            "default": false,
+            "title": "Plan Complete",
+            "type": "boolean"
+          },
+          "prepared": {
+            "default": false,
+            "title": "Prepared",
+            "type": "boolean"
           },
           "read_pages": {
             "items": {
@@ -3269,6 +3567,137 @@
         "title": "ResearchConversationCreateRequest",
         "type": "object"
       },
+      "ReviewActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "stage": {
+            "title": "Stage",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "tokens": {
+            "default": 0,
+            "title": "Tokens",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "key",
+          "stage",
+          "status"
+        ],
+        "title": "ReviewActivity",
+        "type": "object"
+      },
+      "ReviewActivityDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "status",
+          "result"
+        ],
+        "title": "ReviewActivityDetail",
+        "type": "object"
+      },
+      "ReviewActivityPage": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewActivity"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "items",
+          "total",
+          "next_offset"
+        ],
+        "title": "ReviewActivityPage",
+        "type": "object"
+      },
       "ReviewClearRequest": {
         "additionalProperties": false,
         "properties": {
@@ -3328,6 +3757,9 @@
               "approve_reference_pdfs",
               "pause",
               "stop_stage",
+              "skip_references",
+              "extend_analysis",
+              "write_report",
               "resume",
               "extend_budget",
               "link_paper"
@@ -3377,6 +3809,29 @@
             "title": "Expected Revision",
             "type": "integer"
           },
+          "main_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelReferenceSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "main_parallel_requests": {
+            "anyOf": [
+              {
+                "maximum": 32.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Main Parallel Requests"
+          },
           "reference_matches": {
             "anyOf": [
               {
@@ -3413,6 +3868,16 @@
               }
             ],
             "title": "Stage"
+          },
+          "summary_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SummaryRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "work_budget": {
             "anyOf": [
@@ -3459,6 +3924,13 @@
           "main_model": {
             "$ref": "#/components/schemas/ModelReferenceSpec"
           },
+          "main_parallel_requests": {
+            "default": 1,
+            "maximum": 32.0,
+            "minimum": 1.0,
+            "title": "Main Parallel Requests",
+            "type": "integer"
+          },
           "objective": {
             "maxLength": 20000,
             "minLength": 1,
@@ -3469,6 +3941,16 @@
             "default": false,
             "title": "Openalex Enabled",
             "type": "boolean"
+          },
+          "summary_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SummaryRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "title": {
             "maxLength": 200,
@@ -3681,7 +4163,8 @@
                   "papers",
                   "budget",
                   "references",
-                  "reference_pdfs"
+                  "reference_pdfs",
+                  "analysis"
                 ],
                 "type": "string"
               },
@@ -3748,6 +4231,10 @@
           "main_model": {
             "$ref": "#/components/schemas/ModelReferenceSpec"
           },
+          "main_parallel_requests": {
+            "title": "Main Parallel Requests",
+            "type": "integer"
+          },
           "notices": {
             "items": {
               "type": "string"
@@ -3769,6 +4256,11 @@
               }
             ],
             "title": "Output Path"
+          },
+          "references_skipped": {
+            "default": false,
+            "title": "References Skipped",
+            "type": "boolean"
           },
           "revision": {
             "title": "Revision",
@@ -3848,6 +4340,16 @@
               }
             ]
           },
+          "summary_model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SummaryRole"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "title": {
             "title": "Title",
             "type": "string"
@@ -3899,6 +4401,7 @@
           "stage",
           "approval",
           "main_model",
+          "main_parallel_requests",
           "decision_model",
           "conversation_id",
           "track_id",
@@ -5115,6 +5618,53 @@
           "answer_run"
         ],
         "title": "StopAndAnswerResponse",
+        "type": "object"
+      },
+      "SummaryRole": {
+        "additionalProperties": false,
+        "properties": {
+          "max_output_tokens": {
+            "default": 26214,
+            "maximum": 26214.0,
+            "minimum": 512.0,
+            "title": "Max Output Tokens",
+            "type": "integer"
+          },
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          },
+          "parallel_requests": {
+            "default": 1,
+            "maximum": 32.0,
+            "minimum": 1.0,
+            "title": "Parallel Requests",
+            "type": "integer"
+          },
+          "reasoning_effort": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning Effort"
+          }
+        },
+        "required": [
+          "model_reference"
+        ],
+        "title": "SummaryRole",
         "type": "object"
       },
       "ToolAttemptResponse": {
@@ -8016,6 +8566,195 @@
         ]
       }
     },
+    "/api/literature-reviews/{review_id}/activity": {
+      "get": {
+        "operationId": "review_activity_api_literature_reviews__review_id__activity_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewActivityPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Activity",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/activity/detail": {
+      "get": {
+        "operationId": "review_activity_detail_api_literature_reviews__review_id__activity_detail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "key",
+            "required": true,
+            "schema": {
+              "title": "Key",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewActivityDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Activity Detail",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/analysis": {
+      "get": {
+        "operationId": "review_analysis_api_literature_reviews__review_id__analysis_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/AnalysisProgress"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Review Analysis Api Literature Reviews  Review Id  Analysis Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Review Analysis",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
     "/api/literature-reviews/{review_id}/candidates": {
       "get": {
         "operationId": "review_candidates_api_literature_reviews__review_id__candidates_get",
@@ -8275,6 +9014,81 @@
           }
         },
         "summary": "Export Review",
+        "tags": [
+          "literature reviews"
+        ]
+      }
+    },
+    "/api/literature-reviews/{review_id}/paper-progress": {
+      "get": {
+        "operationId": "paper_progress_api_literature_reviews__review_id__paper_progress_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "review_id",
+            "required": true,
+            "schema": {
+              "title": "Review Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "summaries_only",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Summaries Only",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperProgressPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Paper Progress",
         "tags": [
           "literature reviews"
         ]

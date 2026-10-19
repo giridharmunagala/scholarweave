@@ -76,6 +76,9 @@ language data; encrypted PDFs must be unlocked before upload.
 - Browse 25-paper pages, filter by collection or preparation status, and sort by date or title.
 - Read the original PDF alongside extracted text, paper notes, and saved summaries.
 - Extract native PDF text and use Tesseract OCR for scanned pages, with optional vision-model OCR repair.
+- If a page cannot be extracted or recovered with OCR, skip its text and record the page number
+  and failure reason in the extraction metadata. Other pages continue with their original page
+  numbers; a PDF with no readable pages still reports an explicit preparation error.
 - Generate quick overviews or reviewed, citation-grounded summaries for one paper or a collection.
 - Keep immutable summary versions and source-versioned evidence, with the ability to promote a saved version.
 - Start a discussion from a paper, its summary, or its saved notes.
@@ -175,6 +178,80 @@ format and round-trip workflow.
 
 ### Agentic Literature Reviews
 
+```mermaid
+flowchart TD
+    A["Your research question"] --> B["Main LLM proposes scope and work limits"]
+    B --> C["You approve"]
+    C --> D["Discover papers and reuse local sources"]
+    D --> E["Decision model screens titles and abstracts"]
+    E --> F["Collect relevant PDFs"]
+    F --> G["Extract text; OCR where needed<br/>Record unrecoverable pages as skipped"]
+    G --> H["Decision model chooses pages to read or defer<br/>Using page excerpts and reading policy"]
+    H --> P{"Separate compact summary model?"}
+    P -->|Yes| Q["Tool-free summary model reads selected text<br/>One request when it fits; capped output"]
+    Q --> R["Save summary and page-linked findings<br/>No exact-quote gate or enhancement pass"]
+    P -->|No| I["Main LLM groups selected pages"]
+    I --> J["Read multi-page packets<br/>Extract quotes, findings and partial summaries"]
+    J --> K["Combine and audit each paper's summary"]
+    J --> L["Request additional pages if needed"]
+    L --> I
+    K --> M["Compare papers and audit findings"]
+    R --> S["At analysis: main model chooses useful papers/pages<br/>Read original transcripts and extract evidence"]
+    S --> M
+    M --> N["Save review with citations and coverage limits"]
+    K --> O["Check shared references from original papers"]
+    R --> O
+    O --> E
+```
+
+Page-level decisions do not mean one main-LLM reading call per page. The reader groups selected
+pages into multi-page packets that fit the main model's own context window, independently of the
+decision model's context limit. Packet sizes depend on text length and model-selected groups;
+an unusually long page may need splitting. Main-model reading jobs run sequentially, while native
+decision calls can run in parallel. Shared references use the same screening and reading flow
+within approved limits; supplemental papers do not expand references again.
+
+To speed up only paper summaries, enable **Use a separate compact summary model** in review setup,
+or in the always-visible **Summary model for unfinished papers** section of an existing review.
+If it is running, click **Pause to choose summary model**, make your selection, then resume from reading.
+Choose an enabled chat-capable model; it needs structured JSON generation, not tool calling.
+Discovery, screening, page selection, reference discovery and final synthesis keep their existing roles.
+Completed paper summaries are retained.
+
+Each compact response uses the four-section outline (motivation/contribution, method, results,
+open questions), with approximate sentence guidance: 5--8 for motivation/contribution, 10--15
+for the method, about 15 for results, and 3--6 for open questions. These are suggestions, not quotas
+or hard word/sentence limits; unsupported sections are omitted and thin evidence needs less prose.
+The summary model returns plain Markdown prose and limitations: no JSON schema, claims, quotations,
+claim indexes, or citation bookkeeping. The application records source packet pages and versions
+itself. There is no enhancement pass during this stage.
+Summary context is capped at **128K (131,072 tokens) per request**, or the smaller configured model
+context. **20% is reserved for output**, with a default generation cap of **26,214 tokens** including
+reasoning (configurable from 512 to 26,214). Smaller model contexts reduce that output ceiling.
+Instructions and the existing safety margin also reduce available input; unknown tokenizers use
+conservative byte-based admission. Choose low or no reasoning where supported.
+**Parallel summaries** selects 1--32 concurrent paper summaries (default 1). All use the same
+summary model, finish missing page decisions before generation, and drain before another model
+can run. Configure enough server slots and context **per slot**; 128K is not a shared batch budget.
+Pause cancels and accounts for every active child; completed summaries and packet receipts survive.
+
+Selected text that fits is summarized in one request, without model-driven grouping, combination
+or per-section audits. Oversized papers use bounded packets whose summaries are combined locally,
+with an explicit notice. Summary output is stored as returned, with no format/content validation
+and no validation-repair calls. The section/sentence style is prompt guidance, not an acceptance check.
+Summary prose is saved as an unverified lead, never counted as verified evidence.
+Existing prose rejected for quote mismatches or invalid claim indexes can be reused without another
+generation call, including after pause/resume.
+At analysis time, the main model uses summaries as leads to select useful original paper pages,
+reads their extracted transcripts, and obtains source-backed evidence before synthesis/auditing.
+This does not enhance or regenerate every paper summary. Compact summaries remain review-local artifacts, not
+canonical full-paper summaries.
+The review's **Paper summaries** browser shows a paginated, metadata-only list, filtered to ready
+summaries by default. **View summary** fetches just that paper's saved text. Source/page diagnostics
+are a separate disclosure; progress polling does not download summary bodies.
+Existing reviews retain their saved output limit; set it to 26214 and choose **Parallel summaries**
+under **Summary model for unfinished papers** when resuming to use the larger budget/concurrency.
+
 Open **Deep Work > Literature reviews**, or follow a research track's **Deep Work** link, to build a source-backed review document.
 Choose a main model and a System One decision model under **Settings > Default models**.
 New reviews inherit that decision default, with a per-review override available. Approve the proposed
@@ -198,7 +275,8 @@ Native llama.cpp `/v1/systemone` screening defaults to eight same-model requests
 Change **Parallel decision calls** in **Settings > Default models** (1–32). The saved limit applies
 to subsequent requests without restarting. Screening progress streams after each completed decision,
 with automatic reconnect and a three-second polling fallback.
-Generation and model switches remain serialized. Main-model fallback screens batches, not one
+Other generation and model switches remain serialized; only an explicitly configured same-model
+summary group adds generative concurrency. Main-model fallback screens batches, not one
 generation per paper. Native ratings are metadata judgments, not proof of
 scientific quality or novelty. See [review setup and controls](docs/research-tracks.md#staged-literature-reviews)
 for decision-model limits, source keys, missing PDFs, and recovery. Terminal users can open `/review`.
@@ -255,11 +333,13 @@ npm.cmd install
 npm.cmd run build
 Set-Location ..
 
-.\.venv\Scripts\python.exe -m uvicorn backend.app:app --host 127.0.0.1 --port 1102
+.\.venv\Scripts\python.exe -m scholarweave_tui --web
 ```
 
-Open [ScholarWeave](http://127.0.0.1:1102), add your provider in **Settings**, and select a chat model.
-The backend serves both the API and the built frontend.
+The launcher opens ScholarWeave in your browser. Add your provider in **Settings** and select a chat
+model. The backend serves both the API and the built frontend on the same origin: it prefers
+port 1102, but automatically reserves a free loopback port if that port is occupied. The browser
+opens the selected URL and `/api` follows it automatically; no frontend/backend port editing is needed.
 
 **Windows web launcher (not the terminal cockpit):**
 
@@ -270,8 +350,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\launch-scholar
 This builds the frontend, starts or reuses the local backend for this library, checks that
 it serves the web app, and opens your default browser. It does not require the terminal extra.
 Keep the launcher window open while using a server it started; Ctrl+C shuts down only that
-server. A pre-existing backend is left running. If that backend started before the frontend
-was built, restart it first. Use `-ApiUrl http://127.0.0.1:8001` for a different port, or
+server. A compatible pre-existing backend for this library is discovered and left running,
+even if it uses an automatically selected port. If that backend started before the frontend
+was built, restart it first. Use `-ApiUrl http://127.0.0.1:8001` to prefer a different port, or
 `-Check -NoPause` to check startup without opening the browser. The existing Windows shortcut
 and `launch-scholarweave.ps1` remain terminal launchers.
 
@@ -292,6 +373,15 @@ Ctrl+C stops only that backend. All options are forwarded, including a startup-o
 ```sh
 sh scripts/launch-scholarweave-web.sh --api-url http://127.0.0.1:8001 --check
 ```
+
+**Frontend development:** start the backend with the launcher above, then run `npm run dev`
+from `frontend/`. Vite also chooses another port if its preferred frontend port is busy; open
+the URL it prints. Its same-origin `/api` proxy reads the launcher's local
+`backend-runtime.json` discovery file on each request, so backend port changes are picked up
+without restarting Vite. The file lives in `local_data/` by default, or `SCHOLARWEAVE_DATA_DIR`
+when configured in the repository `.env` or environment.
+`--connect-only --api-url ...` requires that exact existing origin and never selects another port.
+A manually invoked `uvicorn --port ...` still uses a fixed port; use the launcher for automatic selection.
 
 The app has no authentication, so keep its web server bound to `127.0.0.1`. This does not restrict
 model connections: your provider can run on your machine, another server, or a hosted service.

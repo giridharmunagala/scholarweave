@@ -4,12 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
+    "dev": "vite --config vite.config.ts",
+    "build": "tsc -b && vite build --config vite.config.ts",
     "generate:api": "python ../scripts/export_openapi.py openapi.json && openapi-typescript openapi.json -o src/api/schema.generated.ts",
     "check:api": "python ../scripts/check_api_contracts.py",
-    "preview": "vite preview",
-    "test": "vitest run"
+    "preview": "vite preview --config vite.config.ts",
+    "test": "vitest run --config vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
@@ -24,6 +24,7 @@
     "remark-math": "^6.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.7.0",

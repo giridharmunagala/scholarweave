@@ -81,7 +81,7 @@ class DocumentIngestion:
             assert enhancement_model is not None
             assert quality_model is not None
             await self.vision.enhance_pages(
-                pages,
+                [page for page in pages if page.get("_image_png") and not page.get("ocr_skipped")],
                 enhancement_model,
                 triage_model=quality_model,
                 progress=progress,
@@ -209,8 +209,12 @@ class DocumentIngestion:
             len(str(page.get("text") or "").strip()) for page in pages
         )
         if extracted_char_count == 0:
+            notes = " ".join(
+                str(page["ocr_fallback_note"]) for page in pages if page.get("ocr_fallback_note")
+            )
             raise DocumentProcessingError(
                 "No readable text was extracted from the paper. Retry ingestion with OCR."
+                + (f" {notes}" if notes else "")
             )
         chunks = self.formatter.chunk_pages(pages, title=document.title)
         if not chunks:
@@ -287,6 +291,7 @@ class DocumentIngestion:
             metadata={
                 "ocr_available": self.ocr.available(),
                 "ocr_pages": [page["page"] for page in pages if page.get("ocr_used")],
+                "ocr_skipped_pages": [page["page"] for page in pages if page.get("ocr_skipped")],
                 "ocr_fallback_pages": [int(page) for page in ocr_fallback_notes],
                 "ocr_fallback_notes": ocr_fallback_notes,
                 "llm_enhanced_pages": [page["page"] for page in pages if page.get("llm_enhanced")],

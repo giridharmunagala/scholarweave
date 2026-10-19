@@ -12,6 +12,16 @@ InferencePriority = Literal["interactive", "background"]
 DEFAULT_PARALLEL_DECISIONS = 8
 _priority: ContextVar[InferencePriority] = ContextVar("inference_priority", default="interactive")
 _progress: ContextVar[Callable[[str], Awaitable[None]] | None] = ContextVar("inference_progress", default=None)
+_parallel_group: ContextVar[tuple[str, int] | None] = ContextVar("inference_parallel_group", default=None)
+
+
+@contextmanager
+def inference_parallel_group(group: str, limit: int) -> Iterator[None]:
+    token = _parallel_group.set((group, limit))
+    try:
+        yield
+    finally:
+        _parallel_group.reset(token)
 
 
 @contextmanager
@@ -44,6 +54,7 @@ class _Request:
     model: str | None
     priority: InferencePriority
     decision: bool = False
+    parallel_group: tuple[str, int] | None = None
 
 
 @dataclass
@@ -83,7 +94,7 @@ class InferenceLease:
 
 
 class InferenceScheduler:
-    """One generation lane, allowing bounded same-model native decision batches."""
+    """One model at a time, with bounded native decisions and explicit summary groups."""
 
     def __init__(self, *, decision_parallelism: Callable[[], int] | None = None) -> None:
         self._decision_parallelism = decision_parallelism or (lambda: DEFAULT_PARALLEL_DECISIONS)
@@ -110,9 +121,14 @@ class InferenceScheduler:
         )
         if self._active:
             active = self._active[0]
-            if not (active.decision and candidate.decision
-                    and (active.profile_id, active.model) == (candidate.profile_id, candidate.model)
-                    and len(self._active) < self._decision_parallelism()):
+            same_model = (active.profile_id, active.model) == (candidate.profile_id, candidate.model)
+            decisions = active.decision and candidate.decision and len(self._active) < self._decision_parallelism()
+            summaries = (
+                not active.decision and not candidate.decision
+                and active.parallel_group is not None and candidate.parallel_group == active.parallel_group
+                and len(self._active) < active.parallel_group[1]
+            )
+            if not (same_model and (decisions or summaries)):
                 return None
         return candidate
 
@@ -177,7 +193,7 @@ class InferenceScheduler:
             policy = self._policies.get(profile_id, False) if profile_id is not None else False
         state = self._providers.setdefault(profile_id, _ProviderQueue())
         state.serialize_model_switches = policy
-        item = _Request(profile_id, model, priority or _priority.get(), decision)
+        item = _Request(profile_id, model, priority or _priority.get(), decision, _parallel_group.get())
         self._waiters.append(item)
         try:
             while self._next_request() is not item:

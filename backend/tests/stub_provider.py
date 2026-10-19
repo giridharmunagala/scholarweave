@@ -59,6 +59,7 @@ class StubProvider:
         self.tool_arguments: dict[str, Any] = {}
         self.tool_plans: list[tuple[str, str, dict[str, Any]]] = []
         self.stream_delay_seconds = 0.0
+        self.stream_gates: dict[str, threading.Event] = {}
         self.tool_plan_cursor = 0
         self.base_url = ""
         self.reject_reasoning_with_tools = False
@@ -68,6 +69,14 @@ class StubProvider:
         self.decision_delay_seconds = 0.0
         self.active_inference = 0
         self.max_active_inference = 0
+        self.tokenizer_enabled = False
+        self.tokenizer_requests: list[dict[str, Any]] = []
+
+    def tokenize(self, payload: dict) -> dict:
+        import tiktoken
+
+        self.tokenizer_requests.append(payload)
+        return {"tokens": tiktoken.get_encoding("cl100k_base").encode(payload["content"])}
 
     @contextmanager
     def inference(self):
@@ -95,6 +104,13 @@ class StubProvider:
 
     def _reply_for(self, _payload: dict[str, Any]) -> str:
         return self.reply
+
+    async def wait_for_stream(self, payload: dict) -> None:
+        gate = self.stream_gates.get(payload.get("model"))
+        if gate is not None and not await asyncio.to_thread(gate.wait, 10):
+            raise TimeoutError("The test did not release the provider response stream.")
+        if self.stream_delay_seconds:
+            await asyncio.sleep(self.stream_delay_seconds)
 
     def responses(self, payload: dict[str, Any]) -> dict[str, Any]:
         self.requests.append(payload)
@@ -260,6 +276,12 @@ def stub_provider():
     provider = StubProvider()
     app = FastAPI()
 
+    @app.post("/tokenize")
+    async def tokenize(request: Request):
+        if not provider.tokenizer_enabled:
+            return JSONResponse(status_code=404, content={"error": {"message": "Tokenizer unavailable"}})
+        return provider.tokenize(await request.json())
+
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
         payload = await request.json()
@@ -276,8 +298,7 @@ def stub_provider():
         if payload.get("stream"):
             async def chunks():
                 with provider.inference():
-                    if provider.stream_delay_seconds:
-                        await asyncio.sleep(provider.stream_delay_seconds)
+                    await provider.wait_for_stream(payload)
                     yield provider.stream(payload)
 
             return StreamingResponse(chunks(), media_type="text/event-stream")
@@ -304,8 +325,7 @@ def stub_provider():
         if payload.get("stream"):
             async def chunks():
                 with provider.inference():
-                    if provider.stream_delay_seconds:
-                        await asyncio.sleep(provider.stream_delay_seconds)
+                    await provider.wait_for_stream(payload)
                     yield provider.response_api_stream(payload)
 
             return StreamingResponse(chunks(), media_type="text/event-stream")

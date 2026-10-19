@@ -6,7 +6,10 @@ import json
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import replace
-from typing import Any
+from typing import Any, overload
+from urllib.parse import urlsplit, urlunsplit
+
+from openai import NotFoundError as ProviderNotFoundError
 
 from backend.agents.blueprint import AgentBlueprint, ModelReferenceSpec
 from backend.agents.compiler import AgentCompiler, CompiledAgent
@@ -17,6 +20,7 @@ from backend.prompting.registry import PromptRegistry
 from backend.providers.decisions import decision_input_size, score_decisions
 from backend.providers.inference import inference_priority
 from backend.providers.runtime import ModelRuntime
+from backend.providers.reasoning import ReasoningEffort
 from backend.providers.types import ModelReference
 from backend.research.reviews.repository import ReviewRepository
 from backend.research.reviews.schemas import DecisionRole, ReviewSchema
@@ -97,11 +101,18 @@ class ReviewJobs:
         self.repository.save_job(review_id, key, "work_budget", {"key": key, "work_kind": kind})
 
     def prepare(
-        self, reference: ModelReferenceSpec, prompt_id: str, schema: type[ReviewSchema], *, input_tokens: int | None = None,
+        self, reference: ModelReferenceSpec, prompt_id: str, schema: type[ReviewSchema] | None = None, *, input_tokens: int | None = None,
+        max_output_tokens: int | None = None, reasoning_effort: ReasoningEffort | None = None,
+        context_window_tokens: int | None = None, output_reserve_fraction: float | None = None,
     ) -> tuple[CompiledAgent, InputBudget, int]:
         resolved = self.runtime.resolve("chat", model_reference=ModelReference.model_validate(reference.model_dump()))
         window = resolved.context_window_tokens or self.runtime.settings.agent_context_window_tokens
-        input_limit, output_limit, _ = model_context_budget(window)
+        if context_window_tokens is not None:
+            window = min(window, context_window_tokens)
+        reserved_output = int(window * output_reserve_fraction) if output_reserve_fraction is not None else max_output_tokens
+        input_limit, output_limit, _ = model_context_budget(window, reserved_output)
+        if max_output_tokens is not None:
+            output_limit = min(output_limit, max_output_tokens)
         blueprint = AgentBlueprint.model_validate({
             "name": f"Literature review: {prompt_id}",
             "entry_agent_id": "review_worker",
@@ -110,8 +121,12 @@ class ReviewJobs:
                 "id": "review_worker", "name": "Isolated literature worker",
                 "instructions": self.prompts.render(prompt_id),
                 "model": reference.model_dump(),
-                "model_settings": {"max_tokens": output_limit},
-                "output": {"kind": "json_schema", "name": schema.__name__, "schema": schema.model_json_schema()},
+                "model_settings": {
+                    "max_tokens": output_limit,
+                    **({"reasoning": {"effort": reasoning_effort}} if reasoning_effort is not None else {}),
+                },
+                **({"output": {"kind": "json_schema", "name": schema.__name__, "schema": schema.model_json_schema()}}
+                   if schema is not None else {}),
             }],
         })
         compiled = self.compiler.compile(blueprint, context_window_tokens=window)
@@ -121,9 +136,23 @@ class ReviewJobs:
         ))
         budget = InputBudget(resolved.model, min(input_limit, input_tokens) if input_tokens is not None else input_limit)
         # The wire schema and runtime system information are additional to agent instructions.
-        budget.limit -= budget.count("", json_text(schema.model_json_schema())) + 1024
+        budget.limit -= (budget.count("", json_text(schema.model_json_schema())) if schema is not None else 0) + 1024
         if budget.limit <= 0:
-            raise ValidationError("The selected model context cannot accommodate this worker's instructions and schema.")
+            raise ValidationError("The selected model context cannot accommodate this worker's instructions and request overhead.")
+        if prompt_id == "literature-analysis-sources":
+            async def count_request(parameters: dict) -> int | None:
+                if budget.encoding is not None:
+                    return 32 + len(budget.encoding.encode(json_text(parameters), disallowed_special=()))
+                if budget.method != "provider-tokenize":
+                    return None
+                return await self._provider_input_count(
+                    json_text(parameters), (compiled, budget, output_limit), serialized_request=True,
+                )
+
+            compiled = replace(compiled, context_policy=ContextBudgetPolicy(
+                self.runtime.settings, context_window_tokens_by_agent={"review_worker": window},
+                prompt_registry=self.prompts, request_token_counter=count_request,
+            ))
         return compiled, budget, output_limit
 
     def packets(
@@ -147,11 +176,102 @@ class ReviewJobs:
             packets.append({**frame, "records": current})
         return packets
 
+    async def _provider_input_count(
+        self, prompt: str, prepared: tuple[CompiledAgent, InputBudget, int],
+        *, serialized_request: bool = False,
+    ) -> int:
+        compiled, budget, _ = prepared
+        system = "" if serialized_request else compiled.entry_agent.instructions
+        cached = budget.cached_count(system, prompt)
+        if cached is not None:
+            return cached
+        binding = compiled.entry_agent.binding
+        url = urlsplit(str(binding.client.base_url))
+        path = url.path.rstrip("/")
+        if path.endswith("/v1"):
+            path = path[:-3]
+        endpoint = urlunsplit((url.scheme, url.netloc, f"{path}/tokenize", "", ""))
+        with inference_priority("background"):
+            async with self.runtime.inference_scheduler.request(
+                profile_id=binding.provider_profile_id, model=binding.model_name,
+                server_url=str(binding.client.base_url).rstrip("/"),
+            ):
+                result = await binding.client.post(endpoint, cast_to=object, body={
+                    "model": binding.model_name,
+                    "content": prompt if serialized_request else budget.serialize(system, prompt),
+                })
+        if not isinstance(result, dict) or not isinstance(result.get("tokens"), list) or not result["tokens"] or not all(
+            isinstance(token, int) and not isinstance(token, bool) for token in result["tokens"]
+        ):
+            raise ValidationError("The inference server returned an invalid tokenizer response; no oversized summary request was sent.")
+        count = len(result["tokens"]) + 32
+        budget.remember_count(system, prompt, count)
+        return count
+
+    async def summary_packets(
+        self, review_id: str, records: list[dict], frame: dict,
+        prepared: tuple[CompiledAgent, InputBudget, int],
+    ) -> list[dict]:
+        compiled, budget, _ = prepared
+        if budget.encoding is not None:
+            return self.packets(records, frame, prepared)
+        if compiled.entry_agent.binding.provider_kind != "openai_compatible":
+            self._tokenizer_notice(review_id)
+            return self.packets(records, frame, prepared)
+        try:
+            await self._provider_input_count(json_text({**frame, "records": []}), prepared)
+        except ProviderNotFoundError:
+            self._tokenizer_notice(review_id)
+            return self.packets(records, frame, prepared)
+        budget.method = "provider-tokenize"
+        packets = []
+        offset = 0
+        while offset < len(records):
+            if self.repository.get(review_id).state["status"] != "running":
+                raise ReviewPaused()
+            low, high = 1, len(records) - offset
+            fitting = 0
+            while low <= high:
+                size = (low + high) // 2
+                packet = {**frame, "records": records[offset:offset + size]}
+                count = await self._provider_input_count(json_text(packet), prepared)
+                if count <= budget.limit:
+                    fitting, low = size, size + 1
+                else:
+                    high = size - 1
+            if not fitting:
+                raise ValidationError("One complete summary exceeds the model's measured input budget. Use a larger context or a narrower objective.")
+            packets.append({**frame, "records": records[offset:offset + fitting]})
+            offset += fitting
+        return packets
+
+    def _tokenizer_notice(self, review_id: str) -> None:
+        state = self.repository.get(review_id).state
+        notice = "Exact tokenization is unavailable for summary selection; conservative byte-based batches may underfill the model context."
+        if notice not in state.get("notices", []):
+            self.checkpoint(review_id, notices=[*state.get("notices", []), notice])
+
+    @overload
     async def call(
         self, review_id: str, stage: str, key: str, packet: dict,
         prepared: tuple[CompiledAgent, InputBudget, int], schema: type[ReviewSchema],
         validate: Callable[[dict], None] | None = None,
-    ) -> dict:
+    ) -> dict: ...
+
+    @overload
+    async def call(
+        self, review_id: str, stage: str, key: str, packet: dict,
+        prepared: tuple[CompiledAgent, InputBudget, int], schema: None = None,
+        validate: None = None,
+    ) -> str: ...
+
+    async def call(
+        self, review_id: str, stage: str, key: str, packet: dict,
+        prepared: tuple[CompiledAgent, InputBudget, int], schema: type[ReviewSchema] | None = None,
+        validate: Callable[[dict], None] | None = None,
+    ) -> dict | str:
+        if schema is None:
+            return await self._call(review_id, stage, key, packet, prepared, None)
         current = packet
         for attempt in range(3):
             if attempt and self.repository.get(review_id).state["status"] != "running":
@@ -175,7 +295,10 @@ class ReviewJobs:
                     "Resolve the validation error; do not invent evidence or omit required records.",
                 }
                 compiled, budget, _ = prepared
-                if budget.count(compiled.entry_agent.instructions, json_text(current)) > budget.limit:
+                size = (await self._provider_input_count(json_text(current), prepared)
+                        if budget.method == "provider-tokenize"
+                        else budget.count(compiled.entry_agent.instructions, json_text(current)))
+                if size > budget.limit:
                     raise InvalidReviewOutput(
                         f"{exc}; corrective feedback cannot fit the admitted context. No truncated repair was sent."
                     ) from exc
@@ -183,14 +306,11 @@ class ReviewJobs:
 
     async def _call(
         self, review_id: str, stage: str, key: str, packet: dict,
-        prepared: tuple[CompiledAgent, InputBudget, int], schema: type[ReviewSchema],
+        prepared: tuple[CompiledAgent, InputBudget, int], schema: type[ReviewSchema] | None,
         validate: Callable[[dict], None] | None = None,
-    ) -> dict:
+    ) -> dict | str:
         compiled, budget, reserve = prepared
         prompt = json_text(packet)
-        estimated = budget.count(compiled.entry_agent.instructions, prompt)
-        if estimated > budget.limit:
-            raise ValidationError("Review input exceeds its admitted context. No truncated request was sent.")
         binding = compiled.entry_agent.binding
         provenance = {
             "model": binding.model_name, "provider_profile_id": binding.provider_profile_id,
@@ -199,6 +319,20 @@ class ReviewJobs:
             "endpoint_hash": digest(str(binding.client.base_url)), "provider_kind": binding.provider_kind,
         }
         job_key = f"{key}:{digest(provenance)}"
+        state = self.repository.get(review_id).state
+        if state.get("main_model") == {
+            "provider_profile_id": binding.provider_profile_id, "model": binding.model_name,
+        }:
+            for previous in self.repository.jobs(review_id, stage, key_prefix=f"{key}:"):
+                prior_provenance = previous.get("provenance", {})
+                if (
+                    previous.get("status") in {"completed", "settled"}
+                    and previous.get("key") == f"{key}:{digest(prior_provenance)}"
+                    and all(prior_provenance.get(field) == provenance[field] for field in ("prompt_hash", "input_hash"))
+                ):
+                    return self._validate_result(review_id, previous["key"], stage, {
+                        **previous, "raw_result": previous.get("result", previous.get("raw_result")),
+                    }, schema, validate)
         saved = self.repository.job(review_id, job_key) or {
             "key": job_key, "stage": stage, "provenance": provenance, "tokens_spent": 0,
         }
@@ -213,6 +347,10 @@ class ReviewJobs:
             raise InvalidReviewOutput(error)
         if saved.get("status") == "settled":
             return self._validate_result(review_id, job_key, stage, saved, schema, validate)
+        estimated = (await self._provider_input_count(prompt, prepared)
+                     if budget.method == "provider-tokenize" else budget.count(compiled.entry_agent.instructions, prompt))
+        if estimated > budget.limit:
+            raise ValidationError("Review input exceeds its admitted context. No truncated request was sent.")
         if self.repository.get(review_id).state["status"] != "running":
             raise ReviewPaused()
         run = None
@@ -224,7 +362,7 @@ class ReviewJobs:
                     raise ValidationError("An unfinished review task's run is missing. Its outcome cannot be assumed.")
         if run is None or run.status in {"failed", "cancelled"}:
             if saved.get("status") != "starting":
-                overhead = budget.count("", json_text(schema.model_json_schema())) + 1024
+                overhead = (budget.count("", json_text(schema.model_json_schema())) if schema is not None else 0) + 1024
                 self.reserve(review_id, estimated + overhead + reserve)
                 saved = {
                     **saved, "run_id": str(uuid.uuid4()), "status": "starting",
@@ -258,10 +396,10 @@ class ReviewJobs:
             self._account(review_id, job_key, stage, saved, run)
             raise
         self._account(review_id, job_key, stage, saved, run)
-        self.checkpoint(review_id, active_run_id=None)
+        self.checkpoint(review_id, active_run_id=self.repository.running_run(review_id))
         if run.status != "completed":
             error = run.error or ""
-            if run.status == "failed" and (
+            if schema is not None and run.status == "failed" and (
                 f"Model returned invalid JSON for structured output '{schema.__name__}'" in error
                 or f"Structured output '{schema.__name__}' failed JSON Schema validation:" in error
             ):
@@ -274,9 +412,13 @@ class ReviewJobs:
         return self._validate_result(review_id, job_key, stage, saved, schema, validate)
 
     def _validate_result(
-        self, review_id: str, key: str, stage: str, saved: dict, schema: type[ReviewSchema],
+        self, review_id: str, key: str, stage: str, saved: dict, schema: type[ReviewSchema] | None,
         validate: Callable[[dict], None] | None,
-    ) -> dict:
+    ) -> dict | str:
+        if schema is None:
+            result = saved["raw_result"]
+            self.repository.save_job(review_id, key, stage, {**saved, "status": "completed", "result": result})
+            return result
         try:
             result = schema.model_validate(saved["raw_result"]).model_dump(mode="json")
             if validate:

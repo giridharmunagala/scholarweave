@@ -29,7 +29,8 @@ def main() -> None:
     parser.add_argument(
         "--api-url",
         default="http://127.0.0.1:1102",
-        help="Local server origin (default: http://127.0.0.1:1102).",
+        help="Preferred local origin; automatically chooses a free port if occupied (default: http://127.0.0.1:1102). "
+             "--connect-only requires this exact origin.",
     )
     args = parser.parse_args()
     if not args.web and importlib.util.find_spec("textual") is None:
@@ -50,6 +51,7 @@ def main() -> None:
         with BackendSession(
             base_url, root, connect_only=args.connect_only, timeout=args.startup_timeout,
         ) as session:
+            base_url = session.base_url
             if args.web:
                 session.check_web()
             if args.check:

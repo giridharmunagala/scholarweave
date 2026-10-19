@@ -227,12 +227,35 @@ class ReviewRepository:
             ))
             return deepcopy(row.content) if row else None
 
-    def jobs(self, review_id: str, stage: str | None = None) -> list[dict]:
+    def jobs(self, review_id: str, stage: str | None = None, *, key_prefix: str | None = None) -> list[dict]:
         with self.sessions() as session:
             query = select(ReviewJob).where(ReviewJob.review_id == review_id)
             if stage:
                 query = query.where(ReviewJob.stage == stage)
+            if key_prefix is not None:
+                query = query.where(ReviewJob.job_key.startswith(key_prefix))
             return [deepcopy(row.content) for row in session.scalars(query.order_by(ReviewJob.job_key))]
+
+    def activity_page(self, review_id: str, *, limit: int, offset: int) -> tuple[list[dict], int]:
+        conditions = (
+            ReviewJob.review_id == review_id,
+            ReviewJob.stage.not_in(("progress", "work_budget")),
+            ReviewJob.job_key != "analysis-plan",
+        )
+        with self.sessions() as session:
+            total = session.scalar(select(func.count()).select_from(ReviewJob).where(*conditions)) or 0
+            rows = session.scalars(select(ReviewJob).where(*conditions).order_by(
+                ReviewJob.updated_at.desc(), ReviewJob.job_key,
+            ).offset(offset).limit(limit))
+            return [{**deepcopy(row.content), "key": row.job_key, "stage": row.stage} for row in rows], total
+
+    def running_run(self, review_id: str) -> str | None:
+        run_id = func.json_extract(ReviewJob.content, "$.run_id")
+        with self.sessions() as session:
+            return session.scalar(select(run_id).where(
+                ReviewJob.review_id == review_id, run_id.is_not(None),
+                func.json_extract(ReviewJob.content, "$.status").in_(("starting", "running")),
+            ).order_by(ReviewJob.job_key).limit(1))
 
     def save_job(self, review_id: str, key: str, stage: str, content: dict) -> None:
         identifier = hashlib.sha256(f"{review_id}:{key}".encode()).hexdigest()
@@ -246,6 +269,24 @@ class ReviewRepository:
                 row.content = deepcopy(content)
                 row.updated_at = utcnow()
             session.commit()
+
+    def paper_jobs(self, review_id: str, candidate_id: str | None = None) -> list[dict]:
+        with self.sessions() as session:
+            query = select(ReviewJob).where(
+                ReviewJob.review_id == review_id,
+                or_(
+                    ReviewJob.job_key.startswith("reading-plan:"),
+                    ReviewJob.job_key.startswith("paper-operation:"),
+                    func.json_extract(ReviewJob.content, "$.kind").in_(("evidence", "analysis_evidence", "selective_summary")),
+                ),
+            )
+            if candidate_id is not None:
+                query = query.where(or_(
+                    ReviewJob.job_key.startswith(f"reading-plan:{candidate_id}:"),
+                    ReviewJob.job_key == f"paper-operation:{candidate_id}",
+                    func.json_extract(ReviewJob.content, "$.candidate_id") == candidate_id,
+                ))
+            return [deepcopy(row.content) for row in session.scalars(query.order_by(ReviewJob.job_key))]
 
     def cached(self, key: str, *, max_age_seconds: int = 86_400) -> dict | None:
         with self.sessions() as session:
