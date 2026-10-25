@@ -3,6 +3,7 @@ import { Link, useNavigationGuard } from '../../app/router';
 import { Icon } from '../../shared/components/Icons';
 import { EmptyState, ErrorNotice, Loading } from '../../shared/components/Ui';
 import { ModelSelect } from '../../shared/components/ModelSelect';
+import { SettingsDrawer } from '../../shared/components/SettingsDrawer';
 import { chatModelSelectOptions, modelReferenceLabel } from '../chat/ChatModelPicker';
 import { providersApi, type Provider } from '../providers/api';
 import {
@@ -54,7 +55,6 @@ export default function BriefPage() {
   const editionRevision = useRef(0);
   const mounted = useRef(true);
   const running = useRef(true);
-  useNavigationGuard(!!busy, 'A brief operation is still running. Please wait before leaving.', false);
 
   useEffect(() => {
     mounted.current = true;
@@ -159,6 +159,7 @@ export default function BriefPage() {
       setQuery('');
       setTopic('');
       setNotice('Temporary data cleared. Kept papers and pages remain in your library.');
+      setSettingsOpen(false);
     });
   };
   const configure = (preferences: BriefPreferences) => perform('Saving interests and refreshing', async () => {
@@ -202,27 +203,52 @@ export default function BriefPage() {
         <div>
           <div className="brief-date"><Icon name="bulb" size={16} /> YOUR MORNING EDITION <span>{date}</span></div>
           <h1>Morning Brief<span className="brief-title-dot">.</span></h1>
-          <p>A little less noise. A little more understanding.</p>
         </div>
         <div className="brief-header-actions">
-          <button type="button" className="button secondary" onClick={() => setSettingsOpen(!settingsOpen)} aria-expanded={settingsOpen} disabled={!!busy}>
-            <Icon name="sliders" size={15} /> Interests & sources
-          </button>
           <button type="button" className="button" onClick={() => void refresh()} disabled={!!busy}>
             <Icon name="refresh" size={15} /> Refresh
+          </button>
+          <button type="button" className="icon-button settings-trigger" onClick={() => setSettingsOpen(true)}
+            aria-label="Brief settings" title="Brief settings" aria-haspopup="dialog"
+            aria-controls="brief-settings" aria-expanded={settingsOpen}>
+            <Icon name="settings" size={20} /><span>Settings</span>
           </button>
         </div>
       </header>
 
-      <div className="brief-lifecycle">
-        <span><Icon name="shield" size={15} /> Today's edition is cached across visits and server restarts. Downloads stay temporary until you choose <strong>Keep</strong>.</span>
-        <button type="button" className="button ghost small brief-clear" onClick={clear} disabled={!!busy || !edition?.day || edition.cleared}>
-          <Icon name="trash" size={14} /> Clear fetched data
-        </button>
-      </div>
       {error ? <ErrorNotice error={error} /> : null}
       {notice ? <p className="brief-notice" role="status">{notice}</p> : null}
-      {settingsOpen && catalog ? <BriefSettings catalog={catalog} busy={!!busy} onSave={configure} onClose={() => setSettingsOpen(false)} /> : null}
+      <SettingsDrawer id="brief-settings" title="Brief settings" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+        {error ? <ErrorNotice error={error} /> : null}
+        <section aria-label="Highlights model">
+          <h3>Highlights</h3>
+          <label htmlFor="brief-model">Morning Brief model</label>
+          <ModelSelect id="brief-model" ariaLabel="Morning Brief model"
+            options={chatModelSelectOptions(providers)}
+            value={catalog?.preferences.summary_model_reference ?? {}}
+            disabled={!!busy || summaryRunning || !catalog}
+            emptyOptionLabel="Same as chat"
+            emptyOptionHint={modelReferenceLabel(catalog?.summary_model_reference ?? {}, providers) || 'No chat model selected'}
+            onChange={(reference) => {
+              if (!catalog) return;
+              void perform('Saving brief model', async () => {
+                const next = await savePreferences({ ...catalog.preferences,
+                  summary_model_reference: reference.model ? reference : null });
+                if (mounted.current) setCatalog(next);
+              });
+            }}
+          />
+          <p className="field-hint">Model changes are saved immediately. Highlights are generated only when you ask, with at most 32K input per call and whole sources only.</p>
+        </section>
+        {catalog ? <BriefSettings catalog={catalog} busy={!!busy} onSave={configure} /> : <p>Interests and sources are not available yet.</p>}
+        <section aria-label="Temporary data">
+          <h3>Temporary data</h3>
+          <p className="field-hint">Today's edition is cached across visits and server restarts. Downloads stay temporary until you choose Keep. Daily highlights and kept library files are never cleared here.</p>
+          <button type="button" className="button danger small brief-clear" onClick={clear} disabled={!!busy || !edition?.day || edition.cleared}>
+            <Icon name="trash" size={14} /> Clear fetched data
+          </button>
+        </section>
+      </SettingsDrawer>
       {busy ? <Loading label={`${busy}...`} /> : null}
 
       {edition ? (
@@ -231,22 +257,6 @@ export default function BriefPage() {
             <div className="brief-highlights-heading">
               <div><h2>Today's highlights</h2><p>The main ideas first. Explore the sources below when something catches your eye.</p></div>
               <div className="brief-summary-controls">
-                <label htmlFor="brief-model">Morning Brief model</label>
-                <ModelSelect id="brief-model" ariaLabel="Morning Brief model"
-                  options={chatModelSelectOptions(providers)}
-                  value={catalog?.preferences.summary_model_reference ?? {}}
-                  disabled={!!busy || summaryRunning || !catalog}
-                  emptyOptionLabel="Same as chat"
-                  emptyOptionHint={modelReferenceLabel(catalog?.summary_model_reference ?? {}, providers) || 'No chat model selected'}
-                  onChange={(reference) => {
-                    if (!catalog) return;
-                    void perform('Saving brief model', async () => {
-                      const next = await savePreferences({ ...catalog.preferences,
-                        summary_model_reference: reference.model ? reference : null });
-                      if (mounted.current) setCatalog(next);
-                    });
-                  }}
-                />
                 <button type="button" className="button secondary small" onClick={() => void startHighlights()}
                   disabled={!!busy || summaryRunning || !items.length || !catalog?.summary_model_reference?.model}>
                   {summary ? 'Regenerate highlights' : 'Generate highlights'}
@@ -260,8 +270,9 @@ export default function BriefPage() {
               </small>
             </div> : !summaryRunning ? <p className="brief-summary-help">
               {catalog?.summary_model_reference?.model
-                ? 'Generate a short overview from the collected metadata. No extra pages or PDFs are fetched.'
-                : <>Select a model for highlights, or <Link to="/settings">configure providers</Link>. The reading list works without an LLM.</>}
+                ? 'Generate a short overview from the collected metadata when you choose. Browsing and refreshing never call a model.'
+                : <><button type="button" className="button ghost small" onClick={() => setSettingsOpen(true)}>Choose highlights model</button>
+                  {' '}The reading list works without an LLM.</>}
             </p> : null}
             {summaryRunning ? <p className="brief-notice" role="status">Preparing highlights in the background
               {highlights?.total_parts ? ` (${highlights.completed_parts ?? 0}/${highlights.total_parts} stages complete)` : '...'}.
@@ -270,7 +281,7 @@ export default function BriefPage() {
             {highlights?.error ? <p className="brief-source-warning" role="alert">{highlights.error}</p> : null}
             {pollError ? <ErrorNotice error={pollError} /> : null}
             <div className="brief-highlights-foot">
-              <span>32K maximum input per call; whole sources only. Daily highlights stay saved when fetched data expires or is cleared.</span>
+              <span>Daily highlights stay saved in your workspace.</span>
               <button type="button" className="button ghost small" disabled={!!busy}
                 onClick={() => historyOpen ? setHistoryOpen(false) : void showHistory()}>
                 {historyOpen ? 'Hide past highlights' : 'Past highlights'}
@@ -348,7 +359,6 @@ export default function BriefPage() {
                     <button type="button" className="button danger small" disabled={!!busy} onClick={() => void discard(selectedItem)}><Icon name="trash" size={14} /> Discard</button>
                     <a href={selectedItem.url} target="_blank" rel="noreferrer">Original <Icon name="arrowRight" size={13} /></a>
                   </div>
-                  <p className="brief-reader-help">Clear removes this preview, not a kept library copy.</p>
                   {selectedItem.preview_note ? <p className="brief-source-warning">{selectedItem.preview_note}</p> : null}
                   {preview.media_type === 'application/pdf'
                     ? <iframe title={`PDF preview: ${selectedItem.title}`} src={previewUrl(selectedItem.id)} className="brief-pdf" />
@@ -417,21 +427,42 @@ function Headline({ item, number, busy, selected, onDownload, onKeep, onDiscard 
   </article>;
 }
 
-function BriefSettings({ catalog, busy, onSave, onClose }: {
-  catalog: BriefCatalog; busy: boolean; onSave: (preferences: BriefPreferences) => Promise<void>; onClose: () => void;
+function BriefSettings({ catalog, busy, onSave }: {
+  catalog: BriefCatalog; busy: boolean; onSave: (preferences: BriefPreferences) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<BriefPreferences>(catalog.preferences);
   const [exclusions, setExclusions] = useState(catalog.preferences.exclude_terms?.join(', ') ?? '');
+  const currentInterests = JSON.stringify({
+    topic_ids: [...(catalog.preferences.topic_ids ?? [])].sort(),
+    source_ids: [...(catalog.preferences.source_ids ?? [])].sort(),
+    extra_interests: catalog.preferences.extra_interests ?? '',
+    exclude_terms: [...(catalog.preferences.exclude_terms ?? [])].map((term) => term.trim()).filter(Boolean).sort(),
+    lookback_days: catalog.preferences.lookback_days ?? 7,
+  });
+  const draftInterests = JSON.stringify({
+    topic_ids: [...(draft.topic_ids ?? [])].sort(),
+    source_ids: [...(draft.source_ids ?? [])].sort(),
+    extra_interests: draft.extra_interests ?? '',
+    exclude_terms: exclusions.split(',').map((term) => term.trim()).filter(Boolean).sort(),
+    lookback_days: draft.lookback_days ?? 7,
+  });
+  useNavigationGuard(
+    currentInterests !== draftInterests,
+    'You have unsaved Morning Brief interest changes. Leave without saving?',
+  );
   const toggle = (key: 'topic_ids' | 'source_ids', id: string) => {
     const ids = draft[key] ?? [];
     setDraft({ ...draft, [key]: ids.includes(id) ? ids.filter((value) => value !== id) : [...ids, id] });
   };
   return <form className="brief-settings" onSubmit={(event) => {
     event.preventDefault();
-    void onSave({ ...draft, exclude_terms: exclusions.split(',').map((term) => term.trim()).filter(Boolean) });
+    void onSave({
+      ...draft,
+      exclude_terms: exclusions.split(',').map((term) => term.trim()).filter(Boolean),
+      summary_model_reference: catalog.preferences.summary_model_reference ?? null,
+    });
   }}>
-    <div className="brief-settings-heading"><div><h2>Make it your morning</h2><p>Choose research interests and primary sources. No paid feed or model is required.</p></div>
-      <button type="button" className="icon-button" onClick={onClose} aria-label="Close interests and sources" disabled={busy}><Icon name="close" size={17} /></button></div>
+    <div className="brief-settings-heading"><div><h3>Interests &amp; sources</h3><p>Choose research interests and primary sources. Changes apply when you save and refresh.</p></div></div>
     <fieldset disabled={busy}><legend>Research interests</legend><div className="brief-choice-grid">
       {catalog.topics?.map((value) => <label key={value.id}><input type="checkbox" checked={draft.topic_ids?.includes(value.id) ?? false} onChange={() => toggle('topic_ids', value.id)} />{value.label}</label>)}
     </div></fieldset>

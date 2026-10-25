@@ -13,7 +13,7 @@ export type ModelReference = components['schemas']['ModelReferenceSpec'];
 type ConversationMessageRequest = components['schemas']['ConversationMessageRequest'];
 export type ResponseEffort = NonNullable<ConversationMessageRequest['response_effort']>;
 type SendMessageOptions = Partial<Pick<ConversationMessageRequest,
-  'reasoning_effort' | 'web_enabled' | 'response_effort' | 'context_window_tokens' | 'attachment_paths'
+  'reasoning_effort' | 'web_enabled' | 'response_effort' | 'context_window_tokens' | 'attachment_paths' | 'reading_context' | 'turn_intent'
 >>;
 
 function conversationApi(basePath: string) {
@@ -38,6 +38,7 @@ function conversationApi(basePath: string) {
         ...options,
         web_enabled: options.web_enabled ?? true,
         response_effort: options.response_effort ?? 'auto',
+        turn_intent: options.turn_intent ?? 'chat',
         attachment_paths: options.attachment_paths?.length ? options.attachment_paths : undefined,
       } satisfies Pick<ConversationMessageRequest, 'content' | keyof SendMessageOptions>),
     ),

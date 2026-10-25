@@ -1,0 +1,67 @@
+.settings-drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  margin: 0;
+  padding: 0;
+  width: min(460px, 100%);
+  height: 100dvh;
+  max-width: 100%;
+  max-height: 100dvh;
+  overflow: hidden;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+  opacity: 0;
+  transform: translateX(32px);
+  transition: opacity var(--dur-med) var(--ease), transform var(--dur-med) var(--ease),
+    display var(--dur-med) allow-discrete, overlay var(--dur-med) allow-discrete;
+}
+.settings-drawer[open] { opacity: 1; transform: none; }
+.settings-drawer::backdrop {
+  background: var(--scrim);
+  opacity: 0;
+  transition: opacity var(--dur-med) var(--ease),
+    display var(--dur-med) allow-discrete, overlay var(--dur-med) allow-discrete;
+}
+.settings-drawer[open]::backdrop { opacity: 1; }
+
+@starting-style {
+  .settings-drawer[open] { opacity: 0; transform: translateX(32px); }
+  .settings-drawer[open]::backdrop { opacity: 0; }
+}
+
+.settings-drawer-panel { display: flex; flex-direction: column; height: 100%; }
+.settings-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.settings-drawer-header h2 { margin: 0; font-size: var(--text-lg); }
+.settings-drawer-body {
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  flex: 1;
+  min-height: 0;
+}
+.settings-drawer-body > section { display: grid; gap: var(--space-3); min-width: 0; }
+.settings-drawer-body > section + section { border-top: 1px solid var(--border); padding-top: var(--space-4); }
+.settings-drawer-body h3 { margin: 0; font-size: var(--text-sm); }
+.settings-drawer-body label { display: grid; gap: var(--space-2); font-size: var(--text-sm); }
+.settings-drawer-body label:has(input[type="checkbox"]) { display: flex; align-items: center; }
+.settings-drawer-body :is(input:not([type="checkbox"]), select) { width: 100%; min-width: 0; }
+.settings-drawer-body p { margin: 0; }
+.settings-drawer-body footer { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-drawer, .settings-drawer::backdrop { transition: none; transform: none; }
+}

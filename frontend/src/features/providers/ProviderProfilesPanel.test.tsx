@@ -3,7 +3,7 @@ import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ProviderProfilesPanel } from './ProviderProfilesPanel';
-import { providersApi, type Provider } from './api';
+import { providersApi, type Provider, type ProviderVerification } from './api';
 
 const localProvider: Provider = {
   id: 'local',
@@ -18,6 +18,10 @@ const localProvider: Provider = {
   created_at: '2026-09-06T00:00:00Z',
   updated_at: '2026-09-06T00:00:00Z',
 };
+const chatModel: Provider['models'][number] = {
+  name: 'chat-1', capabilities: ['chat', 'tools'], enabled: true,
+  context_window_tokens: 32768, preserve_thinking: false, reasoning_efforts: null,
+};
 
 describe('application-wide inference scheduling', () => {
   let container: HTMLDivElement;
@@ -28,6 +32,7 @@ describe('application-wide inference scheduling', () => {
   beforeEach(() => {
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div');
+    document.body.appendChild(container);
     root = createRoot(container);
     vi.stubGlobal('fetch', vi.fn());
     onRefresh.mockClear();
@@ -36,6 +41,7 @@ describe('application-wide inference scheduling', () => {
 
   afterEach(async () => {
     await act(async () => { root.unmount(); });
+    container.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -52,6 +58,17 @@ describe('application-wide inference scheduling', () => {
     const button = Array.from(container.querySelectorAll('button'))
       .find((entry) => entry.textContent?.includes(text))!;
     await act(async () => { button.click(); });
+  }
+  async function clickDialogButton(text: string) {
+    const button = [...document.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
+      .find((entry) => entry.textContent?.trim() === text)!;
+    await act(async () => button.click());
+  }
+  async function inputValue(input: HTMLInputElement, value: string) {
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
   }
 
   it('explains the global lane regardless of legacy provider settings', async () => {
@@ -127,6 +144,53 @@ describe('application-wide inference scheduling', () => {
     expect(select.value).toBe('chat_completions');
   });
 
+  async function changeEndpoint(value: string) {
+    const input = container.querySelector('[aria-label="Base URL for Local models"]') as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  it.each(['openai_compatible', 'ollama'] as const)('edits an existing %s endpoint without replacing saved configuration', async (kind) => {
+    const update = vi.spyOn(providersApi, 'update').mockResolvedValue(localProvider);
+    await render([{ ...localProvider, kind }]);
+    await clickButton('Edit URL');
+    expect((container.querySelector('input[type="url"]') as HTMLInputElement).value).toBe(localProvider.base_url);
+    await changeEndpoint('http://127.0.0.1:9090/v1');
+    await clickButton('Save URL');
+    expect(update).toHaveBeenCalledExactlyOnceWith('local', {
+      base_url: 'http://127.0.0.1:9090/v1', serialize_model_switches: true,
+    });
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(container.querySelector('input[type="url"]')).toBeNull();
+  });
+
+  it('cancels endpoint changes without saving', async () => {
+    const update = vi.spyOn(providersApi, 'update');
+    await render([localProvider]);
+    await clickButton('Edit URL');
+    await changeEndpoint('http://127.0.0.1:9090/v1');
+    await clickButton('Cancel');
+    expect(update).not.toHaveBeenCalled();
+    await clickButton('Edit URL');
+    expect((container.querySelector('input[type="url"]') as HTMLInputElement).value).toBe(localProvider.base_url);
+  });
+
+  it('keeps the endpoint draft and surfaces save failures', async () => {
+    const error = new Error('Could not save URL');
+    vi.spyOn(providersApi, 'update').mockRejectedValue(error);
+    await render([localProvider]);
+    await clickButton('Edit URL');
+    await changeEndpoint('http://127.0.0.1:9090/v1');
+    await clickButton('Save URL');
+    expect(onError).toHaveBeenCalledWith(error);
+    expect(onRefresh).not.toHaveBeenCalled();
+    const input = container.querySelector('input[type="url"]') as HTMLInputElement;
+    expect(input.value).toBe('http://127.0.0.1:9090/v1');
+    expect(input.disabled).toBe(false);
+  });
+
   it('surfaces errors saving reasoning overrides', async () => {
     const error = new Error('Could not save');
     vi.spyOn(providersApi, 'update').mockRejectedValue(error);
@@ -139,5 +203,168 @@ describe('application-wide inference scheduling', () => {
     expect(onError).toHaveBeenCalledWith(error);
     expect(onRefresh).not.toHaveBeenCalled();
     expect(select.disabled).toBe(false);
+  });
+
+  it('requires archive confirmation, warns about references, and offers identity-preserving restoration', async () => {
+    const archive = vi.spyOn(providersApi, 'archive').mockResolvedValue({ ...localProvider, state: 'archived' });
+    const restore = vi.spyOn(providersApi, 'restore').mockResolvedValue(localProvider);
+    await act(async () => root.render(
+      <ProviderProfilesPanel
+        providers={[localProvider]}
+        defaultReferences={[{ chat: { provider_profile_id: 'local', model: 'chat-1' } }]}
+        onRefresh={onRefresh}
+        onError={onError}
+      />,
+    ));
+    await clickButton('Archive');
+    expect(archive).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alertdialog"]')?.textContent).toContain('defaults: chat');
+    expect(container.textContent).toContain('Defaults and history will not be cleared');
+    await clickButton('Cancel archive');
+    expect(container.querySelector('[role="alertdialog"]')).toBeNull();
+    await clickButton('Archive');
+    await clickButton('Confirm archive');
+    expect(archive).toHaveBeenCalledExactlyOnceWith('local');
+    await render([{ ...localProvider, state: 'archived' }]);
+    expect(container.textContent).toContain('Archived providers');
+    expect(container.textContent).not.toContain('Manage models');
+    await clickButton('Restore Local models');
+    expect(restore).toHaveBeenCalledExactlyOnceWith('local');
+  });
+
+  it('allows manual registration without discovery, preserving configured models', async () => {
+    const discover = vi.spyOn(providersApi, 'discover').mockResolvedValue({ models: [], discovery_error: 'Model listing is not supported' });
+    const update = vi.spyOn(providersApi, 'update').mockResolvedValue(localProvider);
+    await render([localProvider]);
+    await clickButton('Discover models');
+    expect(discover).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: 'Model listing is not supported' }));
+    await clickButton('Manage models');
+    const input = document.querySelector<HTMLInputElement>('.provider-model-manual input:not([type="checkbox"])')!;
+    await inputValue(input, 'deployment-custom');
+    await clickDialogButton('Register model');
+    expect(update).toHaveBeenCalledExactlyOnceWith('local', {
+      serialize_model_switches: true,
+      models: [{ name: 'deployment-custom', capabilities: ['chat'], enabled: true, preserve_thinking: false }],
+    });
+    expect(onRefresh).toHaveBeenCalledOnce();
+    expect(input.value).toBe('');
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Capability choices declare intended use');
+  });
+
+  it('retains manual model input on failure and rejects duplicate registrations', async () => {
+    const update = vi.spyOn(providersApi, 'update').mockRejectedValue(new Error('Registration failed'));
+    await render([{ ...localProvider, models: [chatModel] }]);
+    await clickButton('Manage models');
+    const input = document.querySelector<HTMLInputElement>('.provider-model-manual input:not([type="checkbox"])')!;
+    await inputValue(input, 'chat-1');
+    await clickDialogButton('Register model');
+    expect(update).not.toHaveBeenCalled();
+    expect(document.querySelector('.provider-model-manual [role="alert"]')?.textContent).toContain('already configured');
+    await inputValue(input, 'new-chat');
+    await clickDialogButton('Register model');
+    expect(input.value).toBe('new-chat');
+    expect(document.querySelector('.provider-model-manual [role="alert"]')?.textContent).toContain('Registration failed');
+    expect(update.mock.calls[0][1].models?.[0]).toEqual(chatModel);
+  });
+
+  it.each(['100', '4096.5', 'invalid', '2000001'])('validates invalid context %s without showing it as saved', async (value) => {
+    const update = vi.spyOn(providersApi, 'update');
+    await render([{ ...localProvider, models: [chatModel] }]);
+    await clickButton('Manage models');
+    const input = document.querySelector<HTMLInputElement>('[aria-label="chat-1 context window tokens"]')!;
+    await inputValue(input, value);
+    await act(async () => input.dispatchEvent(new FocusEvent('focusout', { bubbles: true })));
+    expect(input.getAttribute('aria-invalid')).toBe('true');
+    expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toContain('4096 to 2000000');
+    expect(update).not.toHaveBeenCalled();
+    await clickDialogButton('Revert context');
+    expect(input.value).toBe('32768');
+    expect(input.getAttribute('aria-invalid')).toBe('false');
+    expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toBe('Saved context');
+  });
+
+  it('retains a failed context draft, supports retry, and accepts clearing to fallback', async () => {
+    let current = { ...localProvider, models: [chatModel] };
+    const update = vi.spyOn(providersApi, 'update')
+      .mockRejectedValueOnce(new Error('Could not save context'))
+      .mockImplementation(async (_, payload) => {
+        current = { ...current, models: payload.models! as Provider['models'] };
+        return current;
+      });
+    onRefresh.mockImplementationOnce(async () => {
+      root.render(<ProviderProfilesPanel providers={[current]} onRefresh={onRefresh} onError={onError} />);
+    });
+    await render([current]);
+    await clickButton('Manage models');
+    const input = document.querySelector<HTMLInputElement>('[aria-label="chat-1 context window tokens"]')!;
+    await inputValue(input, '65536');
+    expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toContain('Unsaved context');
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(input.value).toBe('65536');
+    expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toContain('could not be confirmed');
+    await inputValue(input, '');
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(update).toHaveBeenLastCalledWith('local', expect.objectContaining({
+      models: [expect.objectContaining({ context_window_tokens: null })],
+    }));
+    expect(document.getElementById(input.getAttribute('aria-describedby')!)?.textContent).toBe('Saved context');
+  });
+
+  it('permits the smaller decision-only context minimum', async () => {
+    const model = { ...chatModel, capabilities: ['decision'] as const };
+    vi.spyOn(providersApi, 'update').mockResolvedValue(localProvider);
+    await render([{ ...localProvider, models: [{ ...model, capabilities: ['decision'] }] }]);
+    await clickButton('Manage models');
+    const input = document.querySelector<HTMLInputElement>('[aria-label="chat-1 context window tokens"]')!;
+    await inputValue(input, '512');
+    expect(input.getAttribute('aria-invalid')).toBe('false');
+    await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(providersApi.update).toHaveBeenCalledWith('local', expect.objectContaining({
+      models: [expect.objectContaining({ context_window_tokens: 512 })],
+    }));
+  });
+
+  it('shows verification pending state, capability failures, and detail instead of reachable implying tools', async () => {
+    let finish!: (result: ProviderVerification) => void;
+    vi.spyOn(providersApi, 'verify').mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await render([{ ...localProvider, models: [chatModel] }]);
+    await clickButton('Manage models');
+    await clickDialogButton('Verify');
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Verifying…');
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Checking chat-1 capabilities');
+    await act(async () => finish({
+      provider: 'openai_compatible', base_url: localProvider.base_url, model: 'chat-1',
+      reachable: true, tool_calling: false, detail: 'Provider answered but ignored the tool: done',
+    }));
+    expect(document.querySelector('.provider-verification')?.textContent).toContain('tool calling not verified');
+    expect(document.querySelector('.provider-verification')?.textContent).toContain('ignored the tool');
+    expect(document.querySelector('.provider-verification')?.textContent).not.toContain('reachable');
+  });
+
+  it('shows verification transport errors inline and clears stale results before retry', async () => {
+    vi.spyOn(providersApi, 'verify').mockResolvedValueOnce({
+      provider: 'openai_compatible', base_url: localProvider.base_url, model: 'chat-1',
+      reachable: true, tool_calling: true, detail: 'Provider answered and called the test tool.',
+    }).mockRejectedValueOnce(new Error('Endpoint offline'));
+    await render([{ ...localProvider, models: [chatModel] }]);
+    await clickButton('Manage models');
+    await clickDialogButton('Verify');
+    expect(document.querySelector('.provider-verification')?.textContent).toContain('Response and tool calling verified');
+    await clickDialogButton('Verify');
+    expect(document.querySelector('.provider-verification')?.textContent).toContain('Endpoint offline');
+    expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain('Response and tool calling verified');
+  });
+
+  it.each(['embedding', 'decision'] as const)('does not present a verified %s model as a tool calling test', async (capability) => {
+    vi.spyOn(providersApi, 'verify').mockResolvedValue({
+      provider: 'openai_compatible', base_url: localProvider.base_url, model: 'chat-1',
+      reachable: true, tool_calling: false, detail: `${capability} response received`,
+    });
+    await render([{ ...localProvider, models: [{ ...chatModel, capabilities: [capability] }] }]);
+    await clickButton('Manage models');
+    await clickDialogButton('Verify');
+    expect(document.querySelector('.provider-verification')?.textContent).toContain('tools not tested');
+    expect(document.querySelector('.provider-verification')?.textContent).toContain(`${capability} response received`);
   });
 });

@@ -153,14 +153,18 @@ def test_note_links_preserve_dirty_drafts_and_open_exact_paths_internally(monkey
             href = "/library/notes?path=" + quote(target, safe="")
             preview = app.query_one("#note-preview", Markdown)
             preview.post_message(Markdown.LinkClicked(preview, href))
-            await pilot.pause()
+            await wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmDiscard)
+                              and any(button.region.width > 0
+                                      for button in app.screen.query("#discard").results(Button)))
             assert isinstance(app.screen, ConfirmDiscard)
             await pilot.press("escape")
             await settle(app, pilot)
             assert app.query_one("#note-editor", TextArea).text == "Keep my unsaved draft"
             assert app.note.path == server.records[0]["path"]
             preview.post_message(Markdown.LinkClicked(preview, href))
-            await pilot.pause()
+            await wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmDiscard)
+                              and any(button.region.width > 0
+                                      for button in app.screen.query("#discard").results(Button)))
             await pilot.click("#discard")
             await settle(app, pilot)
             assert app.note.path == target
@@ -188,7 +192,9 @@ def test_note_links_preserve_dirty_drafts_and_open_exact_paths_internally(monkey
             await pilot.pause()
             skill_preview = app.query_one("#skill-preview", Markdown)
             skill_preview.post_message(Markdown.LinkClicked(skill_preview, href))
-            await pilot.pause()
+            await wait_for_ui(pilot, lambda: isinstance(app.screen, ConfirmDiscard)
+                              and any(button.region.width > 0
+                                      for button in app.screen.query("#discard").results(Button)))
             assert isinstance(app.screen, ConfirmDiscard)
             await pilot.press("escape")
             await settle(app, pilot)

@@ -15,6 +15,7 @@ from backend.brief.router import router as brief_router
 from backend.core.config import Settings
 from backend.conversations.router import router as conversations_router
 from backend.core.router import router as core_router
+from backend.core.path_picker_router import router as path_picker_router
 from backend.providers.router import router as providers_router
 from backend.prompting.router import router as skills_router
 from backend.research.router import router as research_router, summary_router
@@ -22,6 +23,9 @@ from backend.research.reviews.router import router as reviews_router
 from backend.runs.router import router as runs_router
 from backend.workspace.router import router as workspace_router
 from backend.tracks.router import router as tracks_router
+from backend.tracks.writing_router import router as writing_router
+from backend.tracks.repository_router import router as linked_repositories_router
+from backend.references.router import router as references_router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -46,6 +50,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     prefix = container.settings.api_prefix
     for router in (
         core_router,
+        path_picker_router,
         providers_router,
         summary_router,
         conversations_router,
@@ -54,6 +59,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         reviews_router,
         workspace_router,
         tracks_router,
+        writing_router,
+        linked_repositories_router,
+        references_router,
         skills_router,
         brief_router,
     ):

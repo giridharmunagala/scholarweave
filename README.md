@@ -52,19 +52,21 @@ Deep Work conversations open in the dedicated workspace with their history intac
 the requested scope, not a fixed latency guarantee; model speed, context size, and source retrieval
 still affect response time.
 
-**Deep Work** separates two workflows: literature reviews with initial scope/constraints and
-paper/comparison work-limit approval, followed by automatic high/relevant paper reading; and
-open-ended research tasks with work plans, usage, findings, steering and
-stop controls. Both use the existing local backend and track artifacts. Leaving the page does not
-cancel work. Return to pending decisions, inspect the evidence, or continue a stopped task.
-Reviews show screened/read-paper and comparison-pass counters, live per-paper operations and
-source-backed findings. Shared references are screened and read within the same limits; ambiguous
-identities are skipped visibly and supplemental papers never trigger recursive reference expansion.
+**Deep Work opens one Research workspace** for discovery, selected-paper reading and broader
+investigation. Start with a question, approve scope and work limits, explore abstract-based topics,
+then choose papers for focused briefs with checked quotations. There is one saved-research history
+and one follow-up composer for research, evidence comparison and ideas, not a second assistant
+panel or task destination. New paper research shares a durable investigation conversation;
+follow-up instructions include the current review, reading focus, approval state and saved findings
+so the assistant can reuse existing work. Paper approvals are never bypassed by agent instructions.
+Pause research stops active agent work and pauses paper work; resume and paper approvals remain
+explicit. Saved investigations and old task links remain accessible in the same workspace. Leaving the
+page does not cancel work. Single-paper explanations and questions remain in **Ask**.
 
 The default limits are 10 attachments per message, 2 MiB per UTF-8 Markdown/text file, and 40 MiB per
 PDF. A PDF's extracted workspace text must also fit the 2 MiB text limit; oversized extraction returns
-an error while preserving the original in the library. Scanned pages require Tesseract and its
-language data; encrypted PDFs must be unlocked before upload.
+an error while preserving the original in the library. Scanned pages require the configured local
+Surya server or Tesseract and its language data; encrypted PDFs must be unlocked before upload.
 
 ### Paper Library
 
@@ -75,7 +77,7 @@ language data; encrypted PDFs must be unlocked before upload.
   and page references. Title matches carry more weight; unprepared PDFs are still searchable by title.
 - Browse 25-paper pages, filter by collection or preparation status, and sort by date or title.
 - Read the original PDF alongside extracted text, paper notes, and saved summaries.
-- Extract native PDF text and use Tesseract OCR for scanned pages, with optional vision-model OCR repair.
+- Extract layout-aware Markdown with local Surya 2: reading order, headings, tables, equations and source figure crops. Native PDF text and Tesseract remain available as lightweight alternatives.
 - If a page cannot be extracted or recovered with OCR, skip its text and record the page number
   and failure reason in the extraction metadata. Other pages continue with their original page
   numbers; a PDF with no readable pages still reports an explicit preparation error.
@@ -103,7 +105,9 @@ Clearing stays effective until you explicitly refresh.
 **Today's highlights** appears above the reading list: two or three LLM-written paragraphs based
 only on collected titles, abstracts and publisher metadata, with no extra page or PDF downloads.
 Its separate model picker initially follows the model selected in chat; choosing another brief
-model does not change chat. Highlights generate in the background and are reused across visits.
+model does not change chat. **Generate highlights** explicitly starts background generation;
+opening the page, browsing cached headlines and refreshing sources do not invoke a model.
+Completed highlights are reused across visits.
 Each call is capped at 32K input tokens, including instructions, or less for smaller model contexts.
 Known OpenAI tokenizers are counted locally; other models use a conservative UTF-8 byte upper
 bound and may need smaller batches. Complete source records are never split or silently omitted.
@@ -175,6 +179,48 @@ Revision checks protect newer edits, and section history lets you recover earlie
 Files remain under `workspace\projects\tracks\<title--id>\`; refresh the workspace index after direct
 external edits. [Research track organization](docs/research-tracks.md) describes the document
 format and round-trip workflow.
+
+### References, Claims, Writing, And Linked Repositories
+
+The paper library's **References** panel manages bibliographic records independently of PDF
+acquisition. Create or edit a stable citation key, author names, DOI/arXiv identifiers and publication
+metadata; link a record to a local paper or to another publication version. Import/export BibTeX
+and RIS using the documented subset shown in the panel. Identity conflicts stop an entire import
+instead of guessing a merge. Citation keys do not change when metadata is edited.
+Collections can use nested names such as `Inference/Quantization/Foundations`. These are virtual
+collections: organizing them never moves canonical PDFs, notes, or summaries.
+
+Each research track has **Notebook**, **Code & artifacts**, and **Claims & writing** views:
+
+- **Code & artifacts** links an explicitly authorized existing local repository without copying it.
+  Use **Browse…** to choose its root in a native folder dialog; no path typing is required.
+  The dialog opens on the **backend's desktop**, not a remote browser's machine. Windows uses its
+  native file manager dialog; other desktops require Python's Tk support. Remote/headless backends
+  without an interactive desktop report an explicit error. Cancel leaves the selection unchanged;
+  dialogs close after two minutes, and only one can be open at once. Selecting a path does not grant
+  access: the authorization checkbox and **Connect repository** action are still required.
+  Browse code, Markdown reports, PDF pages, images, CSV tables, JSON metrics and saved notebook
+  cells/outputs (without a kernel). Make small manual
+  text edits with a stale-file guard and link artifact hashes to saved experiment IDs. Explicitly
+  append a receipt and your observation to Results without generating a scientific conclusion.
+  Refresh to check changed or missing
+  outputs. An observed Git revision is not proof of which code produced an artifact; optional
+  producing revisions are supplied by the researcher. Linking never executes code or automatically
+  indexes/sends repository contents to a model.
+- **Claims & writing** records statements separately from researcher interpretation. Attach
+  supporting, contradictory, or contextual quotations from prepared paper pages. Quotations must
+  match the page text, and receipts retain source versions and page hashes. Refresh shows changed
+  or missing sources; matching a quotation does not verify the scientific claim.
+- Write a track-linked manuscript in Markdown, insert stable `[@citation_key]` citations and
+  `[claim:id]` links, and inspect structural evidence/citation warnings. Saves reuse track revision
+  history. Export saved drafts as Markdown, LaTeX, or DOCX with references and a claim-evidence
+  appendix. Unresolved references/claims block export. LaTeX and DOCX are plain-text draft exports,
+  not journal templates or full Markdown converters. Discussing a saved manuscript uses the existing
+  chat and explicit-save research-track tools, not a new writing agent.
+
+ScholarWeave is not an IDE or experiment runner. Development, coding agents, environments, and
+execution stay in your existing tools. Repository links and artifact receipts connect that work
+to research, without claiming that externally supplied results have been independently verified.
 
 ### Agentic Literature Reviews
 
@@ -249,15 +295,55 @@ canonical full-paper summaries.
 The review's **Paper summaries** browser shows a paginated, metadata-only list, filtered to ready
 summaries by default. **View summary** fetches just that paper's saved text. Source/page diagnostics
 are a separate disclosure; progress polling does not download summary bodies.
-Existing reviews retain their saved output limit; set it to 26214 and choose **Parallel summaries**
-under **Summary model for unfinished papers** when resuming to use the larger budget/concurrency.
+Existing reviews retain their saved output limits. The legacy API/terminal controls remain available;
+the replacement web workspace does not expose the old stage-resume and summary-configuration flow.
 
-Open **Deep Work > Literature reviews**, or follow a research track's **Deep Work** link, to build a source-backed review document.
-Choose a main model and a System One decision model under **Settings > Default models**.
-New reviews inherit that decision default, with a per-review override available. Approve the proposed
-scope and one overall token allowance, then review the ranked shortlist before any new PDF
-downloads or detailed reading. Discovery reuses the library, searches arXiv/web/optional OpenAlex,
-and follows model-selected reference lists in cached, paced waves.
+Open **Deep Work > Research workspace** and start with a research question. Configured model
+defaults are used; missing model configuration is shown explicitly and advanced settings are
+secondary. New research uses targeted paper briefs and an initial discovery wave of up to
+**24 papers**, rather than automatically collecting a large corpus.
+
+The workspace has **Papers**, **Understanding**, and **Ideas** views. Papers presents an
+abstract-based landscape, reasoned reading recommendations, and a searchable shortlist. No
+arbitrary six-paper batch is preselected: choose papers explicitly and supply a reading focus.
+Open briefs and source quotations in place to decide whether to read the original. Retrieval
+preserves paragraph context, but selected passages are still not full-paper coverage.
+While choosing papers, use **Add papers from arXiv** or **Add PDF link** to expand the current
+shortlist. PDF links accept an optional title and do not download or read the source until
+you select it and approve **Read selected papers**.
+
+Understanding exposes current evidence and explicit cross-paper refinement. Comparisons distinguish
+agreements, differences, and unknowns, retain source references, and are cached against their inputs.
+When evidence requires multiple context packets, separate comparison groups are disclosed rather
+than presented as one global conclusion. Completed work remains visible while more evidence is gathered.
+
+Unselected candidates and completed receipts are retained. Existing full-reading tasks appear under
+**Saved research** as read-only history, not as the default landing experience. Start a new question
+for the replacement workflow. No old research tasks, library papers, notes, or generated files are
+automatically deleted.
+
+Each review has a self-contained folder under `workspace/research/<track>/<review>/`: candidates,
+topic metadata/explorations, selections, PDFs, extracted sources, per-paper `summary.md`, `scratch/`,
+model receipts, and `report.md`. Existing library sources are reused for acquisition and retained;
+the review keeps local PDF copies so its folder remains self-contained. Summary prose and model
+outputs are **workspace files, not SQLite payloads**. SQLite retains lifecycle state, file pointers,
+hashes and usage; index refresh keeps research-file contents out of FTS as well. File names remain
+discoverable, and files can be opened through workspace paths. A linked track receives a report link.
+
+The default UI leads with the question and next decision. Technical activity and errors remain
+available without exposing manual pipeline-stage controls. Edited local outputs are preserved
+rather than overwritten.
+
+**Explore ideas** is also available independently of a review, and from review questions, topics,
+and paper context. It uses a normal conversation to propose, combine, challenge, or simplify
+conceptual directions. Supporting observations are separated from speculation, and novelty remains
+unverified unless explicitly checked. It requires no embedding model or PDF collection and does
+not automatically start a review, run experiments, or save artifacts. Select an idea to prepare
+editable Develop, Challenge, Combine, or Simplify drafts. **Check against literature** opens a new
+editable research question with readable context; it does not submit or start research.
+
+Previously saved reviews and API/terminal reviews without an embedding role retain the legacy
+source-audited workflow described below.
 
 Fresh, bounded jobs plan page coverage, extract verifiable quotations, compare findings, and audit
 gap hypotheses against the sources. Appendices and ablations are deferred by relevance, not excluded
@@ -287,9 +373,29 @@ Add provider profiles for Ollama, self-hosted OpenAI-compatible servers such as 
 services such as OpenAI and OpenRouter. Configure the service's compatible base URL, API key where
 required, and available models in **Settings**.
 
+Use **Edit URL** on an existing provider profile to change its host or port, then **Save URL**.
+Saved models, API keys, reasoning settings, and model assignments are preserved; there is no need
+to recreate the profile. Keep the required API path (such as `/v1`) and verify models after saving.
+Embedding endpoints support both OpenAI's `data` envelope and llama.cpp's native list of pooled vectors.
+
 Choose models and supported reasoning settings for chat and paper summaries. ScholarWeave uses the
 official OpenAI client with the profile's selected API; provider support depends on compatible endpoints
 and the model capabilities required for your task, such as tool calling or vision.
+
+To pair a smaller model with your main model, open **Settings > Models > Small tasks**.
+Choose the smaller model and save. It handles topic naming in Papers and Deep Work, paper
+summaries/briefs, and older-conversation summaries. Chat (including Quick), research planning,
+cross-paper comparisons, and final answers continue using the main model. **Paper summaries**
+and **Context maintenance** offer optional overrides; explicit per-task choices still win.
+Leave Small tasks unset to retain the main-model behavior.
+
+For llama router hot-swapping, register both exact model IDs under the same OpenAI-compatible
+provider profile and set each model's actual context window. ScholarWeave sends the selected
+model ID through the existing inference queue; the router owns loading and unloading.
+The smaller model needs tool calling for saved paper summaries and structured output for topic
+labels. Changes apply to new jobs, not already queued summaries or saved research summary roles.
+Switching has a loading cost, so a helper is most useful for batches or when the router can keep
+both models ready.
 
 **Generation API** defaults to **Chat Completions**, keeping Ollama, llama.cpp, proxies and existing
 profiles unchanged. Choose **Responses** for an OpenAI or Azure deployment that supports it, then
@@ -313,6 +419,107 @@ does not clear intentional overrides.
 
 ![ScholarWeave provider settings](docs/screenshots/settings-providers.png)
 
+## Layout-aware local OCR
+
+In **Settings > Documents**, select **Surya 2**, then save:
+
+| Setting | Starting value |
+| --- | --- |
+| Server URL | `http://localhost:18080/v1` |
+| Model ID | `Surya-ocr-2` (must match `/v1/models`) |
+| Parallel OCR pages | `10` |
+| OCR output tokens | `8192` |
+
+The server must load both the [Surya 2 GGUF model](https://huggingface.co/datalab-to/surya-ocr-2-gguf)
+and its vision projector. ScholarWeave attaches to it; it does not download models, start another
+server or send pages to a cloud service. Environment equivalents are
+`SCHOLARWEAVE_OCR_ENGINE=surya`, `SCHOLARWEAVE_OCR_SURYA_BASE_URL`,
+`SCHOLARWEAVE_OCR_SURYA_MODEL`, `SCHOLARWEAVE_OCR_SURYA_PARALLEL` and
+`SCHOLARWEAVE_OCR_SURYA_MAX_TOKENS`. Saved UI settings take precedence over environment defaults.
+
+**Parallel OCR pages** accepts any positive integer, including `48`, without a fixed application
+ceiling. Keep it at or below the OCR server's `--parallel` slots, with enough memory and context
+per slot. The default of `10` is a starting point, not a hardware limit or throughput guarantee.
+
+Automatic ingestion then processes pages without completed OCR, including selectable, multi-column PDFs. For an
+already-indexed paper, open **Details > Extraction and indexing > Re-run with OCR**. Existing
+extractions are not bulk-rewritten when the setting changes. **Use embedded text** remains an
+explicit fast alternative. The **Text** reader renders Markdown with headings, lists, equations,
+tables and extracted figures. Figure PNGs live beside `extracted.md` under `figures/`; the manifest
+records page citations, reading order, block coordinates and artifact IDs. These are crops of the
+original page, including vector diagrams rendered to PNG, not reconstructed or generated images.
+Merged-cell tables use sanitized HTML inside Markdown rather than flattening their structure.
+Headers and footers remain in the manifest but are excluded from the paper body.
+
+Use the Papers **Batch OCR** action for non-OCR papers in the current selection or filter.
+Surya processes multiple papers concurrently while sharing the **Parallel OCR pages** limit
+across the whole batch, rather than leaving slots idle when one paper is short. Tesseract
+batches remain sequential.
+
+Open **Runs** for overall paper/page progress bars, each paper's page counts and errors,
+and recent OCR batch history. Overall speed and remaining time use page completions observed
+over the last two minutes, with a shorter warm-up window just after opening Runs. Per-paper
+bars and estimates are not shown. Start OCR there or from the Papers selection; opening Runs never
+starts a job. Jobs run on the local backend, so navigation, page reloads and closing a browser
+tab do not lose progress or stop controls. **Stop batch** cancels active ingestions and leaves
+pending papers unstarted, retaining completed OCR and existing canonical files. Start another
+batch explicitly to process remaining or incomplete papers. Keep the backend running; an
+interrupted backend does not silently restart OCR.
+Successful pages are checkpointed immediately with their source-PDF hash, text, layout and figure crops.
+Retries reuse these pages even after a stop or backend restart. Only missing/failed pages run again;
+**Re-run with OCR** is the explicit full-page override. Results discarded before page checkpointing
+was introduced cannot be recovered unless they exist in an extraction manifest.
+
+Full-page OCR is preferred. Malformed, repetitive or truncated output retries using constrained
+layout JSON and individual block crops. Remaining failures are listed in the paper's extraction
+details; native text is retained where available and unreadable pages are marked skipped. Original
+PDFs, canonical notes and saved summaries remain untouched. General-purpose vision rewriting is
+not run on Surya output because it can discard layout and image references.
+
+Batch OCR saves successful OCR pages together with embedded PDF text for individual pages whose
+OCR failed. **Runs** marks these papers completed with errors and lists the affected page numbers;
+**Details > Extraction and indexing** also flags them. They remain eligible for another OCR attempt.
+If a page has neither usable OCR nor embedded text, the batch preserves the previous extraction
+instead of replacing it with missing content.
+
+**CPU quick reading and recovery:** Indra OCR runs locally on ONNX Runtime, without a GPU or
+another model server. Download its pinned models once:
+
+```powershell
+hf download datalab-to/indra-ocr --revision v1.1.0
+```
+
+The model cache is shared with the application; alternatively set `INDRA_OCR_MODEL_DIR` to a
+downloaded model folder. No download runs during ingestion. In the paper reader, open
+**Papers settings > Quick CPU OCR** to prepare missing pages without changing the configured
+batch engine. Existing successful OCR pages are reused. In **Settings > Documents**, enable
+**Indra CPU recovery** to try Indra only after Surya's full-page and block recovery fail.
+Recovery is off by default; `SCHOLARWEAVE_OCR_INDRA_FALLBACK_ENABLED=true` sets its environment default.
+If CPU recovery also fails, the existing embedded-text fallback / previous-extraction safeguards apply.
+
+CPU pages and recovery reasons are recorded in manifests and page checkpoints; the reader and Runs
+identify recovered pages. Indra is experimental for research articles: it is useful for prose and
+quick reading, but equations, table values, chart interpretation and reading order must be checked
+against the source PDF. A local six-failed-page smoke test at 200 DPI / four CPU threads had median
+warm OCR time of 0.54 seconds/page versus 1.37 for Tesseract (excluding rendering and model loading),
+but Indra made symbol/numeric errors
+and interpreted a multi-panel chart as a table. These are not accuracy scores or a representative
+benchmark. Optional math decoding was not enabled in the application: the trial still produced
+malformed equations and it required a Windows UTF-8 workaround. Use explicit **Re-run with OCR**
+to replace CPU pages with the configured engine's extraction.
+
+Indra code is Apache-2.0; its [model weights](https://huggingface.co/datalab-to/indra-ocr)
+have a modified OpenRAIL-M license, not an unrestricted Apache model license.
+
+**llama.cpp sizing:** verify the effective per-slot context, not just the model's training window.
+`--ctx-size 262144 --parallel 16` can provide 16,384 tokens per slot; that already accommodates
+10 page flows. A 10-slot configuration with the same per-slot context uses
+`--ctx-size 163840 --parallel 10`. Leave room for image/prompt tokens: 16k context does not mean
+16k output. ScholarWeave uses greedy decoding (`temperature=0`, `top_p=0.1`) and defaults to 8192
+output tokens. Increase per-slot context or lower concurrency if your server reports context or
+memory errors. If chat and OCR use the same model router, `--models-max 1` causes model swapping;
+use at least `--models-max 2` if memory permits, or a dedicated OCR server.
+
 ## Get Started
 
 Requirements:
@@ -320,7 +527,7 @@ Requirements:
 - Python 3.12+
 - Node.js 20+ to build the frontend
 - A configured model provider: Ollama, an OpenAI-compatible server, or a hosted service and API key
-- Tesseract and language data for OCR of scanned PDFs
+- A local Surya 2 server for layout-aware OCR, or Tesseract and language data for basic scanned-page OCR
 
 From the repository root in PowerShell:
 
@@ -347,8 +554,10 @@ opens the selected URL and `/api` follows it automatically; no frontend/backend 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\launch-scholarweave-web.ps1
 ```
 
-This builds the frontend, starts or reuses the local backend for this library, checks that
+This builds the frontend when needed, starts or reuses the local backend for this library, checks that
 it serves the web app, and opens your default browser. It does not require the terminal extra.
+Unchanged launches reuse verified assets without invoking npm. Source, build configuration,
+dependency, or build-environment changes and missing or modified output trigger a rebuild.
 Keep the launcher window open while using a server it started; Ctrl+C shuts down only that
 server. A compatible pre-existing backend for this library is discovered and left running,
 even if it uses an automatically selected port. If that backend started before the frontend
@@ -424,8 +633,9 @@ Use `--connect-only` to require an existing server without starting one. The TUI
 the database or writes research files directly. Configure your default chat model in the web app's
 **Settings** first; provider
 setup, PDF imports, extraction, collection management, and native PDF viewing remain in the web app.
-The normal terminal command does not require Node.js or a frontend build. Add `--build-frontend`
-to build the web app before startup, or `--check` to check startup and exit without opening the TUI.
+The normal terminal command does not require Node.js or a frontend build. Add `--ensure-frontend`
+to build the web app only when its verified assets are missing or outdated, or `--build-frontend`
+to force a rebuild. Use `--check` to check startup and exit without opening the TUI.
 
 **One-click Windows shortcut:** from the repository root, run this small installer once:
 
@@ -560,8 +770,11 @@ metadata without moving their files. Both `local_data/` and `workspace/` are exc
 ## Development
 
 ```powershell
-# Backend tests
+# Full backend suite (logical CPUs, up to 20 worker processes by default)
 .\.venv\Scripts\python.exe -m pytest
+
+# Focused feature checks; use -n 0 for single-test debugging
+.\.venv\Scripts\python.exe -m pytest backend\tests\test_surya_ocr.py backend\tests\test_documents.py backend\tests\test_architecture.py
 
 # Optional terminal UI tests
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,tui]"
@@ -576,6 +789,11 @@ npm.cmd run build
 npm.cmd run generate:api
 npm.cmd run check:api
 ```
+
+Production builds retain TypeScript's incremental cache in the ignored
+`frontend/*.tsbuildinfo` files. Repeated builds avoid rechecking unchanged code;
+application and test sources still receive the same strict type checks when they change.
+Deleting these cache files forces a fresh check.
 
 Keep `openapi-typescript` pinned to **7.13.0**. See [AGENTS.md](AGENTS.md) for coding conventions,
 [docs/architecture.md](docs/architecture.md) for the runtime and storage design, and

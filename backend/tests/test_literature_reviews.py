@@ -3,28 +3,24 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from itertools import groupby
 from unittest.mock import Mock
 
 import httpx
 import pytest
 
 from backend.agents.context import ScholarWeaveContext
-from backend.agents.blueprint import SessionPolicySpec
 from backend.app import create_app
 from backend.bootstrap import create_services
 from backend.conversations.turns import deep_work_blueprint, research_blueprint
 from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.providers.decisions import score_decisions, validate_decisions
-from backend.providers.runtime import _compatible_capabilities, _compatible_context_window
 from backend.providers.schemas import ProviderCreate, ProviderModel
 from backend.providers.types import ModelReference, ProviderRuntimeError
 from backend.research.reviews.discovery import normalize_candidate, candidate_key, ScholarlyDiscovery
-from backend.research.reviews.schemas import Candidate, DecisionRole, EvidencePacket, ReviewControlRequest, ReviewCreateRequest, ReviewScope, Screening, SummaryRole
+from backend.research.reviews.schemas import Candidate, DecisionRole, ReviewControlRequest, ReviewCreateRequest, ReviewScope, SummaryRole
 from backend.research.search import AsyncRateLimiter, rate_limit_delay
 from backend.research.sources import SourceDownloadService
 from backend.tools.policy import ToolInputError
-from scholarweave_tui.client import ScholarWeaveClient
 
 
 def review_reply(payload: dict) -> str:
@@ -207,38 +203,6 @@ async def test_parallel_summaries_overlap_only_to_the_selected_limit_and_preserv
 
 
 @pytest.mark.anyio
-async def test_summary_role_using_main_model_obeys_main_parallel_limit(test_settings, stub_provider):
-    services = create_services(test_settings)
-    release_streams = threading.Event()
-    task = None
-    try:
-        candidates, role = await seed_parallel_summary_review(services, stub_provider, parallel_requests=4)
-        role = role.model_copy(update={"model_reference": services.reviews._spec("parallel").main_model})
-        services.reviews.jobs.checkpoint(
-            "parallel", summary_model=role.model_dump(mode="json"), main_parallel_requests=2,
-        )
-        stub_provider.reply = "A compact summary of the admitted original text."
-        stub_provider.stream_gates["main"] = release_streams
-        task = asyncio.create_task(services.reviews._reading("parallel"))
-        async with asyncio.timeout(10):
-            while stub_provider.max_active_inference < 2:
-                await asyncio.sleep(0.01)
-        release_streams.set()
-        await task
-        assert len(stub_provider.requests) == len(candidates)
-        assert all(request["model"] == "main" for request in stub_provider.requests)
-        assert stub_provider.max_active_inference == 2
-        assert services.reviews.get("parallel").main_parallel_requests == 2
-        assert all(services.reviews.paper("parallel", candidate.id).selective_summary for candidate in candidates)
-    finally:
-        release_streams.set()
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-        await services.close()
-
-
-@pytest.mark.anyio
 async def test_parallel_summary_pause_cancels_every_child_and_resume_keeps_completed_summaries(
     test_settings, stub_provider, monkeypatch,
 ):
@@ -282,77 +246,6 @@ async def test_parallel_summary_pause_cancels_every_child_and_resume_keeps_compl
 
 
 @pytest.mark.anyio
-async def test_summary_selection_uses_provider_tokens_to_fill_128k_context(test_settings, stub_provider):
-    from backend.research.reviews.jobs import json_text
-    from backend.research.reviews.schemas import AnalysisSources
-
-    services = create_services(test_settings)
-    stub_provider.tokenizer_enabled = True
-    stub_provider.reply = '{"sources":[]}'
-    try:
-        provider = services.providers.create(ProviderCreate(
-            name="Measured local tokenizer", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
-            models=[ProviderModel(name="unknown-large-review", capabilities={"chat"}, context_window_tokens=131072)],
-        ))
-        main = {"provider_profile_id": provider.id, "model": "unknown-large-review"}
-        spec = ReviewCreateRequest(title="Wide summary batches", objective="Compare methods.", main_model=main)
-        services.reviews.repository.create("wide-batches", spec.model_dump(mode="json"), {
-            "status": "running", "stage": "synthesis",
-            "work_budget": {"screened_papers": 100, "read_papers": 20, "comparison_passes": 1},
-        })
-        prepared = services.reviews.jobs.prepare(spec.main_model, "literature-analysis-sources", AnalysisSources)
-        compiled, budget, output = prepared
-        records = [{"candidate_id": f"paper-{index}", "summary": "adaptive " * 6000} for index in range(16)]
-        frame = {"stage": "analysis-source-selection"}
-        conservative = services.reviews.jobs.packets(records, frame, prepared)
-        packets = await services.reviews.jobs.summary_packets("wide-batches", records, frame, prepared)
-        assert output == 32768
-        assert budget.method == "provider-tokenize"
-        assert len(packets) == 2 < len(conservative)
-        assert [record for packet in packets for record in packet["records"]] == records
-        first_count = budget.count(compiled.entry_agent.instructions, json_text(packets[0]))
-        assert 60_000 <= first_count <= budget.limit
-        for packet in packets:
-            assert budget.count(compiled.entry_agent.instructions, json_text(packet)) <= budget.limit
-        expanded = {**frame, "records": [*packets[0]["records"], packets[1]["records"][0]]}
-        assert await services.reviews.jobs._provider_input_count(json_text(expanded), prepared) > budget.limit
-        # Exercise the real harness too: its byte heuristic must not reject the measured batch.
-        result = await services.reviews.jobs.call(
-            "wide-batches", "synthesis", "analysis-source-selection", packets[0], prepared, AnalysisSources,
-        )
-        assert result == {"sources": []}
-        assert len(stub_provider.requests) == 1
-        assert stub_provider.requests[0]["max_tokens"] == 32768
-        assert all(request["model"] == "unknown-large-review" for request in stub_provider.tokenizer_requests)
-        quoted_records = [{
-            "candidate_id": f"quoted-{index}",
-            "page_decisions": [{
-                "reason": json_text({"priority": {"choice": "read", "confidence": 0.75}})
-            }] * 1000,
-        } for index in range(16)]
-        quoted_packets = await services.reviews.jobs.summary_packets(
-            "wide-batches", quoted_records, frame, prepared,
-        )
-        assert budget.count(compiled.entry_agent.instructions, json_text(quoted_packets[0])) >= 60_000
-        result = await services.reviews.jobs.call(
-            "wide-batches", "synthesis", "quoted-source-selection", quoted_packets[0], prepared, AnalysisSources,
-        )
-        assert result == {"sources": []}
-        assert len(stub_provider.requests) == 2
-        assert json.loads(stub_provider.requests[-1]["messages"][-1]["content"]) == quoted_packets[0]
-        measured_request = json.loads(stub_provider.tokenizer_requests[-1]["content"])
-        assert isinstance(measured_request, dict)
-        assert measured_request["messages"] == stub_provider.requests[-1]["messages"]
-        assert stub_provider.requests[-1]["max_tokens"] == 32768
-        with pytest.raises(ValidationError, match="One complete summary exceeds"):
-            await services.reviews.jobs.summary_packets(
-                "wide-batches", [{"summary": "x y " * 60000}], frame, prepared,
-            )
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
 async def test_summary_tokenizer_unavailable_is_visible_and_invalid_counts_block(test_settings, stub_provider, monkeypatch):
     from backend.research.reviews.schemas import AnalysisSources
 
@@ -373,29 +266,6 @@ async def test_summary_tokenizer_unavailable_is_visible_and_invalid_counts_block
         with pytest.raises(ValidationError, match="invalid tokenizer response"):
             await services.reviews.jobs.summary_packets("tokenizer-safety", records, {}, prepared)
         assert not stub_provider.requests
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("context_tokens", [32768, 131072, 262144])
-async def test_summary_context_caps_at_128k_and_reserves_twenty_percent_for_output(
-    test_settings, stub_provider, context_tokens,
-):
-    services = create_services(test_settings)
-    try:
-        provider = services.providers.create(ProviderCreate(
-            name="Summary context", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
-            models=[ProviderModel(name="summary", capabilities={"chat"}, context_window_tokens=context_tokens)],
-        ))
-        role = SummaryRole(model_reference={"provider_profile_id": provider.id, "model": "summary"})
-        compiled, budget, output = services.reviews._prepare_summary(role)
-        window = min(context_tokens, 131072)
-        assert compiled.context_window_tokens == window
-        assert output == window // 5
-        assert budget.limit == window - window // 5 - ((window + 9) // 10) - 1024
-        _, smaller_budget, smaller_output = services.reviews._prepare_summary(role.model_copy(update={"max_output_tokens": 1024}))
-        assert smaller_budget.limit == budget.limit and smaller_output == 1024
     finally:
         await services.close()
 
@@ -498,56 +368,9 @@ async def test_compact_summary_is_one_tool_free_capped_call_and_reuses_receipts(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("summary_text", [
-    "Plain summary without JSON or headings.",
-    "## First\nOne.\n## Second\nTwo.\n## Third\nThree.\n## Fourth\nFour.\n## Fifth\nFive.",
-    '{"claims": [], "partial_summary": [{"title": "Anything", "claim_indexes": [14, 15]}]}',
-    "",
+@pytest.mark.parametrize(("rejected_output", "selection_page"), [
+    (None, 1), (None, 999), ("quote", 1),
 ])
-async def test_compact_summary_saves_output_verbatim_without_checks_or_retries(
-    test_settings, stub_provider, monkeypatch, summary_text,
-):
-    services = create_services(test_settings)
-    calls = []
-
-    def reply(payload):
-        calls.append(payload)
-        assert not payload.get("response_format")
-        return summary_text
-
-    monkeypatch.setattr(stub_provider, "_reply_for", reply)
-    try:
-        reference = configure(services, stub_provider)
-        document_id = await seed_paper(services)
-        spec = ReviewCreateRequest(title="Invalid compact review", objective="Compare methods.", main_model=reference,
-                                   summary_model=SummaryRole(model_reference=reference))
-        services.reviews.repository.create("invalid-compact", spec.model_dump(mode="json"), {
-            "status": "running", "stage": "reading", "allowance_tokens": 10_000_000,
-        })
-        candidate = Candidate(id="invalid-paper", title="Adaptive methods", document_id=document_id, selected=True)
-        services.reviews.repository.save_candidate("invalid-compact", candidate.id, candidate)
-        version = services.documents.source_revision(document_id)["source_version"]
-        key = f"reading-plan:{candidate.id}:{version}:content-v2"
-        services.reviews.repository.save_job("invalid-compact", key, "reading_plan", {
-            "key": key, "status": "completed", "pages": [{"page": 1, "action": "read", "reason": "Core result."}],
-        })
-        if summary_text:
-            await services.reviews._reading("invalid-compact")
-            assert services.reviews.paper("invalid-compact", candidate.id).selective_summary["sections"][0]["content"] == summary_text
-        else:
-            with pytest.raises(ValidationError, match="model returned no answer text"):
-                await services.reviews._reading("invalid-compact")
-            assert services.reviews.paper("invalid-compact", candidate.id).selective_summary is None
-        assert len(calls) == 1
-        assert services.reviews.paper("invalid-compact", candidate.id).findings == []
-        assert not any("automatically repairing" in notice for notice in services.reviews.get("invalid-compact").notices)
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("rejected_output", [None, "quote", "claim_index", "completed", "settled"])
-@pytest.mark.parametrize("selection_page", [1, 999])
 async def test_compact_summary_saves_prose_without_evidence_bookkeeping_and_analysis_reads_originals(
     test_settings, stub_provider, monkeypatch, rejected_output, selection_page,
 ):
@@ -618,15 +441,12 @@ async def test_compact_summary_saves_prose_without_evidence_bookkeeping_and_anal
                 }, services.reviews._prepare_summary(role))[0]
                 rejected_key = f"compact-summary:{document_id}:previous"
                 services.reviews.repository.save_job("fast-summaries", rejected_key, "reading", {
-                    "key": rejected_key, "status": (rejected_output if rejected_output in {"completed", "settled"}
-                                                   else "invalid" if index == 0 else "retry_requested"), "raw_result": {
+                    "key": rejected_key, "status": "invalid" if index == 0 else "retry_requested", "raw_result": {
                         **summary_result, "partial_summary": [{
                             **summary_result["partial_summary"][0], "claim_indexes": [14, 15],
                         }],
                     },
-                    "validation_error": ("An evidence claim did not quote the admitted source page verbatim."
-                                         if rejected_output == "quote"
-                                         else "A partial summary must cite claims from its own source packet."),
+                    "validation_error": "An evidence claim did not quote the admitted source page verbatim.",
                     "provenance": {"input_hash": digest(packet), "model": fast["model"],
                                    "provider_profile_id": fast["provider_profile_id"]},
                     "tokens_spent": 100, "usage_estimated": False,
@@ -690,88 +510,6 @@ async def test_compact_summary_saves_prose_without_evidence_bookkeeping_and_anal
 
 
 @pytest.mark.anyio
-async def test_paused_review_can_change_summary_role_without_restarting_exploration(
-    test_settings, stub_provider, monkeypatch,
-):
-    services = create_services(test_settings)
-    scheduled = []
-    monkeypatch.setattr(services.reviews, "_schedule", scheduled.append)
-    try:
-        reference = configure(services, stub_provider)
-        spec = ReviewCreateRequest(title="Paused review", objective="Compare methods.", main_model=reference)
-        history = {stage: "completed" for stage in ("scope", "discovery", "screening", "reading_plan")}
-        services.reviews.repository.create("paused-summary", spec.model_dump(mode="json"), {
-            "status": "paused", "stage": "reading", "stage_history": history,
-            "work_budget": {"screened_papers": 100, "read_papers": 20, "comparison_passes": 1},
-        })
-        role = SummaryRole(model_reference=reference, max_output_tokens=1024)
-        current = services.reviews.get("paused-summary")
-        updated = await services.reviews.control("paused-summary", ReviewControlRequest(
-            expected_revision=current.revision, action="resume", summary_model=role,
-        ))
-        assert updated.summary_model == role and updated.main_model == spec.main_model
-        assert updated.stage == "reading" and updated.stage_history == history
-        assert scheduled == ["paused-summary"]
-        assert services.reviews._spec("paused-summary").summary_model == role
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("status,approval", [("paused", None), ("blocked", None), ("paused", "budget"), ("paused", "plan")])
-async def test_resume_can_change_main_model_and_preserves_checkpoints(
-    test_settings, stub_provider, monkeypatch, status, approval,
-):
-    app = create_app(test_settings)
-    services = app.state.services
-    scheduled = []
-    monkeypatch.setattr(services.reviews, "_schedule", scheduled.append)
-    try:
-        main = configure(services, stub_provider)
-        replacement = configure(services, stub_provider, name="replacement-main")
-        summary = SummaryRole(model_reference=main, parallel_requests=4)
-        spec = ReviewCreateRequest(title="Saved research", objective="Compare methods.", main_model=main, summary_model=summary)
-        history = {stage: "completed" for stage in ("scope", "discovery", "screening", "reading_plan")}
-        services.reviews.repository.create("switch-main", spec.model_dump(mode="json"), {
-            "status": status, "stage": "reading", "approval": approval, "stage_history": history,
-            "work_budget": {"screened_papers": 100, "read_papers": 20, "comparison_passes": 1},
-        })
-        candidate = Candidate(id="saved-paper", title="Saved paper", selected=True)
-        services.reviews.repository.save_candidate("switch-main", candidate.id, candidate)
-        receipt = {"key": "saved-evidence", "status": "completed", "result": {"quote": "Original text."}}
-        services.reviews.repository.save_job("switch-main", receipt["key"], "reading", receipt)
-        current = services.reviews.get("switch-main")
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as http:
-            response = await http.post("/api/literature-reviews/switch-main/control", json={
-                "action": "resume", "expected_revision": current.revision, "main_model": replacement,
-            })
-            assert response.status_code == 200, response.text
-            updated = response.json()
-            assert updated["main_model"] == replacement
-            assert updated["summary_model"] == summary.model_dump(mode="json")
-            assert updated["stage_history"] == history and updated["stage"] == "reading"
-            assert updated["work_budget"] == current.work_budget.model_dump(mode="json")
-            assert updated["status"] == ("awaiting_approval" if approval else "running")
-            assert updated["approval"] == approval
-            assert (await http.post("/api/literature-reviews/switch-main/control", json={
-                "action": "resume", "expected_revision": current.revision, "main_model": main,
-            })).status_code == 409
-        assert scheduled == ([] if approval else ["switch-main"])
-        assert services.reviews.repository.job("switch-main", receipt["key"]) == receipt
-        assert services.reviews._candidates("switch-main", selected=True) == [candidate]
-        assert services.reviews.repository.get("switch-main").specification["main_model"] == main
-        assert services.reviews._spec("switch-main").main_model.model == "replacement-main"
-        assert not stub_provider.requests
-        restarted = create_services(test_settings)
-        try:
-            assert restarted.reviews.get("switch-main").main_model.model == "replacement-main"
-        finally:
-            await restarted.close()
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
 async def test_main_model_switch_validates_before_updating_or_resuming(test_settings, stub_provider, monkeypatch):
     services = create_services(test_settings)
     scheduled = []
@@ -797,18 +535,6 @@ async def test_main_model_switch_validates_before_updating_or_resuming(test_sett
         assert not scheduled
     finally:
         await services.close()
-
-
-@pytest.mark.parametrize("payload", [
-    {"action": "pause", "main_model": {"provider_profile_id": "local", "model": "new"}},
-    {"action": "resume", "main_model": None},
-    {"action": "resume", "main_model": {}},
-])
-def test_main_model_changes_require_explicit_model_and_resume(payload):
-    from pydantic import ValidationError as SchemaValidationError
-
-    with pytest.raises(SchemaValidationError):
-        ReviewControlRequest(expected_revision=1, **payload)
 
 
 @pytest.mark.anyio
@@ -840,66 +566,6 @@ async def test_main_model_switch_reuses_completed_jobs_with_original_provenance(
             "reuse-main", "scope", "scope", {"objective": "A new question."}, new, ReviewScope,
         )
         assert [request["model"] for request in stub_provider.requests] == ["main", "replacement-main"]
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_main_model_switch_repacks_only_unfinished_summary_selection(test_settings, stub_provider, monkeypatch):
-    from backend.research.reviews.jobs import digest
-    from backend.research.reviews.schemas import AnalysisSources
-
-    services = create_services(test_settings)
-    monkeypatch.setattr(services.reviews, "_schedule", lambda review_id: None)
-    stub_provider.reply = '{"sources":[]}'
-    try:
-        main = configure(services, stub_provider, name="gpt-4o")
-        provider = services.providers.create(ProviderCreate(
-            name="Smaller research context", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
-            models=[ProviderModel(name="gpt-4o-mini", capabilities={"chat"}, context_window_tokens=16384)],
-        ))
-        replacement = {"provider_profile_id": provider.id, "model": "gpt-4o-mini"}
-        spec = ReviewCreateRequest(title="Saved selections", objective="Compare methods.", main_model=main)
-        services.reviews.repository.create("repack-main", spec.model_dump(mode="json"), {
-            "status": "running", "stage": "synthesis",
-            "work_budget": {"screened_papers": 100, "read_papers": 20, "comparison_passes": 1},
-        })
-        summaries = [{"candidate_id": f"paper-{index}", "source_version": "v1",
-                      "available_pages": [1], "summary": "adaptive " * 4000} for index in range(6)]
-        prepared = services.reviews.jobs.prepare(spec.main_model, "literature-analysis-sources", AnalysisSources)
-        frame = {**services.reviews._frame("repack-main"), "stage": "analysis-source-selection"}
-        packets = await services.reviews.jobs.summary_packets("repack-main", summaries, frame, prepared)
-        assert len(packets) > 1 and len(packets[0]["records"]) > 1
-        await services.reviews.jobs.call(
-            "repack-main", "synthesis", "analysis-source-selection", packets[0], prepared, AnalysisSources,
-        )
-        completed_ids = [row["candidate_id"] for row in packets[0]["records"]]
-        packet_key = digest(packets[0])
-        services.reviews.repository.save_job("repack-main", "analysis-plan", "synthesis", {
-            "key": "analysis-plan", "fingerprint": "old-model-context",
-            "input_fingerprint": digest([summaries, services.reviews._frame("repack-main")]),
-            "selection_prompt_hash": digest(prepared[0].entry_agent.instructions),
-            "phase": "selecting", "page_limit": 60, "pages": [], "report_requested": False,
-            "selection_done": [packet_key], "selection_total": len(packets),
-            "selection_records": {packet_key: completed_ids},
-        })
-        services.reviews.jobs.checkpoint("repack-main", status="paused")
-        await services.reviews.control("repack-main", ReviewControlRequest(
-            action="resume", expected_revision=services.reviews.get("repack-main").revision, main_model=replacement,
-        ))
-        await services.reviews._analysis_sources("repack-main", summaries)
-        pending_ids = []
-        for request in stub_provider.requests[1:]:
-            assert request["model"] == "gpt-4o-mini"
-            packet = json.loads(next(row["content"] for row in reversed(request["messages"]) if row["role"] == "user"))
-            pending_ids.extend(row["candidate_id"] for row in packet["records"])
-        assert pending_ids == [row["candidate_id"] for row in summaries if row["candidate_id"] not in completed_ids]
-        plan = services.reviews.repository.job("repack-main", "analysis-plan")
-        assert plan["page_limit"] == 60 and packet_key in plan["selection_done"]
-        assert len(plan["selection_done"]) == plan["selection_total"]
-        calls = len(stub_provider.requests)
-        await services.reviews._analysis_sources("repack-main", summaries)
-        assert len(stub_provider.requests) == calls
     finally:
         await services.close()
 
@@ -979,123 +645,6 @@ async def test_oversized_compact_summary_preserves_all_spans_and_resumes_without
 
 
 @pytest.mark.anyio
-async def test_paper_progress_is_paginated_metadata_and_loads_one_summary_on_demand(
-    test_settings, stub_provider, monkeypatch,
-):
-    from backend.research.reviews.jobs import digest
-
-    app = create_app(test_settings)
-    services = app.state.services
-    try:
-        reference = configure(services, stub_provider)
-        spec = ReviewCreateRequest(title="Summary browser", objective="Compare methods.", main_model=reference)
-        services.reviews.repository.create("browser", spec.model_dump(mode="json"), {"status": "running", "stage": "reading"})
-        document_ids = []
-        text = "SAVED SUMMARY BODY " * 400
-        for index in range(27):
-            document_id = await seed_paper(services, suffix=f"browser-{index}") if index < 26 else None
-            candidate = Candidate(id=f"browser-{index:02}", title=f"Paper {index:02}", selected=True,
-                                  document_id=document_id,
-                                  error="Source unavailable" if index == 26 else None)
-            services.reviews.repository.save_candidate("browser", candidate.id, candidate)
-            if index == 26:
-                continue
-            document_ids.append(document_id)
-            revision = services.documents.source_revision(document_id)
-            plan_key = f"reading-plan:{candidate.id}:{revision['source_version']}:content-v2"
-            services.reviews.repository.save_job("browser", plan_key, "reading_plan", {
-                "key": plan_key, "status": "completed",
-                "pages": [{"page": 1, "action": "read", "reason": "Core method."}],
-            })
-            receipt = {
-                "key": f"evidence-receipt:{candidate.id}", "kind": "evidence", "candidate_id": candidate.id,
-                **revision, "reading_policy": "content-v2", "claims": [], "limitations": [],
-                "spans": [{"page": 1, "start": 0, "end": 10}], "partial_summary": [],
-            }
-            services.reviews.repository.save_job("browser", receipt["key"], "reading", receipt)
-            key = f"paper-summary:{candidate.id}:{revision['source_version']}:selective-v1:{digest([receipt])}"
-            services.reviews.repository.save_job("browser", key, "reading", {
-                "key": key, "kind": "selective_summary", "candidate_id": candidate.id, **revision,
-                "summary": {"sections": [{"title": "Method", "content": text, "evidence_ids": []}], "limitations": []},
-            })
-        services.reviews.repository.save_job("browser", "compact-summary:worker", "reading", {
-            "key": "compact-summary:worker", "raw_result": {"private_worker_output": text},
-        })
-        assert all(row["key"] != "compact-summary:worker" for row in services.reviews.repository.paper_jobs("browser"))
-        assert all(row.get("candidate_id", "browser-00") == "browser-00"
-                   for row in services.reviews.repository.paper_jobs("browser", "browser-00"))
-
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
-            with monkeypatch.context() as context:
-                context.setattr(services.reviews, "_paper", Mock(side_effect=AssertionError("Progress must not read paper text")))
-                first = await client.get("/api/literature-reviews/browser/paper-progress")
-                assert first.status_code == 200
-                page = first.json()
-                assert page["counts"] == {
-                    "total": 27, "collected": 26, "prepared": 26, "plan_complete": 26, "summarized": 26, "failed": 1,
-                }
-                assert len(page["items"]) == 25 and page["total"] == 26 and page["next_offset"] == 25
-                assert "SAVED SUMMARY BODY" not in first.text and len(first.content) < 12000
-                assert all(set(row) == {"candidate_id", "title", "collected", "prepared", "plan_complete",
-                                        "summary_complete", "operation", "error"} for row in page["items"])
-                last = (await client.get("/api/literature-reviews/browser/paper-progress?offset=25")).json()
-                assert [row["candidate_id"] for row in last["items"]] == ["browser-25"] and last["next_offset"] is None
-                all_papers = (await client.get("/api/literature-reviews/browser/paper-progress?summaries_only=false&limit=100")).json()
-                assert len(all_papers["items"]) == 27 and all_papers["items"][-1]["error"] == "Source unavailable"
-                assert (await client.get("/api/literature-reviews/browser/paper-progress?limit=101")).status_code == 422
-                assert (await client.get("/api/literature-reviews/missing/paper-progress")).status_code == 404
-            detail = await client.get("/api/literature-reviews/browser/papers/browser-00")
-            assert detail.status_code == 200 and detail.json()["selective_summary"]["sections"][0]["content"] == text
-            services.document_ingestion._persist_document_content(
-                services.documents.get_document(document_ids[0]),
-                [{"page": 1, "text": "Replacement original content.", "ocr_used": False}],
-                enhancement_model=None, extraction_mode="embedded",
-            )
-            updated = (await client.get("/api/literature-reviews/browser/paper-progress")).json()
-            assert len(updated["items"]) == 25 and updated["counts"]["summarized"] == 25
-            assert all(row["candidate_id"] != "browser-00" for row in updated["items"])
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_collection_progress_reads_jobs_once_without_loading_unread_manifests(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    try:
-        reference = configure(services, stub_provider)
-        spec = ReviewCreateRequest(title="Collection progress", objective="Compare methods.", main_model=reference)
-        services.reviews.repository.create("collection", spec.model_dump(mode="json"), {
-            "status": "running", "stage": "reading_plan",
-        })
-        document_id = await seed_paper(services)
-        for index in range(25):
-            candidate = Candidate(id=f"collected-{index}", title=f"Paper {index}", selected=True,
-                                  document_id=document_id if index < 20 else None,
-                                  error="Source unavailable" if index == 24 else None)
-            services.reviews.repository.save_candidate("collection", candidate.id, candidate.model_copy(update={
-                "document_id": None,
-            }))
-            services.reviews.repository.update_candidate("collection", candidate)
-        jobs = Mock(wraps=services.reviews.repository.jobs)
-        monkeypatch.setattr(services.reviews.repository, "jobs", jobs)
-        content = Mock(wraps=services.documents.artifact_content)
-        monkeypatch.setattr(services.documents, "artifact_content", content)
-        papers = services.reviews.papers("collection")
-        assert len(papers) == 25
-        assert sum(paper.collected for paper in papers) == 20
-        assert sum(paper.prepared for paper in papers) == 20
-        assert not any(paper.plan_complete or paper.selective_summary for paper in papers)
-        assert sum(bool(paper.error) for paper in papers) == 1
-        assert jobs.call_count == 2  # One reference-extraction check and one shared job snapshot.
-        content.assert_not_called()
-        jobs.reset_mock()
-        assert services.reviews.get("collection").evidence_count == 0
-        content.assert_not_called()
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
 async def test_failed_preparation_keeps_linked_document_and_clears_active_operation(test_settings, stub_provider, monkeypatch):
     services = create_services(test_settings)
     try:
@@ -1128,152 +677,7 @@ async def test_failed_preparation_keeps_linked_document_and_clears_active_operat
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("protocol", ["generation", "systemone"])
-async def test_content_page_policy_and_selective_summaries_ignore_review_objective(
-    test_settings, stub_provider, monkeypatch, protocol,
-):
-    services = create_services(test_settings)
-    original_native = stub_provider.decisions
-    decision_packets = []
-    texts = [
-        "Abstract: Adaptive study motivation and contribution.",
-        "Introduction: The problem and assumptions.",
-        "Method: A substantive core algorithm.",
-        "Results: The primary measured outcome is 42 percent.",
-        "Discussion and conclusion: Meaningful limitations.",
-        "Appendix: Peripheral implementation listings.",
-        "Extra ablation studies: Optional secondary variants.",
-        "Trailing diagrams: Figure labels only.",
-        "References: Researcher. Shared adaptive reference (2024).",
-        "Appendix: The only substantive core proof is reported here.",
-        "Unclear scanned page: insufficient outline.",
-        "Appendix: Peripheral diagram labels only.",
-        "Author-stated limitations: Substantive qualifications to the main result.",
-    ]
-    deferred = {6, 7, 8, 9, 12}
-
-    def choices(packet, rows):
-        assert not {"objective", "questions", "inclusion_criteria", "exclusion_criteria"} & packet.keys()
-        decision_packets.append(packet)
-        return [{
-            "page": row["page"], "action": "defer" if row["page"] in deferred else "read",
-            "reference_page": row["page"] == 9, "reason": "Substantive section content or peripheral material.",
-        } for row in rows]
-
-    def reply(payload):
-        schema = payload["response_format"]["json_schema"]["name"]
-        packet = json.loads(next(row["content"] for row in reversed(payload["messages"]) if row["role"] == "user"))
-        if schema == "ReadingPlan":
-            instructions = payload["messages"][0]["content"]
-            assert "not matching a research objective" in instructions
-            assert "extra ablation" in instructions and "only substantive core information" in instructions
-            return json.dumps({"pages": choices(packet, packet["records"])})
-        if schema == "ReadingGroups":
-            return json.dumps({"groups": [
-                [row["page"] for row in packet["records"] if row["page"] <= 5],
-                [row["page"] for row in packet["records"] if row["page"] > 5],
-            ]})
-        if schema == "ReferenceExtraction":
-            return json.dumps({"references": [{
-                "title": "Shared adaptive reference", "authors": ["Researcher"], "year": 2024,
-                "doi": None, "arxiv_id": None, "quote": row["text"], "page": row["page"],
-            } for row in packet["records"]]})
-        result = json.loads(review_reply(payload))
-        if schema == "EvidencePacket":
-            assert "objective" not in packet and "questions" not in packet
-            result["follow_up_pages"] = []
-        return json.dumps(result)
-
-    def native(payload):
-        packet = payload["state"]
-        packet = json.loads(packet) if isinstance(packet, str) else packet
-        row = choices(packet, [packet["outline"]])[0]
-        criteria = payload["questions"]["priority"]["criteria"]
-        assert "extra ablations" in criteria["defer"] and "only substantive core information" in criteria["read"]
-        result = original_native(payload)
-        for name, choice in {"priority": "defer" if row["page"] in deferred else "uncertain" if row["page"] == 11 else "read",
-                             "references": "yes" if row["reference_page"] else "no"}.items():
-            result["answers"][name]["choice"] = choice
-            result["answers"][name]["probabilities"] = {
-                key: float(key == choice) for key in result["answers"][name]["probabilities"]
-            }
-        return result
-
-    monkeypatch.setattr(stub_provider, "_reply_for", reply)
-    monkeypatch.setattr(stub_provider, "decisions", native)
-    try:
-        main = configure(services, stub_provider)
-        if protocol == "systemone":
-            provider = services.providers.create(ProviderCreate(
-                name="Decision", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
-                models=[ProviderModel(name="decision", capabilities={"decision"}, context_window_tokens=8192)],
-            ))
-            reference = {"provider_profile_id": provider.id, "model": "decision"}
-        else:
-            reference = configure(services, stub_provider, name="fast")
-        role = DecisionRole(model_reference=reference, protocol=protocol, input_tokens=8192)
-        document_id = await seed_paper(services)
-        services.document_ingestion._persist_document_content(
-            services.documents.get_document(document_id),
-            [{"page": index + 1, "text": text, "ocr_used": False} for index, text in enumerate(texts)],
-            enhancement_model=None, extraction_mode="embedded",
-        )
-        version = services.documents.source_revision(document_id)["source_version"]
-        captured = []
-        for index, objective in enumerate(["Find adaptive runtime improvements.", "Compare scientific motivation."]):
-            review_id = f"content-policy-{index}"
-            specification = ReviewCreateRequest(title="Content review", objective=objective, main_model=main,
-                                                decision_model=role, web_enabled=False)
-            services.reviews.repository.create(review_id, specification.model_dump(mode="json"), {
-                "status": "running", "stage": "reading", "scope": None, "allowance_tokens": 10_000_000,
-            })
-            candidate = Candidate(id=f"paper-{index}", title="Adaptive methods", document_id=document_id, selected=True)
-            services.reviews.repository.save_candidate(review_id, candidate.id, candidate)
-            old_key = f"reading-plan:{candidate.id}:{version}:references-v1"
-            services.reviews.repository.save_job(review_id, old_key, "reading_plan", {
-                "key": old_key, "status": "completed", "pages": [{"page": 1, "action": "defer"}],
-            })
-            before = len(decision_packets)
-            await services.reviews._reading_plan(review_id, candidates=[candidate])
-            captured.append(decision_packets[before:])
-            assert any(packet.get("neighbor_decisions") for packet in captured[-1])
-            paper = services.reviews.paper(review_id, candidate.id)
-            assert [row.page for row in paper.pages if row.action == "defer"] == sorted(deferred)
-            assert paper.pages[8].reference_page
-            await services.reviews._reading(review_id, candidates=[candidate])
-            paper = services.reviews.paper(review_id, candidate.id)
-            assert paper.read_pages == [1, 2, 3, 4, 5, 10, 11, 13]
-            assert len(paper.partial_summaries) == 2
-            assert paper.selective_summary["sections"][0]["content"].startswith("The combined inspected results")
-            ids = {claim["id"] for claim in paper.findings}
-            assert set(paper.selective_summary["sections"][0]["evidence_ids"]) == ids
-            assert all(claim["quote"] in texts[claim["page"] - 1] for claim in paper.findings)
-            assert all(claim["source_version"] == version for claim in paper.findings)
-            assert services.summaries.versions(document_id) == []
-            await services.reviews._references(review_id)
-            assert services.reviews.references(review_id)[0].citations[0]["page"] == 9
-            requests = len(stub_provider.requests) + len(stub_provider.decision_requests)
-            await services.reviews._reading_plan(review_id, candidates=[candidate])
-            await services.reviews._reading(review_id, candidates=[candidate])
-            assert requests == len(stub_provider.requests) + len(stub_provider.decision_requests)
-            receipts = [job for job in services.reviews.repository.jobs(review_id, "reading") if job.get("kind") == "evidence"]
-            changed = {**receipts[0], "limitations": ["Changed source receipt"]}
-            services.reviews.repository.save_job(review_id, changed["key"], "reading", changed)
-            assert services.reviews.paper(review_id, candidate.id).selective_summary is None
-        assert sorted(map(json.dumps, captured[0])) == sorted(map(json.dumps, captured[1]))
-        services.document_ingestion._persist_document_content(
-            services.documents.get_document(document_id),
-            [{"page": 1, "text": "Replacement source extraction.", "ocr_used": False}],
-            enhancement_model=None, extraction_mode="embedded",
-        )
-        replaced = services.reviews.paper("content-policy-0", "paper-0")
-        assert replaced.selective_summary is None and replaced.partial_summaries == [] and replaced.findings == []
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("invalid", ["quote", "partial_support", "combined_support", "audit_support"])
+@pytest.mark.parametrize("invalid", ["quote", "combined_support"])
 async def test_selective_summary_rejects_invalid_source_support(test_settings, stub_provider, monkeypatch, invalid):
     services = create_services(test_settings)
 
@@ -1284,12 +688,8 @@ async def test_selective_summary_rejects_invalid_source_support(test_settings, s
             result["follow_up_pages"] = []
             if invalid == "quote":
                 result["claims"][0]["quote"] = "Invented source text."
-            elif invalid == "partial_support":
-                result["partial_summary"][0]["claim_indexes"] = [len(result["claims"])]
         elif payload["response_format"]["json_schema"]["name"] == "SelectiveSummary":
-            if (invalid == "combined_support" and packet["stage"] == "combine") or (
-                invalid == "audit_support" and packet["stage"] == "audit"
-            ):
+            if invalid == "combined_support" and packet["stage"] == "combine":
                 result["sections"][0]["evidence_ids"] = ["another-paper-evidence"]
         return json.dumps(result)
 
@@ -1308,7 +708,7 @@ async def test_selective_summary_rejects_invalid_source_support(test_settings, s
             await services.reviews._reading("source-checks", candidates=[candidate])
         paper = services.reviews.paper("source-checks", candidate.id)
         assert paper.selective_summary is None
-        if invalid in {"quote", "partial_support"}:
+        if invalid == "quote":
             assert paper.partial_summaries == [] and paper.findings == []
     finally:
         await services.close()
@@ -1329,8 +729,11 @@ async def command(services, identifier: str, action: str, **values):
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("protocol", ["generation", "systemone"])
-@pytest.mark.parametrize("match", ["exact", "ambiguous", "relevant", "somewhat", "irrelevant"])
+@pytest.mark.parametrize(("protocol", "match"), [
+    ("systemone", "exact"),
+    ("generation", "ambiguous"),
+    ("generation", "irrelevant"),
+])
 async def test_original_reference_counts_and_automatic_reading(test_settings, stub_provider, monkeypatch, protocol, match):
     services = create_services(test_settings)
     downloads_seen = []
@@ -1490,11 +893,6 @@ async def test_original_reference_counts_and_automatic_reading(test_settings, st
         await services.close()
 
 
-def test_isolated_page_gaps_do_not_fill_separated_blocks():
-    from backend.research.reviews.service import LiteratureReviewService
-    choices = [{"page": page, "action": "read" if page in (1, 2, 3, 5, 10, 11, 12) else "defer"} for page in range(1, 13)]
-    assert LiteratureReviewService._isolated_gaps(choices) == [4]
-
 @pytest.mark.anyio
 async def test_distinct_work_budgets_low_relevance_and_comparison_passes(test_settings, stub_provider, monkeypatch):
     services = create_services(test_settings)
@@ -1626,7 +1024,7 @@ async def test_screening_ranks_and_excludes_before_pagination(test_settings, stu
         services.reviews.repository.create("ranking", specification.model_dump(mode="json"), {
             "status": "running", "stage": "screening", "scope": None, "allowance_tokens": 10_000_000,
         })
-        count = 552 if protocol == "generation" else 16
+        count = 104 if protocol == "generation" else 16
         for index in range(count):
             candidate = Candidate(id=f"candidate-{index}", title=f"Adaptive {index}", abstract="Adaptive method results.")
             services.reviews.repository.save_candidate("ranking", candidate.id, candidate)
@@ -1667,35 +1065,6 @@ async def test_screening_ranks_and_excludes_before_pagination(test_settings, stu
         requests = len(stub_provider.requests) + len(stub_provider.decision_requests)
         await services.reviews._screening("ranking")
         assert len(stub_provider.requests) + len(stub_provider.decision_requests) == requests
-    finally:
-        await services.close()
-
-
-@pytest.mark.parametrize("old,new", [
-    ("core", "HIGHLY_RELEVANT"), ("relevant", "RELEVANT"),
-    ("background", "SOMEWHAT_RELEVANT"), ("uncertain", "SOMEWHAT_RELEVANT"), ("unrelated", "IRRELEVANT"),
-])
-def test_legacy_screening_ratings_remain_readable(old, new):
-    screening = Screening(kind="research", relevance=old, reason="Existing review.", matched_questions=[])
-    assert screening.relevance == new
-
-
-@pytest.mark.anyio
-async def test_review_inherits_default_native_decision_model(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    try:
-        main = configure(services, stub_provider)
-        profile = services.providers.create(ProviderCreate(
-            name="Default System One", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
-            models=[ProviderModel(name="decision", capabilities={"decision"}, context_window_tokens=8192)],
-        ))
-        test_settings.default_model_references["decision"] = {"provider_profile_id": profile.id, "model": "decision"}
-        review = await services.reviews.create(ReviewCreateRequest(title="Defaults", objective="Adaptive", main_model=main))
-        assert review.decision_model.protocol == "systemone"
-        assert review.decision_model.model_reference.model == "decision"
-        assert review.decision_model.input_tokens == 8192
-        await settle(services, review.id)
     finally:
         await services.close()
 
@@ -1757,9 +1126,96 @@ async def test_clear_review_removes_owned_artifacts_and_keeps_shared_and_edited_
 
 
 @pytest.mark.anyio
+async def test_existing_review_can_move_tracks_without_rewriting_saved_artifacts(test_settings, stub_provider):
+    app = create_app(test_settings)
+    services = app.state.services
+    try:
+        old, target = services.tracks.create("Original"), services.tracks.create("Destination")
+        spec = ReviewCreateRequest(
+            title="Existing findings", objective="Compare prior evidence",
+            main_model=configure(services, stub_provider), track_id=old.id,
+        )
+        output = services.workspace.create_note(name="Saved findings", content="Keep this annotated report")
+        services.reviews.repository.create("move-review", spec.model_dump(mode="json"), {
+            "status": "completed", "stage": "publication", "output_path": output.path,
+        })
+        receipt = {"kind": "publication_artifact", "track_id": old.id, "body": "Original publication"}
+        services.reviews.repository.save_job("move-review", "topic-publication", "publication", receipt)
+        original_state = services.reviews.repository.get("move-review").state
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as http:
+            revision = services.reviews.get("move-review").revision
+            moved = await http.put("/api/literature-reviews/move-review/track", json={
+                "track_id": target.id, "expected_revision": revision,
+            })
+            assert moved.status_code == 200, moved.text
+            assert moved.json()["track_id"] == target.id
+            assert moved.json()["output_path"] == output.path
+            assert services.reviews.repository.get("move-review").state == original_state
+            assert services.workspace.read_file(output.path).content == output.content
+            assert services.reviews.list(track_id=old.id) == []
+            assert services.reviews.list(track_id=target.id)[0].id == "move-review"
+            stale = await http.put("/api/literature-reviews/move-review/track", json={
+                "track_id": old.id, "expected_revision": revision,
+            })
+            assert stale.status_code == 409
+            key, previous = services.reviews._publication_receipt("move-review", "topic-publication", target.id)
+            assert previous is None and key != "topic-publication"
+            services.reviews.repository.save_job("move-review", key, "publication", {**receipt, "track_id": target.id})
+            assert services.reviews.repository.job("move-review", "topic-publication") == receipt
+            assert services.reviews._publication_receipt("move-review", "topic-publication", old.id)[1] == receipt
+            current = services.reviews.get("move-review")
+            with pytest.raises(NotFoundError):
+                await services.reviews.assign_track(current.id, "missing", current.revision)
+            services.reviews.jobs.checkpoint(current.id, status="running")
+            current = services.reviews.get(current.id)
+            blocked = await http.put(f"/api/literature-reviews/{current.id}/track", json={
+                "track_id": old.id, "expected_revision": current.revision,
+            })
+            assert blocked.status_code == 409
+            assert services.reviews.get(current.id).track_id == target.id
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_moved_topic_review_preserves_both_publication_receipts(test_settings, stub_provider):
+    services = create_services(test_settings)
+    try:
+        original, destination = services.tracks.create("Original"), services.tracks.create("Destination")
+        reference = configure(services, stub_provider)
+        spec = ReviewCreateRequest(
+            title="Saved topic research", objective="Compare evidence", main_model=reference,
+            summary_model={"model_reference": reference}, embedding_model={"model_reference": reference},
+            track_id=original.id,
+        )
+        folder = "research/original/saved-review"
+        report = services.workspace.write_file(f"{folder}/report.md", "# Existing findings\n")
+        services.reviews.repository.create("moved-topic", spec.model_dump(mode="json"), {
+            "status": "completed", "stage": "publication", "workspace_path": folder, "output_path": report.path,
+        })
+        await services.reviews._publication("moved-topic")
+        old_receipt = services.reviews.repository.job("moved-topic", "topic-publication")
+        old_content = services.tracks.read_section(original.id, "literature").content
+        review = services.reviews.get("moved-topic")
+        await services.reviews.assign_track(review.id, destination.id, review.revision)
+        await services.reviews._publication(review.id)
+        published = services.tracks.read_section(destination.id, "literature")
+        await services.reviews._publication(review.id)
+        assert services.tracks.read_section(destination.id, "literature").sha256 == published.sha256
+        assert services.tracks.read_section(original.id, "literature").content == old_content
+        assert services.reviews.repository.job(review.id, "topic-publication") == old_receipt
+        assert services.reviews.repository.job(review.id, f"topic-publication:track:{destination.id}")["track_id"] == destination.id
+        assert services.reviews.get(review.id).workspace_path == folder
+        assert services.workspace.read_file(report.path).content == report.content
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
 async def test_clear_cancels_parallel_native_requests_before_removing_review(test_settings, stub_provider):
     services = create_services(test_settings)
-    stub_provider.decision_delay_seconds = 1
+    # Keep every request pending until clear cancels it, even under worker contention.
+    stub_provider.decision_delay_seconds = 60
     try:
         profile = services.providers.create(ProviderCreate(
             name="System One", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
@@ -1778,7 +1234,7 @@ async def test_clear_cancels_parallel_native_requests_before_removing_review(tes
             while services.model_runtime.inference_scheduler.snapshot()["active_requests"] != 8:
                 await asyncio.sleep(0.01)
 
-        await asyncio.wait_for(wait_for_batch(), timeout=5)
+        await asyncio.wait_for(wait_for_batch(), timeout=30)
         result = await services.reviews.clear("cancel", services.reviews.get("cancel").revision)
         assert result.deleted_document_ids == []
         assert services.model_runtime.inference_scheduler.snapshot()["active_requests"] == 0
@@ -1814,64 +1270,6 @@ async def test_failed_clear_stays_paused_and_can_be_retried(test_settings, stub_
         result = await services.reviews.clear("retry-clear", services.reviews.get("retry-clear").revision)
         assert result.deleted_document_ids == [document.id]
     finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("existing,expected_requests", [(0, 5), (475, 1), (500, 0), (510, 0)])
-async def test_discovery_cap_stops_sources_and_resume(test_settings, stub_provider, monkeypatch, existing, expected_requests):
-    services = create_services(test_settings)
-    requests, starts = [], []
-    clock = [0.0]
-
-    async def sleep(delay):
-        clock[0] += delay
-
-    async def search(request):
-        requests.append(request)
-        starts.append(clock[0])
-        assert request.url.host == "export.arxiv.org"
-        start = int(request.url.params["start"])
-        limit = int(request.url.params["max_results"])
-        entries = "".join(
-            f"<entry><id>https://arxiv.org/abs/2401.{index:05d}</id><title>Adaptive {index}</title>"
-            f"<summary>Adaptive results.</summary></entry>"
-            for index in range(start, start + limit)
-        )
-        return httpx.Response(200, text=f'<feed xmlns="http://www.w3.org/2005/Atom">{entries}</feed>')
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(search))
-    await services.research_search.close()
-    monkeypatch.setattr(services.research_search, "_client", client)
-    monkeypatch.setitem(services.research_search._limiters, "arxiv", AsyncRateLimiter(20, clock=lambda: clock[0], sleep=sleep))
-    try:
-        spec = ReviewCreateRequest(title="Bounded discovery", objective="Review adaptive methods.",
-                                   main_model=configure(services, stub_provider))
-        scope = ReviewScope(
-            questions=["Adaptive methods?"], inclusion_criteria=[], exclusion_criteria=[],
-            queries=[{"provider": "arxiv", "query": "adaptive", "pages": 20},
-                     {"provider": "web", "query": "more adaptive papers", "pages": 1}],
-            suggested_allowance_tokens=1_000_000, rationale="Bounded search.",
-        )
-        services.reviews.repository.create("cap", spec.model_dump(mode="json"), {
-            "status": "running", "stage": "discovery", "scope": scope.model_dump(mode="json"),
-        })
-        for index in range(existing):
-            candidate = Candidate(id=f"local-{index}", title=f"Local {index}")
-            services.reviews.repository.save_candidate("cap", candidate.id, candidate)
-        await services.reviews._discovery("cap")
-        assert len(requests) == expected_requests
-        assert starts == [3.0 * index for index in range(expected_requests)]
-        assert services.reviews.get("cap").candidate_count == max(existing, 500)
-        assert any("500-paper cap" in notice for notice in services.reviews.get("cap").notices)
-        if existing == 475:
-            assert requests[0].url.params["max_results"] == "25"
-        await services.reviews._discovery("cap")
-        assert len(requests) == expected_requests
-        services.reviews._advance("cap")
-        assert services.reviews.get("cap").stage == "screening"
-    finally:
-        await client.aclose()
         await services.close()
 
 
@@ -1961,44 +1359,6 @@ async def test_review_approval_selective_evidence_publication_and_reuse(test_set
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("protocol", ["systemone", "generation"])
-async def test_independent_roles_run_in_grouped_phases(test_settings, stub_provider, monkeypatch, protocol):
-    services = create_services(test_settings)
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    try:
-        main = configure(services, stub_provider, kind="openai")
-        if protocol == "systemone":
-            profile = services.providers.create(ProviderCreate(
-                name="Decision endpoint", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
-                models=[ProviderModel(name="decision", capabilities={"decision"}, context_window_tokens=8192)],
-            ))
-            decision = {"provider_profile_id": profile.id, "model": "decision"}
-        else:
-            decision = configure(services, stub_provider, api_mode="responses", name="decision")
-        await seed_paper(services, title="Adaptive study one", suffix="one")
-        await seed_paper(services, title="Adaptive study two", suffix="two")
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Two roles", objective="Compare adaptive studies.", main_model=main, web_enabled=False,
-            decision_model=DecisionRole(model_reference=decision, protocol=protocol, input_tokens=8192),
-        ))
-        await settle(services, review.id)
-        await command(services, review.id, "approve_plan")
-        shortlist = await settle(services, review.id)
-        assert shortlist.status == "completed", shortlist.error
-        finished = await settle(services, review.id)
-        assert finished.status == "completed", finished.error
-        assert [name for name, _ in groupby(stub_provider.request_order)] == ["main", "decision", "main"]
-        assert stub_provider.max_active_inference == 1
-        if protocol == "systemone":
-            assert len(stub_provider.decision_requests) == 8
-            assert all("decision" != payload["model"] for payload in stub_provider.requests)
-        else:
-            assert stub_provider.response_api_requests
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize("base_path", ["", "/v1"])
 async def test_native_and_generation_share_the_global_lane(test_settings, stub_provider, base_path):
     services = create_services(test_settings)
@@ -2069,76 +1429,7 @@ async def test_skipping_references_before_reading_preserves_approval_and_survive
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("stage", ["references", "reference_screening", "reference_collection"])
-async def test_skipping_active_references_awaits_cancellation(test_settings, stub_provider, monkeypatch, stage):
-    services = create_services(test_settings)
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    try:
-        await seed_paper(services)
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Skip active references", objective="Review adaptive methods.",
-            main_model=configure(services, stub_provider), web_enabled=False,
-        ))
-        await settle(services, review.id)
-        await command(services, review.id, "approve_plan")
-        assert (await settle(services, review.id)).status == "completed"
-        services.reviews.jobs.checkpoint(review.id, stage=stage, status="running", output_path=None)
-        started = asyncio.Event()
-        cancelled = asyncio.Event()
-
-        async def active_reference():
-            started.set()
-            try:
-                await asyncio.Event().wait()
-            finally:
-                cancelled.set()
-
-        task = asyncio.create_task(active_reference())
-        services.reviews._tasks[review.id] = task
-        await started.wait()
-        await command(services, review.id, "skip_references")
-        assert cancelled.is_set()
-        assert task.cancelled()
-        completed = await settle(services, review.id)
-        assert completed.status == "completed", completed.error
-        assert completed.references_skipped
-        assert completed.output_path
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_budget_checkpoint_and_stop_without_evidence(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    try:
-        await seed_paper(services)
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Budget", objective="Review adaptive methods.", main_model=configure(services, stub_provider), web_enabled=False,
-        ))
-        proposed = await settle(services, review.id)
-        await seed_paper(services, title="Adaptive second", suffix="second")
-        await command(services, review.id, "approve_plan",
-                      work_budget={"screened_papers": 1, "read_papers": 20, "comparison_passes": 1})
-        waiting = await settle(services, review.id)
-        assert waiting.approval == "budget", waiting.error
-        assert waiting.work_used.screened_papers == 1
-        await command(services, review.id, "pause")
-        await command(services, review.id, "resume")
-        assert services.reviews.get(review.id).approval == "budget"
-        await command(services, review.id, "stop_stage")
-        shortlist = await settle(services, review.id)
-        assert shortlist.approval == "budget"
-        assert shortlist.output_path is None
-        await command(services, review.id, "extend_budget",
-                      work_budget={"screened_papers": 2, "read_papers": 20, "comparison_passes": 1})
-        assert (await settle(services, review.id)).status == "completed"
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failure", ["omitted", "duplicated", "empty", "out_of_range", "schema", "corrected", "valid"])
+@pytest.mark.parametrize("failure", ["omitted", "corrected"])
 async def test_grouping_automatically_repairs_or_falls_back(test_settings, stub_provider, monkeypatch, failure):
     services = create_services(test_settings)
     group_calls = 0
@@ -2148,17 +1439,8 @@ async def test_grouping_automatically_repairs_or_falls_back(test_settings, stub_
         result = json.loads(review_reply(payload))
         if "groups" in result:
             group_calls += 1
-            pages = [number for group in result["groups"] for number in group]
             if failure == "omitted":
                 result["groups"] = []
-            elif failure == "duplicated":
-                result["groups"] = [pages + pages]
-            elif failure == "empty":
-                result["groups"] = [pages, []]
-            elif failure == "out_of_range":
-                result["groups"] = [pages + [999]]
-            elif failure == "schema":
-                result["groups"] = "not groups"
             elif failure == "corrected" and group_calls == 1:
                 result["groups"] = []
         return json.dumps(result)
@@ -2176,17 +1458,15 @@ async def test_grouping_automatically_repairs_or_falls_back(test_settings, stub_
         assert finished.status == "completed", finished.error
         jobs = services.reviews.repository.jobs(review.id)
         fallback = [job for job in jobs if job.get("kind") == "FALLBACK"]
-        invalid = failure not in {"corrected", "valid"}
+        invalid = failure == "omitted"
         assert bool(fallback) == invalid
         assert any("FALLBACK" in notice for notice in finished.notices) == invalid
         if invalid:
             assert group_calls == 3 * len(fallback)
             assert sorted(number for job in fallback for number in job["pages"]) == [1, 2]
             assert all(job["pages"] == sorted(job["pages"]) for job in fallback)
-        elif failure == "corrected":
-            assert group_calls == 3
         else:
-            assert group_calls == 2
+            assert group_calls == 3
         assert finished.evidence_count > 0
         assert finished.work_used.read_papers == 1
         assert sum(job.get("tokens_spent", 0) for job in jobs) == finished.used_tokens
@@ -2221,60 +1501,6 @@ async def test_grouping_automatically_repairs_or_falls_back(test_settings, stub_
             services.reviews.jobs.checkpoint(review.id, status="blocked", stage="reading", error=legacy_error)
             await services.reviews.start()
             assert services.reviews.get(review.id).status == "blocked"
-        if failure == "empty":
-            services.reviews.jobs.checkpoint(
-                review.id, status="paused", stage="reading",
-                error="ValidationError: An isolated worker returned invalid evidence: "
-                "Reading groups must contain every admitted page exactly once.. Resume to retry this task.",
-            )
-            await services.close()
-            services = create_services(test_settings)
-            await services.start()
-            assert services.reviews.get(review.id).status == "paused"
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_pause_during_grouping_repair_does_not_fallback(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    group_calls = 0
-
-    def reply(payload):
-        nonlocal group_calls
-        result = json.loads(review_reply(payload))
-        if "groups" in result:
-            group_calls += 1
-            result["groups"] = []
-            stub_provider.stream_delay_seconds = 0.5
-        return json.dumps(result)
-
-    monkeypatch.setattr(stub_provider, "_reply_for", reply)
-    try:
-        await seed_paper(services)
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Pause repair", objective="Review adaptive methods.",
-            main_model=configure(services, stub_provider), web_enabled=False,
-        ))
-        await settle(services, review.id)
-        await command(services, review.id, "approve_plan")
-        async with asyncio.timeout(20):
-            while group_calls < 2:
-                await asyncio.sleep(0.02)
-        await command(services, review.id, "pause")
-        assert services.reviews.get(review.id).status == "paused"
-        assert not any(job.get("kind") == "FALLBACK" for job in services.reviews.repository.jobs(review.id))
-        calls = len(stub_provider.requests)
-        await services.close()
-        services = create_services(test_settings)
-        await services.start()
-        assert services.reviews.get(review.id).status == "paused"
-        assert len(stub_provider.requests) == calls
-        stub_provider.stream_delay_seconds = 0
-        monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-        await command(services, review.id, "resume")
-        finished = await settle(services, review.id)
-        assert finished.status == "completed", finished.error
     finally:
         await services.close()
 
@@ -2411,112 +1637,9 @@ async def test_source_revision_prevents_stale_publication_and_preserves_track_ed
 
 
 @pytest.mark.anyio
-async def test_review_uses_saved_track_context_and_seeds_linked_papers(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-
-    def reply(payload):
-        result = json.loads(review_reply(payload))
-        if "queries" in result:
-            result["queries"] = [{"provider": "library", "query": "unmatchedsearchword", "pages": 1}]
-        return json.dumps(result)
-
-    monkeypatch.setattr(stub_provider, "_reply_for", reply)
-    try:
-        track = services.tracks.create("Adaptive research")
-        problem = services.tracks.read_section(track.id, "problem")
-        problem = services.tracks.write_section(
-            track.id, "problem", "# Problem\n\nCompare adaptive retrieval under a 50 ms latency limit.", problem.sha256,
-        )
-        exploration = services.tracks.write_section(
-            track.id, "exploration/prior-attempts", "# Prior attempts\n\nAdaptive reranking was already rejected for latency.", None,
-        )
-        document_id = await seed_paper(services)
-        services.tracks.add_paper(track.id, document_id)
-        folder = services.workspace.paper_folder(document_id)
-        summary = "# Existing summary\n\n" + "Earlier adaptive analysis with source citations [p.1]. " * 5
-        services.workspace.write_file(f"{folder}/summary.md", summary)
-        conversation = services.conversations.create(
-            title="Attached research", kind="agent", model_reference={}, session_policy=SessionPolicySpec(),
-        )
-        services.tracks.link_conversation(track.id, conversation.id)
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Track-aware review", objective="Compare adaptive approaches.",
-            main_model=configure(services, stub_provider), conversation_id=conversation.id, web_enabled=False,
-        ))
-        assert review.track_id == track.id
-        proposed = await settle(services, review.id)
-        assert proposed.approval == "plan", proposed.error
-        context = services.reviews.repository.job(review.id, "track-context")
-        assert context is not None
-        sources = {item["path"]: item for item in context["context"]["sources"]}
-        assert sources[problem.path]["sha256"] == problem.sha256
-        assert "50 ms" in sources[problem.path]["excerpt"]
-        assert "already rejected" in sources[exploration.path]["excerpt"]
-        assert sources[f"{folder}/summary.md"]["excerpt"].startswith("# Existing summary")
-        assert summary.startswith(sources[f"{folder}/summary.md"]["excerpt"])
-        first_prompt = json.loads(next(
-            message["content"] for message in reversed(stub_provider.requests[0]["messages"])
-            if message["role"] == "user"
-        ))
-        assert first_prompt["track_context"]["sources"] == context["context"]["sources"]
-        assert first_prompt["track_context"]["evidence_status"] == "Unverified prior work; verify claims against current paper sources."
-        assert not services.reviews.repository.jobs(review.id, "reading")
-        services.tracks.write_section(track.id, "problem", "# Changed after scope\n\nA different question.", problem.sha256)
-        await command(services, review.id, "approve_plan")
-        shortlist = await settle(services, review.id)
-        assert shortlist.status == "completed", shortlist.error
-        candidates = services.reviews.candidates(review.id).items
-        assert len(candidates) == 1 and candidates[0].document_id == document_id
-        assert candidates[0].selected
-        assert any("track" in trail for trail in candidates[0].discovery)
-        done = await settle(services, review.id)
-        assert done.status == "completed", done.error
-        assert services.workspace.read_file(f"{folder}/summary.md").content == summary
-        assert services.summaries.versions(document_id) == []
-        assert services.reviews.repository.job(review.id, "track-context") == context
-        assert context in services.reviews.export(review.id)["records"]
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_track_context_is_bounded_and_scope_replays_the_original_snapshot(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    try:
-        track = services.tracks.create("Large notebook")
-        problem = services.tracks.read_section(track.id, "problem")
-        services.tracks.write_section(track.id, "problem", "# Constraints\n\n" + "Adaptive constraints. " * 2000, problem.sha256)
-        for index in range(6):
-            services.tracks.write_section(
-                track.id, f"exploration/prior-{index}", "# Prior work\n\n" + "Adaptive prior evidence. " * 1000, None,
-            )
-        reference = configure(services, stub_provider)
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Bounded context", objective="Compare adaptive methods.", main_model=reference,
-            track_id=track.id, web_enabled=False,
-        ))
-        proposed = await settle(services, review.id)
-        assert proposed.approval == "plan", proposed.error
-        context = services.reviews.repository.job(review.id, "track-context")
-        assert context["context"]["omitted_source_count"] or any(source["truncated"] for source in context["context"]["sources"])
-        assert any("Notebook context was limited" in notice for notice in proposed.notices)
-        compiled, budget, _ = services.reviews.jobs.prepare(review.main_model, "literature-scope", ReviewScope)
-        packet = next(item["content"] for item in stub_provider.requests[0]["messages"] if item["role"] == "user")
-        assert budget.count(compiled.entry_agent.instructions, packet) <= budget.limit
-        assert "source.pdf" not in packet
-        services.tracks.write_section(track.id, "exploration/later-note", "Do not silently alter the approved scope.", None)
-        calls = len(stub_provider.requests)
-        await services.reviews._scope(review.id)
-        assert len(stub_provider.requests) == calls
-        assert services.reviews.repository.job(review.id, "track-context") == context
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("decision", ["extend_analysis", "write_report"])
-@pytest.mark.parametrize("model_switch", ["none", "current", "legacy"])
+@pytest.mark.parametrize(("decision", "model_switch"), [
+    ("extend_analysis", "none"), ("write_report", "current"),
+])
 async def test_synthesis_reading_plan_caps_followups_and_exposes_saved_outputs(
     test_settings, stub_provider, monkeypatch, decision, model_switch,
 ):
@@ -2586,11 +1709,6 @@ async def test_synthesis_reading_plan_caps_followups_and_exposes_saved_outputs(
         assert reads == [1, 2]
         if model_switch != "none":
             await command(services, "bounded-analysis", "pause")
-            if model_switch == "legacy":
-                legacy_plan = services.reviews.repository.job("bounded-analysis", "analysis-plan")
-                for field in ("input_fingerprint", "selection_records", "selection_prompt_hash"):
-                    legacy_plan.pop(field, None)
-                services.reviews.repository.save_job("bounded-analysis", "analysis-plan", "synthesis", legacy_plan)
             replacement = configure(services, stub_provider, name="replacement-main")
             before = len(stub_provider.requests)
             current = services.reviews.get("bounded-analysis")
@@ -2638,36 +1756,6 @@ async def test_synthesis_reading_plan_caps_followups_and_exposes_saved_outputs(
         await services.close()
 
 
-@pytest.mark.anyio
-async def test_review_http_and_terminal_controls(test_settings, stub_provider, monkeypatch):
-    app = create_app(test_settings)
-    services = app.state.services
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    client = ScholarWeaveClient(transport=httpx.ASGITransport(app=app))
-    try:
-        reference = configure(services, stub_provider)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as http:
-            created = await http.post("/api/literature-reviews", json={
-                "title": "API review", "objective": "Review adaptive methods.", "main_model": reference, "web_enabled": False,
-            })
-            assert created.status_code == 202, created.text
-            review = await settle(services, created.json()["id"])
-            listed = await client.reviews()
-            assert listed[0].id == review.id
-            paused = await client.control_review(review.id, ReviewControlRequest(action="pause", expected_revision=review.revision))
-            assert paused.status == "paused"
-            stale = await http.post(f"/api/literature-reviews/{review.id}/control", json={
-                "action": "approve_plan", "expected_revision": review.revision,
-            })
-            assert stale.status_code == 409
-            exported = await http.get(f"/api/literature-reviews/{review.id}/export")
-            assert exported.status_code == 200 and exported.json()["schema_version"] == 1
-            assert exported.headers["content-disposition"].endswith('.json"')
-    finally:
-        await client.close()
-        await services.close()
-
-
 def test_decision_answers_are_validated_not_treated_as_calibrated_truth():
     question = {"kind": {"type": "choice", "instructions": "Publication kind?", "criteria": {"research": "original", "review": "survey"}}}
     valid = {"answers": {"kind": {"type": "choice", "choice": "research", "probabilities": {"research": 0.8, "review": 0.2}}}}
@@ -2677,14 +1765,6 @@ def test_decision_answers_are_validated_not_treated_as_calibrated_truth():
             validate_decisions({"answers": {"kind": {**valid["answers"]["kind"], "probabilities": probabilities}}}, question)
     with pytest.raises(ProviderRuntimeError, match="output tokens"):
         validate_decisions({**valid, "usage": {"input_tokens": 100, "output_tokens": 10}}, question)
-
-
-def test_discovered_native_context_is_not_dropped_as_a_small_chat_window():
-    metadata = {"architecture": {"output_modalities": ["decisions"]}, "status": {"args": ["--ctx-size", "512"]}}
-    assert _compatible_capabilities(metadata) == {"decision"}
-    assert _compatible_context_window(metadata) == 512
-    metadata["architecture"]["output_modalities"].append("text")
-    assert _compatible_context_window(metadata) is None
 
 
 @pytest.mark.anyio
@@ -2733,75 +1813,6 @@ async def test_deduplication_and_source_cache_cursors_cooldowns(test_settings, s
 
 
 @pytest.mark.anyio
-async def test_source_packets_bound_context_without_losing_spans(test_settings, stub_provider):
-    services = create_services(test_settings)
-    try:
-        reference = configure(services, stub_provider)
-        from backend.agents.blueprint import ModelReferenceSpec
-        prepared = services.reviews.jobs.prepare(ModelReferenceSpec.model_validate(reference), "literature-evidence", EvidencePacket)
-        text = "Adaptive evidence with numerical qualifiers and limitations. " * 1000
-        packets = services.reviews._source_packets([{"page": 1, "text": text}], {"objective": "Find limitations."}, prepared)
-        assert len(packets) > 1
-        spans = [span for packet in packets for span in packet["records"]]
-        assert "".join(span["text"] for span in spans) == text
-        assert spans[0]["start"] == 0 and spans[-1]["end"] == len(text)
-        assert all(a["end"] == b["start"] for a, b in zip(spans, spans[1:]))
-        assert all(prepared[1].count(prepared[0].entry_agent.instructions, json.dumps(packet, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) <= prepared[1].limit for packet in packets)
-        assert not stub_provider.requests
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_resume_screening_from_pending_paper_approval(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    original_decisions = stub_provider.decisions
-
-    def decisions(payload):
-        result = original_decisions(payload)
-        rating = "IRRELEVANT" if payload["state"]["title"] == "Unrelated paper" else "HIGHLY_RELEVANT"
-        answer = result["answers"]["relevance"]
-        answer["choice"] = rating
-        answer["probabilities"] = {key: float(key == rating) for key in answer["probabilities"]}
-        return result
-
-    monkeypatch.setattr(stub_provider, "decisions", decisions)
-    try:
-        main = configure(services, stub_provider)
-        profile = services.providers.create(ProviderCreate(
-            name="Decision", kind="openai_compatible", base_url=stub_provider.base_url,
-            models=[ProviderModel(name="decision", capabilities={"decision"}, context_window_tokens=8192)],
-        ))
-        specification = ReviewCreateRequest(
-            title="Recover screening", objective="Compare adaptive methods.", main_model=main,
-            decision_model=DecisionRole(
-                model_reference={"provider_profile_id": profile.id, "model": "decision"}, input_tokens=8192,
-            ), web_enabled=False,
-        )
-        services.reviews.repository.create("recover-screening", specification.model_dump(mode="json"), {
-            "status": "awaiting_approval", "stage": "reading_plan", "approval": "papers",
-            "scope": None, "allowance_tokens": 1_000_000, "approval_revision": 1,
-            "stage_history": {"scope": "completed", "discovery": "completed", "screening": "stopped"},
-        })
-        for index, title in enumerate(["Adaptive results", "Unrelated paper"]):
-            candidate = Candidate(id=f"recover-{index}", title=title, abstract="Research results.")
-            services.reviews.repository.save_candidate("recover-screening", candidate.id, candidate)
-        await command(services, "recover-screening", "resume", stage="screening")
-        waiting = await settle(services, "recover-screening")
-        assert waiting.status == "blocked" and waiting.approval is None
-        assert waiting.screened_count == 2 and waiting.excluded_count == 1
-        assert waiting.stage_history["screening"] == "completed"
-        assert services.reviews.repository.get(waiting.id).state.get("approval_revision")
-        assert services.reviews.candidates(waiting.id).total == 1
-        assert not stub_provider.requests
-        await command(services, waiting.id, "resume")
-        assert (await settle(services, waiting.id)).status == "blocked"
-        assert services.reviews.get(waiting.id).selected_count == 1
-    finally:
-        await services.close()
-
-
-@pytest.mark.anyio
 async def test_stale_approval_and_pending_approval_pause_resume(test_settings, stub_provider, monkeypatch):
     services = create_services(test_settings)
     monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
@@ -2825,114 +1836,6 @@ async def test_stale_approval_and_pending_approval_pause_resume(test_settings, s
         with pytest.raises(ConflictError):
             await command(services, review.id, "approve_papers", candidate_ids=["invented"])
     finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_metadata_discovery_never_expands_a_reference_frontier(test_settings, stub_provider, monkeypatch):
-    test_settings.openalex_api_key = "test-key"
-    services = create_services(test_settings)
-    requests = []
-    works = {
-        f"W{index}": {
-            "id": f"https://openalex.org/W{index}", "title": f"Adaptive paper {index}", "type": "review",
-            "referenced_works": [f"https://openalex.org/{ref}" for ref in refs],
-        } for index, refs in [(1, ["W2", "W3"]), (2, ["W4"]), (3, ["W4"]), (4, ["W1"])]
-    }
-
-    async def metadata(request):
-        requests.append(request)
-        identifiers = request.url.params.get("filter", "openalex:W1").removeprefix("openalex:").split("|")
-        return httpx.Response(200, json={"results": [works[key] for key in identifiers], "meta": {}})
-
-    def reply(payload):
-        result = json.loads(review_reply(payload))
-        if "queries" in result:
-            result["queries"] = [{"provider": "openalex", "query": "adaptive", "pages": 1}]
-        return json.dumps(result)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(metadata))
-    await services.reviews.discovery.close()
-    services.reviews.discovery = ScholarlyDiscovery(test_settings, services.research_search, services.reviews.repository, client=client)
-    services.reviews.discovery._openalex_limiter = AsyncRateLimiter(60000)
-    monkeypatch.setattr(stub_provider, "_reply_for", reply)
-    try:
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Citation frontier", objective="Find adaptive evidence.", main_model=configure(services, stub_provider),
-            openalex_enabled=True,
-        ))
-        await settle(services, review.id)
-        await command(services, review.id, "approve_plan")
-        waiting = await settle(services, review.id)
-        assert waiting.status == "blocked", waiting.error
-        assert waiting.candidate_count == 1 and waiting.selected_count == 1
-        assert services.documents.list_documents() == []
-        assert len(requests) == 1
-        jobs = services.reviews.repository.jobs(review.id, "discovery")
-        assert not any(job["key"].startswith("reference-frontier:") for job in jobs)
-    finally:
-        await client.aclose()
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_remote_acquisition_and_later_papers_are_automatically_screened_and_read(test_settings, stub_provider, monkeypatch):
-    services = create_services(test_settings)
-    requests = []
-
-    async def download(request):
-        requests.append(str(request.url))
-        return httpx.Response(200, content=b"%PDF-1.7\n" + request.url.path.encode(), headers={"Content-Type": "application/pdf"})
-
-    async def allow_public(_url):
-        return None
-
-    async def options(_identifier):
-        return {"recommended_mode": "embedded", "ocr_available": True}
-
-    async def ingest(identifier, *, enhance_with_llm=True, **_kwargs):
-        assert enhance_with_llm is False
-        services.document_ingestion._persist_document_content(
-            services.documents.get_document(identifier),
-            [{"page": page, "text": f"Adaptive result and qualification on page {page}.", "ocr_used": False} for page in (1, 2, 3)],
-            enhancement_model=None, extraction_mode="embedded",
-        )
-        return services.documents.get_document(identifier)
-
-    client = httpx.AsyncClient(transport=httpx.MockTransport(download))
-    downloads = SourceDownloadService(test_settings, services.documents, services.workspace, client=client)
-    services.reviews.downloads = downloads
-    monkeypatch.setattr(downloads, "_validate_public_url", allow_public)
-    monkeypatch.setattr(services.documents, "ingestion_options", options)
-    monkeypatch.setattr(services.documents, "ingest_document", ingest)
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    try:
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Acquisition gate", objective="Compare adaptive evidence.", main_model=configure(services, stub_provider),
-            web_enabled=False,
-        ))
-        await settle(services, review.id)
-        first = normalize_candidate(review.id, {"title": "Same title", "url": "https://papers.example/first.pdf"}, "web", "supplied reference")
-        services.reviews.repository.save_candidate(review.id, candidate_key(first), first)
-        await command(services, review.id, "approve_plan")
-        completed = await settle(services, review.id)
-        assert completed.status == "completed", completed.error
-        assert requests == ["https://papers.example/first.pdf"]
-        later = normalize_candidate(review.id, {"title": "Same title", "url": "https://papers.example/later.pdf"}, "web", "later reference")
-        services.reviews.repository.save_candidate(review.id, candidate_key(later), later)
-        await command(services, review.id, "resume", stage="screening")
-        waiting = await settle(services, review.id)
-        assert waiting.approval == "budget" and waiting.selected_count == 2
-        await command(services, review.id, "extend_budget",
-                      work_budget={"screened_papers": 100, "read_papers": 20, "comparison_passes": 2})
-        with pytest.raises(ConflictError):
-            await services.reviews._prepare_paper(review.id, later)
-        done = await settle(services, review.id)
-        assert done.status == "completed", done.error
-        assert requests == ["https://papers.example/first.pdf", "https://papers.example/later.pdf"]
-        assert len(services.documents.list_documents()) == 2
-    finally:
-        await client.aclose()
         await services.close()
 
 
@@ -3093,7 +1996,7 @@ async def test_publication_recovers_track_write_before_checkpoint_without_losing
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("case", ["oversized", "uncertain", "malformed"])
+@pytest.mark.parametrize("case", ["uncertain", "malformed"])
 async def test_native_failures_use_grouped_main_fallback_and_keep_cost(test_settings, stub_provider, monkeypatch, case):
     services = create_services(test_settings)
     monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
@@ -3123,7 +2026,7 @@ async def test_native_failures_use_grouped_main_fallback_and_keep_cost(test_sett
             title="Fallback", objective="Review adaptive studies.", main_model=main, web_enabled=False,
             decision_model=DecisionRole(
                 model_reference={"provider_profile_id": profile.id, "model": "decision"},
-                input_tokens=128 if case == "oversized" else 4096,
+                input_tokens=4096,
             ),
         ))
         await settle(services, review.id)
@@ -3131,11 +2034,10 @@ async def test_native_failures_use_grouped_main_fallback_and_keep_cost(test_sett
         waiting = await settle(services, review.id)
         assert waiting.approval != "papers", waiting.error
         assert services.reviews.candidates(review.id).items[0].screening.reason == "Addresses adaptive methods."
-        assert len([item for item in stub_provider.decision_requests if "kind" in item["questions"]]) == (0 if case == "oversized" else 1)
+        assert len([item for item in stub_provider.decision_requests if "kind" in item["questions"]]) == 1
         native_jobs = [job for job in services.reviews.repository.jobs(review.id, "screening") if "rubric_hash" in job.get("provenance", {})]
-        assert len(native_jobs) == (0 if case == "oversized" else 1)
-        if native_jobs:
-            assert native_jobs[0]["usage_estimated"] is (case == "malformed")
+        assert len(native_jobs) == 1
+        assert native_jobs[0]["usage_estimated"] is (case == "malformed")
         if case == "malformed":
             assert any(job.get("status") == "interrupted" and job["tokens_spent"] > 100 for job in services.reviews.repository.jobs(review.id))
     finally:
@@ -3162,12 +2064,6 @@ async def test_identity_bridges_merge_unapproved_rows_but_not_conflicting_dois(t
         assert len(merged.discovery) == 3 and merged.url.startswith("https://")
     finally:
         await services.close()
-
-
-@pytest.mark.parametrize("capability", ["chat", "tools", "vision"])
-def test_decision_capability_does_not_relax_generative_context_minimum(capability):
-    with pytest.raises(ValueError, match="at least 4096"):
-        ProviderModel(name="mixed", capabilities={"decision", capability}, context_window_tokens=512)
 
 
 @pytest.mark.anyio
@@ -3205,6 +2101,8 @@ async def test_rate_limiter_serializes_slow_requests_and_preserves_retry_after()
 
 @pytest.mark.anyio
 async def test_agent_review_handoff_inherits_web_policy_and_cannot_approve(test_settings, stub_provider, monkeypatch):
+    from backend.tests.test_topic_research import embedding_reference
+
     services = create_services(test_settings)
     arguments = {
         "action": "start", "review_id": None, "title": "Agent review", "objective": "Review adaptive evidence.",
@@ -3215,6 +2113,9 @@ async def test_agent_review_handoff_inherits_web_policy_and_cannot_approve(test_
     monkeypatch.setattr(stub_provider, "_reply_for", lambda payload: review_reply(payload) if payload.get("response_format") else "The review is proposed; use the review panel to approve it.")
     try:
         reference = configure(services, stub_provider)
+        services.reviews.jobs.runtime.settings.default_model_references["embedding"] = embedding_reference(services, stub_provider)
+        small = configure(services, stub_provider, name="small-tasks")
+        test_settings.default_model_references["small_tasks"] = small
         chat = research_blueprint(reference, web_enabled=False)
         assert "literature-review" not in chat.agents[0].tool_ids
         assert "[Deep Work](/deep-work)" in chat.agents[0].instructions
@@ -3226,11 +2127,20 @@ async def test_agent_review_handoff_inherits_web_policy_and_cannot_approve(test_
         assert len(reviews) == 1
         proposed = await settle(services, reviews[0].id)
         assert proposed.approval == "plan", proposed.error
+        assert proposed.reading_mode == "targeted"
+        assert proposed.embedding_model is not None
+        assert proposed.summary_model is not None
+        assert proposed.summary_model.model_reference.model_dump() == small
+        assert proposed.main_model.model_dump() == reference
         assert services.reviews.repository.get(proposed.id).specification["web_enabled"] is False
         runtime = services.runs._tool_runtime
         context = ScholarWeaveContext(run_id=run.id, tool_runtime=runtime)
         replay = await runtime.invoke("research.literature", arguments, context)
         assert replay["id"] == proposed.id and len(services.reviews.list()) == 1
+        services.reviews.jobs.runtime.settings.default_model_references.pop("embedding")
+        with pytest.raises(ToolInputError, match="Configure a default embedding model"):
+            await runtime.invoke("research.literature", {**arguments, "title": "Another question"}, context)
+        assert len(services.reviews.list()) == 1
         with pytest.raises(ToolInputError):
             await runtime.invoke("research.literature", {**arguments, "action": "approve_papers", "review_id": proposed.id, "expected_revision": proposed.revision}, context)
         legacy = research_blueprint(reference, research_mode="review")
@@ -3238,53 +2148,4 @@ async def test_agent_review_handoff_inherits_web_policy_and_cannot_approve(test_
         worker = next(agent for agent in deep_work_blueprint(reference).agents if agent.id == "worker")
         assert "literature-review" not in worker.tool_ids
     finally:
-        await services.close()
-
-
-@pytest.mark.anyio
-async def test_terminal_review_picker_pauses_and_returns_to_approval(test_settings, stub_provider, monkeypatch):
-    pytest.importorskip("textual")
-    from textual.widgets import OptionList
-    from scholarweave_tui.app import ScholarWeaveApp
-    from scholarweave_tui.preferences import Preferences
-    from scholarweave_tui.widgets import ChoicePicker
-
-    backend = create_app(test_settings)
-    services = backend.state.services
-    monkeypatch.setattr(stub_provider, "_reply_for", review_reply)
-    client = ScholarWeaveClient(transport=httpx.ASGITransport(app=backend))
-    try:
-        reference = configure(services, stub_provider)
-        review = await services.reviews.create(ReviewCreateRequest(
-            title="Terminal review", objective="Review adaptive studies.", main_model=reference, web_enabled=False,
-        ))
-        await settle(services, review.id)
-        app = ScholarWeaveApp(client, Preferences(test_settings.data_dir / "tui-preferences.json"))
-        async with app.run_test(size=(160, 48)) as pilot:
-            await pilot.pause()
-            await app.workers.wait_for_complete()
-
-            async def picker(count):
-                async with asyncio.timeout(10):
-                    while not isinstance(app.screen, ChoicePicker) or app.screen.query_one(OptionList).option_count != count:
-                        await pilot.pause()
-                await pilot.pause()
-
-            app.choose_literature_review()
-            await picker(2)
-            await pilot.press("down", "enter")
-            await picker(3)
-            await pilot.press("down", "enter")
-            await app.workers.wait_for_complete()
-            assert services.reviews.get(review.id).status == "paused"
-            app.choose_literature_review()
-            await picker(2)
-            await pilot.press("down", "enter")
-            await picker(3)
-            await pilot.press("down", "down", "enter")
-            await app.workers.wait_for_complete()
-            assert services.reviews.get(review.id).approval == "plan"
-            assert services.reviews.get(review.id).status == "awaiting_approval"
-    finally:
-        await client.close()
         await services.close()

@@ -60,12 +60,26 @@ class ConversationAttachmentResponse(ConversationSchema):
     document_id: str | None
 
 
+class ReadingContext(ConversationSchema):
+    document_id: str = Field(min_length=1, max_length=64)
+    page: int | None = Field(default=None, ge=1)
+    selection: str | None = Field(default=None, max_length=4000)
+
+
 class ConversationMessageRequest(ConversationSchema):
     content: str = Field(min_length=1)
+    turn_intent: Literal["chat", "ideation"] = Field(
+        default="chat",
+        description="Explicit per-turn conceptual ideation; does not start a review or create artifacts.",
+    )
     attachment_paths: list[Annotated[str, Field(min_length=1, max_length=512)]] = Field(
         default_factory=list,
         max_length=10,
         description="Readable workspace paths returned by chat attachment uploads.",
+    )
+    reading_context: ReadingContext | None = Field(
+        default=None,
+        description="The paper open in the reader; the server adds its title, folder and search order.",
     )
     reasoning_effort: ReasoningEffort | None = None
     web_enabled: bool = True

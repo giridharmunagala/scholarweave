@@ -1,3 +1,5 @@
+import { checkIdeaAgainstLiteratureHref, type AskContext } from '../../app/ask';
+import { IDEA_ACTIONS, ideaActionDraft, readIdeaDraft, recalledIdea, saveIdeaDraft } from './ideas';
 import {
   Fragment,
   useEffect,
@@ -68,6 +70,16 @@ import { RunActivity } from './RunActivity';
 import { SessionOverview } from './SessionMonitor';
 import { TrackChatSelector } from '../tracks/TrackChatSelector';
 import { Link, useNavigate } from '../../app/router';
+import {
+  contextualDraftKey,
+  conversationDraftKey,
+  forgetChatDraft,
+  fullChatDraftHref,
+  lastChatDraftKey,
+  readChatDraft,
+  saveChatDraft,
+  type ChatDraft,
+} from './chatDrafts';
 
 const SUGGESTIONS = [
   'Help me think through an idea.',
@@ -201,23 +213,51 @@ function PaneResizer({
   );
 }
 
-export function ResearchChatPage() {
+export function ResearchChatPage({ embedded = false, draft, autoSend = false, readingContext: initialReading, intent, initialTrack, ideaObjective, ideaContext, onHandoffChange }: {
+  embedded?: boolean; draft?: string; autoSend?: boolean; readingContext?: AskContext; intent?: 'chat' | 'ideation';
+  initialTrack?: string; ideaObjective?: string; ideaContext?: string;
+  onHandoffChange?: (href: string) => void;
+} = {}) {
   const navigate = useNavigate();
   const [initialDraft] = useState(
-    () => new URLSearchParams(window.location.search).get('research')?.trim() ?? '',
+    () => embedded ? draft?.trim() ?? '' : new URLSearchParams(window.location.search).get('research')?.trim() ?? '',
   );
-  const [initialTrackId] = useState(() => new URLSearchParams(window.location.search).get('track') ?? '');
-  const [initialConversationId] = useState(() => new URLSearchParams(window.location.search).get('conversation'));
-  const [trackId, setTrackId] = useState(initialTrackId);
+  const [initialTrackId] = useState(() => initialTrack ?? (embedded ? '' : new URLSearchParams(window.location.search).get('track') ?? ''));
+  const [initialReadingContext] = useState<AskContext | null>(() => {
+    if (initialReading || embedded) return initialReading ?? null;
+    try {
+      const value = JSON.parse(new URLSearchParams(window.location.search).get('reading') ?? 'null') as AskContext | null;
+      return value?.document_id && value.title ? value : null;
+    } catch {
+      return null;
+    }
+  });
+  const [initialSession] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    const conversationId = embedded ? null : params.get('conversation');
+    const explicit = initialDraft || initialReadingContext || initialTrackId || intent === 'ideation'
+      || (!embedded && params.get('intent') === 'ideation');
+    const key = (!embedded ? params.get('draft') : null)
+      ?? (conversationId ? conversationDraftKey(conversationId) : null)
+      ?? (explicit ? contextualDraftKey([initialDraft, initialReadingContext, initialTrackId, intent ?? params.get('intent')]) : lastChatDraftKey(embedded ? 'assistant' : 'full'))
+      ?? 'new';
+    const saved = readChatDraft(key);
+    return { key, saved, conversationId: conversationId ?? saved?.conversationId ?? null, explicit: Boolean(explicit) };
+  });
+  const [draftKey, setDraftKey] = useState(initialSession.key);
+  const [initialConversationId] = useState(initialSession.conversationId);
+  const [trackId, setTrackId] = useState(initialSession.saved?.trackId ?? initialTrackId);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [current, setCurrent] = useState<ConversationDetail | null>(null);
-  const [modelReference, setModelReference] = useState<ModelReference>({});
+  const [modelReference, setModelReference] = useState<ModelReference>(initialSession.saved?.modelReference ?? {});
   const [preferredModelReference, setPreferredModelReference] = useState<ModelReference>({});
   const [contextWindowTokens, setContextWindowTokens] = useState(32_768);
-  const [webEnabled, setWebEnabled] = useState(true);
-  const [responseEffort, setResponseEffort] = useState<ResponseEffort>('auto');
+  const [webEnabled, setWebEnabled] = useState(initialSession.saved?.webEnabled ?? true);
+  const [responseEffort, setResponseEffort] = useState<ResponseEffort>(initialSession.saved?.responseEffort ?? 'auto');
+  const [turnIntent, setTurnIntent] = useState<'chat' | 'ideation'>(() =>
+    initialSession.saved?.intent ?? ((intent ?? (!embedded ? new URLSearchParams(window.location.search).get('intent') : null)) === 'ideation' ? 'ideation' : 'chat'));
   const [run, setRun] = useState<Run | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [historyState, setHistoryState] = useState<'ready' | 'loading' | 'unavailable'>('ready');
@@ -226,18 +266,30 @@ export function ResearchChatPage() {
   const [steeringMessages, setSteeringMessages] = useState<
     (Omit<SteeringMessage, 'status'> & { status: 'queued' | 'applied' })[]
   >([]);
-  const [content, setContent] = useState(initialDraft);
-  const [attachments, setAttachments] = useState<ConversationAttachment[]>([]);
+  const [content, setContentState] = useState(initialSession.saved?.content ?? initialDraft);
+  const contentVersionRef = useRef(initialSession.saved?.contentVersion ?? 0);
+  const setContent = (value: string) => {
+    contentVersionRef.current += 1;
+    setContentState(value);
+  };
+  const [selectedIdea, setSelectedIdea] = useState(initialSession.saved?.selectedIdea ?? '');
+  const [otherIdea, setOtherIdea] = useState(initialSession.saved?.otherIdea ?? '');
+  const [attachments, setAttachments] = useState<ConversationAttachment[]>(initialSession.saved?.attachments ?? []);
+  const [reading, setReading] = useState<AskContext | null>(initialSession.saved?.reading ?? initialReadingContext);
+  const [ideaReadingEvidence] = useState(() => reading
+    ? `${reading.title}${reading.page ? `, page ${reading.page}` : ''}\n${reading.selection ?? ''}` : '');
   const [uploadingNames, setUploadingNames] = useState<string[]>([]);
   const [attachmentError, setAttachmentError] = useState<unknown>(null);
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<unknown>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [sending, setSending] = useState(false);
   const [queueingSteering, setQueueingSteering] = useState(false);
   const [stopping, setStopping] = useState<'stop' | 'answer' | null>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(
-    () => typeof window === 'undefined' || window.innerWidth > OVERLAY_WIDTH,
+    () => !embedded && (typeof window === 'undefined' || window.innerWidth > OVERLAY_WIDTH),
   );
   const [activityOpen, setActivityOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
@@ -247,6 +299,7 @@ export function ResearchChatPage() {
   );
   const [resizing, setResizing] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [failedDraft, setFailedDraft] = useState<string | null>(initialSession.saved?.failedDraft ?? null);
   const pageRef = useRef<HTMLDivElement>(null);
   const messageListRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -254,8 +307,62 @@ export function ResearchChatPage() {
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const uploadControllerRef = useRef<AbortController | null>(null);
   const activityToggleRef = useRef<HTMLButtonElement>(null);
+  const moreMenuRef = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const close = (event: Event) => {
+      const menu = moreMenuRef.current;
+      if (!menu?.open) return;
+      if (event instanceof KeyboardEvent ? event.key === 'Escape' : !menu.contains(event.target as Node)) {
+        menu.open = false;
+      }
+    };
+    document.addEventListener('pointerdown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('pointerdown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, []);
   const openRequestRef = useRef(0);
   const runLifecycleRef = useRef(0);
+  const steeringRequestRef = useRef(0);
+  const mountedRef = useRef(true);
+  const activeRunRef = useRef(run?.id);
+  activeRunRef.current = run?.id;
+  const steerableRunRef = useRef(false);
+  steerableRunRef.current = Boolean(run && ['pending', 'running'].includes(run.status));
+  const activeConversationRef = useRef(current?.id);
+  activeConversationRef.current = current?.id;
+  const pendingDraftRef = useRef<string | null>(null);
+  const initialOpenedRef = useRef(false);
+  const bootstrapRef = useRef<{ conversations?: Conversation[]; providers?: Provider[]; settings?: Settings }>({});
+  const draftSnapshot: ChatDraft = {
+    conversationId: current?.id ?? (loading ? initialConversationId : null),
+    content: content || pendingDraftRef.current || '',
+    attachments, reading, selectedIdea, otherIdea, intent: turnIntent,
+    trackId, modelReference, responseEffort, webEnabled, failedDraft, contentVersion: contentVersionRef.current,
+  };
+  const snapshotRef = useRef(draftSnapshot);
+  snapshotRef.current = draftSnapshot;
+  const persistDraft = () => {
+    saveChatDraft(draftKey, snapshotRef.current, embedded ? 'assistant' : 'full');
+    if (snapshotRef.current.conversationId) {
+      saveChatDraft(conversationDraftKey(snapshotRef.current.conversationId), snapshotRef.current);
+    }
+  };
+  useEffect(() => {
+    if (loading || historyState === 'loading') return;
+    persistDraft();
+    onHandoffChange?.(fullChatDraftHref(draftKey, current?.id));
+  }, [draftKey, content, attachments, reading, selectedIdea, otherIdea, turnIntent, trackId, modelReference, responseEffort, webEnabled, failedDraft, current?.id, loading, historyState, onHandoffChange]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  useEffect(() => {
+    steeringRequestRef.current += 1;
+    setQueueingSteering(false);
+  }, [run?.id]);
   const effectiveModelReference = useMemo(
     () => resolveModelReference(modelReference, settings),
     [modelReference.provider_profile_id, modelReference.model, settings],
@@ -360,15 +467,28 @@ export function ResearchChatPage() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const refreshList = () => chatApi.list().then(setConversations);
+  const refreshList = () => chatApi.list().then(setConversations).catch((nextError) => {
+    if (mountedRef.current) setError(nextError);
+  });
   const open = async (
     id: string,
     contextProviders = providers,
     contextSettings: Settings | null = settings,
+    keepDraft = false,
   ) => {
+    if (!keepDraft && !loading) persistDraft();
     const request = ++openRequestRef.current;
-    clearAttachments();
-    setResponseEffort('auto');
+    setError(null);
+    if (!keepDraft) setFailedDraft(null);
+    steeringRequestRef.current += 1;
+    pendingDraftRef.current = null;
+    if (!keepDraft) {
+      uploadControllerRef.current?.abort();
+      uploadControllerRef.current = null;
+      setUploadingNames([]);
+      setAttachmentError(null);
+    }
+    setQueueingSteering(false);
     setHistoryState('loading');
     setRun(null);
     setRuns([]);
@@ -390,8 +510,25 @@ export function ResearchChatPage() {
     setHistoryState(runsResult.status === 'fulfilled' ? 'ready' : 'unavailable');
     if (runsResult.status === 'rejected') setError(runsResult.reason);
     const conversation = conversationResult.value;
+    const savedIdea = readIdeaDraft(conversation.id) ?? recalledIdea(conversation.items);
+    if (!keepDraft) {
+      const key = conversationDraftKey(id);
+      const saved = readChatDraft(key);
+      setDraftKey(key);
+      setContent(saved?.content ?? '');
+      setAttachments(saved?.attachments ?? []);
+      setReading(saved?.reading ?? null);
+      setSelectedIdea(saved?.selectedIdea ?? savedIdea);
+      setOtherIdea(saved?.otherIdea ?? '');
+      setFailedDraft(saved?.failedDraft ?? null);
+      setResponseEffort(saved?.responseEffort ?? 'auto');
+      setWebEnabled(saved?.webEnabled ?? true);
+      setTurnIntent(saved?.intent ?? (savedIdea ? 'ideation' : 'chat'));
+    } else if (!selectedIdea && savedIdea) {
+      setSelectedIdea(savedIdea);
+    }
     if (conversation.kind === 'deep_work') {
-      navigate(`/deep-work?view=tasks&conversation=${encodeURIComponent(conversation.id)}`, { replace: true });
+      navigate(`/deep-work?conversation=${encodeURIComponent(conversation.id)}`, { replace: true });
       return;
     }
     const allRuns = runsResult.status === 'fulfilled' ? runsResult.value : [];
@@ -419,34 +556,64 @@ export function ResearchChatPage() {
   };
 
   useEffect(() => {
-    Promise.all([
-      chatApi.list(),
-      providersApi.list(),
-      providersApi.settings(),
-    ])
-      .then(async ([items, nextProviders, nextSettings]) => {
-        setConversations(items);
-        setProviders(nextProviders);
-        setSettings(nextSettings);
-        const preferredModel = preferredChatModel(nextSettings);
+    let cancelled = false;
+    const load = async () => {
+      const cached = bootstrapRef.current;
+      setLoadError(null);
+      const results = await Promise.allSettled([
+        cached.conversations ? Promise.resolve(cached.conversations) : chatApi.list(),
+        cached.providers ? Promise.resolve(cached.providers) : providersApi.list(),
+        cached.settings ? Promise.resolve(cached.settings) : providersApi.settings(),
+      ]);
+      if (cancelled) return;
+      const [listResult, providersResult, settingsResult] = results;
+      if (listResult.status === 'fulfilled' && !cached.conversations) {
+        cached.conversations = listResult.value;
+        setConversations(listResult.value);
+      }
+      if (providersResult.status === 'fulfilled' && !cached.providers) {
+        cached.providers = providersResult.value;
+        setProviders(providersResult.value);
+      }
+      if (settingsResult.status === 'fulfilled' && !cached.settings) {
+        cached.settings = settingsResult.value;
+        setSettings(settingsResult.value);
+        const preferredModel = preferredChatModel(settingsResult.value);
         setPreferredModelReference(preferredModel);
-        setModelReference(preferredModel);
-        setContextWindowTokens(
-          configuredContextWindow(
-            nextProviders,
-            preferredModel,
-            nextSettings.agent_context_window_tokens,
-          ),
-        );
-        const firstChat = items.find((item) => item.kind !== 'deep_work');
-        const openId = initialConversationId ?? (!initialDraft && !initialTrackId ? firstChat?.id : undefined);
-        if (openId) {
-          await open(openId, nextProviders, nextSettings);
+        if (!current) {
+          if (!initialSession.saved) setModelReference(preferredModel);
+          setContextWindowTokens(
+            configuredContextWindow(
+              cached.providers ?? [],
+              initialSession.saved?.modelReference ?? preferredModel,
+              settingsResult.value.agent_context_window_tokens,
+            ),
+          );
         }
-      })
-      .catch(setError)
-      .finally(() => setLoading(false));
-  }, []);
+      }
+      const failures = results.flatMap((result, index) => result.status === 'rejected'
+        ? [`${['Chat history', 'Models', 'Settings'][index]}: ${result.reason instanceof Error ? result.reason.message : 'Could not load'}`]
+        : []);
+      if (failures.length) setLoadError(new Error(failures.join('\n')));
+      try {
+        if (!initialOpenedRef.current) {
+          initialOpenedRef.current = true;
+          const firstChat = cached.conversations?.find((item) => item.kind !== 'deep_work');
+          const openId = initialConversationId ?? (!initialSession.explicit && !initialSession.saved ? firstChat?.id : undefined);
+          if (openId) await open(openId, cached.providers ?? [], cached.settings ?? null, Boolean(initialSession.saved || initialSession.explicit || !loading));
+        }
+      } catch (nextError) {
+        if (!cancelled) {
+          initialOpenedRef.current = false;
+          setLoadError(nextError);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
 
   useEffect(() => {
     if (!loading && initialDraft) composerRef.current?.focus();
@@ -647,10 +814,17 @@ export function ResearchChatPage() {
     };
   }, [run?.id, run?.status, current?.id, sending, stopping]);
 
-  const resetThread = () => {
+  const resetThread = (keepDraft = false) => {
     openRequestRef.current += 1;
-    clearAttachments();
-    setResponseEffort('auto');
+    steeringRequestRef.current += 1;
+    pendingDraftRef.current = null;
+    setQueueingSteering(false);
+    setError(null);
+    if (!keepDraft) setFailedDraft(null);
+    if (!keepDraft) {
+      clearAttachments();
+      setResponseEffort('auto');
+    }
     setRun(null);
     setRuns([]);
     setHistoryState('ready');
@@ -663,7 +837,24 @@ export function ResearchChatPage() {
   };
 
   const create = () => {
+    persistDraft();
+    if (!current) {
+      if (!content && pendingDraftRef.current) setContent(pendingDraftRef.current);
+      uploadControllerRef.current?.abort();
+      uploadControllerRef.current = null;
+      setUploadingNames([]);
+      setAttachmentError(null);
+      resetThread(true);
+      composerRef.current?.focus();
+      return;
+    }
     setCurrent(null);
+    const saved = readChatDraft('new');
+    setDraftKey('new');
+    setContent(saved?.content ?? '');
+    setReading(saved?.reading ?? null);
+    setSelectedIdea(saved?.selectedIdea ?? '');
+    setOtherIdea(saved?.otherIdea ?? '');
     setTrackId('');
     setModelReference(preferredModelReference);
     setContextWindowTokens(
@@ -674,10 +865,20 @@ export function ResearchChatPage() {
       ),
     );
     resetThread();
+    setFailedDraft(saved?.failedDraft ?? null);
+    setAttachments(saved?.attachments ?? []);
+    setResponseEffort(saved?.responseEffort ?? 'auto');
+    setWebEnabled(saved?.webEnabled ?? true);
+    setTurnIntent(saved?.intent ?? 'chat');
     composerRef.current?.focus();
   };
 
   const selectModel = (reference: ModelReference) => {
+    if (reference.provider_profile_id === modelReference.provider_profile_id && reference.model === modelReference.model) return;
+    if (current && !window.confirm(
+      'Changing the model starts a new chat without the existing transcript. Your current chat stays saved. Your unsent message, paper context and attachments will move to the new chat. Continue?',
+    )) return;
+    persistDraft();
     setModelReference(reference);
     setPreferredModelReference(reference);
     setContextWindowTokens(
@@ -693,7 +894,8 @@ export function ResearchChatPage() {
       .catch(setError);
     if (current) {
       setCurrent(null);
-      resetThread();
+      setDraftKey(contextualDraftKey(['model-change', current.id, reference]));
+      resetThread(true);
     }
   };
 
@@ -740,6 +942,7 @@ export function ResearchChatPage() {
     ) return;
     try {
       await chatApi.remove(id);
+      forgetChatDraft(conversationDraftKey(id));
       const remaining = await chatApi.list();
       setConversations(remaining);
       if (current?.id === id) {
@@ -754,20 +957,35 @@ export function ResearchChatPage() {
 
   const send = async (override?: string) => {
     const draft = override ?? content;
+    const consumesDraft = override === undefined || override === content;
     const submitted = draft.trim();
     if (!submitted || uploadControllerRef.current || historyState === 'loading') return;
+    optionsRef.current?.removeAttribute('open');
     if (sending) {
       if (
         !run
         || !['pending', 'running'].includes(run.status)
         || queueingSteering
         || attachments.length
+        || reading
       ) return;
+      const request = openRequestRef.current;
+      const steeringRequest = ++steeringRequestRef.current;
+      const runId = run.id;
+      const conversationId = current?.id;
+      const isCurrent = () => mountedRef.current
+        && request === openRequestRef.current
+        && steeringRequest === steeringRequestRef.current
+        && activeRunRef.current === runId
+        && steerableRunRef.current
+        && activeConversationRef.current === conversationId;
       setQueueingSteering(true);
       setError(null);
-      setContent('');
+      if (consumesDraft) setContent('');
+      const submittedVersion = contentVersionRef.current;
       try {
-        const message = await chatApi.steer(run.id, submitted);
+        const message = await chatApi.steer(runId, submitted);
+        if (!isCurrent()) return;
         setSteeringMessages((messages) =>
           messages.some((item) => item.id === message.id)
             ? messages
@@ -775,19 +993,26 @@ export function ResearchChatPage() {
         );
         setPinnedToBottom(true);
       } catch (nextError) {
-        setContent(draft);
+        if (!isCurrent()) return;
+        if (consumesDraft && contentVersionRef.current === submittedVersion) setContent(draft);
+        else setFailedDraft(draft);
         setError(nextError);
       } finally {
-        setQueueingSteering(false);
-        window.setTimeout(() => composerRef.current?.focus(), 0);
+        if (isCurrent()) {
+          setQueueingSteering(false);
+          window.setTimeout(() => composerRef.current?.focus(), 0);
+        }
       }
       return;
     }
     const request = openRequestRef.current;
+    const key = draftKey;
     const attachmentPaths = attachments.map((attachment) => attachment.path);
     setSending(true);
     setError(null);
-    setContent('');
+    pendingDraftRef.current = consumesDraft ? draft : null;
+    if (consumesDraft) setContent('');
+    const submittedVersion = contentVersionRef.current;
     setOptimisticUser(submitted);
     setRun(null);
     setStream(emptyChatStream);
@@ -796,7 +1021,9 @@ export function ResearchChatPage() {
       let conversation = current;
       if (!conversation) {
         const created = await chatApi.create(modelReference, trackId || undefined);
-        if (request !== openRequestRef.current) return;
+        const saved = readChatDraft(key);
+        if (saved) saveChatDraft(key, { ...saved, conversationId: created.id });
+        if (!mountedRef.current || request !== openRequestRef.current) return;
         conversation = await chatApi.get(created.id);
         if (request !== openRequestRef.current) return;
         setCurrent(conversation);
@@ -810,13 +1037,25 @@ export function ResearchChatPage() {
           reasoning_effort: reasoningEffort ?? undefined,
           web_enabled: webEnabled,
           response_effort: responseEffort,
+          turn_intent: turnIntent,
           context_window_tokens: contextWindowTokens,
           attachment_paths: attachmentPaths,
+          ...(reading ? { reading_context: { document_id: reading.document_id, page: reading.page ?? null, selection: reading.selection ?? null } } : {}),
         },
       );
-      if (request !== openRequestRef.current) return;
+      for (const savedKey of [key, conversationDraftKey(conversation.id)]) {
+        const saved = readChatDraft(savedKey);
+        if (saved?.contentVersion === submittedVersion) saveChatDraft(savedKey, {
+          ...saved, conversationId: conversation.id, content: consumesDraft ? '' : saved.content,
+          attachments: [], reading: null, responseEffort: 'auto',
+        });
+      }
+      if (!mountedRef.current || request !== openRequestRef.current) return;
+      pendingDraftRef.current = null;
+      if (turnIntent === 'ideation') saveIdeaDraft(conversation.id, selectedIdea);
       setResponseEffort('auto');
       setAttachments([]);
+      setReading(null);
       setAttachmentError(null);
       setCurrent((active) => (
         active
@@ -829,13 +1068,24 @@ export function ResearchChatPage() {
       void refreshList();
       window.setTimeout(() => composerRef.current?.focus(), 0);
     } catch (nextError) {
-      if (request !== openRequestRef.current) return;
-      setContent(draft);
+      if (!mountedRef.current || request !== openRequestRef.current) return;
+      pendingDraftRef.current = null;
+      if (consumesDraft && contentVersionRef.current === submittedVersion) setContent(draft);
+      else setFailedDraft(draft);
       setOptimisticUser(null);
       setSending(false);
       setError(nextError);
     }
   };
+
+  const autoSent = useRef(false);
+  useEffect(() => {
+    if (!autoSend || autoSent.current || loading || !initialDraft) return;
+    autoSent.current = true;
+    void send(initialDraft);
+    // send reads the latest render's state; it only needs to fire once loading settles.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoSend, loading, initialDraft]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase();
@@ -908,6 +1158,7 @@ export function ResearchChatPage() {
   const renderActivity = (candidate: Run) => (
     <RunActivity
       stages={stagesByRun.get(candidate.id) ?? []}
+      liveThought={runActive && candidate.id === run?.id ? latestReasoning(liveTimeline) : null}
       workPlan={sessionSummary.runs.find((summary) => summary.id === candidate.id)?.workPlan}
       onOpenActivity={() => setActivityOpen(true)}
     />
@@ -923,7 +1174,15 @@ export function ResearchChatPage() {
     [current?.items, runs],
   );
 
-  if (loading || !settings) return <Loading label="Loading chats…" />;
+  const retryLoading = () => setLoadAttempt((attempt) => attempt + 1);
+  if (loading) return <Loading label="Loading chats…" />;
+  if (!settings) return (
+    <section className="chat-page">
+      <ErrorNotice error={loadError ?? new Error('Chat settings could not be loaded.')} />
+      <button type="button" className="button" onClick={retryLoading}>Retry loading chats</button>
+      <Link className="button" to="/settings">Open settings</Link>
+    </section>
+  );
 
   const hasTranscript = Boolean(current?.items.length || run || optimisticUser);
 
@@ -936,7 +1195,7 @@ export function ResearchChatPage() {
   return (
     <div
       ref={pageRef}
-      className={`chat-page${focusMode ? ' focus-mode' : ''}`}
+      className={`chat-page${focusMode ? ' focus-mode' : ''}${embedded ? ' chat-embedded' : ''}`}
       onKeyDown={(event) => {
         if (event.key !== 'Escape') return;
         const popover = event.currentTarget.querySelector<HTMLDetailsElement>('.composer-options[open]');
@@ -951,6 +1210,22 @@ export function ResearchChatPage() {
       }}
     >
       {error ? <ErrorNotice error={error} /> : null}
+      {failedDraft ? (
+        <details className="notice">
+          <summary>Your earlier message was not sent. Your newer draft is unchanged.</summary>
+          <pre>{failedDraft}</pre>
+          <button type="button" className="button" onClick={() => {
+            setContent(content ? `${failedDraft}\n\n${content}` : failedDraft);
+            setFailedDraft(null);
+          }}>Add unsent message to draft</button>
+        </details>
+      ) : null}
+      {loadError ? (
+        <div>
+          <ErrorNotice error={loadError} />
+          <button type="button" className="button" onClick={retryLoading}>Retry loading chats</button>
+        </div>
+      ) : null}
       <div
         className={`chat-layout${showSidebar ? '' : ' collapsed'}${activityOpen ? ' activity-open' : ''}${resizing ? ' resizing' : ''}`}
         style={{
@@ -1061,17 +1336,6 @@ export function ResearchChatPage() {
               </button>
             ) : null}
             <h1>{current?.title ?? 'New chat'}</h1>
-            <Link className="button ghost small" to={`/deep-work?${new URLSearchParams({
-              view: 'tasks',
-              ...(current ? { conversation: current.id } : {}),
-              ...(trackId ? { track: trackId } : {}),
-            })}`}>Deep Work</Link>
-            <TrackChatSelector conversationId={current?.id} trackId={trackId} disabled={sending || historyState === 'loading'}
-              onError={setError} onChange={(id) => {
-                setTrackId(id);
-                setCurrent((value) => value ? { ...value, track_id: id || null } : value);
-                void refreshList();
-              }} />
             {compaction ? (
               <span
                 className={`compaction-indicator ${compaction.state}`}
@@ -1086,21 +1350,40 @@ export function ResearchChatPage() {
                 {compaction.label}
               </span>
             ) : null}
-            <button
-              type="button"
-              className={`focus-toggle${focusMode ? ' active' : ''}`}
-              aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
-              aria-pressed={focusMode}
-              title="Focus mode (Alt+Shift+F)"
-              onClick={() => {
-                setFocusMode((value) => !value);
-                setActivityOpen(false);
-                composerRef.current?.focus();
-              }}
-            >
-              <Icon name="expand" size={15} />
-              <span>Focus</span>
-            </button>
+            <details className="chat-more" ref={moreMenuRef}>
+              <summary aria-label="More chat options" title="More options">
+                <Icon name="more" size={16} />
+              </summary>
+              <div className="chat-more-menu">
+                <TrackChatSelector conversationId={current?.id} trackId={trackId} disabled={sending || historyState === 'loading'}
+                  onError={setError} onChange={(id) => {
+                    setTrackId(id);
+                    setCurrent((value) => value ? { ...value, track_id: id || null } : value);
+                    void refreshList();
+                  }} />
+                <Link className="chat-more-item" to={`/deep-work?${new URLSearchParams({
+                  ...(current ? { conversation: current.id } : {}),
+                  ...(trackId ? { track: trackId } : {}),
+                })}`}><Icon name="runs" size={15} />Open in Deep Work</Link>
+                <button
+                  type="button"
+                  className={`chat-more-item focus-toggle${focusMode ? ' active' : ''}`}
+                  aria-label={focusMode ? 'Exit focus mode' : 'Enter focus mode'}
+                  aria-pressed={focusMode}
+                  title="Focus mode (Alt+Shift+F)"
+                  onClick={(event) => {
+                    event.currentTarget.closest('details')?.removeAttribute('open');
+                    setFocusMode((value) => !value);
+                    setActivityOpen(false);
+                    composerRef.current?.focus();
+                  }}
+                >
+                  <Icon name="expand" size={15} />
+                  <span>{focusMode ? 'Exit focus mode' : 'Focus mode'}</span>
+                  <kbd>Alt+Shift+F</kbd>
+                </button>
+              </div>
+            </details>
             <button
               ref={activityToggleRef}
               type="button"
@@ -1278,11 +1561,22 @@ export function ResearchChatPage() {
                     onOpenActivity={activityOpen ? undefined : () => setActivityOpen(true)}
                   />
                 ) : null}
-                {sending ? <div className="composer-intent" role="status">
-                  Keep guiding the work here. Your message applies before the next model call.
-                </div> : null}
+                {runActive && reading ? (
+                  <p className="composer-reading" role="status">
+                    Paper context cannot be added to ongoing work. Wait for this run to finish before sending the paper with your message.
+                  </p>
+                ) : null}
                 {/* One control surface: what you type, what answers, and how you send it. */}
                 <div className="composer-box">
+                  {reading ? (
+                    <div className="composer-reading" aria-label="Reading context">
+                      <Icon name="file" size={13} />
+                      <span title={reading.title}>{reading.title}{reading.page ? ` ? p. ${reading.page}` : ''}</span>
+                      <button type="button" aria-label="Don't use this paper as context" title="Don't use this paper as context" disabled={sending} onClick={() => setReading(null)}>
+                        <Icon name="close" size={12} />
+                      </button>
+                    </div>
+                  ) : null}
                   {attachments.length ? (
                     <ul className="composer-attachments" aria-label="Attached files">
                       {attachments.map((attachment, index) => (
@@ -1315,6 +1609,7 @@ export function ResearchChatPage() {
                     title="Enter to send; Shift+Enter for a new line"
                     rows={1}
                     value={content}
+                    disabled={historyState === 'loading'}
                     onChange={(event) => setContent(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -1350,8 +1645,7 @@ export function ResearchChatPage() {
                         className="composer-icon"
                         type="button"
                         aria-label="Attach file"
-                        aria-describedby="chat-attachment-help"
-                        title={runActive ? 'Attachments are available after this run finishes; steering accepts text only' : 'Attach files'}
+                        title={runActive ? 'Attachments are available after this run finishes; steering accepts text only' : 'Attach .md, .txt or .pdf (up to 10 files)'}
                         disabled={runActive || uploading || historyState === 'loading' || attachments.length >= MAX_ATTACHMENTS}
                         onClick={() => attachmentInputRef.current?.click()}
                       >
@@ -1361,7 +1655,7 @@ export function ResearchChatPage() {
                         providers={providers}
                         settings={settings}
                         value={modelReference}
-                        disabled={sending}
+                        disabled={sending || uploading || historyState === 'loading'}
                         onChange={selectModel}
                       />
                       <label className="response-effort-control">
@@ -1396,11 +1690,53 @@ export function ResearchChatPage() {
                         Web
                       </button>
                       <details className="composer-options" ref={optionsRef}>
-                        <summary title="Advanced options: reasoning effort and context size">
+                        <summary title="Chat mode, idea tools, reasoning effort and context size">
                           <Icon name="settings" size={13} />
                           Options
                         </summary>
                         <div className="composer-options-popover">
+                          <label className="composer-context">
+                            <span>Mode</span>
+                            <select aria-label="Conversation intent" value={turnIntent} disabled={runActive}
+                              onChange={(event) => {
+                                setTurnIntent(event.target.value as 'chat' | 'ideation');
+                                optionsRef.current?.removeAttribute('open');
+                                composerRef.current?.focus();
+                              }}>
+                              <option value="chat">Chat</option>
+                              <option value="ideation">Explore ideas</option>
+                            </select>
+                          </label>
+                          {turnIntent === 'ideation' ? (
+                            <div className="composer-ideation-hint" role="note">
+                              <strong>Shape a direction</strong>
+                              <span>Compare premise, supporting observations, speculation and unknowns. Abstracts and excerpts are not full-paper evidence. Novelty is unverified.</span>
+                              <label>Selected idea
+                                <textarea rows={2} maxLength={2400} value={selectedIdea} onChange={(event) => {
+                                  setSelectedIdea(event.target.value);
+                                  if (current) saveIdeaDraft(current.id, event.target.value);
+                                }}
+                                  placeholder="Paste or describe the idea you want to work on" />
+                              </label>
+                              <label>Another idea to combine (optional)
+                                <input maxLength={2400} value={otherIdea} onChange={(event) => setOtherIdea(event.target.value)}
+                                  placeholder="Describe the second direction" />
+                              </label>
+                              {IDEA_ACTIONS.map((action) => <button key={action}
+                                type="button" disabled={!selectedIdea.trim() || sending || (action === 'Combine' && !otherIdea.trim())}
+                                onClick={() => {
+                                  setContent(ideaActionDraft(action, selectedIdea, otherIdea));
+                                  optionsRef.current?.removeAttribute('open');
+                                  composerRef.current?.focus();
+                                }}>
+                                {action}
+                              </button>)}
+                              {selectedIdea.trim() ? <Link to={checkIdeaAgainstLiteratureHref(selectedIdea,
+                                ideaObjective || initialDraft || current?.items.find((item) => item.role === 'user')?.text || '',
+                                ideaContext || ideaReadingEvidence)}>Check against literature</Link> : null}
+                              <span>Actions prepare editable drafts; Send adds them to this conversation. Literature checking opens a new editable review, never starts one.</span>
+                            </div>
+                          ) : null}
                           <ReasoningEffortSelect
                             value={reasoningEffort}
                             supportedEfforts={supportedReasoningEfforts}
@@ -1467,7 +1803,7 @@ export function ResearchChatPage() {
                           className="composer-icon composer-send"
                           type="button"
                           aria-label="Queue steering message"
-                          disabled={queueingSteering || uploading || attachments.length > 0 || !content.trim()}
+                          disabled={queueingSteering || uploading || attachments.length > 0 || reading !== null || !content.trim()}
                           onClick={() => void send()}
                         >
                           {queueingSteering
@@ -1488,11 +1824,6 @@ export function ResearchChatPage() {
                     )}
                   </div>
                 </div>
-                <p className="composer-attachment-help" id="chat-attachment-help">
-                  .md / .txt (default 2 MiB), .pdf (default 40 MiB). Up to 10 files.
-                  {' '}Files are saved and indexed before sending. Type a request to start.
-                  {attachments.length ? ' Removing an attachment keeps the uploaded file in your workspace.' : ''}
-                </p>
               </div>
             </div>
           </div>
@@ -1713,6 +2044,14 @@ function compactionTitle(event: RunStreamEvent): string {
   return 'Context compaction was triggered for this conversation.';
 }
 
+/** The server appends reader context to the stored turn; show only the question and the paper. */
+export function splitReadingContext(text: string): { body: string; readingTitle: string | null } {
+  const start = text.indexOf('\n\n<reading-context>');
+  if (start < 0) return { body: text, readingTitle: null };
+  const title = /\ntitle: (.*)\n/.exec(text.slice(start))?.[1] ?? null;
+  return { body: text.slice(0, start), readingTitle: title };
+}
+
 function Message({
   role,
   text,
@@ -1733,17 +2072,19 @@ function Message({
   canRetry?: boolean;
 }) {
   const isAssistant = role === 'assistant';
+  const { body, readingTitle } = splitReadingContext(text);
   // No avatar, no role caption: the shape of the turn already says who is speaking.
   return (
     <article className={`message role-${role} ${className}`.trim()}>
       <div className="message-body">
-        <MarkdownViewer content={text} />
+        {readingTitle ? <small className="message-reading"><Icon name="file" size={12} />{readingTitle}</small> : null}
+        <MarkdownViewer content={body} />
         {streaming ? <i className="stream-cursor" aria-hidden="true" /> : null}
         {isAssistant && sources?.length ? <SourceImages sources={sources} /> : null}
         {isAssistant && sources?.length ? <SourceChips sources={sources} /> : null}
       </div>
       <MessageActions
-        content={text}
+        content={body}
         metrics={isAssistant ? metrics : null}
         onRetry={isAssistant ? onRetry : null}
         canRetry={canRetry}
@@ -1814,6 +2155,15 @@ function isTerminalEvent(eventType: string): boolean {
 function displayStream(run: Run): ChatStreamState {
   const restored = restoreChatStream(run.events);
   return run.status === 'completed' ? { ...restored, assistant: '' } : restored;
+}
+
+/** Most recent reasoning text so a waiting user can follow what the model is weighing. */
+function latestReasoning(timeline: TurnTimeline): string | null {
+  for (let index = timeline.steps.length - 1; index >= 0; index -= 1) {
+    const step = timeline.steps[index];
+    if (step.kind === 'reasoning' && step.text.trim()) return step.text.trim();
+  }
+  return null;
 }
 
 function liveReasoningTimeline(timeline: TurnTimeline): TurnTimeline | null {

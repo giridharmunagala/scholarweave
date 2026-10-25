@@ -3,13 +3,31 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated, Literal
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNTIME_VERSION = "native-1"
+
+
+def _local_ocr_url(value: str) -> str:
+    url = urlsplit(value)
+    if (
+        url.scheme not in {"http", "https"}
+        or url.hostname not in {"localhost", "127.0.0.1", "::1"}
+        or (url.port is not None and not 1 <= url.port <= 65535)
+        or url.username or url.password or url.query or url.fragment
+        or url.path.rstrip("/") != "/v1"
+    ):
+        raise ValueError("OCR URL must be a loopback HTTP(S) endpoint ending in /v1.")
+    return value.rstrip("/")
+
+
+LocalOCRURL = Annotated[str, AfterValidator(_local_ocr_url)]
 
 
 class Settings(BaseSettings):
@@ -97,6 +115,12 @@ class Settings(BaseSettings):
     max_chunks_per_document: int = 2000
     pdf_min_text_chars: int = 40
     ocr_language: str = "eng"
+    ocr_engine: Literal["tesseract", "surya"] = "tesseract"
+    ocr_surya_base_url: LocalOCRURL = "http://localhost:18080/v1"
+    ocr_surya_model: str = Field(default="Surya-ocr-2", min_length=1, max_length=200)
+    ocr_surya_parallel: int = Field(default=10, ge=1)
+    ocr_surya_max_tokens: int = Field(default=8192, ge=512, le=32768)
+    ocr_indra_fallback_enabled: bool = False
     ocr_llm_enhancement_enabled: bool = False
     ocr_llm_model: str | None = None
     ocr_llm_triage_model: str | None = None

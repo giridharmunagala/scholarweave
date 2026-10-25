@@ -6,12 +6,16 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import StreamingResponse
 
 from backend.core.http import services
+from backend.documents.models import PaperUsefulness
 from backend.runs.schemas import run_response
+from backend.workspace.schemas import WorkspaceFileContentResponse
 from backend.research.schemas import (
+    ArxivSearchResponse,
     ArtifactContentResponse,
     ArtifactResponse,
     DocumentChunkResponse,
@@ -19,16 +23,22 @@ from backend.research.schemas import (
     DocumentSummaryResponse,
     DocumentSearchResponse,
     IngestionOptionsResponse,
+    OcrBatchResponse,
+    OcrBatchStartRequest,
     PaperFolderAssignmentRequest,
     PaperFolderCreateRequest,
     PaperFolderResponse,
     PaperSummaryContentResponse,
     PaperSummaryBatchRequest,
     PaperSummaryBatchResponse,
+    PaperSummaryPromotionRequest,
     PaperSummaryPromotionResponse,
     PaperSummaryRunRequest,
     PaperSummaryRunResponse,
     PaperSummaryVersionResponse,
+    PaperTopicMapResponse,
+    PaperTopicRequest,
+    PaperUsefulnessRequest,
     RemotePdfDownloadRequest,
     SavedWebSourceNoteResponse,
     WebSourceCreateRequest,
@@ -41,6 +51,45 @@ summary_router = APIRouter(
     prefix="/documents/{document_id}/summaries",
     tags=["paper summaries"],
 )
+
+
+@router.get("/documents/ocr-batches", response_model=list[OcrBatchResponse])
+async def list_ocr_batches(container=Depends(services)) -> list[dict]:
+    return container.ocr_batches.list()
+
+
+@router.post(
+    "/documents/ocr-batches", response_model=OcrBatchResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def start_ocr_batch(
+    payload: OcrBatchStartRequest, container=Depends(services),
+) -> dict:
+    return await container.ocr_batches.start(payload.document_ids)
+
+
+@router.get("/documents/ocr-batches/{batch_id}", response_model=OcrBatchResponse)
+async def get_ocr_batch(batch_id: str, container=Depends(services)) -> dict:
+    return container.ocr_batches.get(batch_id)
+
+
+@router.post("/documents/ocr-batches/{batch_id}/stop", response_model=OcrBatchResponse)
+async def stop_ocr_batch(batch_id: str, container=Depends(services)) -> dict:
+    return container.ocr_batches.stop(batch_id)
+
+
+@router.get("/research/arxiv", response_model=ArxivSearchResponse)
+async def search_arxiv(
+    query: str = Query(min_length=1, max_length=1000),
+    start: int = Query(default=0, ge=0),
+    container=Depends(services),
+) -> dict:
+    if not query.strip():
+        raise HTTPException(status_code=422, detail="Enter an arXiv search query.")
+    try:
+        return await container.research_search.search_arxiv_page(query, start=start, limit=10)
+    except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+        raise HTTPException(status_code=502, detail=f"arXiv search failed: {exc}") from exc
 
 
 @summary_router.post(
@@ -105,6 +154,19 @@ def list_summary_versions(
     ]
 
 
+@router.get("/documents/summary-runs", response_model=list[PaperSummaryRunResponse])
+def list_active_summary_runs(
+    document_id: str | None = Query(default=None),
+    container=Depends(services),
+) -> list[PaperSummaryRunResponse]:
+    return [
+        PaperSummaryRunResponse(
+            run=run_response(run), prompt_revision=revision, document_id=paper_id,
+        )
+        for run, revision, paper_id in container.summaries.active_runs(document_id)
+    ]
+
+
 @summary_router.get(
     "/{version_id}",
     response_model=PaperSummaryContentResponse,
@@ -128,14 +190,36 @@ def get_summary_version(
 def promote_summary_version(
     document_id: str,
     version_id: str,
+    payload: PaperSummaryPromotionRequest,
     container=Depends(services),
 ) -> PaperSummaryPromotionResponse:
-    version, path, content = container.summaries.promote(document_id, version_id)
+    version, path, content = container.summaries.promote(
+        document_id, version_id,
+        expected_sha256=payload.expected_sha256, replace_existing=payload.replace_existing,
+    )
     return PaperSummaryPromotionResponse(
         version=PaperSummaryVersionResponse.model_validate(version),
         summary_path=path,
         content=content,
     )
+
+
+@router.get("/paper-topics", response_model=PaperTopicMapResponse | None)
+def get_paper_topics(folder_id: str | None = None, container=Depends(services)) -> dict | None:
+    return container.paper_topics.get(folder_id)
+
+
+@router.post("/paper-topics", response_model=PaperTopicMapResponse)
+async def build_paper_topics(payload: PaperTopicRequest, container=Depends(services)) -> dict:
+    return await container.paper_topics.build(
+        payload.folder_id, payload.embedding_model, payload.naming_model,
+    )
+
+
+@router.delete("/paper-topics", status_code=status.HTTP_204_NO_CONTENT)
+def clear_paper_topics(folder_id: str | None = None, container=Depends(services)) -> Response:
+    container.paper_topics.clear(folder_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/paper-folders", response_model=list[PaperFolderResponse])
@@ -164,9 +248,11 @@ def delete_paper_folder(folder_id: str, container=Depends(services)) -> Response
 
 @router.get("/documents", response_model=list[DocumentSummaryResponse])
 def list_documents(container=Depends(services)) -> list[DocumentSummaryResponse]:
+    documents = container.documents.list_documents()
+    abstracts = container.documents.document_abstracts(documents)
     return [
-        _document_summary(document)
-        for document in container.documents.list_documents()
+        _document_summary(document, abstracts.get(document.id))
+        for document in documents
     ]
 
 
@@ -176,19 +262,22 @@ def search_documents(
     folder_id: str | None = None,
     unfiled: bool = False,
     paper_status: Literal["uploaded", "processing", "ready", "failed"] | None = None,
+    usefulness: PaperUsefulness | None = None,
     limit: int = Query(default=25, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     container=Depends(services),
 ) -> list[DocumentSearchResponse]:
+    results = container.documents.search_documents(
+        query, folder_id=folder_id, unfiled=unfiled, status=paper_status,
+        limit=limit, offset=offset, usefulness=usefulness,
+    )
+    abstracts = container.documents.document_abstracts([item[0] for item in results])
     return [
         DocumentSearchResponse(
-            **_document_summary(document).model_dump(),
+            **_document_summary(document, abstracts.get(document.id)).model_dump(),
             score=score, excerpt=excerpt, citation=citation, page_start=page,
         )
-        for document, score, excerpt, citation, page in container.documents.search_documents(
-            query, folder_id=folder_id, unfiled=unfiled, status=paper_status,
-            limit=limit, offset=offset,
-        )
+        for document, score, excerpt, citation, page in results
     ]
 
 
@@ -301,6 +390,11 @@ def get_document(document_id: str, container=Depends(services)) -> DocumentRespo
     return _document_response(container, document_id)
 
 
+@router.post("/documents/{document_id}/notes", response_model=WorkspaceFileContentResponse)
+def ensure_document_notes(document_id: str, container=Depends(services)) -> WorkspaceFileContentResponse:
+    return WorkspaceFileContentResponse.model_validate(container.documents.ensure_notes(document_id))
+
+
 @router.put("/documents/{document_id}/folder", response_model=DocumentResponse)
 def assign_document_folder(
     document_id: str,
@@ -308,6 +402,16 @@ def assign_document_folder(
     container=Depends(services),
 ) -> DocumentResponse:
     container.documents.assign_folder(document_id, payload.folder_id)
+    return _document_response(container, document_id)
+
+
+@router.put("/documents/{document_id}/usefulness", response_model=DocumentResponse)
+def set_document_usefulness(
+    document_id: str,
+    payload: PaperUsefulnessRequest,
+    container=Depends(services),
+) -> DocumentResponse:
+    container.documents.set_usefulness(document_id, payload.usefulness)
     return _document_response(container, document_id)
 
 
@@ -336,10 +440,15 @@ async def document_ingestion_options(
 @router.post("/documents/{document_id}/ingest", response_model=DocumentResponse)
 async def ingest_document(
     document_id: str,
-    mode: Literal["embedded", "ocr"] = "embedded",
+    mode: Literal["embedded", "ocr", "quick"] | None = None,
     container=Depends(services),
 ) -> DocumentResponse:
-    await container.documents.ingest_document(document_id, force_ocr=mode == "ocr")
+    await container.documents.ingest_document(
+        document_id, force_ocr=mode == "ocr",
+        use_layout=False if mode == "embedded" else None,
+        quick_ocr=mode == "quick",
+        require_readable_pages=mode == "quick",
+    )
     return _document_response(container, document_id)
 
 
@@ -428,9 +537,11 @@ def _document_response(container, document_id: str) -> DocumentResponse:
     return DocumentResponse(
         id=document.id,
         title=document.title,
+        abstract=container.documents.document_abstracts([document]).get(document.id),
         source_filename=document.source_filename,
         content_type=document.content_type,
         status=document.status,
+        usefulness=(document.metadata_json or {}).get("usefulness", PaperUsefulness.UNRATED),
         page_count=document.page_count,
         metadata=document.metadata_json or {},
         artifacts=[_artifact_response(artifact) for artifact in artifacts],
@@ -452,13 +563,15 @@ def _document_response(container, document_id: str) -> DocumentResponse:
     )
 
 
-def _document_summary(document) -> DocumentSummaryResponse:
+def _document_summary(document, abstract: str | None = None) -> DocumentSummaryResponse:
     return DocumentSummaryResponse(
         id=document.id,
         title=document.title,
+        abstract=abstract,
         source_filename=document.source_filename,
         content_type=document.content_type,
         status=document.status,
+        usefulness=(document.metadata_json or {}).get("usefulness", PaperUsefulness.UNRATED),
         page_count=document.page_count,
         metadata=document.metadata_json or {},
         created_at=document.created_at,

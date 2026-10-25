@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ThemeProvider } from '../shared/theme/ThemeProvider';
@@ -10,7 +10,7 @@ describe('application shell', () => {
   let container: HTMLDivElement;
   let root: Root;
 
-  const render = async (pathname: string) => {
+  const render = async (pathname: string, children: ReactNode = <main>Page</main>) => {
     window.history.replaceState({}, '', pathname);
     root = createRoot(container);
     await act(async () => {
@@ -18,7 +18,7 @@ describe('application shell', () => {
         <ThemeProvider>
           <RouterProvider>
             <AppShell>
-              <main>Page</main>
+              {children}
             </AppShell>
           </RouterProvider>
         </ThemeProvider>,
@@ -29,6 +29,7 @@ describe('application shell', () => {
 
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     vi.stubGlobal('scrollTo', vi.fn());
     container = document.createElement('div');
@@ -41,42 +42,19 @@ describe('application shell', () => {
     vi.unstubAllGlobals();
   });
 
-  it('offers every destination once, in one labelled rail', async () => {
+  it('summons the assistant with Ctrl+J and opens search with Ctrl+K', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } })));
     await render('/');
 
-    const labels = Array.from(container.querySelectorAll('.rail .nav-link .rail-label')).map(
-      (node) => node.textContent,
-    );
-    expect(labels).toEqual(['Chat', 'Deep Work', 'Morning Brief', 'Research Tracks', 'Library', 'Settings']);
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Chat');
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', ctrlKey: true })); });
+    expect(container.querySelector('.app-shell')?.classList.contains('ask-open')).toBe(true);
+    expect(container.querySelector('.ask-panel[aria-label="Assistant"]')).not.toBeNull();
 
-    // The rail is the only navigation chrome: no top bar, no breadcrumb, no drawer.
-    expect(container.querySelector('.topbar')).toBeNull();
-    expect(container.querySelector('.breadcrumb')).toBeNull();
-    expect(container.querySelector('.sidebar')).toBeNull();
-    expect(container.querySelector('[aria-label="Resize navigation sidebar"]')).toBeNull();
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(container.querySelector('.ask-panel')).toBeNull();
 
-    // Conversations are listed by the chat page alone, never mirrored in the rail.
-    expect(container.querySelector('.nav-chat-tree')).toBeNull();
-
-    expect(container.querySelector('.search-trigger')).toBeNull();
-    expect(container.querySelector('.theme-trigger')).not.toBeNull();
-  });
-
-  it('marks the rail entry for the current section', async () => {
-    await render('/library/123');
-
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Library');
-  });
-
-  it('marks Research Tracks as a primary destination', async () => {
-    await render('/tracks?id=track-1');
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Research Tracks');
-  });
-
-  it('marks Morning Brief as a primary destination', async () => {
-    await render('/brief');
-    expect(container.querySelector('.rail .nav-link.active .rail-label')?.textContent).toBe('Morning Brief');
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true })); });
+    expect(container.querySelector('.palette')).not.toBeNull();
   });
 
   it('opens the compact theme picker and supports matching the system theme', async () => {
@@ -103,5 +81,13 @@ describe('application shell', () => {
     });
     expect(localStorage.getItem('scholarweave-theme')).toBe('system');
     expect(container.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it('navigates to batch Runs and marks its page active', async () => {
+    await render('/');
+    const runs = container.querySelector<HTMLAnchorElement>('nav[aria-label="Primary"] a[href="/runs"]')!;
+    await act(async () => runs.click());
+    expect(window.location.pathname).toBe('/runs');
+    expect(runs.getAttribute('aria-current')).toBe('page');
   });
 });

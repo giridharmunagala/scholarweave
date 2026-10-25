@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Sequence
 
-from sqlalchemy import column, create_engine, delete, func, inspect, literal, or_, select, table, text
+from sqlalchemy import column, create_engine, delete, func, inspect, literal, literal_column, or_, select, table, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -226,6 +226,7 @@ class WorkspaceRepository:
         tags: Sequence[str],
         limit: int,
         offset: int,
+        related_paths: Sequence[str] = (),
     ) -> list[tuple[WorkspaceEntry, float | None, str | None]]:
         with self._session_factory() as session:
             tokens = list(dict.fromkeys(_SEARCH_TOKEN.findall(query or "")))
@@ -242,19 +243,38 @@ class WorkspaceRepository:
                     )
                     .join(fts, WorkspaceEntry.path == fts.c.path)
                     .where(text("workspace_entries_fts MATCH :query"))
-                    .params(query=" OR ".join(f'"{token}"' for token in tokens))
                 )
+                if related_paths:
+                    matches = (
+                        select(fts.c.path, literal_column(f"-{_BM25}").label("score"),
+                               literal_column("snippet(workspace_entries_fts, 3, '', '', ' ... ', 32)").label("excerpt"))
+                        .where(text("workspace_entries_fts MATCH :query"))
+                        .cte("matches").prefix_with("MATERIALIZED")
+                    )
+                    statement = (
+                        select(WorkspaceEntry, matches.c.score, matches.c.excerpt)
+                        .outerjoin(matches, WorkspaceEntry.path == matches.c.path)
+                        .where(or_(matches.c.path.is_not(None), WorkspaceEntry.path.in_(related_paths)))
+                        .order_by(matches.c.path.is_(None), matches.c.score.desc())
+                    )
             if kinds:
                 statement = statement.where(WorkspaceEntry.kind.in_(kinds))
             for tag in tags:
                 statement = statement.where(
                     func.instr(WorkspaceEntry.tags_text, f"\n{tag.casefold()}\n") > 0
                 )
-            if tokens:
+            if tokens and not related_paths:
                 statement = statement.order_by(text(_BM25))
             statement = statement.order_by(WorkspaceEntry.modified_at.desc(), WorkspaceEntry.path)
             statement = statement.offset(offset).limit(limit)
-            return [(entry, score, excerpt) for entry, score, excerpt in session.execute(statement)]
+            parameters = {"query": " OR ".join(f'"{token}"' for token in tokens)} if tokens else {}
+            return [(entry, score, excerpt) for entry, score, excerpt in session.execute(statement, parameters)]
+
+    def paper_notes(self) -> list[WorkspaceEntry]:
+        with self._session_factory() as session:
+            return list(session.scalars(select(WorkspaceEntry).where(
+                WorkspaceEntry.kind == "paper_notes", WorkspaceEntry.paper_id.is_not(None),
+            ).order_by(WorkspaceEntry.modified_at.desc(), WorkspaceEntry.path)))
 
     def paths_for_tags(self, tags: Sequence[str]) -> dict[str, str]:
         if not tags:

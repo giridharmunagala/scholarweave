@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.providers.reasoning import ReasoningEffort
+from backend.research.schemas import ArxivPaperInput, PdfPaperInput
 
 ReviewStage = Literal["scope", "discovery", "screening", "reading_plan", "reading", "references", "reference_screening", "reference_collection", "synthesis", "publication"]
 ReviewStatus = Literal["running", "awaiting_approval", "paused", "blocked", "completed"]
@@ -50,17 +51,49 @@ class SummaryRole(ReviewSchema):
         return self
 
 
+class EmbeddingRole(ReviewSchema):
+    model_reference: ModelReferenceSpec
+    batch_size: int = Field(default=16, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def explicit_model(self) -> EmbeddingRole:
+        if not self.model_reference.provider_profile_id or not self.model_reference.model:
+            raise ValueError("Select an explicit provider and embedding model.")
+        return self
+
+
+class ResearchTopic(ReviewSchema):
+    id: str
+    title: str
+    description: str
+    candidate_ids: list[str]
+    exploration: str | None = None
+
+
+class TopicLabel(ReviewSchema):
+    id: str
+    title: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class TopicLabels(ReviewSchema):
+    topics: list[TopicLabel]
+
+
 class ReviewCreateRequest(ReviewSchema):
     title: str = Field(min_length=1, max_length=200)
     objective: str = Field(min_length=1, max_length=20_000)
     main_model: ModelReferenceSpec
     decision_model: DecisionRole | None = None
     summary_model: SummaryRole | None = None
+    embedding_model: EmbeddingRole | None = None
     conversation_id: str | None = None
     track_id: str | None = None
     web_enabled: bool = True
     openalex_enabled: bool = False
     main_parallel_requests: int = Field(default=1, ge=1, le=32)
+    reading_mode: Literal["targeted", "full"] = "full"
+    input_papers: list[ArxivPaperInput] = Field(default_factory=list, max_length=24)
 
     @model_validator(mode="after")
     def explicit_models(self) -> ReviewCreateRequest:
@@ -71,12 +104,18 @@ class ReviewCreateRequest(ReviewSchema):
             raise ValueError("Select an explicit provider and model for each review role.")
         if not self.title.strip() or not self.objective.strip():
             raise ValueError("The review needs a title and a research objective.")
+        if self.embedding_model and not self.summary_model:
+            raise ValueError("Topic-led research needs an explicit paper summary model.")
         return self
 
 
 class ReviewControlRequest(ReviewSchema):
     expected_revision: int = Field(ge=1)
-    action: Literal["approve_plan", "approve_papers", "select_references", "approve_reference_pdfs", "pause", "stop_stage", "skip_references", "extend_analysis", "write_report", "resume", "extend_budget", "link_paper"]
+    action: Literal["approve_plan", "approve_papers", "select_references", "approve_reference_pdfs", "pause", "stop_stage", "skip_references", "extend_analysis", "write_report", "resume", "extend_budget", "link_paper", "explore_topics", "approve_topics", "find_more_topics", "revise_selection", "refine_understanding", "add_arxiv_papers", "add_pdf_paper"]
+    input_papers: list[ArxivPaperInput] | None = Field(default=None, min_length=1, max_length=24)
+    pdf_paper: PdfPaperInput | None = None
+    topic_ids: list[str] | None = None
+    feedback: str | None = Field(default=None, max_length=20_000)
     candidate_ids: list[str] | None = None
     reference_matches: dict[str, str] | None = None
     document_id: str | None = None
@@ -86,9 +125,20 @@ class ReviewControlRequest(ReviewSchema):
     main_model: ModelReferenceSpec | None = None
     main_parallel_requests: int | None = Field(default=None, ge=1, le=32)
     summary_model: SummaryRole | None = None
+    reading_mode: Literal["targeted", "full"] | None = None
 
     @model_validator(mode="after")
     def model_change_on_resume(self) -> ReviewControlRequest:
+        if self.action == "add_arxiv_papers" and not self.input_papers:
+            raise ValueError("Choose at least one arXiv paper to add.")
+        if self.input_papers is not None and self.action != "add_arxiv_papers":
+            raise ValueError("Add arXiv inputs only with the add_arxiv_papers action.")
+        if self.action == "add_pdf_paper" and self.pdf_paper is None:
+            raise ValueError("Supply a PDF URL to add.")
+        if self.pdf_paper is not None and self.action != "add_pdf_paper":
+            raise ValueError("Add a PDF URL only with the add_pdf_paper action.")
+        if "reading_mode" in self.model_fields_set and self.action != "approve_topics":
+            raise ValueError("Change reading depth only when approving a topic reading batch.")
         if "main_model" in self.model_fields_set or "main_parallel_requests" in self.model_fields_set:
             if self.action != "resume":
                 raise ValueError("Change main-model settings only when resuming a paused review.")
@@ -106,7 +156,17 @@ class SearchQuery(ReviewSchema):
     pages: int = Field(ge=1)
 
 
+class TopicSearchPlan(ReviewSchema):
+    queries: list[SearchQuery] = Field(min_length=1, max_length=5)
+
+
+
 class ReviewClearRequest(ReviewSchema):
+    expected_revision: int = Field(ge=1)
+
+
+class ReviewTrackRequest(ReviewSchema):
+    track_id: str = Field(min_length=1)
     expected_revision: int = Field(ge=1)
 
 
@@ -244,6 +304,8 @@ class SelectiveSummary(ReviewSchema):
 
 class PaperReview(ReviewSchema):
     candidate_id: str
+    document_id: str | None = None
+    brief: PaperBrief | None = None
     title: str = ""
     collected: bool = False
     prepared: bool = False
@@ -300,6 +362,49 @@ class EvidencePacket(ReviewSchema):
     limitations: list[str]
     follow_up_pages: list[int]
     partial_summary: list[PartialSummarySection]
+
+
+class BriefSection(ReviewSchema):
+    title: Literal["Fit to objective", "Approach", "Pertinent findings", "Limitations and unknowns", "Why and when to read"]
+    content: str = Field(min_length=1)
+    claim_indexes: list[int]
+
+
+class BriefPacket(ReviewSchema):
+    claims: list[EvidenceClaim]
+    sections: list[BriefSection]
+    limitations: list[str]
+
+
+class BriefFinding(EvidenceClaim):
+    id: str
+    candidate_id: str
+    document_id: str
+    source_version: str
+    title: str
+    citation: str
+
+
+class PaperBriefSection(ReviewSchema):
+    title: Literal["Fit to objective", "Approach", "Pertinent findings", "Limitations and unknowns", "Why and when to read"]
+    content: str
+    evidence_ids: list[str]
+
+
+class PaperBrief(ReviewSchema):
+    reading_mode: Literal["targeted"]
+    question_focus: str | None
+    source_pages: list[int]
+    sections: list[PaperBriefSection]
+    limitations: list[str]
+    findings: list[BriefFinding]
+
+
+class UnderstandingSnapshot(ReviewSchema):
+    markdown: str
+    candidate_ids: list[str]
+    question_focus: str | None
+    fingerprint: str
 
 
 class AnalysisSource(ReviewSchema):
@@ -386,11 +491,18 @@ class ReviewResponse(ReviewSchema):
     objective: str
     status: ReviewStatus
     stage: ReviewStage
-    approval: Literal["plan", "papers", "budget", "references", "reference_pdfs", "analysis"] | None
+    approval: Literal["plan", "papers", "budget", "references", "reference_pdfs", "analysis", "topics"] | None
     main_model: ModelReferenceSpec
     main_parallel_requests: int
     decision_model: DecisionRole | None
     summary_model: SummaryRole | None = None
+    embedding_model: EmbeddingRole | None = None
+    workspace_path: str | None = None
+    topics: list[ResearchTopic] = Field(default_factory=list)
+    selected_topic_ids: list[str] = Field(default_factory=list)
+    reading_mode: Literal["targeted", "full"] = "full"
+    question_focus: str | None = None
+    provisional_path: str | None = None
     conversation_id: str | None
     track_id: str | None
     scope: ReviewScope | None

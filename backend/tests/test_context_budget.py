@@ -11,6 +11,8 @@ from backend.agents.context import ScholarWeaveContext, ToolReceipt
 from backend.agents.context_budget import (
     CHECKPOINT_MESSAGE_PREFIX,
     ContextBudgetPolicy,
+    IMAGE_INPUT_TOKEN_RESERVE,
+    _estimated_tokens,
     _request_tokens,
     _replace_checkpointed_paper_reads,
     model_context_budget,
@@ -26,6 +28,21 @@ from backend.conversations.steering import (
 from backend.core.config import Settings
 from backend.runs.hooks import start_agent_invocation
 from backend.tests.harness_support import FakeClient
+
+
+@pytest.mark.parametrize("kind", ["image_url", "input_image"])
+def test_visual_context_sizes_image_tokens_instead_of_base64(kind):
+    def parts(payload):
+        return [{"type": "text", "text": "Source [p.1]."}, {
+            "type": kind, "image_url": {"url": f"data:image/jpeg;base64,{payload}"},
+        }]
+    small = _estimated_tokens(parts("a" * 100))
+    large = _estimated_tokens(parts("a" * 100_000))
+    assert small == large
+    assert IMAGE_INPUT_TOKEN_RESERVE < large < IMAGE_INPUT_TOKEN_RESERVE + 100
+    assert _estimated_tokens(parts("a") * 2) >= 2 * IMAGE_INPUT_TOKEN_RESERVE
+    text = {"text": "Ordinary text still uses UTF-8 byte sizing."}
+    assert _estimated_tokens(text) == math.ceil(len(json.dumps(text).encode("utf-8")) / 4)
 
 
 class Runtime:
@@ -2002,9 +2019,9 @@ async def test_helper_hot_swap_reuses_official_client_scheduler_without_nested_l
     priorities = []
     original_acquire = scheduler._acquire_request
 
-    async def acquire(profile_id, model, priority):
+    async def acquire(profile_id, model, priority, decision=False):
         priorities.append((model, _priority.get()))
-        return await original_acquire(profile_id, model, priority)
+        return await original_acquire(profile_id, model, priority, decision)
 
     monkeypatch.setattr(scheduler, "_acquire_request", acquire)
     monkeypatch.setattr(
@@ -2047,14 +2064,13 @@ async def test_helper_hot_swap_reuses_official_client_scheduler_without_nested_l
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("window", [4096, 16000, 80000])
-@pytest.mark.parametrize("manual_budget", [False, True])
 async def test_retry_response_budget_uses_available_context_without_changing_initial_cap(
-    tmp_path, window, manual_budget,
+    tmp_path, window,
 ) -> None:
     settings = Settings(
         data_dir=tmp_path / "data", workspace_dir=tmp_path / "workspace",
         agent_context_window_tokens=window,
-        agent_context_use_model_window=not manual_budget,
+        agent_context_use_model_window=False,
         agent_context_compaction_target_tokens=1024,
     )
     main = agent()

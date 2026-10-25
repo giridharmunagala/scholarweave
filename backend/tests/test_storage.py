@@ -12,6 +12,136 @@ from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.service import WorkspaceService
 
 
+@pytest.mark.parametrize("content,removed", [
+    ("", True),
+    ("x" * 1023, True),
+    ("x" * 1024, False),
+    ("\u00e9" * 511 + "x", True),
+    ("\u00e9" * 512, False),
+    ("x" * 1022 + "\r\n", False),
+], ids=["empty", "1023-bytes", "1024-bytes", "unicode-1023", "unicode-1024", "crlf-1024"])
+def test_note_cleanup_uses_strict_raw_byte_boundary(test_settings, content, removed) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    path = "knowledge/boundary.md"
+    workspace.write_file(path, content)
+    preview = workspace.preview_note_cleanup()
+    assert [item["path"] for item in preview["candidates"]] == ([path] if removed else [])
+    assert preview["failed"] == []
+    if removed:
+        candidate = preview["candidates"][0]
+        assert candidate["size_bytes"] == len(content.encode("utf-8"))
+        assert candidate["sha256"] == hashlib.sha256(content.encode("utf-8")).hexdigest()
+    result = workspace.cleanup_notes(preview["candidates"])
+    assert result == {"deleted_paths": [path] if removed else [], "skipped": [], "failed": []}
+    assert [item.path for item in workspace.list_files()] == ([] if removed else [path])
+    assert (test_settings.workspace_dir / path).exists() is not removed
+
+
+def test_note_cleanup_limits_scope_and_rechecks_protected_paths(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    note = workspace.create_note(name="Stub", content="")
+    paper = workspace.ensure_paper_folder("cleanup-paper", "Cleanup paper")
+    protected = [
+        paper["summary_path"], f"{paper['folder']}/summaries/version.md",
+        f"{paper['folder']}/attachments/notes.md", "research/review/report.md",
+        "projects/tracks/track--cleanup/problem.md",
+        "projects/tracks/track--cleanup/exploration/note.md",
+        ".scholarweave/internal.md", "inbox/attachments/upload/notes.md",
+        "knowledge/morning-brief/receipt.json", "other/notes.md",
+    ]
+    for path in protected:
+        storage.write_workspace_file(path, {} if path.endswith(".json") else "protected")
+    workspace.refresh_index()
+    preview = workspace.preview_note_cleanup()
+    assert {item["path"] for item in preview["candidates"]} == {note.path, paper["notes_path"]}
+    forged = [
+        {"path": path, "size_bytes": storage.workspace_file_info(path).size_bytes,
+         "sha256": storage.file_hash(test_settings.workspace_dir, path)}
+        for path in protected
+    ]
+    result = workspace.cleanup_notes([*preview["candidates"], *forged])
+    assert set(result["deleted_paths"]) == {note.path, paper["notes_path"]}
+    assert {item["path"] for item in result["skipped"]} == set(protected)
+    assert result["failed"] == []
+    assert all((test_settings.workspace_dir / path).is_file() for path in protected)
+    assert workspace.search(query="Stub") == []
+
+
+def test_note_cleanup_revalidates_changes_and_reports_partial_failure(test_settings, monkeypatch) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    paths = {name: f"knowledge/{name}.md" for name in ["grown", "changed", "gone", "denied", "remove"]}
+    for path in paths.values():
+        workspace.write_file(path, "stub")
+    preview = workspace.preview_note_cleanup()
+    storage.write_workspace_file(paths["grown"], "x" * 1024)
+    storage.write_workspace_file(paths["changed"], "edit")
+    storage.delete_workspace_file(paths["gone"])
+    delete = storage.delete_workspace_file
+
+    def deny_one(path):
+        if path == paths["denied"]:
+            raise PermissionError("File is locked")
+        delete(path)
+
+    monkeypatch.setattr(storage, "delete_workspace_file", deny_one)
+    result = workspace.cleanup_notes(preview["candidates"])
+    assert result["deleted_paths"] == [paths["remove"]]
+    assert {item["path"] for item in result["skipped"]} == {paths["grown"], paths["changed"], paths["gone"]}
+    assert result["failed"] == [{"path": paths["denied"], "reason": "File is locked"}]
+    assert workspace.read_file(paths["changed"]).content == "edit"
+    assert workspace.read_file(paths["grown"]).content == "x" * 1024
+    assert {item.path for item in workspace.list_files()} == {paths["grown"], paths["changed"], paths["denied"]}
+
+
+def test_note_cleanup_preview_uses_disk_not_stale_index_and_never_deletes(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    workspace.write_file("knowledge/shrunk.md", "x" * 1024)
+    workspace.write_file("knowledge/grown.md", "stub")
+    storage.write_workspace_file("knowledge/shrunk.md", "")
+    storage.write_workspace_file("knowledge/grown.md", "x" * 1024)
+    storage.write_workspace_file("knowledge/new.md", "new external note")
+    preview = workspace.preview_note_cleanup()
+    assert {item["path"] for item in preview["candidates"]} == {"knowledge/shrunk.md", "knowledge/new.md"}
+    assert all((test_settings.workspace_dir / item["path"]).exists() for item in preview["candidates"])
+    assert workspace.cleanup_notes([]) == {"deleted_paths": [], "skipped": [], "failed": []}
+
+
+def test_note_cleanup_keeps_unreadable_notes_and_reports_preview_errors(test_settings, monkeypatch) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    path = "knowledge/unreadable.md"
+    workspace.write_file(path, "stub")
+    snapshot = storage.read_workspace_file_snapshot
+
+    def unreadable(candidate):
+        if candidate == path:
+            raise PermissionError("Cannot read note")
+        return snapshot(candidate)
+
+    monkeypatch.setattr(storage, "read_workspace_file_snapshot", unreadable)
+    assert workspace.preview_note_cleanup() == {
+        "threshold_bytes": 1024, "candidates": [],
+        "failed": [{"path": path, "reason": "Cannot read note"}],
+    }
+    assert (test_settings.workspace_dir / path).is_file()
+
+
+def test_note_cleanup_serializes_duplicate_confirmations(test_settings) -> None:
+    workspace = WorkspaceService(SafeStorage(test_settings))
+    note = workspace.create_note(name="One stub", content="")
+    candidates = workspace.preview_note_cleanup()["candidates"]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(workspace.cleanup_notes, [candidates, candidates]))
+    assert sorted(len(result["deleted_paths"]) for result in results) == [0, 1]
+    assert sorted(len(result["skipped"]) for result in results) == [0, 1]
+    assert all(result["failed"] == [] for result in results)
+    assert not (test_settings.workspace_dir / note.path).exists()
+    assert workspace.list_files() == []
+
+
 def test_batched_tag_paths_match_search_order_and_casefolding(test_settings) -> None:
     workspace = WorkspaceService(SafeStorage(test_settings))
     older = workspace.create_note(name="Earlier", content="Earlier content", tags=["shared", "separate"])
@@ -137,6 +267,59 @@ def test_workspace_atomic_write_failure_preserves_original_and_index(test_settin
     assert list(target.parent.glob("*.tmp")) == []
 
 
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_atomic_write_retries_windows_replacement_errors(test_settings, monkeypatch, winerror) -> None:
+    storage = SafeStorage(test_settings)
+    target = storage.write_bytes_atomic(test_settings.workspace_dir, "retry.json", b"old").absolute_path
+    replace = Path.replace
+    attempts = []
+    delays = []
+
+    def transient_replace(source, destination):
+        attempts.append(source)
+        if len(attempts) < 3:
+            error = PermissionError("File is busy")
+            error.winerror = winerror
+            raise error
+        return replace(source, destination)
+
+    monkeypatch.setattr(Path, "replace", transient_replace)
+    monkeypatch.setattr("backend.persistence.files.time.sleep", delays.append)
+    result = storage.write_bytes_atomic(test_settings.workspace_dir, "retry.json", b"new")
+    assert target.read_bytes() == b"new"
+    assert result.sha256 == hashlib.sha256(b"new").hexdigest()
+    assert len(attempts) == 3
+    assert len(set(attempts)) == 1
+    assert delays == [0.05, 0.1]
+    assert not list(target.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("winerror,expected_attempts", [(5, 5), (32, 5), (33, 5), (None, 1), (87, 1)])
+def test_atomic_write_propagates_persistent_errors(test_settings, monkeypatch, winerror, expected_attempts) -> None:
+    storage = SafeStorage(test_settings)
+    target = storage.write_bytes_atomic(test_settings.workspace_dir, "retry.json", b"old").absolute_path
+    attempts = []
+    delays = []
+    error = PermissionError("Replacement denied")
+    if winerror is not None:
+        error.winerror = winerror
+
+    def fail_replace(source, destination):
+        attempts.append(source)
+        raise error
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    monkeypatch.setattr("backend.persistence.files.time.sleep", delays.append)
+    with pytest.raises(PermissionError) as raised:
+        storage.write_bytes_atomic(test_settings.workspace_dir, "retry.json", b"new")
+    assert raised.value is error
+    assert len(attempts) == expected_attempts
+    assert len(delays) == expected_attempts - 1
+    assert sum(delays) <= 0.75
+    assert target.read_bytes() == b"old"
+    assert not list(target.parent.glob("*.tmp"))
+
+
 def test_workspace_json_read_hash_covers_original_bytes(test_settings) -> None:
     storage = SafeStorage(test_settings)
     raw = b'{ "value": 1 }\r\n'
@@ -152,6 +335,24 @@ def test_workspace_atomic_writer_keeps_its_own_size_limit(test_settings) -> None
     assert storage.write_workspace_file("note.md", "longer than four").size_bytes == 16
     with pytest.raises(StorageError, match="maximum"):
         storage.write_bytes_atomic(settings.artifacts_dir, "file.txt", b"too long")
+
+
+def test_workspace_document_uses_upload_limit_without_relaxing_artifact_limits(test_settings) -> None:
+    settings = test_settings.model_copy(update={"max_artifact_bytes": 4, "max_upload_bytes": 16})
+    storage = SafeStorage(settings)
+    path = "research/task/papers/paper/source.pdf"
+    stored = storage.write_workspace_document(path, b"x" * 16)
+    assert stored.absolute_path.read_bytes() == b"x" * 16
+    with pytest.raises(StorageError, match="Document exceeds"):
+        storage.write_workspace_document(path, b"x" * 17)
+    assert stored.absolute_path.read_bytes() == b"x" * 16
+    with pytest.raises(StorageError, match="Artifact exceeds"):
+        storage.write_bytes_atomic(settings.workspace_dir, "other.bin", b"x" * 16)
+    with pytest.raises(StorageError, match="Unsupported file type"):
+        storage.write_workspace_document("other.bin", b"x" * 16)
+    with pytest.raises(StorageError, match="escapes"):
+        storage.write_workspace_document("../outside.pdf", b"x" * 16)
+    assert not list(settings.workspace_dir.rglob("*.tmp"))
 
 
 def test_workspace_read_write_and_escape_protection(test_settings) -> None:
@@ -267,10 +468,28 @@ def test_workspace_service_refuses_to_delete_papers_root(test_settings) -> None:
     workspace.ensure_paper_folder("paper-1", "A Study")
 
     for path in ("library", "library/papers", workspace.paper_folder("paper-1")):
-        with pytest.raises(ValueError, match="Managed research"):
+        with pytest.raises(ValidationError, match="Managed research"):
             workspace.delete_folder(path)
 
     assert len(workspace.list_files()) == 2
+
+
+def test_recreating_paper_notes_is_serialized_and_preserves_external_content(test_settings) -> None:
+    storage = SafeStorage(test_settings)
+    workspace = WorkspaceService(storage)
+    paper = workspace.ensure_paper_folder("restore-notes", "Restore notes")
+    workspace.delete_user_file(paper["notes_path"])
+    workspace.delete_user_file(paper["summary_path"])
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        notes = list(pool.map(lambda _: workspace.ensure_paper_notes("restore-notes", "Restore notes"), range(2)))
+    assert notes[0].sha256 == notes[1].sha256
+    assert notes[0].path == notes[1].path == paper["notes_path"]
+    assert not (test_settings.workspace_dir / paper["summary_path"]).exists()
+
+    storage.write_workspace_file(paper["notes_path"], "Notes changed outside the application.")
+    restored = workspace.ensure_paper_notes("restore-notes", "Restore notes")
+    assert restored.content == "Notes changed outside the application."
+    assert workspace.search(query="outside", tags=["paper:restore-notes"])[0].path == restored.path
 
 
 def test_workspace_organization_preserves_note_identity_and_search_on_move(test_settings) -> None:

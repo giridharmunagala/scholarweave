@@ -17,6 +17,7 @@ export function IconButton({
   disabled = false,
   size = 14,
   className = '',
+  visibleLabel,
 }: {
   icon: IconName;
   label: string;
@@ -26,6 +27,7 @@ export function IconButton({
   disabled?: boolean;
   size?: number;
   className?: string;
+  visibleLabel?: string;
 }) {
   const classes = ['icon-button'];
   if (tone === 'danger') classes.push('danger');
@@ -45,27 +47,27 @@ export function IconButton({
       }}
     >
       <Icon name={icon} size={size} />
+      {visibleLabel ? <span>{visibleLabel}</span> : null}
     </button>
   );
 }
 
 export function PageHeader({
-  eyebrow,
   title,
   description,
   actions,
 }: {
+  /** Kept for callers; the rail already says which section you are in. */
   eyebrow?: string;
   title: string;
+  /** Shown on hover only, so the page opens straight onto its content. */
   description?: string;
   actions?: ReactNode;
 }) {
   return (
     <header className="page-header">
       <div>
-        {eyebrow ? <span className="eyebrow">{eyebrow}</span> : null}
-        <h1>{title}</h1>
-        {description ? <p>{description}</p> : null}
+        <h1 title={description}>{title}</h1>
       </div>
       {actions ? <div className="button-row">{actions}</div> : null}
     </header>

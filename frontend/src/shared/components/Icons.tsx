@@ -41,6 +41,7 @@ export type IconName =
   | 'refresh'
   | 'expand'
   | 'chat'
+  | 'more'
   | 'file';
 
 const PATHS: Record<IconName, string> = {
@@ -80,6 +81,7 @@ const PATHS: Record<IconName, string> = {
   refresh: 'M20 12a8 8 0 1 1-2.6-5.9M20 4v4.5h-4.5',
   expand: 'M9 4H5a1 1 0 0 0-1 1v4m11-5h4a1 1 0 0 1 1 1v4M9 20H5a1 1 0 0 1-1-1v-4m11 5h4a1 1 0 0 0 1-1v-4',
   file: 'M7 3h7l5 5v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm7 0v5h5',
+  more: 'M5 12h.01M12 12h.01M19 12h.01',
 };
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'name'> {

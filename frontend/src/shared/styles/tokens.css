@@ -11,8 +11,8 @@
   --font-sans: "Inter Variable", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, "SFMono-Regular", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
 
-  --text-xs: .76rem;
-  --text-sm: .85rem;
+  --text-xs: .78rem;
+  --text-sm: .875rem;
   --text-base: .95rem;
   --text-lg: 1.1rem;
   --text-xl: 1.4rem;
@@ -27,9 +27,9 @@
   --space-7: 3rem;
 
   --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
   --radius-pill: 999px;
   --radius: var(--radius-lg);
 
@@ -39,9 +39,10 @@
   --ease: cubic-bezier(.22, .8, .3, 1);
   --ease-spring: cubic-bezier(.34, 1.56, .64, 1);
 
-  --rail-width: 86px;
+  --rail-width: 192px;
   --rail-bar-height: 64px;
-  --page-gutter: clamp(1rem, 2.2vw, 2rem);
+  --page-gutter: clamp(1rem, 2vw, 1.5rem);
+  --page-title-size: clamp(1.5rem, 2vw, 1.85rem);
   --content-max: 1380px;
   /* Long-form answers stay within a comfortable measure (roughly 80-95 characters
    * per line); wider columns make dense research prose hard to track. */
@@ -53,21 +54,21 @@
  * blue accent. Colour is reserved for state, not decoration. */
 [data-theme='light'] {
   color-scheme: light;
-  --bg: #f5f6f8;
+  --bg: #f8f9fb;
   --surface: #ffffff;
   --surface-2: #f2f4f7;
   --surface-3: #e6e9ee;
   --surface-inset: #f8f9fb;
-  --border: #e1e4e9;
+  --border: #e5e8ee;
   --border-strong: #c8cdd5;
   --text: #1f2933;
   --text-strong: #111820;
   --muted: #59636f;
-  --accent: #2f5c9e;
-  --accent-strong: #234a83;
+  --accent: #315ed0;
+  --accent-strong: #254ba8;
   --accent-2: #4f6680;
   --accent-contrast: #ffffff;
-  --accent-soft: #e5ecf6;
+  --accent-soft: #edf2ff;
   --success: #2e7550;
   --warning: #94660c;
   --danger: #b03a3a;
@@ -209,13 +210,11 @@
   --warning-border: color-mix(in srgb, var(--warning) 50%, var(--border));
   --hover-bg: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
 
-  /* The rail is a dark neutral column in every theme, light and dark alike, so it
-   * carries its own foreground ramp rather than the page's. */
-  --rail-bg: linear-gradient(180deg, var(--rail-solid) 0%, var(--rail-deep) 100%);
-  --rail-fg: rgb(255 255 255 / 68%);
-  --rail-fg-strong: #ffffff;
-  --rail-hover: rgb(255 255 255 / 9%);
-  --rail-active: rgb(255 255 255 / 14%);
+  --rail-bg: var(--surface);
+  --rail-fg: var(--muted);
+  --rail-fg-strong: var(--text-strong);
+  --rail-hover: var(--surface-2);
+  --rail-active: var(--accent-soft);
 
   --glass-blur: none;
   --glass-blur-wide: none;

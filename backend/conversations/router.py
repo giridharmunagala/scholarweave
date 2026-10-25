@@ -99,6 +99,8 @@ async def send_research_message(
         web_search_limit=payload.web_search_limit,
         context_window_tokens=payload.context_window_tokens,
         attachment_paths=payload.attachment_paths,
+        reading_context=payload.reading_context.model_dump() if payload.reading_context else None,
+        turn_intent=payload.turn_intent,
     )
     return ConversationMessageResponse(
         conversation=_response(container.conversation_turns.get_conversation(conversation_id), container.tracks),
@@ -166,6 +168,8 @@ async def send_deep_work_message(
         fast_answer=payload.fast_answer,
         context_window_tokens=payload.context_window_tokens,
         attachment_paths=payload.attachment_paths,
+        reading_context=payload.reading_context.model_dump() if payload.reading_context else None,
+        turn_intent=payload.turn_intent,
     )
     return ConversationMessageResponse(
         conversation=_response(

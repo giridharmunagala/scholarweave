@@ -74,6 +74,41 @@ For deployments supporting Responses, switch API mode and clear that workaround 
 to allow the request's reasoning effort to reach the model. Overrides otherwise retain their
 precedence in either protocol.
 
+### Connected research workspace services
+
+`ReferenceService` owns the revision-guarded bibliography stored through `SafeStorage` in
+`data_dir/references/library.json`; no additional SQL tables or schema cutover are needed.
+Its router exposes metadata reads/edits/import/export, with stable immutable citation keys and
+explicit identity conflicts. Nested paper collections reuse existing virtual folder names
+and membership rather than moving canonical paper files.
+
+`WritingService` composes track/document/workspace services. Claims have verified page quotations,
+recorded source versions and page hashes in `data_dir/track_claims/`; current source state is
+computed on reads, without changing recorded evidence. Manuscripts reuse the existing
+`exploration/manuscript` section and its history/indexing/optimistic concurrency. Writing export
+resolves reference keys, includes evidence receipts and refuses unresolved links. The existing
+read-track tool exposes paginated claims/references; no new model or execution subsystem exists.
+
+`LinkedRepositoryService` connects explicitly authorized external local roots to tracks.
+The root is a capability granted by the researcher, not an arbitrary path accepted on each
+read. Service checks exclude sensitive/dependency paths and filesystem redirects; file reads
+and writes go through `SafeStorage`, with byte bounds and stale-hash checks for edits.
+No code execution, repository indexing or automatic provider upload occurs. Artifact receipts
+link existing EXP IDs to observed hashes and distinguish observed Git state from unverified
+user-supplied producing revisions. Metadata is local and unlinking never deletes external files.
+The single-process limitation still applies; path checks are not a hostile-process sandbox.
+
+`PathPickerService` selects a file or folder on the backend desktop, without reading, writing,
+or authorizing it. The web UI's shared `LocalPathPicker` invokes `POST /api/path-picker` only
+from Browse. The synchronous route runs outside the event loop; a process-scoped lock permits
+one native dialog, with a two-minute subprocess timeout that kills and reaps the dialog process.
+Windows uses STA WinForms, other desktops use an isolated Tk process. Cancellation returns a null
+path; unavailable desktops and process failures are explicit semantic errors. Loopback Host and
+Origin validation, JSON-only requests, a custom browser header and no CORS opt-in prevent external
+websites from opening dialogs. Loopback development origins may use Vite's different port.
+Existing upload inputs keep browser-native file selection; note names and URLs are not filesystem
+path inputs.
+
 ### Terminal client
 
 `scholarweave_tui/` is an optional Textual presentation layer, installed with the `tui` extra and
@@ -82,7 +117,10 @@ HTTP API using `httpx` and the shared Pydantic wire models. The UI does not impo
 construct a service container, access SQLite, or write research files. The single-worker backend
 remains the only owner of inference, run lifecycle, persistence, and workspace indexing.
 
-The launcher checks backend health and library identity before reusing a server. If absent, it
+The launcher checks backend health and library identity before reusing a server. It requests
+`/api/health?check_ocr=false`: backend readiness must not wait for the optional OCR server.
+This returns `ocr_available: null` (not checked); the default health request still reports
+live OCR availability. If absent, it
 reserves an IPv4 loopback socket **before** spawning a separate backend process, passing the socket
 through Python multiprocessing (including on Windows). Port 1102 (or `--api-url`) is preferred,
 not mandatory: occupied ports fall back to an OS-assigned free port while retaining the bound socket.
@@ -98,14 +136,14 @@ are never stopped. `--connect-only` disables autostart and discovery fallback, r
 
 `install-windows-launcher.ps1` at the repository root installs desktop/Start Menu shortcuts pointing to the small
 `scripts/launch-scholarweave.ps1` wrapper in this checkout. It runs the same Python entry point with
-`--build-frontend`; no custom executable or bundled runtime is built. Frontend build failures stop
+`--ensure-frontend`; no custom executable or bundled runtime is built. Frontend build failures stop
 startup and remain visible rather than opening a success-shaped TUI.
-On Linux, `sh scripts/launch-scholarweave.sh` runs the same entry point with `--build-frontend`
+On Linux, `sh scripts/launch-scholarweave.sh` runs the same entry point with `--ensure-frontend`
 using the checkout's `.venv/bin/python`, regardless of the invoking directory. It forwards CLI
 arguments and uses `exec` so terminal signals and exit status reach the Python launcher directly.
 
 `scripts/launch-scholarweave-web.ps1` and Linux `scripts/launch-scholarweave-web.sh` use the
-same entry point with `--web --build-frontend`, without importing or requiring Textual.
+same entry point with `--web --ensure-frontend`, without importing or requiring Textual.
 The shell wrapper uses the checkout's `.venv/bin/python` and forwards arguments with `exec`,
 just like the TUI wrapper. Web mode checks HTML availability before opening the browser and keeps
 an owned backend alive until the launcher is closed; reused backends are left running.
@@ -115,6 +153,13 @@ allows a free frontend port and rereads backend discovery metadata for every pro
 including SSE; repository `.env`/environment data-directory overrides are respected. Only loopback
 HTTP discovery URLs are accepted. npm scripts explicitly load `vite.config.ts` rather than stale
 TypeScript-emitted JavaScript configuration.
+
+`--ensure-frontend` compares content hashes of frontend sources, configuration, dependency
+lockfiles, and build environment with the record in `frontend/dist/.scholarweave-build.json`.
+It also verifies the entire output inventory, including lazy chunks, before reusing a build.
+Failed builds invalidate the record; incomplete output or inputs changed during building stop
+startup. The first managed build establishes the record. `--build-frontend` still forces a
+production build, with TypeScript's incremental cache retaining unchanged strict checks.
 
 Chat commands use the existing conversation and run routes. The composer's `/` menu is presentation
 only: `/model` selects a configured model, its per-message reasoning budget, and context window;
@@ -171,6 +216,92 @@ Presentation is theme-driven: `scholarweave_tui/themes.py` registers the shipped
 research behaviour stays in backend settings, and a read-only data directory degrades silently.
 
 ### Staged literature-review lifecycle
+
+The web entry point is a question-first research workspace with Papers, Understanding and Ideas
+views. Its paper list and source-quotation reader share one surface. Setup resolves saved model
+defaults and requires missing configuration rather than silently guessing. Full-reading legacy
+reviews remain read-only history, without destructive cleanup, migration or pipeline controls.
+API compatibility for those saved jobs is retained. The Ideas view embeds the normal chat engine;
+literature-check handoffs contain bounded, human-readable question/evidence context and fill an
+editable new-review draft without starting acquisition. Model-generated ideas are not evidence.
+
+New web reviews supply an explicit `embedding_model` and `summary_model` and use the topic-led
+branch of this lifecycle. Existing specifications without an embedding role retain legacy semantics.
+New targeted tasks cap their initial discovery wave at 24 unique papers for an earlier topic gate;
+full/legacy tasks retain the 100-paper cap. The explicit `find_more_topics` control authorizes up to
+100 additional papers per request, with new queries for uncovered aspects of the approved scope.
+Existing source permissions, pacing and web-request limits remain in force. Newly fetched papers
+form additional groups without renumbering or overwriting existing topics and explorations.
+`GET /api/research/arxiv` exposes paginated metadata through the existing rate-limited search
+service, without inference or PDF acquisition. New-review `input_papers` join initial discovery;
+the revision-guarded `add_arxiv_papers` control adds explicit inputs at the topic gate and reuses
+topic categorization without approving reading. Input identifiers are validated and download URLs
+are derived from arXiv IDs, not supplied arbitrary URLs. Existing candidate identity deduplication
+and topic membership preservation apply to both paths.
+The separate `add_pdf_paper` control accepts a validated HTTP(S) URL and optional title at the
+same topic gate. It reuses known candidate URLs/identities and only queues metadata; approved
+collection still uses the existing downloader's public-address, redirect and PDF checks and
+the review's reading work allowance. arXiv author metadata is not truncated or rejected for
+large collaborations; search results show a compact author preview while retaining the full input.
+`reviews/topics.py` batches title-and-abstract embeddings through
+the shared runtime/scheduler (16 inputs by default), validates vectors, then uses deterministic
+average-link cosine grouping (0.72 similarity threshold, at most 12 topics per discovery round). The main model names
+groups from bounded metadata samples; it cannot change membership. Embeddings and grouping receipts
+are cached by input/model provenance. Rewound discovery invalidates topics if the corpus changes.
+
+The `topics` approval cannot be bypassed by resume or stage stopping. `explore_topics` runs
+metadata-only exploration for all chosen topics, with optional feedback, and returns to that gate.
+`approve_topics` is a separate, revision-guarded decision accepting a nonempty `candidate_ids`
+subset of the selected topics (omitting it retains the legacy union). Unselected candidates,
+explorations and receipts remain available. `revise_selection` returns paused, blocked or completed
+topic-led reviews to the topic gate without erasing cached work. Older already-persisted cleanup
+checkpoints retain their recovery semantics; previously discarded metadata cannot be reconstructed.
+New web reviews explicitly choose `reading_mode: targeted`; absent fields remain `full` for
+legacy specifications. Approval may also explicitly change depth to `full` for a selected batch.
+Approval feedback becomes durable `question_focus`, included in brief and synthesis provenance.
+Targeted reading serially prepares one source, reads at most six lexically matched 1,800-character
+spans, saves a five-section brief and publishes progress before collecting the next source.
+Span boundaries prefer paragraphs, then sentences, while retaining exact original offsets.
+The changed retrieval provenance is `targeted-v2`; historical receipts remain untouched.
+Lexical matching is bounded passage retrieval, not an intent classifier or a relevance verdict.
+Verbatim quotations and page membership are validated; application-assigned evidence IDs link
+sections to immutable source-version receipts. Briefs explicitly disclose partial coverage and
+unknowns, and are never canonical full-paper summaries. The paper endpoint exposes `brief`,
+`document_id` and existing progress/summary fields. `provisional_path` points to a deterministic
+growing selected-batch findings document; no per-paper synthesis call is required.
+There are no automatic supplemental references. Full mode retains complete extracted-page
+summarization by the selected summary role; final synthesis waits for each readable selected
+paper's brief or full summary, not every discovered paper. Individual unavailable/unreadable
+sources are recorded durably and omitted with explicit report coverage gaps; no readable sources
+blocks the task, while storage/model failures and pause/work limits still propagate. Bounded summary-inference batches and
+hierarchical reductions preserve paper IDs and write a scratch ledger before the overall report.
+The report explicitly identifies summary-based inference, not independently source-audited evidence.
+The completed report also supplies an `UnderstandingSnapshot` via
+`GET /api/literature-reviews/{id}/understanding`, including paper membership and question focus.
+An explicit `refine_understanding` control compares the current available briefs without re-reading
+papers. It uses the existing runner, work allowance, bounded packets and immutable receipt storage;
+identical inputs reuse the comparison. Pause, model failure and exhausted comparison allowance
+retain the pending workspace action for normal retry/extension. Changing selection cancels that
+pending action without deleting the saved comparison. Multi-packet refinements are labelled
+comparison groups; no cross-group agreement is implied. Incoming briefs appear progressively,
+but cross-paper synthesis is done per completed batch or explicit refinement, not per paper.
+
+Each topic-led review owns `research/<track-component>/<review-component>/` in the workspace.
+`ReviewRepository` stores immutable, content-addressed JSON receipts there; SQLite keeps only
+operational metadata and verified file pointers. Receipt saves reuse hash-verified existing files
+rather than replacing them on resume.
+Changed receipts fail integrity validation. Atomic storage replacements retry Windows access/sharing
+errors briefly before propagating persistent failures.
+Topic-led model calls use `ModelRuntime.generate`
+with the existing role context admission, repair bounds, API-mode selection and inference scheduler,
+without persisting transcripts or summary bodies in run tables. Ordinary workspace indexing stores
+metadata but no content for the `research/` tree, including explicit refresh and user edits.
+The folder includes PDFs, extracted pages, Markdown summaries, topics, scratch notes and report.
+Canonical library sources remain independent; track publication appends a report link, not duplicate
+summary prose. Hash-checked writes/cleanup preserve externally edited files.
+Existing reviews can change track association through the revision-guarded review API while
+idle. Their original artifact paths and prior-work snapshots stay stable; publication receipts
+remain destination-specific so later publication does not lose cleanup provenance.
 
 `backend/research/reviews/` owns durable review state, shortlist decisions, isolated job receipts,
 and scholarly metadata caches. `bootstrap.py` constructs the service; `/api/literature-reviews`
@@ -336,7 +467,7 @@ Discovery reuses the paper library and source metadata, not a new semantic index
 receipts, per-work/query caches and source cooldown support paced continuation; discovery never
 recursively follows metadata references. Completed page decisions, including native answer
 scores/reasons, are visible through the papers endpoint and Deep Work alongside captured references.
-Each review admits at most 500 unique discovered papers, including local and track seeds.
+Each review admits at most 100 unique discovered papers, including local and track seeds.
 The cap counts excluded papers too: screening does not automatically refill the corpus. At the cap,
 discovery advances to screening without requesting further pages, providers or reference expansion.
 Existing larger corpora are preserved but cannot fetch more papers. Requests are sequential; arXiv
@@ -387,12 +518,13 @@ edition first and requests a single-flight refresh only if no current-day editio
 Cached reads reconcile kept status with one paper inventory query and one batched workspace-tag
 query, rather than issuing library queries per headline. The page renders the edition independently
 of catalog loading.
-`brief/summaries.py` generates metadata-only highlights through `ModelRuntime` and packaged prompts.
+`brief/summaries.py` generates metadata-only highlights through `ModelRuntime` and packaged prompts,
+only after the explicit generation action. Edition reads and metadata refreshes never start inference.
 The brief model preference is independent of chat and otherwise follows the last selected/default
 chat reference. Generation runs in a service-owned task outside the edition lock; progress/final
 commits take the lock briefly. Clear, refresh, expiry and shutdown cancel obsolete tasks, and task
 identity fences prevent late commits. Interrupted generation is surfaced on restart, not silently
-rerun. Completed highlights are part of the edition manifest, so cached reads never call the model.
+rerun. Completed highlights are part of the edition manifest.
 Requests include framing in a 32,768-token input ceiling, respect smaller context/output reserves,
 and batch whole metadata records. Tiktoken counts recognized models; unknown tokenizers use a
 conservative UTF-8-byte upper bound. Oversized records, empty/truncated responses and failed
@@ -502,6 +634,14 @@ flowchart TD
 It does not execute model turns. `RunService` supervises execution, and `AgentRunner` owns the
 model/tool loop.
 
+`DocumentService.paper_context` assembles stored page extraction/layout and registered figure
+positions for reader questions, paper tools, summaries and staged-review source reads. Actual
+images are included only for the consuming model's declared vision capability, with rendered PDF
+pages used when extraction has no crops. Image/layout omissions and failures remain source metadata.
+Multimodal tool evidence is projected by the harness after the tool-result group, not encoded as
+JSON text; both provider protocols share that projection and exclude images for text-only models.
+Text and images share the model context budget; reviews reserve source-context space before packing.
+
 Auto and Quick use one agent with local/web tools and optional work-plan tools. Narrow lookups and
 discussion can finish without a plan; the model plans only substantial scoped assignments. Thorough
 adds an optional focused worker and sequential execution, sharing the main instructions instead of
@@ -537,10 +677,23 @@ scope/work-limit approval, automatic paper decisions, live per-paper operations 
 main-model findings, source coverage and pause/resume controls. Evidence extraction is never labelled
 as canonical summary generation.
 Research tasks use the existing `/deep-work/conversations` endpoints with Thorough effort and
-show work plans, usage, findings, steering, stopping and durable event history. The page polls
+show work plans, usage, findings, steering, stopping and durable event history inside the same
+Research workspace, not a separate task tab. Creating paper research first obtains a durable
+investigation conversation and binds it to the review. Selecting a saved review restores its linked
+investigation; selecting an investigation restores its linked paper decisions. Follow-up instructions
+and steering carry the selected review ID, objective/focus, partial-reading coverage, pending
+approval and artifact paths so the agent can inspect and reuse existing evidence. These instructions
+do not grant approval or trigger another reading pipeline. Agent-started reviews inherit the saved
+embedding default and use targeted topic-led reading; missing configuration is surfaced explicitly.
+The page polls
 persisted state every three seconds; navigation does not cancel backend work. Old Deep Work
 conversation links open this page; mixed older chat histories remain readable and can be opened
-as research tasks explicitly. No history migration or second orchestration system is introduced.
+as investigations explicitly. Legacy `view=tasks` links load the same research view.
+`DeepWorkPage` owns the combined saved-research selector, conversation progress, transcript and
+single follow-up composer; `LiteratureReviews` embeds only the starting question or paper decisions,
+not a second history or assistant. Ideas and evidence comparison reuse that composer.
+Pause attempts both agent cancellation and paper pause and reports partial failures; summarization
+pauses papers first. No history migration or second orchestration system is introduced.
 New interactive blueprints omit `literature_review` and direct background-review requests to
 Deep Work. Legacy API effort selectors and already-persisted active plans retain compatibility.
 
@@ -902,6 +1055,11 @@ never become zero-hit measurements. The usage disclosure hides cache information
 No cache/progress extension parameters are sent to generic OpenAI-compatible APIs.
 Static compiled instructions retain the user profile but not a freshly generated clock.
 Each new run persists one timezone-aware request-time context alongside its appended input.
+At the provider boundary, the harness folds that clock entry into its associated user message as
+`[Application context: request submitted at <date> <time> <timezone>]`, followed by the original
+user content. Both Chat Completions and Responses use this projection, including for existing
+saved histories; durable user text and actual system/developer instructions remain unchanged.
+Request clocks therefore do not introduce mid-conversation system messages.
 Delegates receive that same clock context without the parent transcript; tool rounds and recovery
 reuse it rather than regenerating time before the history. Existing compiled runs retain their
 original instructions. Stable prefixes enable server-side reuse but cannot guarantee cache hits.
@@ -1063,6 +1221,9 @@ An identical rejected request is never resent; unrelated provider errors still s
 flowchart LR
     Input[Uploaded or downloaded PDF] --> Source[Retain source PDF]
     Source --> Inspect[Inspect native text per page]
+    Inspect -->|Surya selected| Layout[Full-page layout OCR]
+    Layout --> Figures[Markdown, bounding boxes,<br/>source figure crops]
+    Figures --> Format
     Inspect --> Decision{Text adequate?}
     Decision -->|Yes| Extract[Extract text]
     Decision -->|No| OCR[Render and OCR selected pages]
@@ -1075,10 +1236,56 @@ flowchart LR
     DB --> Workspace[Ensure notes.md<br/>and summary.md]
 ```
 
-PDF opening, lazy page-tree parsing, native page extraction, and Tesseract availability probes in
-the asynchronous OCR paths are offloaded through AnyIO's existing worker pool. Pages are still
-processed sequentially and callbacks remain on the event loop. This removes document-length event
-loop stalls without multiplying page-image memory, model concurrency, or application workers.
+PDF opening, lazy page-tree parsing, native page extraction, rendering and OCR availability probes
+are offloaded through AnyIO's worker pool; progress callbacks remain on the event loop. Tesseract
+uses native text first and sequential OCR fallback. Selecting Surya uses layout OCR on every page
+in automatic ingestion, including text-rich PDFs; the explicit embedded-text action opts out.
+`POST /documents/{id}/ingest` without a mode follows that configured policy; `mode=embedded` and
+`mode=ocr` remain explicit overrides.
+`documents/surya.py` uses the official OpenAI client against a configured loopback `/v1` server,
+without a second agent harness, Torch runtime, model download or cloud service. A process-wide
+document OCR instance limits concurrent page flows across papers (default 10); PDFium calls are
+serialized across threads, and rendered images are capped at 2048px width / six million pixels.
+The server-owned batch queue starts multiple Surya paper ingestions, bounded by that configured page
+budget, so short papers can collectively fill the available slots. This does not multiply the
+backend request cap. Server-owned OCR jobs retain batch and per-paper progress, terminal results
+and errors for the **Runs** page independently of the browser's lifetime. Atomic SafeStorage receipts
+in the local data directory's `ocr-batches/` folder retain history without a database schema cutover.
+Stopping cancels active
+ingestions and leaves pending ones unstarted; completed outputs remain available. Backend recovery
+marks interrupted work without restarting it automatically. Tesseract batch ingestion remains
+sequential.
+Each successful OCR page is atomically checkpointed through SafeStorage and registered as an
+`ocr_page_checkpoint` artifact, keyed by source PDF hash and page number. Checkpoints retain
+page-level OCR success, Markdown, layout and figure crops independently of the published extraction.
+Batch and automatic retries reuse completed pages from checkpoints or legacy manifests, including
+after cancellation/restart; only missing/failed pages make OCR requests. Explicit full OCR overrides
+bypass reuse. Embedded-text fallbacks never count as OCR success.
+An explicit reader `mode=quick` uses the lazily loaded local Indra CPU runtime without changing
+the configured batch engine. The persisted, opt-in `ocr_indra_fallback_enabled` setting also lets
+Surya pages that fail full-page and block recovery try Indra before native-text fallback.
+Indra uses only predownloaded v1.1.0 ONNX models, one shared page slot and at most four CPU threads.
+Model loading/inference stay off the event loop; stopping drains in-flight CPU work before releasing
+the slot. No inference-time downloads or network inference are permitted. Successful CPU pages use
+the same immediate checkpoints and retry semantics, retain per-page engine/recovery/quality metadata,
+and are visibly identified in the reader and batch results. They are an experimental quick-reading
+aid, not verified equation/table transcriptions. Optional Indra math decoding is not enabled.
+
+Surya's full-page HTML is converted into Markdown headings, lists, tables and math in model reading
+order. Spanning tables retain sanitized HTML because GFM cannot represent merged cells. Figures
+and diagrams are cropped from the source raster, not generated. Page manifests retain ordered
+blocks with normalized 0-1000 bounding boxes and image artifact IDs; headers/footers are retained
+there but excluded from body text. Markdown links to relative `figures/*.png` files, persisted
+through SafeStorage and served through the existing artifact endpoints. The paper reader maps
+those paths to known local artifacts. Chunks preserve Markdown structure and actual section
+headings, allowing existing abstract extraction to stop at the next section.
+
+Malformed, empty, repetitive or token-truncated full-page responses retry as layout plus per-block
+OCR. Unrecoverable pages retain native text or are visibly recorded as skipped. Cancellation stops
+queued page work; page ordering and citations do not depend on request completion order. Successful
+re-ingestion removes stale generated image artifacts. Failed Surya extraction leaves previous
+extraction intact. Surya does not run the optional general-purpose vision rewrite pass, which can
+discard geometry and figure references; that pass remains available for Tesseract.
 
 The principal document entities are:
 
@@ -1111,6 +1318,11 @@ erDiagram
 ```
 
 Folder assignment changes document metadata only; it does not move source PDFs or workspace files.
+Manual paper usefulness also lives in document metadata (`usefulness`), without a schema cutover.
+The document APIs expose a typed label, defaulting missing values to `unrated`;
+`PUT /api/documents/{id}/usefulness` changes only that assessment. The library search
+combines usefulness with folder/status filters before pagination using the existing FTS5
+index. Reading progress and automated research decisions remain independent.
 All user-controlled paths pass through `SafeStorage` or `WorkspaceService`.
 
 `WorkspaceLayout` owns readable, bounded path components. `workspace_papers` stores each paper's
@@ -1213,6 +1425,17 @@ item/character continuation cursors without a hidden global output cap.
 
 Summary jobs use one serial model worker. Short extractions fitting the context allowance are
 included directly; longer papers use adaptive read/checkpoint batches with no fixed page cap.
+The optional `default_model_references.small_tasks` pairs a helper with the main model for
+library and research-topic labels, paper summaries/briefs, and context maintenance.
+Explicit task model choices take precedence; `summary` and `compaction` defaults can override
+the helper for those roles. Without a helper, jobs retain their existing main-model defaults.
+Research planning, comparisons, and final responses do not switch to the helper.
+Selections use ordinary provider bindings and the inference scheduler, so models on one llama
+router share its serialized switching behavior without application-managed loading/unloading.
+New paper summaries inherit the selected helper; durable runs retain their compiled model.
+New research tasks snapshot their summary role, while topic-label jobs record the helper in
+their model-scoped job provenance. Invalid naming/summary helpers fail explicitly; context
+maintenance retains its existing visible fallback to the main model.
 Dedicated summaries reserve 10% of the configured effective model window for safety and 25% for
 the initial response allowance; the remaining 65% covers input, including instructions and tool
 schemas. An 80,000-token window therefore allows 52,000 input tokens, 20,000 output tokens, and

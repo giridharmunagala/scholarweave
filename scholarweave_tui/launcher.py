@@ -12,10 +12,11 @@ import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from html.parser import HTMLParser
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Event
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -32,13 +33,112 @@ class OccupiedOrigin(LaunchError):
     """A different application/library occupies a potential listening address."""
 
 
-def build_frontend(root: Path) -> None:
+_FRONTEND_BUILD_RECORD = ".scholarweave-build.json"
+
+
+class _FrontendReferences(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paths: list[str] = []
+        self.has_module = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        if tag == "script" and attributes.get("src"):
+            self.paths.append(attributes["src"])
+            self.has_module |= attributes.get("type") == "module"
+        elif tag == "link" and attributes.get("rel") in {"stylesheet", "modulepreload"} and attributes.get("href"):
+            self.paths.append(attributes["href"])
+
+
+def _frontend_digest(paths: list[Path], base: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(path.relative_to(base).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def _frontend_inputs(root: Path) -> str:
+    frontend = root / "frontend"
+    paths = []
+    for directory, directories, filenames in os.walk(frontend):
+        directories[:] = [
+            name for name in directories
+            if name not in {"node_modules", "dist", "coverage", ".node", ".git"}
+        ]
+        paths.extend(
+            Path(directory) / name for name in filenames
+            if not name.endswith(".tsbuildinfo")
+            and not (Path(directory) == frontend and name in {"vite.config.js", "vite.config.d.ts"})
+        )
+    paths.extend(path for path in root.glob(".env*") if path.is_file())
+    installed_lock = frontend / "node_modules" / ".package-lock.json"
+    if installed_lock.is_file():
+        paths.append(installed_lock)
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key.startswith("VITE_") or key in {"NODE_ENV", "BROWSERSLIST_ENV"}
+    }
+    return hashlib.sha256(
+        (_frontend_digest(paths, root) + json.dumps(environment, sort_keys=True)).encode(),
+    ).hexdigest()
+
+
+def _frontend_outputs(frontend: Path) -> str | None:
+    dist = frontend / "dist"
+    index = dist / "index.html"
+    if not index.is_file():
+        return None
+    references = _FrontendReferences()
+    try:
+        references.feed(index.read_text(encoding="utf-8"))
+    except (UnicodeError, ValueError):
+        return None
+    if not references.has_module:
+        return None
+    for reference in references.paths:
+        url = urlsplit(reference)
+        if not url.scheme and not url.netloc:
+            path = (dist / unquote(url.path).lstrip("/")).resolve()
+            if not path.is_relative_to(dist.resolve()) or not path.is_file():
+                return None
+    return _frontend_digest([
+        path for path in dist.rglob("*")
+        if path.is_file() and path.name != _FRONTEND_BUILD_RECORD
+    ], dist)
+
+
+def build_frontend(root: Path, *, force: bool = True) -> None:
+    try:
+        _build_frontend(root, force=force)
+    except OSError as exc:
+        raise LaunchError(f"Could not read or update frontend build files: {exc}") from exc
+
+
+def _build_frontend(root: Path, *, force: bool) -> None:
     frontend = root / "frontend"
     if not (frontend / "package.json").is_file():
         raise LaunchError(f"Frontend source was not found in {frontend}. Use the repository checkout.")
+    inputs = _frontend_inputs(root)
+    record_path = frontend / "dist" / _FRONTEND_BUILD_RECORD
+    if not force:
+        try:
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError):
+            record = None
+        outputs = _frontend_outputs(frontend)
+        if outputs and record == {"version": 1, "inputs": inputs, "outputs": outputs}:
+            print("Reusing the current web frontend.", flush=True)
+            return
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if npm is None:
         raise LaunchError("Node.js/npm was not found. Install Node.js 20+ and reopen the launcher.")
+    index = frontend / "dist" / "index.html"
+    previous_index = index.stat() if index.is_file() else None
+    # A failed or interrupted rebuild must never authorize reuse of its remaining files.
+    record_path.unlink(missing_ok=True)
     print("Building the web frontend...", flush=True)
     try:
         result = subprocess.run([npm, "run", "build"], cwd=frontend, check=False)
@@ -49,8 +149,18 @@ def build_frontend(root: Path) -> None:
             "Frontend build failed; see the output above. If dependencies are missing, "
             "run 'npm ci' in the frontend directory, then launch again."
         )
-    if not (frontend / "dist" / "index.html").is_file():
+    if not index.is_file():
         raise LaunchError("The frontend build finished without producing frontend/dist/index.html.")
+    if previous_index is not None and index.stat().st_mtime_ns == previous_index.st_mtime_ns:
+        raise LaunchError("The frontend build did not refresh frontend/dist/index.html. Launch again to rebuild it.")
+    outputs = _frontend_outputs(frontend)
+    if not outputs:
+        raise LaunchError("The frontend build finished without producing a complete web bundle.")
+    if inputs != _frontend_inputs(root):
+        raise LaunchError("Frontend sources changed during the build. Launch again to build the current files.")
+    record_path.write_text(json.dumps({
+        "version": 1, "inputs": inputs, "outputs": outputs,
+    }), encoding="utf-8")
 
 
 class BackendSession:
@@ -150,7 +260,7 @@ class BackendSession:
 
     def _ready(self) -> bool:
         try:
-            response = self._http.get(f"{self.base_url}/api/health")
+            response = self._http.get(f"{self.base_url}/api/health", params={"check_ocr": "false"})
         except (httpx.NetworkError, httpx.TimeoutException, httpx.RemoteProtocolError):
             return False
         except httpx.RequestError as exc:

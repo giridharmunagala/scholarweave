@@ -1,8 +1,39 @@
 // @vitest-environment jsdom
-import { act, useState } from 'react';
+import { act, lazy, Suspense, useState, type ReactElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import { expect, it, vi } from 'vitest';
 import { Link, RouterProvider, useLocation, useNavigationGuard } from './router';
+
+it('keeps the previous page visible while the next route module loads', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const original = window.location.href;
+  window.history.replaceState({}, '', '/library');
+  vi.stubGlobal('scrollTo', vi.fn());
+  let finish!: (module: { default: () => ReactElement }) => void;
+  const NextPage = lazy(() => new Promise<{ default: () => ReactElement }>((resolve) => { finish = resolve; }));
+  function Page() {
+    const { pathname } = useLocation();
+    return pathname === '/brief' ? <NextPage /> : <p>Current papers</p>;
+  }
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider>
+      <Link to="/brief">Brief</Link>
+      <Suspense fallback={<p>Loading page</p>}><Page /></Suspense>
+    </RouterProvider>));
+    await act(async () => container.querySelector('a')!.click());
+    expect(container.textContent).toContain('Current papers');
+    expect(container.textContent).not.toContain('Loading page');
+    await act(async () => finish({ default: () => <p>Ready brief</p> }));
+    expect(container.textContent).toContain('Ready brief');
+    expect(container.textContent).not.toContain('Current papers');
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', original);
+    vi.unstubAllGlobals();
+  }
+});
 
 it('guards links, browser navigation and unloading only while a draft is dirty', async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;

@@ -15,6 +15,18 @@ const CAPABILITIES = [
     description: 'Drives agent conversations, tool calling, and generated research notes.',
   },
   {
+    key: 'small_tasks',
+    label: 'Small tasks',
+    icon: 'sparkle',
+    description: 'Optional smaller model for topic names, paper summaries, and conversation-context summaries. Main chat, research planning, comparisons, and final answers stay on the larger model. Your llama router handles switching.',
+  },
+  {
+    key: 'summary',
+    label: 'Paper summaries',
+    icon: 'builder',
+    description: 'Optional override for saved paper summaries and new research paper briefs. Otherwise uses the small tasks model, or the main model when unset.',
+  },
+  {
     key: 'decision',
     label: 'System One decisions',
     icon: 'search',
@@ -36,7 +48,7 @@ const CAPABILITIES = [
     key: 'compaction',
     label: 'Context maintenance',
     icon: 'builder',
-    description: 'Optional helper for older conversation summaries. Uses the main agent when unset or if the helper fails or cannot fit the history.',
+    description: 'Optional override for older conversation summaries. Otherwise uses the small tasks model. Uses the main agent if no helper is configured, or if the helper fails or cannot fit the history.',
   },
 ] as const;
 
@@ -71,6 +83,11 @@ export function ModelDefaultsPanel({
         {CAPABILITIES.map((capability) => {
           const current = settings.default_model_references[capability.key] ?? {};
           const options = capabilityOptions(providers, capability.key);
+          const helperOverride = capability.key === 'compaction' || capability.key === 'summary';
+          const smallTasks = settings.default_model_references.small_tasks;
+          const emptyLabel = helperOverride && (smallTasks?.model || smallTasks?.provider_profile_id)
+            ? 'Use small tasks model'
+            : helperOverride || capability.key === 'small_tasks' ? 'Use main agent model' : 'Not configured';
           return (
             <div className="default-model-card" key={capability.key}>
               <div className="default-model-head">
@@ -86,15 +103,16 @@ export function ModelDefaultsPanel({
                 ariaLabel={`Default ${capability.label} model`}
                 options={options}
                 value={current}
-                emptyOptionLabel={capability.key === 'compaction' ? 'Use main agent model' : 'Not configured'}
-                emptyOptionHint={capability.key === 'compaction' ? 'No separate housekeeping model' : 'Agents must then pick a model explicitly'}
-                placeholder={capability.key === 'compaction' ? 'Use main agent model' : 'Not configured'}
+                emptyOptionLabel={emptyLabel}
+                emptyOptionHint={helperOverride ? 'Inherit the small tasks model when configured' : capability.key === 'small_tasks'
+                  ? 'Keep all tasks on the main model' : 'Agents must then pick a model explicitly'}
+                placeholder={emptyLabel}
                 inline
                 onChange={(reference) => setReference(capability.key, reference)}
               />
               {!options.length ? (
                 <small className="field-hint">
-                  No enabled {capability.key} models. Discover and enable models below.
+                  No enabled {capability.key} models. Discover or register models in Providers.
                 </small>
               ) : null}
               {capability.key === 'decision' ? <label className="field-hint">
@@ -118,6 +136,8 @@ export function ModelDefaultsPanel({
 
 export type ModelCapability =
   | 'chat'
+  | 'small_tasks'
+  | 'summary'
   | 'embedding'
   | 'vision'
   | 'tools'
@@ -131,7 +151,7 @@ export function capabilityOptions(providers: Provider[], capability: ModelCapabi
         (model) =>
           modelIsEnabled(model)
           && ((capability !== 'decision' && !model.capabilities?.length) || model.capabilities?.includes(
-            capability === 'compaction' ? 'chat' : capability,
+            capability === 'compaction' || capability === 'summary' || capability === 'small_tasks' ? 'chat' : capability,
           )),
       )
       .map((model) => ({

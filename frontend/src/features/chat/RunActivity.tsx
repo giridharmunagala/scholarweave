@@ -4,9 +4,10 @@ import type { RunStage } from './runStages';
 import type { SessionWorkItem } from './sessionObservability';
 
 export function RunActivity({
-  stages, workPlan = [], onOpenActivity,
+  stages, workPlan = [], liveThought = null, onOpenActivity,
 }: {
   stages: RunStage[];
+  liveThought?: string | null;
   workPlan?: SessionWorkItem[];
   onOpenActivity: () => void;
 }) {
@@ -54,6 +55,12 @@ export function RunActivity({
           );
         })}
       </ul>
+      {active && liveThought ? (
+        <div className="run-activity-thought" aria-live="polite" aria-label="Latest reasoning">
+          <small>Latest reasoning</small>
+          <p>{liveThought.length > 320 ? `…${liveThought.slice(-320)}` : liveThought}</p>
+        </div>
+      ) : null}
     </section>
   );
 }

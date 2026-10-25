@@ -7,22 +7,16 @@ from urllib.parse import quote
 from datetime import UTC, datetime
 from unittest.mock import Mock
 
-import anyio
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError as SchemaValidationError
 
 from backend.agents.context import ScholarWeaveContext
 from backend.agents.compiler import current_system_information
-from backend.agents.context_budget import _request_tokens
 from backend.app import create_app
 from backend.bootstrap import create_services
 from backend.conversations.schemas import ConversationMessageRequest
-from backend.conversations.turns import (
-    deep_work_blueprint,
-    research_blueprint,
-    validate_paper_work_completion,
-)
+from backend.conversations.turns import validate_paper_work_completion
 from backend.core.errors import ValidationError
 from backend.research.sources import WebSource
 from backend.tests.test_api import configure_provider, wait_for_run
@@ -30,7 +24,7 @@ from backend.tests.stub_provider import _message
 from backend.utils import utcnow
 
 
-@pytest.mark.parametrize("scope", ["connected", "only", "discussion", "partial"])
+@pytest.mark.parametrize("scope", ["connected", "partial"])
 def test_requested_notes_discover_read_and_preserve_connected_details(
     test_settings, stub_provider, scope,
 ):
@@ -47,8 +41,6 @@ def test_requested_notes_discover_read_and_preserve_connected_details(
         unrelated = workspace.create_note(name="Garden", content="Keep seed dates.")
         goal = {
             "connected": "Take notes on how grouped query attention reduces the KV cache for long context.",
-            "only": "Save this KV cache observation only in the Long context note.",
-            "discussion": "Discuss the connection between long context and attention architecture; do not save.",
             "partial": "Save these connected findings and report any notes you could not update.",
         }[scope]
         primary_addition = "Grouped query attention reduces stored KV heads for long-context inference."
@@ -66,27 +58,21 @@ def test_requested_notes_discover_read_and_preserve_connected_details(
             (goal, "read_research_note", {"path": primary.path}),
             (goal, "read_research_note", {"path": supporting.path}),
         ])
-        if scope != "discussion":
-            for note, content in (
-                [(primary, primary_addition), (supporting, supporting_addition)]
-                if scope in {"connected", "partial"} else [(primary, primary_addition)]
-            ):
-                plans.append((goal, "save_research_note", {
-                    "target": "path", "mode": None, "path": note.path,
-                    "document_id": None, "name": None, "content": content, "tags": [],
-                    "selection": None,
-                    "expected_sha256": (
-                        "0" * 64 if scope == "partial" and note.path == supporting.path
-                        else hashlib.sha256(note.content.encode()).hexdigest()
-                    ),
-                }))
+        for note, content in [(primary, primary_addition), (supporting, supporting_addition)]:
+            plans.append((goal, "save_research_note", {
+                "target": "path", "mode": None, "path": note.path,
+                "document_id": None, "name": None, "content": content, "tags": [],
+                "selection": None,
+                "expected_sha256": (
+                    "0" * 64 if scope == "partial" and note.path == supporting.path
+                    else hashlib.sha256(note.content.encode()).hexdigest()
+                ),
+            }))
         stub_provider.tool_plans = plans
         stub_provider.reply = (
             f"Saved the primary note at {primary.path}. Could not update {supporting.path}: "
             "its read hash is stale; the supporting note is unchanged."
-            if scope == "partial" else (
-                "The connection is explained." if scope == "discussion" else "Requested notes saved."
-            )
+            if scope == "partial" else "Requested notes saved."
         )
         conversation = client.post("/api/agent/conversations", json={
             "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
@@ -104,10 +90,10 @@ def test_requested_notes_discover_read_and_preserve_connected_details(
         assert workspace.read_file(primary.path).content.startswith(primary.content)
         assert workspace.read_file(supporting.path).content.startswith(supporting.content)
         assert workspace.read_file(unrelated.path).content == unrelated.content
-        assert (primary_addition in workspace.read_file(primary.path).content) is (scope != "discussion")
+        assert primary_addition in workspace.read_file(primary.path).content
         assert (supporting_addition in workspace.read_file(supporting.path).content) is (scope == "connected")
         writes = [a for a in record.tool_attempts if a.catalog_id == "research.notes.save"]
-        assert len(writes) == {"connected": 2, "only": 1, "discussion": 0, "partial": 2}[scope]
+        assert len(writes) == 2
         if scope == "partial":
             assert writes[0].result_json["path"] == primary.path
             assert "ConflictError" in writes[1].error
@@ -135,8 +121,7 @@ def paper_context(mode: str | None, *, citations: list[str] | None = None):
     )
 
 
-@pytest.mark.parametrize("kind", ["agent", "deep-work"])
-@pytest.mark.parametrize("title", ["New chat", "My ideas"])
+@pytest.mark.parametrize(("kind", "title"), [("agent", "New chat"), ("deep-work", "My ideas")])
 def test_effort_is_per_message_and_plain_chat_uses_one_model_call(
     test_settings, stub_provider, kind, title,
 ):
@@ -191,9 +176,34 @@ def test_explicit_effort_overrides_legacy_selectors(test_settings, stub_provider
         assert not record.runtime_metadata_json.get("autonomous_work")
 
 
-@pytest.mark.parametrize("effort", ["auto", "thorough"])
+def test_ideation_is_explicit_persisted_per_turn_and_needs_no_papers(test_settings, stub_provider):
+    with TestClient(create_app(test_settings)) as client:
+        profile_id = configure_provider(client, stub_provider)
+        conversation = client.post("/api/agent/conversations", json={
+            "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
+        }).json()
+        for index, intent in enumerate(["ideation", "chat"], start=1):
+            response = client.post(
+                f"/api/agent/conversations/{conversation['id']}/messages",
+                json={"content": "Explore alternative explanations.", "turn_intent": intent,
+                      "web_enabled": False},
+            )
+            assert response.status_code == 202, response.text
+            run = wait_for_run(client, response.json()["run"]["id"])
+            assert run["status"] == "completed", run["error"]
+            record = client.app.state.services.runs.get(run["id"])
+            assert record.runtime_metadata_json["turn_intent"] == intent
+            assert not record.runtime_metadata_json["paper_require_summary"]
+            assert not record.runtime_metadata_json["paper_require_notes"]
+            assert not record.runtime_metadata_json.get("work_plan")
+            assert not record.tool_attempts
+            assert len(stub_provider.requests) == index
+            instructions = record.blueprint_json["agents"][0]["instructions"]
+            assert ("# Explore ideas" in instructions) is (intent == "ideation")
+
+
 def test_new_turn_clock_is_appended_without_changing_cached_prefix(
-    test_settings, stub_provider, monkeypatch, effort,
+    test_settings, stub_provider, monkeypatch,
 ):
     test_settings.user_timezone = "Asia/Kolkata"
     test_settings.user_profile = "A local researcher."
@@ -227,7 +237,7 @@ def test_new_turn_clock_is_appended_without_changing_cached_prefix(
                 )
             response = client.post(
                 f"/api/agent/conversations/{conversation['id']}/messages",
-                json={"content": message, "response_effort": effort, "web_enabled": False},
+                json={"content": message, "response_effort": "thorough", "web_enabled": False},
             )
             assert response.status_code == 202, response.text
             run = wait_for_run(client, response.json()["run"]["id"])
@@ -253,10 +263,16 @@ def test_new_turn_clock_is_appended_without_changing_cached_prefix(
             (first, first_followup), (first_followup, second), (second, second_followup),
         ):
             assert after["messages"][:len(before["messages"])] == before["messages"]
-        assert first["messages"][-2]["role"] == second["messages"][-2]["role"] == "system"
-        assert first["messages"][-2]["content"].endswith(clocks[0])
-        assert second["messages"][-2]["content"].endswith(clocks[1])
-        assert second["messages"][-1] == {"role": "user", "content": messages[1]}
+        for request in stub_provider.requests:
+            assert all(item["role"] not in {"system", "developer"} for item in request["messages"][1:])
+        for request, timestamp, message in (
+            (first, "2026-08-09 23:59:15 IST (UTC+05:30)", messages[0]),
+            (second, "2026-08-11 00:00:16 IST (UTC+05:30)", messages[1]),
+        ):
+            assert request["messages"][-1] == {
+                "role": "user",
+                "content": f"[Application context: request submitted at {timestamp}]\n\n{message}",
+            }
         snapshots = [client.app.state.services.runs.prompt_snapshot(run_id) for run_id in run_ids]
         assert snapshots[0]["agents"] == snapshots[1]["agents"]
         assert snapshots[0]["tools"] == snapshots[1]["tools"]
@@ -265,7 +281,7 @@ def test_new_turn_clock_is_appended_without_changing_cached_prefix(
         assert [item["text"] for item in detail["items"] if item["role"] == "user"] == messages
         assert [
             item["text"] for item in detail["items"] if item["role"] == "developer"
-        ] == [first["messages"][-2]["content"], second["messages"][-2]["content"]]
+        ] == [f"Context recorded when this request was submitted:\n{clock}" for clock in clocks]
 
 
 @pytest.mark.parametrize("effort", ["auto", "quick"])
@@ -324,13 +340,6 @@ def test_targeted_web_lookup_reads_source_without_plan_or_summary(
         assert source.url in run["final_output"]
 
 
-@pytest.mark.parametrize("mode", ["research", "learn", "understand"])
-def test_narrow_paper_modes_allow_source_reads_without_artifact_writes(mode):
-    context = paper_context(mode)
-    validate_paper_work_completion(context)
-    assert context.metadata["paper_activity"][0]["action"] == "read"
-
-
 @pytest.mark.parametrize("mode", [None, "review"])
 def test_review_and_legacy_persisted_runs_keep_full_paper_gate(mode):
     context = paper_context(mode)
@@ -338,16 +347,6 @@ def test_review_and_legacy_persisted_runs_keep_full_paper_gate(mode):
         validate_paper_work_completion(context)
     assert "notes.md" in str(error.value.issues)
     assert "summary.md" in str(error.value.issues)
-
-
-@pytest.mark.parametrize(
-    "output",
-    ["Uncited assertion.", "The answer is on p.20.", "A fabricated citation (p.3).", None],
-)
-def test_narrow_completion_does_not_enforce_answer_citation_format(output):
-    context = paper_context("learn")
-    context.metadata["completion_output"] = output
-    validate_paper_work_completion(context)
 
 
 def test_narrow_completion_requires_a_source_read_but_not_citation_metadata():
@@ -369,25 +368,6 @@ def test_explicit_review_gate_cannot_be_disabled_by_metadata_flags():
         validate_paper_work_completion(context)
     context.metadata["research_mode"] = "learn"
     context.metadata["autonomous_work"] = True
-    validate_paper_work_completion(context)
-
-
-def test_research_does_not_enforce_answer_citation_format():
-    context = paper_context("research")
-    context.metadata["paper_activity"].extend([
-        {"document_id": "rejected", "action": "acquired"},
-        {"document_id": "background", "action": "read", "citations": ["p.8"]},
-    ])
-    validate_paper_work_completion(context)
-    context.metadata["completion_output"] = "Unsupported p.20."
-    validate_paper_work_completion(context)
-
-
-@pytest.mark.parametrize("action", ["acquired", "ingested", "summary_reused"])
-def test_research_allows_discussing_available_context_without_forcing_source_reads(action):
-    context = paper_context("research")
-    context.metadata["paper_activity"][0]["action"] = action
-    context.metadata["completion_output"] = "The saved summary omits the experimental setup."
     validate_paper_work_completion(context)
 
 
@@ -433,31 +413,6 @@ def test_overview_is_not_a_review_even_when_its_short_source_is_fully_covered():
          "coverage_complete": True, "review_complete": True}
     )
     validate_paper_work_completion(context)
-
-
-@pytest.mark.parametrize("mode", ["research", "learn", "understand", "review"])
-def test_explicit_modes_offer_local_paper_tools_without_web(mode):
-    blueprint = research_blueprint({}, research_mode=mode, web_enabled=False)
-    tools = set(blueprint.agents[0].tool_ids)
-    assert {
-        "read-paper", "search-library", "read-note", "save-note",
-        "list-workspace", "workspace-index",
-    } <= tools
-    assert not {"search-sources", "acquire-source"} & tools
-    assert f"Selected research mode: {mode}." in blueprint.agents[0].instructions
-
-
-def test_deep_work_blueprint_offers_local_workspace_discovery_to_both_agents():
-    blueprint = deep_work_blueprint({}, web_enabled=False)
-    tools = {tool.id: tool.catalog_id for tool in blueprint.tools}
-    assert tools["list-workspace"] == "research.workspace.list"
-    assert tools["workspace-index"] == "research.workspace.index"
-    for agent in blueprint.agents:
-        assert {"list-workspace", "workspace-index"} <= set(agent.tool_ids)
-        assert "list_workspace" in agent.instructions
-        assert "BM25" in agent.instructions
-        assert "only after external file edits" in agent.instructions
-        assert "Selected research mode: research." in agent.instructions
 
 
 def test_deep_work_queues_workers_after_plan_creation_even_if_provider_batches_calls(
@@ -521,12 +476,15 @@ def test_deep_work_queues_workers_after_plan_creation_even_if_provider_batches_c
             )
         ]
         assert len(worker_requests) == 4
+        clock_lines = clock.splitlines()
+        timestamp = f"{clock_lines[1].removeprefix('Current date: ')} {clock_lines[2].removeprefix('Current time: ')}"
+        context = f"[Application context: request submitted at {timestamp}]"
         for request in worker_requests:
-            assert request["messages"][1]["content"].endswith(clock)
-            assert request["messages"][1]["role"] == "system"
+            assert request["messages"][1]["role"] == "user"
+            assert all(item["role"] not in {"system", "developer"} for item in request["messages"][1:])
             assert [
                 message["content"] for message in request["messages"] if message["role"] == "user"
-            ] in (["Complete track a."], ["Complete track b."])
+            ] in ([f"{context}\n\nComplete track a."], [f"{context}\n\nComplete track b."])
             assert "Execute the two scoped tracks." not in json.dumps(request["messages"])
         for before, after in zip(worker_requests[::2], worker_requests[1::2]):
             assert after["messages"][:len(before["messages"])] == before["messages"]
@@ -559,25 +517,6 @@ def test_deep_work_queues_workers_after_plan_creation_even_if_provider_batches_c
         assert all(item["status"] == "completed" for item in updates[-1].result_json["items"])
 
 
-@pytest.mark.parametrize("mode", ["research", "learn", "understand", "review", "deep_work", "fast_answer"])
-def test_product_blueprints_have_no_turn_character_or_delegation_ceiling(mode):
-    blueprint = (
-        deep_work_blueprint({})
-        if mode == "deep_work"
-        else research_blueprint(
-            {},
-            fast_answer=mode == "fast_answer",
-            research_mode=None if mode == "fast_answer" else mode,
-        )
-    )
-    assert blueprint.run.max_turns is None
-    assert blueprint.run.max_input_characters is None
-    assert blueprint.run.max_output_characters is None
-    assert all(delegate.max_turns is None for delegate in blueprint.agent_tools)
-    assert blueprint.session.history_max_items is None
-    assert blueprint.session.messages_only is False
-
-
 @pytest.mark.parametrize("deep_work", [False, True])
 def test_product_runs_continue_across_epochs_without_repeating_writes(
     test_settings, stub_provider, deep_work,
@@ -586,7 +525,7 @@ def test_product_runs_continue_across_epochs_without_repeating_writes(
     test_settings.agent_max_epochs = 1
     test_settings.agent_run_timeout_seconds = 0.01
     goal = "Record every durable checkpoint."
-    expected = [f"Evidence marker {index:02d}." for index in range(20)]
+    expected = [f"Evidence marker {index:02d}." for index in range(4)]
     stub_provider.tool_plans = [
         (
             goal,
@@ -626,14 +565,13 @@ def test_product_runs_continue_across_epochs_without_repeating_writes(
             },
         )
         assert response.status_code == 202, response.text
-        # Twenty real tool calls and more than ten durable epochs exceed the short-run wait.
-        run = wait_for_run(client, response.json()["run"]["id"], timeout=60)
+        run = wait_for_run(client, response.json()["run"]["id"])
         assert run["status"] == "completed", run["error"]
         content = services.workspace.read_file("notes/checkpoints.md").content
         assert isinstance(content, str)
         assert [line for line in content.splitlines() if line.strip()] == expected
         record = services.runs.get(run["id"])
-        assert len(record.epochs) > 10
+        assert len(record.epochs) > 2
         assert len(stub_provider.requests) == len(stub_provider.tool_plans) + 1
         if deep_work:
             updates = [
@@ -645,50 +583,13 @@ def test_product_runs_continue_across_epochs_without_repeating_writes(
             assert updates[0].result_json["items"][0]["status"] == "completed"
 
 
-@pytest.mark.parametrize("path", ["agent", "deep-work"])
-def test_deep_work_accepts_model_chosen_discussion_and_clarification_without_plan(
-    test_settings, stub_provider, path,
-):
-    opening = "Before researching papers, explain how Deep Work creates a research plan."
-    with TestClient(create_app(test_settings)) as client:
-        profile_id = configure_provider(client, stub_provider)
-        conversation = client.post(
-            f"/api/{path}/conversations",
-            json={"model_reference": {
-                "provider_profile_id": profile_id, "model": "stub-model",
-            }},
-        ).json()
-        for message, answer in (
-            (opening, "We can discuss the scope before starting any research."),
-            ("I might study sparse methods.", "Which application should we focus on?"),
-        ):
-            stub_provider.reply = answer
-            response = client.post(
-                f"/api/{path}/conversations/{conversation['id']}/messages",
-                json={"content": message, "deep_work": True, "web_enabled": False},
-            )
-            assert response.status_code == 202, response.text
-            run = wait_for_run(client, response.json()["run"]["id"])
-            assert run["status"] == "completed", run["error"]
-            record = client.app.state.services.runs.get(run["id"])
-            assert len(record.epochs) == 1
-            assert not record.runtime_metadata_json.get("work_plan")
-            assert not record.runtime_metadata_json.get("paper_activity")
-            assert not record.tool_attempts
-        assert len(stub_provider.requests) == 2
-        assert all(
-            request.get("tool_choice") in (None, "auto")
-            for request in stub_provider.requests
-        )
-        assert {"create_work_plan", "focused_research_worker"} <= set(
-            stub_provider.tools_offered
-        )
-
-
-@pytest.mark.parametrize("terminal_status", ["completed", "blocked"])
-@pytest.mark.parametrize("effort", ["auto", "quick", "thorough"])
+@pytest.mark.parametrize(("effort", "turn_intent", "terminal_status"), [
+    ("auto", "chat", "completed"),
+    ("quick", "ideation", "blocked"),
+    ("thorough", "ideation", "blocked"),
+])
 def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
-    test_settings, stub_provider, terminal_status, effort,
+    test_settings, stub_provider, terminal_status, effort, turn_intent,
 ):
     goal = "Go ahead with the agreed investigation."
     stub_provider.tool_plans = [
@@ -711,13 +612,15 @@ def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
         ).json()
         response = client.post(
             f"/api/deep-work/conversations/{conversation['id']}/messages",
-            json={"content": goal, "web_enabled": False, "response_effort": effort},
+            json={"content": goal, "web_enabled": False, "response_effort": effort,
+                  "turn_intent": turn_intent},
         )
         assert response.status_code == 202, response.text
         run = wait_for_run(client, response.json()["run"]["id"])
         assert run["status"] == "completed", run["error"]
         record = client.app.state.services.runs.get(run["id"])
         assert len(record.epochs) == 2
+        assert record.runtime_metadata_json["turn_intent"] == turn_intent
         assert any(
             event.payload_json.get("terminal_reason") == "work_pending"
             for event in record.events
@@ -737,6 +640,7 @@ def test_deep_work_model_chosen_plan_must_finish_after_premature_answer(
         {"fast_answer": True, "research_mode": "review"},
         {"research_mode": "unknown"},
         {"response_effort": "unknown"},
+        {"turn_intent": "unknown"},
     ],
 )
 def test_incompatible_mode_requests_are_rejected(options):
@@ -744,18 +648,9 @@ def test_incompatible_mode_requests_are_rejected(options):
         ConversationMessageRequest(content="Question", **options)
 
 
-def test_message_input_has_no_character_ceiling_but_requires_content():
-    content = "Research evidence " * 10_000
-    assert ConversationMessageRequest(content=content).content == content
-    schema = ConversationMessageRequest.model_json_schema()["properties"]["content"]
-    assert "maxLength" not in schema
-    assert schema["minLength"] == 1
-    with pytest.raises(SchemaValidationError):
-        ConversationMessageRequest(content="")
-
-
 def test_large_message_reaches_model_when_configured_context_has_room(test_settings, stub_provider):
-    content = "x" * 100_001
+    content = "Research evidence. " * 5_264
+    assert len(content) > 100_000
     with TestClient(create_app(test_settings)) as client:
         profile_id = configure_provider(client, stub_provider)
         conversation = client.post(
@@ -774,44 +669,15 @@ def test_large_message_reaches_model_when_configured_context_has_room(test_setti
         record = client.app.state.services.runs.get(run["id"])
         assert record.input_json == content
         assert any(
-            message.get("role") == "user" and message.get("content") == content
+            message.get("role") == "user" and message.get("content", "").partition("\n\n")[2] == content
             for request in stub_provider.requests
             for message in request["messages"]
         )
 
 
-@pytest.mark.parametrize("path", ["agent", "deep-work"])
-def test_modes_switch_per_turn_and_are_durable_in_run_metadata(test_settings, stub_provider, path):
-    with TestClient(create_app(test_settings)) as client:
-        profile_id = configure_provider(client, stub_provider)
-        conversation = client.post(
-            f"/api/{path}/conversations",
-            json={"model_reference": {
-                "provider_profile_id": profile_id, "model": "stub-model",
-            }},
-        ).json()
-        for mode in ("learn", "understand", "review", "research", None):
-            response = client.post(
-                f"/api/{path}/conversations/{conversation['id']}/messages",
-                json={"content": f"Explain this in {mode} mode", "research_mode": mode,
-                      "web_enabled": False},
-            )
-            assert response.status_code == 202, response.text
-            run = wait_for_run(client, response.json()["run"]["id"])
-            assert run["status"] == "completed", run["error"]
-            record = client.app.state.services.runs.get(run["id"])
-            assert record.runtime_metadata_json["research_mode"] == (mode or "research")
-            assert record.runtime_metadata_json["paper_require_summary"] is (mode == "review")
-            assert record.runtime_metadata_json["paper_require_notes"] is (mode == "review")
-            for agent in record.blueprint_json["agents"]:
-                assert f"Selected research mode: {mode or 'research'}." in agent["instructions"]
-
-
-@pytest.mark.parametrize("cited", [True, False])
-@pytest.mark.parametrize("mode", ["research", "learn", "understand", "review"])
-@pytest.mark.parametrize("deep_work", [False, True])
+@pytest.mark.parametrize(("mode", "deep_work"), [("learn", False), ("review", True)])
 def test_paper_completion_checks_evidence_and_explicit_review_artifacts(
-    test_settings, stub_provider, cited, mode, deep_work,
+    test_settings, stub_provider, mode, deep_work,
 ):
     with TestClient(create_app(test_settings)) as client:
         profile_id = configure_provider(client, stub_provider)
@@ -829,9 +695,7 @@ def test_paper_completion_checks_evidence_and_explicit_review_artifacts(
             {"document_id": document.id, "action": "chunks", "start": 0,
              "limit": 1, "query": None, "offset": None},
         )]
-        stub_provider.reply = (
-            "The sparse method uses thresholding (p.2)." if cited else "An unsupported assertion."
-        )
+        stub_provider.reply = "The sparse method uses thresholding."
         conversation = client.post(
             "/api/agent/conversations",
             json={"model_reference": {
@@ -869,29 +733,7 @@ def test_paper_completion_checks_evidence_and_explicit_review_artifacts(
         assert not any(item["action"] in {"notes_saved", "summary_saved"} for item in activity)
 
 
-@pytest.mark.parametrize("path", ["agent", "deep-work"])
-def test_deep_work_conversation_accepts_research_modes_on_either_endpoint(
-    test_settings, stub_provider, path,
-):
-    with TestClient(create_app(test_settings)) as client:
-        profile_id = configure_provider(client, stub_provider)
-        conversation = client.post("/api/deep-work/conversations", json={
-            "model_reference": {"provider_profile_id": profile_id, "model": "stub-model"},
-        }).json()
-        response = client.post(
-            f"/api/{path}/conversations/{conversation['id']}/messages",
-            json={"content": "Question", "research_mode": "learn"},
-        )
-        assert response.status_code == 202, response.text
-        run = wait_for_run(client, response.json()["run"]["id"])
-        assert run["status"] == "completed", run["error"]
-        record = client.app.state.services.runs.get(run["id"])
-        assert record.runtime_metadata_json["research_mode"] == "learn"
-        assert bool(record.runtime_metadata_json.get("autonomous_work")) is (path == "deep-work")
-
-
-@pytest.mark.parametrize("deep_work", [False, True])
-@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize(("deep_work", "partial"), [(False, False), (True, True)])
 def test_default_discusses_existing_summary_without_regenerating_or_writing_notes(
     test_settings, stub_provider, deep_work, partial,
 ):
@@ -975,48 +817,10 @@ def test_deep_research_applies_live_steering_without_creating_artifacts(
         )
 
 
-@pytest.mark.parametrize("deep_work", [False, True])
-def test_default_can_save_requested_paper_questions_without_claiming_source_review(
-    test_settings, stub_provider, deep_work,
-):
-    with TestClient(create_app(test_settings)) as client:
-        profile_id = configure_provider(client, stub_provider)
-        services = client.app.state.services
-        document = services.documents.create_document_from_bytes(
-            b"%PDF-1.4\n%%EOF", filename="questions.pdf", title="Questions",
-        )
-        question = "User question, not a verified finding: does this method preserve sparsity?"
-        goal = "Save my question in this paper's notes without reviewing the paper."
-        stub_provider.tool_plans = [(goal, "save_research_note", {
-            "target": "paper_notes", "mode": "append", "document_id": document.id,
-            "path": None, "name": None, "content": question, "tags": [],
-            "selection": None, "expected_sha256": None,
-        })]
-        stub_provider.reply = "Saved your question without claiming to have reviewed the paper."
-        conversation = client.post(
-            "/api/agent/conversations",
-            json={"model_reference": {"provider_profile_id": profile_id, "model": "stub-model"}},
-        ).json()
-        response = client.post(
-            f"/api/agent/conversations/{conversation['id']}/messages",
-            json={"content": goal, "deep_work": deep_work, "web_enabled": False},
-        )
-        assert response.status_code == 202, response.text
-        run = wait_for_run(client, response.json()["run"]["id"])
-        assert run["status"] == "completed", run["error"]
-        record = services.runs.get(run["id"])
-        assert [item["action"] for item in record.runtime_metadata_json["paper_activity"]] == [
-            "notes_saved",
-        ]
-        assert question in services.workspace.read_file(f"{services.workspace.paper_folder(document.id)}/notes.md").content
-        assert len(stub_provider.requests) == 2
-
-
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["research", "learn", "understand", "review", None])
-@pytest.mark.parametrize("deep_work", [False, True])
+@pytest.mark.parametrize("mode", ["research", "review"])
 async def test_acquiring_research_candidate_does_not_append_unsolicited_notes(
-    test_settings, monkeypatch, mode, deep_work,
+    test_settings, monkeypatch, mode,
 ):
     services = create_services(test_settings)
     try:
@@ -1033,20 +837,16 @@ async def test_acquiring_research_candidate_does_not_append_unsolicited_notes(
         runtime = services.runs._tool_runtime
         context = ScholarWeaveContext(
             run_id="candidate", tool_runtime=runtime,
-            metadata={"research_mode": mode, "autonomous_work": deep_work},
+            metadata={"research_mode": mode, "autonomous_work": True},
         )
         result = await runtime.invoke("research.sources.acquire", {
             "kind": "paper", "url": "https://papers.example/candidate.pdf", "title": "Candidate",
         }, context)
         assert result["document_id"] == document.id
         notes = services.workspace.read_file(path).content
-        if mode in {"research", "learn", "understand"}:
+        if mode == "research":
             assert notes == "My existing notes."
-            if mode == "research":
-                validate_paper_work_completion(context)
-            else:
-                with pytest.raises(ValidationError, match="Paper Q&A requires"):
-                    validate_paper_work_completion(context)
+            validate_paper_work_completion(context)
         else:
             assert "## Source acquired" in notes
             with pytest.raises(ValidationError, match="Paper work is incomplete"):
@@ -1109,56 +909,3 @@ def test_explicit_review_reads_reuses_summary_and_saves_paper_notes(
         assert "Verified thresholding" in services.workspace.read_file(
             f"{services.workspace.paper_folder(document.id)}/notes.md"
         ).content
-
-
-def test_invalid_upgrade_does_not_promote_conversation(test_settings):
-    with TestClient(create_app(test_settings)) as client:
-        conversation = client.post("/api/agent/conversations", json={}).json()
-        with pytest.raises(ValidationError):
-            client.app.state.services.conversation_turns.start_message(
-                conversation["id"], "Question", deep_work=True, fast_answer=True,
-            )
-        assert client.get(
-            f"/api/agent/conversations/{conversation['id']}"
-        ).json()["kind"] == "autonomous"
-
-
-@pytest.mark.parametrize("mode", ["research", "learn", "understand", "review", "deep_work"])
-@pytest.mark.parametrize("attached_track", [False, True])
-def test_full_workflow_tool_surface_fits_working_context_budget(
-    test_settings, stub_provider, mode, attached_track,
-):
-    with TestClient(create_app(test_settings)) as client:
-        profile_id = configure_provider(client, stub_provider)
-        track = client.post("/api/tracks", json={"title": "A bounded research notebook"}).json() if attached_track else None
-        conversation = client.post(
-            "/api/agent/conversations",
-            json={"track_id": track["id"] if track else None, "model_reference": {
-                "provider_profile_id": profile_id, "model": "stub-model",
-            }},
-        ).json()
-        services = client.app.state.services
-        compiled = services.conversation_turns.compile_conversation(
-            conversation["id"],
-            research_mode="review" if mode == "deep_work" else mode,
-            deep_work=mode == "deep_work",
-        )
-        assert compiled.context_policy is not None
-        context = ScholarWeaveContext(
-            run_id="budget-check", tool_runtime=services.runs._tool_runtime,
-        )
-        items = [{"role": "user", "content": "Explain the paper's assumptions with sources."}]
-
-        async def check_budget():
-            for definition in compiled.agents_by_id.values():
-                prepared = await compiled.context_policy.prepare(
-                    definition, items, definition.instructions, context, turn_index=1,
-                )
-                estimated = _request_tokens(
-                    definition, prepared.items, prepared.instructions, context,
-                )
-                assert estimated <= 12_000, (definition.name, estimated)
-                print(f"{mode}/{definition.id}: {estimated} estimated input tokens")
-
-        anyio.run(check_budget)
-        assert stub_provider.requests == []

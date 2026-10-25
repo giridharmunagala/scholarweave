@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from copy import deepcopy
 from typing import Any
 from typing import Literal
@@ -11,13 +12,26 @@ from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.research.reviews.models import LiteratureReview, ReviewCandidate, ReviewJob, ScholarlyCache
 from backend.research.reviews.schemas import Candidate
 from backend.utils import as_utc, utcnow
+from backend.persistence.files import SafeStorage
 
 _RANK = {"HIGHLY_RELEVANT": 5, "RELEVANT": 4, "SOMEWHAT_RELEVANT": 2, "IRRELEVANT": 1}
 
 
 class ReviewRepository:
-    def __init__(self, session_factory: Any) -> None:
+    def __init__(self, session_factory: Any, storage: SafeStorage | None = None) -> None:
         self.sessions = session_factory
+        self.storage = storage
+
+    def _job_content(self, content: dict) -> dict:
+        if "workspace_receipt" not in content:
+            return deepcopy(content)
+        if self.storage is None:
+            raise ValidationError("Workspace storage is unavailable for this research receipt.")
+        path = content["workspace_receipt"]
+        text = self.storage.read_text(self.storage.settings.workspace_dir, path)
+        if hashlib.sha256(text.encode("utf-8")).hexdigest() != content["receipt_hash"]:
+            raise ValidationError(f"Research receipt changed on disk: {path}. Restore it before resuming.")
+        return json.loads(text)
 
     def create(self, identifier: str, specification: dict, state: dict) -> LiteratureReview:
         with self.sessions() as session:
@@ -48,6 +62,21 @@ class ReviewRepository:
                 raise ConflictError("The review changed. Reload its current state before continuing.")
             session.commit()
         return self.get(identifier)
+
+    def assign_track(self, identifier: str, track_id: str, revision: int) -> None:
+        with self.sessions() as session:
+            record = session.get(LiteratureReview, identifier)
+            if record is None:
+                raise NotFoundError("Literature review was not found.")
+            result = session.execute(
+                update(LiteratureReview)
+                .where(LiteratureReview.id == identifier, LiteratureReview.revision == revision)
+                .values(specification={**record.specification, "track_id": track_id},
+                        revision=revision + 1, updated_at=utcnow())
+            )
+            if result.rowcount != 1:
+                raise ConflictError("The review changed. Reload before moving it.")
+            session.commit()
 
     def candidates(
         self, review_id: str, *, limit: int = 50, offset: int = 0, selected: bool = False,
@@ -110,6 +139,33 @@ class ReviewRepository:
             session.execute(delete(ReviewJob).where(ReviewJob.review_id == review_id))
             session.execute(delete(ReviewCandidate).where(ReviewCandidate.review_id == review_id))
             session.execute(delete(LiteratureReview).where(LiteratureReview.id == review_id))
+
+    def prune_topic_selection(self, review_id: str, topic_ids: set[str]) -> None:
+        with self.sessions.begin() as session:
+            session.execute(delete(ReviewCandidate).where(
+                ReviewCandidate.review_id == review_id, ReviewCandidate.selected == 0,
+            ))
+            discarded = list(session.scalars(select(ReviewJob).where(
+                ReviewJob.review_id == review_id,
+                ReviewJob.stage.in_(("scope", "discovery", "screening")),
+                ReviewJob.job_key != "topics",
+            )))
+            for row in discarded:
+                if row.job_key.startswith("topic-exploration:") and row.job_key.rsplit(":", 1)[-1] in topic_ids:
+                    continue
+                # Keep usage accounting, not discarded model output or metadata.
+                row.content = {
+                    "key": row.job_key, "status": "pruned",
+                    "tokens_spent": row.content.get("tokens_spent", 0),
+                    "usage_estimated": row.content.get("usage_estimated", False),
+                    **({"provenance": row.content["provenance"]} if "provenance" in row.content else {}),
+                }
+                row.stage = "workspace"
+
+    def workspace_receipts(self, review_id: str) -> dict[str, str]:
+        with self.sessions() as session:
+            contents = session.scalars(select(ReviewJob.content).where(ReviewJob.review_id == review_id))
+            return {row["workspace_receipt"]: row["receipt_hash"] for row in contents if "workspace_receipt" in row}
 
     def candidate(self, review_id: str, identifier: str) -> Candidate:
         with self.sessions() as session:
@@ -225,7 +281,7 @@ class ReviewRepository:
             row = session.scalar(select(ReviewJob).where(
                 ReviewJob.review_id == review_id, ReviewJob.job_key == key,
             ))
-            return deepcopy(row.content) if row else None
+            return self._job_content(row.content) if row else None
 
     def jobs(self, review_id: str, stage: str | None = None, *, key_prefix: str | None = None) -> list[dict]:
         with self.sessions() as session:
@@ -234,7 +290,7 @@ class ReviewRepository:
                 query = query.where(ReviewJob.stage == stage)
             if key_prefix is not None:
                 query = query.where(ReviewJob.job_key.startswith(key_prefix))
-            return [deepcopy(row.content) for row in session.scalars(query.order_by(ReviewJob.job_key))]
+            return [self._job_content(row.content) for row in session.scalars(query.order_by(ReviewJob.job_key))]
 
     def activity_page(self, review_id: str, *, limit: int, offset: int) -> tuple[list[dict], int]:
         conditions = (
@@ -247,7 +303,7 @@ class ReviewRepository:
             rows = session.scalars(select(ReviewJob).where(*conditions).order_by(
                 ReviewJob.updated_at.desc(), ReviewJob.job_key,
             ).offset(offset).limit(limit))
-            return [{**deepcopy(row.content), "key": row.job_key, "stage": row.stage} for row in rows], total
+            return [{**self._job_content(row.content), "key": row.job_key, "stage": row.stage} for row in rows], total
 
     def running_run(self, review_id: str) -> str | None:
         run_id = func.json_extract(ReviewJob.content, "$.run_id")
@@ -259,6 +315,27 @@ class ReviewRepository:
 
     def save_job(self, review_id: str, key: str, stage: str, content: dict) -> None:
         identifier = hashlib.sha256(f"{review_id}:{key}".encode()).hexdigest()
+        record = self.get(review_id)
+        if record.specification.get("embedding_model"):
+            if self.storage is None or not record.state.get("workspace_path"):
+                raise ValidationError("Topic-led research requires its local workspace.")
+            text = json.dumps(content, ensure_ascii=False, sort_keys=True)
+            content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            path = f"{record.state['workspace_path']}/receipts/{identifier}-{content_hash}.json"
+            try:
+                existing_hash = self.storage.file_hash(self.storage.settings.workspace_dir, path)
+            except FileNotFoundError:
+                self.storage.write_bytes_atomic(self.storage.settings.workspace_dir, path, text.encode("utf-8"))
+            else:
+                if existing_hash != content_hash:
+                    raise ValidationError(f"Research receipt changed on disk: {path}. Restore it before resuming.")
+            content = {
+                **{name: deepcopy(content[name]) for name in (
+                    "key", "stage", "status", "kind", "candidate_id", "run_id", "work_kind",
+                    "tokens_spent", "usage_estimated", "provenance",
+                ) if name in content},
+                "workspace_receipt": path, "receipt_hash": content_hash,
+            }
         with self.sessions() as session:
             row = session.get(ReviewJob, identifier)
             if row is None:
@@ -277,6 +354,7 @@ class ReviewRepository:
                 or_(
                     ReviewJob.job_key.startswith("reading-plan:"),
                     ReviewJob.job_key.startswith("paper-operation:"),
+                    ReviewJob.job_key.startswith("source-unavailable:"),
                     func.json_extract(ReviewJob.content, "$.kind").in_(("evidence", "analysis_evidence", "selective_summary")),
                 ),
             )
@@ -284,9 +362,10 @@ class ReviewRepository:
                 query = query.where(or_(
                     ReviewJob.job_key.startswith(f"reading-plan:{candidate_id}:"),
                     ReviewJob.job_key == f"paper-operation:{candidate_id}",
+                    ReviewJob.job_key == f"source-unavailable:{candidate_id}",
                     func.json_extract(ReviewJob.content, "$.candidate_id") == candidate_id,
                 ))
-            return [deepcopy(row.content) for row in session.scalars(query.order_by(ReviewJob.job_key))]
+            return [self._job_content(row.content) for row in session.scalars(query.order_by(ReviewJob.job_key))]
 
     def cached(self, key: str, *, max_age_seconds: int = 86_400) -> dict | None:
         with self.sessions() as session:

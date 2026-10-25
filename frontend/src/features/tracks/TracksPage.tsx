@@ -5,7 +5,13 @@ import { Link, useLocation, useNavigate, useNavigationGuard } from '../../app/ro
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { Icon } from '../../shared/components/Icons';
 import { EmptyState, ErrorNotice, Loading, PageHeader } from '../../shared/components/Ui';
+import { SettingsDrawer } from '../../shared/components/SettingsDrawer';
 import { SECTIONS, tracksApi, trackAssistUrl, type ImportPreview, type SectionContent, type Track, type TrackRevision, type TrackSection } from './api';
+import { TrackOverview } from './TrackOverview';
+import { WritingPanel } from './WritingPanel';
+import { LinkedRepositoryPanel } from './LinkedRepositoryPanel';
+import { reviewsApi, type Review } from '../reviews/api';
+import { ReaderNotesPanel } from '../documents/ReaderNotesPanel';
 import './tracks.css';
 
 type Paper = components['schemas']['DocumentSummaryResponse'];
@@ -26,7 +32,7 @@ export default function TracksPage() {
   const [papers, setPapers] = useState<Paper[]>([]);
   const [title, setTitle] = useState('');
   const [explorationName, setExplorationName] = useState('');
-  const [section, setSection] = useState<TrackSection>('problem');
+  const [sectionChoices, setSectionChoices] = useState<Record<string, { section: TrackSection; search: string }>>({});
   const [drafts, setDrafts] = useState<Record<string, Draft>>({});
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState<TrackRevision[]>([]);
@@ -34,9 +40,19 @@ export default function TracksPage() {
   const [latest, setLatest] = useState<SectionContent | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [mergeDrafts, setMergeDrafts] = useState<Record<string, string>>({});
+  const [importSource, setImportSource] = useState<{ file: File; section: TrackSection } | null>(null);
+  const [refreshedPreview, setRefreshedPreview] = useState<ImportPreview | null>(null);
+  const [previousPreview, setPreviousPreview] = useState<ImportPreview | null>(null);
+  const [staleImport, setStaleImport] = useState(false);
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
   const [replaceConfirmed, setReplaceConfirmed] = useState(false);
   const [paperId, setPaperId] = useState('');
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [reviewId, setReviewId] = useState('');
+  const [reviewsLoading, setReviewsLoading] = useState(false);
+  const [reviewError, setReviewError] = useState<unknown>(null);
+  const [reviewVersion, setReviewVersion] = useState(0);
+  const [addExisting, setAddExisting] = useState(false);
   const [skill, setSkill] = useState('');
   const [skills, setSkills] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
@@ -44,7 +60,21 @@ export default function TracksPage() {
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState('');
+  const [workspaceView, setWorkspaceView] = useState<'notebook' | 'writing' | 'repositories' | 'notes'>('notebook');
+  const [openedNotes, setOpenedNotes] = useState(false);
+  const [openedWriting, setOpenedWriting] = useState(false);
+  const [openedRepositories, setOpenedRepositories] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const readyTrack = track?.id === selectedId ? track : null;
+  const rememberedSection = selectedId ? sectionChoices[selectedId] : undefined;
+  const requestedSection = rememberedSection?.search === search ? rememberedSection.section
+    : linkedSection ?? (linkedReview ? 'literature' : rememberedSection?.section ?? 'problem');
+  const section: TrackSection = SECTIONS.some((item) => item === requestedSection)
+    || readyTrack?.exploration?.some((item) => item.section === requestedSection) ? requestedSection : 'problem';
+  const setSection = (value: TrackSection) => {
+    if (selectedId) setSectionChoices((items) => ({ ...items, [selectedId]: { section: value, search } }));
+  };
   const key = selectedId ? draftKey(selectedId, section) : '';
   const draft = drafts[key];
   const dirty = Object.values(drafts).some((item) => item.content !== item.base.content);
@@ -57,13 +87,6 @@ export default function TracksPage() {
       ? items.map((item) => item.id === value.id ? value : item) : [...items, value]);
   };
   useEffect(() => {
-    if (linkedSection && /^(problem|literature|experiments|results|exploration\/[a-z0-9][a-z0-9_-]{0,79})$/.test(linkedSection)) {
-      setSection(linkedSection);
-    } else if (linkedReview) {
-      setSection('literature');
-    }
-  }, [selectedId, linkedSection, linkedReview]);
-  useEffect(() => {
     let active = true;
     tracksApi.list().then((items) => { if (active) setTracks(items); }).catch(setError);
     request<Paper[]>('/documents').then((items) => { if (active) setPapers(items); }).catch(setError);
@@ -73,9 +96,31 @@ export default function TracksPage() {
   }, []);
   useEffect(() => {
     let active = true;
+    if (!selectedId) return;
+    setReviewsLoading(true);
+    setReviewError(null);
+    reviewsApi.list().then((items) => { if (active) setReviews(items); })
+      .catch((reason) => { if (active) setReviewError(reason); })
+      .finally(() => { if (active) setReviewsLoading(false); });
+    return () => { active = false; };
+  }, [selectedId, reviewVersion]);
+  useEffect(() => {
+    let active = true;
     setTrack(null);
     setPreview(null);
+    setImportSource(null);
+    setRefreshedPreview(null);
+    setPreviousPreview(null);
+    setStaleImport(false);
     setError(null);
+    setSettingsOpen(false);
+    setWorkspaceView('notebook');
+    setOpenedWriting(false);
+    setOpenedRepositories(false);
+    setOpenedNotes(false);
+    setAddExisting(false);
+    setPaperId('');
+    setReviewId('');
     if (selectedId) tracksApi.get(selectedId).then((value) => { if (active) updateTrack(value); }).catch((reason) => { if (active) setError(reason); });
     return () => { active = false; };
   }, [selectedId, search]);
@@ -87,7 +132,7 @@ export default function TracksPage() {
     setNotice('');
     setError(null);
     setOpening(false);
-    if (!selectedId) return;
+    if (!selectedId || !readyTrack) return;
     if (!drafts[key] || drafts[key].content === drafts[key].base.content) {
       setOpening(true);
       tracksApi.section(selectedId, section).then((value) => {
@@ -99,7 +144,7 @@ export default function TracksPage() {
       }).catch((reason) => { if (active) setError(reason); }).finally(() => { if (active) setOpening(false); });
     }
     return () => { active = false; };
-  }, [selectedId, section, search]);
+  }, [selectedId, section, search, readyTrack?.id]);
 
   const perform = async (action: () => Promise<void>) => {
     if (busy) return;
@@ -113,6 +158,28 @@ export default function TracksPage() {
     setTitle('');
     // Navigation is deferred until the mutation guard has been released.
     setPendingTrack(value.id);
+  });
+  const addPaper = () => perform(async () => {
+    if (!track || !paperId) return;
+    updateTrack(await tracksApi.paper(track.id, paperId, true));
+    setPaperId('');
+    const saved = await tracksApi.section(track.id, 'literature');
+    setDrafts((items) => {
+      const name = draftKey(track.id, 'literature');
+      const current = items[name];
+      return current && current.content !== current.base.content ? items
+        : { ...items, [name]: { base: saved, content: saved.content } };
+    });
+    setNotice('Paper linked. Its personal reader notes are available in Reader highlights; no files were copied.');
+  });
+  const addReview = () => perform(async () => {
+    const selected = reviews.find((item) => item.id === reviewId);
+    if (!track || !selected) return;
+    if (selected.track_id && !window.confirm(`Move "${selected.title}" from "${tracks.find((item) => item.id === selected.track_id)?.title ?? selected.track_id}" to "${track.title}"? Existing files, published notes and paper links stay in place.`)) return;
+    const moved = await reviewsApi.assignTrack(selected.id, track.id, selected.revision);
+    setReviews((items) => items.map((item) => item.id === moved.id ? moved : item));
+    setReviewId('');
+    setNotice('Review added to this track. Its saved report, personal notes and original files are preserved.');
   });
   const createExploration = () => perform(async () => {
     if (!track) return;
@@ -155,19 +222,41 @@ export default function TracksPage() {
     if (Object.entries(drafts).some(([name, item]) => name.startsWith(`${selectedId}:`) && item.content !== item.base.content)) {
       throw new Error('Save or discard this track’s section drafts before previewing an import. No files were changed.');
     }
-    const value = file.name.toLowerCase().endsWith('.zip')
-      ? await tracksApi.previewZip(selectedId, file)
-      : await tracksApi.preview(selectedId, section, await file.text());
+    const source = { file, section };
+    const value = await previewImportSource(selectedId, source);
     setPreview(value);
+    setImportSource(source);
+    setRefreshedPreview(null);
+    setPreviousPreview(null);
+    setStaleImport(false);
     setMergeDrafts(Object.fromEntries(value.sections.map((item) => [item.section,
       item.current_content === item.incoming_content ? item.current_content : `${item.current_content}\n\n${item.incoming_content}`,
     ])));
     setImportMode('merge');
     setReplaceConfirmed(false);
+    setSettingsOpen(false);
+  });
+  const previewImportSource = (id: string, source: { file: File; section: TrackSection }) =>
+    source.file.name.toLowerCase().endsWith('.zip') ? tracksApi.previewZip(id, source.file)
+      : source.file.text().then((content) => tracksApi.preview(id, source.section, content));
+  const refreshImport = () => perform(async () => {
+    if (!selectedId || !importSource) return;
+    setRefreshedPreview(await previewImportSource(selectedId, importSource));
+    setReplaceConfirmed(false);
+    setNotice('Fresh import baseline loaded for comparison. Your reviewed merged text is unchanged; reconcile and explicitly accept the refreshed baseline before applying.');
   });
   const applyImport = () => perform(async () => {
-    if (!selectedId || !preview || (importMode === 'replace' && !replaceConfirmed)) return;
-    const value = await tracksApi.applyImport(selectedId, preview, importMode, importMode === 'merge' ? mergeDrafts : {});
+    if (!selectedId || !preview || staleImport || refreshedPreview || (importMode === 'replace' && !replaceConfirmed)) return;
+    let value: Track;
+    try {
+      value = await tracksApi.applyImport(selectedId, preview, importMode, importMode === 'merge' ? mergeDrafts : {});
+    } catch (reason) {
+      if (reason instanceof ApiError && reason.status === 409) {
+        setStaleImport(true);
+        setNotice('Import conflict. Your reviewed merge is retained. Refresh the import baseline to compare current saved content, reconcile your merge, and explicitly accept the baseline before retrying.');
+      }
+      throw reason;
+    }
     const refreshed = await Promise.all(preview.sections.map((item) => tracksApi.section(selectedId, item.section)));
     setDrafts((items) => {
       const next = { ...items };
@@ -176,6 +265,8 @@ export default function TracksPage() {
     });
     updateTrack(value);
     setPreview(null);
+    setImportSource(null);
+    setPreviousPreview(null);
     setNotice('Import saved locally. Earlier content is retained in version history.');
   });
 
@@ -205,19 +296,19 @@ export default function TracksPage() {
         <div className="track-list">
           <span className="track-list-label">Tracks{tracks.length ? ` · ${tracks.length}` : ''}</span>
           {!tracks.length ? <p className="track-list-empty">No research tracks yet. Name one above to begin.</p> : null}
+          {dirty ? <p className="track-list-note" role="status">Unsaved drafts are kept while you switch sections. Leaving this page asks for confirmation.</p> : null}
           {tracks.map((item) => <Link key={item.id} to={`/tracks?id=${encodeURIComponent(item.id)}`} className={`track-item${selectedId === item.id ? ' active' : ''}`}>
             <span className="track-item-title">{item.title}</span>
             <span className="track-item-meta">Updated {shortDate(item.updated_at)}</span>
             {Object.entries(drafts).some(([name, value]) => name.startsWith(`${item.id}:`) && value.content !== value.base.content) ? <span className="track-item-draft">Unsaved draft</span> : null}
           </Link>)}
         </div>
-        {dirty ? <p className="track-list-note" role="status">Unsaved drafts are kept while you switch sections. Leaving this page asks for confirmation.</p> : null}
       </aside>
 
       <main className="track-main">
-        {!selectedId ? <EmptyState icon="workspace" title="Select a research track"
-          description="A track keeps the problem statement, literature, experiments and results of one investigation together as Markdown files. Create a track or open an existing one." />
-          : !track ? <Loading label="Loading track…" /> : <>
+        {!selectedId ? (tracks.length ? <TrackOverview tracks={tracks} /> : <EmptyState icon="workspace" title="Select a research track"
+          description="A track keeps the problem statement, literature, experiments and results of one investigation together as Markdown files. Create a track or open an existing one." />)
+          : !track || !readyTrack ? <Loading label="Loading track…" /> : <>
             <header className="track-header">
               <div className="track-heading">
                 <h2>{track.title}</h2>
@@ -226,10 +317,56 @@ export default function TracksPage() {
                   <span><Icon name="papers" size={13} />{track.paper_ids.length} linked papers</span>
                   <span><Icon name="chat" size={13} />{track.conversation_ids.length} linked chats</span>
                 </div>
-                <code className="track-path" title="Workspace folder">{track.folder_path}</code>
               </div>
               <div className="button-row">
+                <button type="button" className="button secondary small" aria-expanded={addExisting}
+                  aria-controls="track-add-existing" disabled={busy} onClick={() => setAddExisting((value) => !value)}>
+                  <Icon name="plus" size={13} />Add existing
+                </button>
                 <Link className="button secondary small" to={`/deep-work?track=${encodeURIComponent(track.id)}`}>Deep Work</Link>
+                <button type="button" className="icon-button settings-trigger" aria-label="Track settings" title="Track settings"
+                  aria-haspopup="dialog" aria-expanded={settingsOpen} aria-controls="track-settings" onClick={() => setSettingsOpen(true)}>
+                  <Icon name="settings" size={20} /><span>Settings</span>
+                </button>
+              </div>
+            </header>
+            {addExisting ? <section id="track-add-existing" className="track-card" aria-label="Add existing to track">
+              <h3>Add existing papers and reviews</h3>
+              <p className="field-hint">Papers and their personal reader notes stay in the shared library. Reviews belong to one track; existing files and previously published notes are not moved or rewritten.</p>
+              <div className="track-add-existing-grid">
+                <div className="track-inline-form">
+                  <label>Library paper
+                    <select aria-label="Library paper" value={paperId} disabled={busy} onChange={(event) => setPaperId(event.target.value)}>
+                      <option value="">Choose a library paper</option>{papers.filter((item) => !track.paper_ids.includes(item.id)).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                    </select>
+                  </label>
+                  <button className="button secondary small" disabled={busy || !paperId} onClick={() => void addPaper()}>Link paper</button>
+                </div>
+                <div className="track-inline-form">
+                  <label>Saved review
+                    <select aria-label="Saved review" value={reviewId} disabled={busy || reviewsLoading || !!reviewError}
+                      onChange={(event) => setReviewId(event.target.value)}>
+                      <option value="">Choose a saved review</option>{reviews.filter((item) => item.track_id !== track.id).map((item) =>
+                        <option key={item.id} value={item.id} disabled={item.status === 'running'}>
+                          {item.title} ({item.track_id ? tracks.find((value) => value.id === item.track_id)?.title ?? item.track_id : 'No track'}{item.status === 'running' ? '; pause first' : ''})
+                        </option>)}
+                    </select>
+                  </label>
+                  <div className="button-row">
+                    <button className="button secondary small" disabled={busy || !reviewId || reviewsLoading || !!reviewError}
+                      onClick={() => void addReview()}>Add review to track</button>
+                    <button className="button ghost small" disabled={busy || reviewsLoading} onClick={() => setReviewVersion((value) => value + 1)}>Refresh saved reviews</button>
+                  </div>
+                  <p className="field-hint">Pause running reviews in Deep Work before moving them. Link their papers separately to include their reader highlights.</p>
+                </div>
+              </div>
+              {reviewError ? <ErrorNotice error={reviewError} /> : null}
+            </section> : null}
+            <SettingsDrawer id="track-settings" title="Track settings" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+              {error ? <ErrorNotice error={error} /> : null}
+              <section>
+                <h3>Import &amp; export</h3>
+                <p className="field-hint">Imports open a preview first. Nothing is saved until you apply the reviewed changes.</p>
                 <button className="button secondary small" disabled={busy} onClick={() => void perform(() => tracksApi.download(track.id))}><Icon name="download" size={13} />Export track ZIP</button>
                 <button className="button secondary small" disabled={busy || !!preview} onClick={() => fileInput.current?.click()}><Icon name="upload" size={13} />Import Markdown or ZIP</button>
                 <input ref={fileInput} hidden type="file" accept=".md,.markdown,.zip,text/markdown,application/zip" aria-label="Import track file" onChange={(event) => {
@@ -237,11 +374,57 @@ export default function TracksPage() {
                   event.target.value = '';
                   if (file) void importFile(file);
                 }} />
-              </div>
-            </header>
+                <code className="track-path" title="Workspace folder">{track.folder_path}</code>
+              </section>
+              <section>
+                <h3>Discuss in chat</h3>
+                <label>Assistance skill
+                  <select aria-label="Track assistance skill" value={skill} onChange={(event) => setSkill(event.target.value)}>
+                    <option value="">No specific skill</option>{skills.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </label>
+                <Link className="button secondary small" to={trackAssistUrl(track, section, skill)}><Icon name="chat" size={13} />Discuss {label(section)} in new chat</Link>
+                <p className="field-hint">Opens an unsent prompt using your normal chat model. It references saved content, not unsaved drafts.</p>
+              </section>
+              <section>
+                <h3>Recent section updates</h3>
+                <ul className="track-updates">{track.sections.map((item) => <li key={item.section}><span>{label(item.section)}</span><time dateTime={item.modified_at}>{shortDate(item.modified_at)}</time></li>)}</ul>
+              </section>
+            </SettingsDrawer>
             {track.warnings.length ? <div className="notice track-warnings" role="status"><div><strong>Track warnings</strong>
               <ul>{track.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : null}
 
+            <div className="button-row" aria-label="Research workspace views">
+              <button className="button secondary small" aria-pressed={workspaceView === 'notebook'} onClick={() => setWorkspaceView('notebook')}>Notebook</button>
+              <button className="button secondary small" aria-pressed={workspaceView === 'notes'} onClick={() => { setOpenedNotes(true); setWorkspaceView('notes'); }}>Reader highlights</button>
+              <button className="button secondary small" aria-pressed={workspaceView === 'repositories'} onClick={() => { setOpenedRepositories(true); setWorkspaceView('repositories'); }}>Code &amp; artifacts</button>
+              <button className="button secondary small" aria-pressed={workspaceView === 'writing'} onClick={() => { setOpenedWriting(true); setWorkspaceView('writing'); }}>Claims &amp; writing</button>
+            </div>
+            {openedNotes ? <div hidden={workspaceView !== 'notes'}><ReaderNotesPanel key={track.id} trackId={track.id}
+              revision={track.paper_ids.join(',')} /></div> : null}
+            {openedWriting ? <div hidden={workspaceView !== 'writing'}><WritingPanel key={track.id} track={track} papers={papers}
+              onManuscriptSaved={async () => {
+                const [metadata, saved] = await Promise.all([tracksApi.get(track.id), tracksApi.section(track.id, 'exploration/manuscript')]);
+                updateTrack(metadata);
+                setDrafts((items) => {
+                  const manuscriptKey = draftKey(track.id, 'exploration/manuscript');
+                  const existing = items[manuscriptKey];
+                  if (existing && existing.content !== existing.base.content) return items;
+                  return { ...items, [manuscriptKey]: { base: saved, content: saved.content } };
+                });
+              }}
+              onOpenManuscript={() => { setSection('exploration/manuscript'); setWorkspaceView('notebook'); }} /></div> : null}
+            {openedRepositories ? <div hidden={workspaceView !== 'repositories'}><LinkedRepositoryPanel key={track.id} trackId={track.id} experiments={track.experiments}
+              onResultsSaved={(saved) => {
+                const resultKey = draftKey(track.id, 'results');
+                setDrafts((items) => {
+                  const existing = items[resultKey];
+                  if (existing && existing.content !== existing.base.content) return items;
+                  return { ...items, [resultKey]: { base: saved, content: saved.content } };
+                });
+                void tracksApi.get(track.id).then(updateTrack).catch(setError);
+              }} /></div> : null}
+            <div hidden={workspaceView !== 'notebook'}>
             <div className="track-workspace">
               <section className="track-editor" aria-label="Track document">
                 <div role="tablist" aria-label="Track sections" className="track-tabs">
@@ -355,46 +538,55 @@ export default function TracksPage() {
                     <button className="icon-button small danger" title="Remove paper" disabled={busy} onClick={() => void perform(async () => { updateTrack(await tracksApi.paper(track.id, id, false)); })}>
                       <Icon name="close" size={13} /><span className="visually-hidden">Remove paper</span></button>
                   </li>)}</ul> : <p className="track-card-hint">No papers linked yet.</p>}
-                  <div className="track-inline-form">
-                    <select aria-label="Library paper" value={paperId} disabled={busy} onChange={(event) => setPaperId(event.target.value)}>
-                      <option value="">Choose a library paper</option>{papers.filter((item) => !track.paper_ids.includes(item.id)).map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-                    </select>
-                    <button className="button secondary small" disabled={busy || !paperId} onClick={() => void perform(async () => { updateTrack(await tracksApi.paper(track.id, paperId, true)); setPaperId(''); })}>Link paper</button>
-                  </div>
-                  <p className="track-card-hint">Links reuse library entries; PDFs are not copied.</p>
+                  <p className="track-card-hint">Use Add existing to link papers. PDFs and personal notes are shared, not copied.</p>
                 </section>
 
-                <section className="track-card">
-                  <header><h3>Discuss in chat</h3></header>
-                  <div className="track-inline-form">
-                    <select aria-label="Track assistance skill" value={skill} onChange={(event) => setSkill(event.target.value)}>
-                      <option value="">No specific skill</option>{skills.map((name) => <option key={name} value={name}>{name}</option>)}
-                    </select>
-                    <Link className="button secondary small" to={trackAssistUrl(track, section, skill)}><Icon name="chat" size={13} />Discuss {label(section)} in new chat</Link>
-                  </div>
-                  <p className="track-card-hint">Opens an unsent prompt using your normal chat model. It references saved content, not unsaved drafts.</p>
+                <section className="track-card" aria-label="Linked reviews">
+                  <header><h3>Linked reviews</h3><span className="tag">{reviews.filter((item) => item.track_id === track.id).length}</span></header>
+                  {reviewError ? <ErrorNotice error={reviewError} /> : reviewsLoading ? <Loading label="Loading reviews..." />
+                    : reviews.some((item) => item.track_id === track.id) ? <ul className="track-links">
+                      {reviews.filter((item) => item.track_id === track.id).map((item) => <li key={item.id}>
+                        <Link to={`/deep-work?${new URLSearchParams({ track: track.id, review: item.id })}`}>{item.title}</Link>
+                        {item.output_path ? <Link to={`/library/notes?${new URLSearchParams({ path: item.output_path })}`}>Report</Link> : null}
+                      </li>)}
+                    </ul> : <p className="track-card-hint">No saved reviews linked yet. Choose Add existing to attach one.</p>}
                 </section>
 
                 {track.conversation_ids.length ? <section className="track-card">
                   <header><h3>Linked chats</h3><span className="tag">{track.conversation_ids.length}</span></header>
                   <ul className="track-links">{track.conversation_ids.map((id) => <li key={id}>
-                    <Link to={`/?conversation=${encodeURIComponent(id)}`} title={id}><Icon name="chat" size={13} /><span>Open chat {id.slice(0, 8)}</span></Link>
+                    <Link to={`/chat?conversation=${encodeURIComponent(id)}`} title={id}><Icon name="chat" size={13} /><span>Open chat {id.slice(0, 8)}</span></Link>
                   </li>)}</ul>
                 </section> : null}
 
-                <section className="track-card">
-                  <header><h3>Recent section updates</h3></header>
-                  <ul className="track-updates">{track.sections.map((item) => <li key={item.section}><span>{label(item.section)}</span><time dateTime={item.modified_at}>{shortDate(item.modified_at)}</time></li>)}</ul>
-                </section>
               </aside>
             </div>
 
+            </div>
             {preview ? <section ref={importPanel} className="panel track-import" aria-label="Import preview">
               <header className="panel-header"><div><h2>Import preview — no changes saved yet</h2>
                 <p>{preview.paper_ids.length} incoming paper links. Existing local library papers are reused.</p></div></header>
+              {notice ? <p role="status">{notice}</p> : null}
+              {refreshedPreview ? <section aria-label="Refreshed import baseline" className="track-block">
+                <h3>Compare refreshed import baseline</h3>
+                <p>Your reviewed merge below is unchanged. Reconcile it with these current saved sections.
+                  Accepting this baseline does not save; Apply import still checks every revision and paper association.</p>
+                {refreshedPreview.sections.map((item) => <div key={item.section}>
+                  <h4>Latest saved {label(item.section)}</h4><pre>{item.current_content || '(new file)'}</pre>
+                </div>)}
+                {refreshedPreview.warnings.length ? <ul>{refreshedPreview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : null}
+                <button className="button secondary" disabled={busy} onClick={() => {
+                  if (window.confirm('Use the refreshed import baseline? Your reviewed merge stays unchanged. Reconcile all external changes before applying.')) {
+                    setPreviousPreview(preview); setPreview(refreshedPreview); setRefreshedPreview(null);
+                    setStaleImport(false); setReplaceConfirmed(false); setError(null);
+                    setNotice('Refreshed baseline accepted. Your reviewed merge is retained. Apply explicitly after reconciling; replacement requires confirmation again.');
+                  }
+                }}>Use refreshed import baseline</button>
+              </section> : null}
               {preview.warnings.length ? <div className="notice track-warnings"><ul>{preview.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div> : null}
               {preview.sections.map((item) => <div className="track-import-section" key={item.section}>
                 <h3>{label(item.section)}</h3>
+                {previousPreview ? <details><summary>Previous import baseline</summary><pre>{previousPreview.sections.find((previous) => previous.section === item.section)?.current_content}</pre></details> : null}
                 <details className="disclosure"><summary>Line-by-line diff</summary><pre>{item.diff || 'No differences'}</pre></details>
                 <div className="track-diff"><div><h4>Current content</h4><pre>{item.current_content}</pre></div><div><h4>Incoming content</h4><pre>{item.incoming_content}</pre></div></div>
                 {importMode === 'merge' ? <label className="field">Merged {label(item.section)} Markdown<textarea className="track-textarea" aria-label={`Merged ${label(item.section)} Markdown`} value={mergeDrafts[item.section] ?? ''} disabled={busy} onChange={(event) => setMergeDrafts((items) => ({ ...items, [item.section]: event.target.value }))} /></label> : null}
@@ -406,7 +598,8 @@ export default function TracksPage() {
                 {importMode === 'replace' ? <label className="check-row"><input type="checkbox" checked={replaceConfirmed} disabled={busy} onChange={(event) => setReplaceConfirmed(event.target.checked)} />I confirm replacing the displayed sections. Earlier content remains in history.</label> : null}
                 <div className="button-row">
                   <button className="button secondary" disabled={busy} onClick={() => { if (window.confirm('Discard this import preview and merged drafts?')) setPreview(null); }}>Cancel import</button>
-                  <button className="button" disabled={busy || (importMode === 'replace' && !replaceConfirmed)} onClick={() => void applyImport()}>Apply import</button>
+                  <button className="button secondary" disabled={busy || !importSource} onClick={() => void refreshImport()}>Refresh import baseline</button>
+                  <button className="button" disabled={busy || staleImport || !!refreshedPreview || (importMode === 'replace' && !replaceConfirmed)} onClick={() => void applyImport()}>Apply import</button>
                 </div>
               </div>
             </section> : null}

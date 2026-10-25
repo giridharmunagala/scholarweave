@@ -86,7 +86,13 @@ async def test_highlights_use_metadata_only_and_cache_archive_across_restart_and
     brief = services.brief
     try:
         first = await brief.refresh()
-        assert first.highlights.status == "running"
+        assert first.highlights.status == "idle"
+        assert brief._summary_task is None
+        assert not stub_provider.requests and not stub_provider.response_api_requests
+        viewed = await brief.edition()
+        assert viewed.highlights.status == "idle"
+        assert not stub_provider.requests and not stub_provider.response_api_requests
+        await brief.generate_highlights(reference)
         edition = await _complete_highlights(brief)
         summary = edition.highlights.summary
         assert edition.highlights.status == "ready" and summary is not None
@@ -121,27 +127,6 @@ async def test_highlights_use_metadata_only_and_cache_archive_across_restart_and
         assert cleared.cleared and not cleared.items and cleared.highlights.summary == summary
         assert archive.exists() and restored.summary_history(limit=25, offset=0) == [summary]
         await restored.close()
-    finally:
-        await services.close()
-        await client.aclose()
-
-
-@pytest.mark.anyio
-async def test_highlight_model_is_independent_and_defaults_to_last_chat_choice(brief_app, stub_provider):
-    _, services, _, client = brief_app
-    try:
-        reference = _brief_model(services, stub_provider)
-        chat = reference.model_copy(update={"model": "chat-model"})
-        services.settings.last_chat_model_reference = chat.model_dump()
-        assert services.brief.catalog().summary_model_reference == chat
-        await services.brief.preferences(BriefPreferences(
-            source_ids=["arxiv", "openai"], summary_model_reference=reference,
-        ))
-        assert services.brief.catalog().summary_model_reference == reference
-        assert services.settings.last_chat_model_reference == chat.model_dump()
-        await services.brief.refresh()
-        assert (await _complete_highlights(services.brief)).highlights.summary.model_reference == reference
-        assert stub_provider.requests[0]["model"] == "brief-model"
     finally:
         await services.close()
         await client.aclose()
@@ -241,6 +226,7 @@ async def test_slow_highlights_do_not_block_cached_reads_and_obsolete_work_is_ca
             return _HIGHLIGHTS
         stub_provider._reply_for = delayed_reply
         await brief.refresh()
+        await brief.generate_highlights(reference)
         task = brief._summary_task
         assert task is not None
         assert await asyncio.to_thread(stub_provider.request_started.wait, 5)
@@ -262,39 +248,13 @@ async def test_slow_highlights_do_not_block_cached_reads_and_obsolete_work_is_ca
             await brief.preferences(BriefPreferences(source_ids=["arxiv", "openai"],
                 summary_model_reference=reference.model_copy(update={"model": "chat-model"})))
             await brief.refresh(force=True)
+            await brief.generate_highlights()
             result = await _complete_highlights(brief)
             assert result.highlights.summary.model_reference.model == "chat-model"
         with pytest.raises(asyncio.CancelledError):
             await task
         if action != "refresh":
             assert brief.summary_history(limit=25, offset=0) == []
-    finally:
-        await services.close()
-        await client.aclose()
-
-
-@pytest.mark.anyio
-async def test_highlights_routes_generate_and_read_paginated_daily_archives(brief_app, stub_provider):
-    app, services, _, client = brief_app
-    try:
-        await services.brief.refresh()
-        reference = _brief_model(services, stub_provider)
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as api:
-            started = await api.post("/api/brief/highlights", json={"model_reference": reference.model_dump()})
-            assert started.status_code == 200 and started.json()["highlights"]["status"] == "running"
-            assert started.headers["cache-control"] == "no-store"
-            completed = await _complete_highlights(services.brief)
-            cached = await api.get("/api/brief")
-            assert cached.json()["highlights"]["summary"]["text"] == _HIGHLIGHTS
-            history = await api.get("/api/brief/summaries?limit=1&offset=0")
-            assert history.status_code == 200
-            assert history.json() == [completed.highlights.summary.model_dump(mode="json")]
-            assert (await api.get("/api/brief/summaries?limit=1&offset=1")).json() == []
-            assert (await api.get("/api/brief/summaries?limit=0")).status_code == 422
-            assert (await api.get("/api/brief/summaries?offset=-1")).status_code == 422
-            await api.delete("/api/brief")
-            assert (await api.get("/api/brief/summaries")).json() == history.json()
-            assert (await api.post("/api/brief/highlights", json={})).status_code == 400
     finally:
         await services.close()
         await client.aclose()

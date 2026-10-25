@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import hashlib
 import os
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -73,7 +74,7 @@ class SafeStorage:
         if len(content) > self.settings.max_upload_bytes:
             raise StorageError("Document exceeds maximum allowed size")
         self._safe_path(self.settings.workspace_dir, relative_path, {".pdf"})
-        return self._write_bytes(self.settings.workspace_dir, relative_path, content)
+        return self._write_bytes_atomic(self.settings.workspace_dir, relative_path, content)
 
     def resolve_path(self, base_dir: Path, relative_path: str) -> Path:
         return self._safe_path(base_dir, relative_path)
@@ -186,7 +187,14 @@ class SafeStorage:
         temporary_absolute = self._safe_path(base_dir, temporary_path)
         try:
             temporary = self._write_bytes(base_dir, temporary_path, content)
-            temporary.absolute_path.replace(target)
+            for attempt in range(5):
+                try:
+                    temporary.absolute_path.replace(target)
+                    break
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == 4:
+                        raise
+                    time.sleep(0.05 * 2**attempt)
         finally:
             temporary_absolute.unlink(missing_ok=True)
         return StoredFile(

@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from ipaddress import ip_address
 import logging
+import math
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -83,6 +84,7 @@ class ResolvedModel:
     default_reasoning_effort: str | None = None
     tool_reasoning_effort: str | None = None
     api_mode: ProviderApiMode = "chat_completions"
+    supports_vision: bool = False
 
     @property
     def agent_base_url(self) -> str:
@@ -199,6 +201,7 @@ class ModelRuntime:
             api_key=profile.api_key,
             model=model,
             api_mode=api_mode,
+            supports_vision="vision" in declared_capabilities,
             default_reasoning_effort=(profile.config_json or {}).get("default_reasoning_effort"),
             tool_reasoning_effort=(profile.config_json or {}).get("tool_reasoning_effort"),
             context_window_tokens=(
@@ -490,11 +493,43 @@ class ModelRuntime:
             )
             return response
         async with self.client(resolved) as client:
-            response = await client.embeddings.create(
+            response = await client.embeddings.with_raw_response.create(
                 model=resolved.model,
                 input=inputs,
+                encoding_format="float",
             )
-        return [item.embedding for item in response.data]
+        try:
+            payload = response.http_response.json()
+        except ValueError as exc:
+            raise ProviderRuntimeError("The embedding endpoint returned invalid JSON.") from exc
+        return _embedding_vectors(payload, 1 if isinstance(inputs, str) else len(inputs))
+
+
+def _embedding_vectors(payload: Any, expected_count: int) -> list[list[float]]:
+    # llama.cpp's native response is a bare list with one pooled vector per entry.
+    entries = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list) or len(entries) != expected_count:
+        raise ProviderRuntimeError("The embedding endpoint must return one vector per input.")
+    indexed: dict[int, list[float]] = {}
+    dimensions: int | None = None
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ProviderRuntimeError("The embedding endpoint returned an invalid entry.")
+        index = entry.get("index")
+        if type(index) is not int or not 0 <= index < expected_count or index in indexed:
+            raise ProviderRuntimeError("The embedding endpoint returned invalid or duplicate input indices.")
+        vector = entry.get("embedding")
+        if isinstance(vector, list) and len(vector) == 1 and isinstance(vector[0], list):
+            vector = vector[0]
+        if not isinstance(vector, list) or not vector or any(
+            type(value) not in (int, float) or not math.isfinite(value) for value in vector
+        ):
+            raise ProviderRuntimeError("The embedding endpoint must return finite pooled numeric vectors.")
+        if dimensions is not None and len(vector) != dimensions:
+            raise ProviderRuntimeError("The embedding endpoint returned inconsistent vector dimensions.")
+        dimensions = len(vector)
+        indexed[index] = [float(value) for value in vector]
+    return [indexed[index] for index in range(expected_count)]
 
 
 def _ollama_context_window(details: dict[str, Any]) -> int | None:

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from '../../shared/components/Icons';
 import { Panel, StatusPill } from '../../shared/components/Ui';
@@ -12,6 +12,7 @@ import {
   type ProviderCreate,
   type ProviderUpdate,
   type ProviderVerification,
+  type Settings,
 } from './api';
 
 const emptyProvider: ProviderCreate = {
@@ -27,21 +28,114 @@ type ModelCapability = (typeof modelCapabilities)[number];
 const modelSwitchHelp =
   'One LLM call at a time across all providers, including chat, summaries, and context maintenance. Queued chat calls get priority between responses, with regular turns for background work. Your model server manages hot swaps; no manual confirmation is needed.';
 
+function ModelContextField({
+  model,
+  disabled,
+  onSave,
+}: {
+  model: Provider['models'][number];
+  disabled: boolean;
+  onSave: (value: number | null) => Promise<boolean>;
+}) {
+  const descriptionId = useId();
+  const savedValue = String(model.context_window_tokens ?? '');
+  const [value, setValue] = useState(savedValue);
+  const [saveError, setSaveError] = useState(false);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    setValue(savedValue);
+    setSaveError(false);
+  }, [savedValue]);
+  const minimum = model.capabilities?.includes('decision')
+    && !model.capabilities.some((capability) => ['chat', 'tools', 'vision'].includes(capability))
+    ? 128 : 4096;
+  const parsed = value.trim() ? Number(value) : null;
+  const valid = parsed === null
+    || (Number.isInteger(parsed) && parsed >= minimum && parsed <= 2000000);
+  const dirty = value !== savedValue;
+  const save = async () => {
+    if (!valid || !dirty || disabled || saving) return;
+    setSaving(true);
+    setSaveError(false);
+    const succeeded = await onSave(parsed);
+    if (succeeded) setValue(String(parsed ?? ''));
+    setSaveError(!succeeded);
+    setSaving(false);
+  };
+  return (
+    <div className="provider-model-context-window">
+      <label className="field">
+        Context (tokens)
+        <input
+          type="text"
+          inputMode="numeric"
+          value={value}
+          placeholder="fallback"
+          disabled={disabled || saving}
+          aria-label={`${model.name} context window tokens`}
+          aria-invalid={!valid}
+          aria-describedby={descriptionId}
+          onChange={(event) => {
+            setValue(event.target.value);
+            setSaveError(false);
+          }}
+          onBlur={() => void save()}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              void save();
+            }
+          }}
+        />
+      </label>
+      <small id={descriptionId} role={!valid || saveError ? 'alert' : 'status'}>
+        {!valid ? `Enter a whole number from ${minimum} to 2000000, or leave blank for fallback.`
+          : saving ? 'Saving context…'
+            : saveError ? 'Context save failed or could not be confirmed. Retry or revert.'
+              : dirty ? 'Unsaved context. Leave the field or press Enter to save.'
+                : 'Saved context'}
+      </small>
+      {dirty ? (
+        <button
+          className="button secondary small"
+          type="button"
+          disabled={disabled || saving}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            setValue(savedValue);
+            setSaveError(false);
+          }}
+        >
+          Revert context
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 export function ProviderProfilesPanel({
   providers,
+  defaultReferences = [],
   onRefresh,
   onError,
 }: {
   providers: Provider[];
+  defaultReferences?: Settings['default_model_references'][];
   onRefresh: () => Promise<void>;
   onError: (error: unknown) => void;
 }) {
   const [draft, setDraft] = useState<ProviderCreate>(emptyProvider);
   const [showCreate, setShowCreate] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [archiveProviderId, setArchiveProviderId] = useState<string | null>(null);
+  const [endpointDraft, setEndpointDraft] = useState<{ providerId: string; baseUrl: string } | null>(null);
   const [verification, setVerification] = useState<
     Record<string, ProviderVerification>
   >({});
+  const [verificationErrors, setVerificationErrors] = useState<Record<string, string>>({});
+  const [manualName, setManualName] = useState('');
+  const [manualCapabilities, setManualCapabilities] = useState<ModelCapability[]>(['chat']);
+  const [manualError, setManualError] = useState<string | null>(null);
   const [modelQueries, setModelQueries] = useState<Record<string, string>>({});
   const [catalogProviderId, setCatalogProviderId] = useState<string | null>(null);
   const [modelFilter, setModelFilter] = useState<'all' | 'enabled' | 'disabled'>('all');
@@ -63,10 +157,10 @@ export function ProviderProfilesPanel({
       })
     : [];
   const enabledModelCount = catalogProvider?.models.filter((model) => model.enabled).length ?? 0;
-  const modelUpdateBusy =
-    busy?.startsWith('enable:')
-    || busy?.startsWith('enable-visible:')
-    || busy?.startsWith('configure:');
+  const modelUpdateBusy = busy !== null;
+  const activeProviders = providers.filter((provider) => provider.state !== 'archived');
+  const fallbackProvider = activeProviders.find((provider) => provider.name === 'Default Ollama')
+    ?? activeProviders[0];
 
   useEffect(() => {
     if (!catalogProviderId) return;
@@ -114,10 +208,20 @@ export function ProviderProfilesPanel({
   const verify = async (provider: Provider, model: string) => {
     const key = `${provider.id}:${model}`;
     setBusy(`verify:${key}`);
+    setVerification((current) => Object.fromEntries(
+      Object.entries(current).filter(([entry]) => entry !== key),
+    ));
+    setVerificationErrors((current) => Object.fromEntries(
+      Object.entries(current).filter(([entry]) => entry !== key),
+    ));
     try {
       const result = await providersApi.verify(provider.id, model);
       setVerification((current) => ({ ...current, [key]: result }));
     } catch (error) {
+      setVerificationErrors((current) => ({
+        ...current,
+        [key]: error instanceof Error ? error.message : String(error),
+      }));
       onError(error);
     } finally {
       setBusy(null);
@@ -128,7 +232,54 @@ export function ProviderProfilesPanel({
     try {
       await providersApi.archive(provider.id);
       await onRefresh();
+      setArchiveProviderId(null);
     } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const restore = async (provider: Provider) => {
+    setBusy(`restore:${provider.id}`);
+    try {
+      await providersApi.restore(provider.id);
+      await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+  const registerModel = async (provider: Provider) => {
+    const name = manualName.trim();
+    if (!name || name.length > 255) {
+      setManualError('Enter a model or deployment name from 1 to 255 characters.');
+      return;
+    }
+    if (provider.models.some((model) => model.name === name)) {
+      setManualError('This model is already configured. Edit it in the catalogue below.');
+      return;
+    }
+    if (!manualCapabilities.length) {
+      setManualError('Select at least one capability for this model.');
+      return;
+    }
+    setBusy(`register:${provider.id}`);
+    setManualError(null);
+    try {
+      await providersApi.update(provider.id, {
+        serialize_model_switches: provider.serialize_model_switches,
+        models: [
+          ...provider.models,
+          { name, capabilities: manualCapabilities, enabled: true, preserve_thinking: false },
+        ],
+      });
+      await onRefresh();
+      setManualName('');
+      setModelQueries((current) => ({ ...current, [provider.id]: '' }));
+      setModelFilter('all');
+    } catch (error) {
+      setManualError(error instanceof Error ? error.message : String(error));
       onError(error);
     } finally {
       setBusy(null);
@@ -188,6 +339,7 @@ export function ProviderProfilesPanel({
           return { ...model, capabilities: [...capabilities] };
         }),
       });
+      clearVerification(provider.id);
       await onRefresh();
     } catch (error) {
       onError(error);
@@ -219,6 +371,7 @@ export function ProviderProfilesPanel({
           };
         }),
       });
+      clearVerification(provider.id);
       await onRefresh();
     } catch (error) {
       onError(error);
@@ -243,8 +396,10 @@ export function ProviderProfilesPanel({
         ),
       });
       await onRefresh();
+      return true;
     } catch (error) {
       onError(error);
+      return false;
     } finally {
       setBusy(null);
     }
@@ -274,7 +429,18 @@ export function ProviderProfilesPanel({
   };
   const openCatalog = (providerId: string) => {
     setModelFilter('all');
+    setManualName('');
+    setManualCapabilities(['chat']);
+    setManualError(null);
     setCatalogProviderId(providerId);
+  };
+  const clearVerification = (providerId: string) => {
+    setVerification((current) => Object.fromEntries(
+      Object.entries(current).filter(([key]) => !key.startsWith(`${providerId}:`)),
+    ));
+    setVerificationErrors((current) => Object.fromEntries(
+      Object.entries(current).filter(([key]) => !key.startsWith(`${providerId}:`)),
+    ));
   };
   const setReasoningOverride = async (
     provider: Provider,
@@ -289,6 +455,7 @@ export function ProviderProfilesPanel({
     setBusy(`reasoning:${provider.id}`);
     try {
       await providersApi.update(provider.id, payload);
+      clearVerification(provider.id);
       await onRefresh();
     } catch (error) {
       onError(error);
@@ -305,7 +472,26 @@ export function ProviderProfilesPanel({
         api_mode: value,
         serialize_model_switches: provider.serialize_model_switches,
       });
+      clearVerification(provider.id);
       await onRefresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const saveEndpoint = async (provider: Provider) => {
+    if (!endpointDraft || endpointDraft.providerId !== provider.id) return;
+    setBusy(`endpoint:${provider.id}`);
+    try {
+      await providersApi.update(provider.id, {
+        base_url: endpointDraft.baseUrl.trim(),
+        serialize_model_switches: provider.serialize_model_switches,
+      });
+      clearVerification(provider.id);
+      await onRefresh();
+      setEndpointDraft(null);
     } catch (error) {
       onError(error);
     } finally {
@@ -367,11 +553,47 @@ export function ProviderProfilesPanel({
           is stated once here instead of repeated on every provider card. */}
       <p className="notice info provider-lane-note">{modelSwitchHelp}</p>
       <div className="card-grid">
-        {providers.map((provider) => {
+        {activeProviders.map((provider) => {
+          const referencedRoles = [...new Set(defaultReferences.flatMap((references) =>
+            Object.entries(references)
+              .filter(([, reference]) => reference.provider_profile_id === provider.id
+                || (!reference.provider_profile_id && reference.model && fallbackProvider?.id === provider.id))
+              .map(([role]) => role),
+          ))];
           return (
             <article className="card stack" key={provider.id}>
               <div className="toolbar"><span className="eyebrow">{provider.kind}</span><StatusPill value={provider.state} /></div>
               <div><h2>{provider.name}</h2><code>{provider.base_url}</code></div>
+              {endpointDraft?.providerId === provider.id ? (
+                <form className="stack" onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveEndpoint(provider);
+                }}>
+                  <label className="field">
+                    Base URL
+                    <input
+                      aria-label={`Base URL for ${provider.name}`}
+                      type="url"
+                      required
+                      maxLength={1024}
+                      value={endpointDraft.baseUrl}
+                      disabled={busy !== null}
+                      onChange={(event) => setEndpointDraft({ providerId: provider.id, baseUrl: event.target.value })}
+                    />
+                  </label>
+                  <p>Change the host or port without losing saved models, API keys, or settings. Keep the API path, such as /v1, if your server requires it. Verify your models after saving.</p>
+                  <div className="button-row">
+                    <button className="button small" type="submit" disabled={busy !== null || !endpointDraft.baseUrl.trim()}>
+                      {busy === `endpoint:${provider.id}` ? 'Saving...' : 'Save URL'}
+                    </button>
+                    <button className="button secondary small" type="button" disabled={busy !== null} onClick={() => setEndpointDraft(null)}>Cancel</button>
+                  </div>
+                </form>
+              ) : (
+                <div>
+                  <button className="button secondary small" type="button" disabled={busy !== null} onClick={() => setEndpointDraft({ providerId: provider.id, baseUrl: provider.base_url })}>Edit URL</button>
+                </div>
+              )}
               <label className="field">
                 Generation API
                 <select
@@ -403,8 +625,7 @@ export function ProviderProfilesPanel({
                 ))}
                 <p>For the OpenAI error &quot;Function tools with reasoning-effort are not supported&quot;, select Responses if your deployment supports it and clear the tool reasoning override to retain reasoning. Otherwise set reasoning effort with tools to none; it does not enable unsupported reasoning plus tools. Leave overrides unset for models that do not accept reasoning.</p>
               </details>
-              {provider.models.length ? (
-                <button
+              <button
                   className="provider-model-catalog-trigger"
                   type="button"
                   aria-pressed={catalogProviderId === provider.id}
@@ -415,16 +636,44 @@ export function ProviderProfilesPanel({
                     {provider.models.filter((model) => model.enabled).length}/{provider.models.length}
                   </span>
                   <Icon name="arrowRight" size={14} />
-                </button>
-              ) : <p>No configured models. Discover models before assigning defaults.</p>}
+              </button>
+              {!provider.models.length ? <p>No configured models. Discover models or register a model manually in Manage models.</p> : null}
               <div className="button-row">
-                <button className="button secondary small" type="button" disabled={busy === `discover:${provider.id}`} onClick={() => void discover(provider)}>{busy === `discover:${provider.id}` ? 'Discovering…' : 'Discover models'}</button>
-                <button className="button danger small" type="button" disabled={busy === `archive:${provider.id}`} onClick={() => void archive(provider)}>Archive</button>
+                <button className="button secondary small" type="button" disabled={busy !== null} onClick={() => void discover(provider)}>{busy === `discover:${provider.id}` ? 'Discovering…' : 'Discover models'}</button>
+                <button className="button danger small" type="button" disabled={busy !== null} onClick={() => setArchiveProviderId(provider.id)}>Archive</button>
               </div>
+              {archiveProviderId === provider.id ? (
+                <div className="notice warning stack" role="alertdialog" aria-label={`Archive ${provider.name}?`}>
+                  <strong>Archive {provider.name}?</strong>
+                  {referencedRoles.length ? <p>This profile is referenced by saved or unsaved defaults: {referencedRoles.join(', ')}.</p> : null}
+                  <p>Models in this profile will become unavailable, including in existing chats and research tasks. Defaults and history will not be cleared. Restore this profile below to recover the same identity, models, and credentials.</p>
+                  <div className="button-row">
+                    <button className="button danger small" type="button" disabled={busy !== null} onClick={() => void archive(provider)}>
+                      {busy === `archive:${provider.id}` ? 'Archiving…' : 'Confirm archive'}
+                    </button>
+                    <button className="button secondary small" type="button" autoFocus disabled={busy !== null} onClick={() => setArchiveProviderId(null)}>Cancel archive</button>
+                  </div>
+                </div>
+              ) : null}
             </article>
           );
         })}
       </div>
+      {providers.some((provider) => provider.state === 'archived') ? (
+        <section className="stack provider-archived" aria-label="Archived providers">
+          <h2>Archived providers</h2>
+          <p>Restore a profile to make its saved model references usable again. Its identity and credentials are retained.</p>
+          {providers.filter((provider) => provider.state === 'archived').map((provider) => (
+            <div className="toolbar" key={provider.id}>
+              <strong>{provider.name}</strong>
+              <StatusPill value="archived" />
+              <button className="button secondary small" type="button" disabled={busy !== null} onClick={() => void restore(provider)}>
+                {busy === `restore:${provider.id}` ? 'Restoring…' : `Restore ${provider.name}`}
+              </button>
+            </div>
+          ))}
+        </section>
+      ) : null}
       {catalogProvider
         ? createPortal(
             <div
@@ -521,6 +770,44 @@ export function ProviderProfilesPanel({
                   Showing {visibleCatalogModels.length} of {catalogProvider.models.length} models
                 </div>
                 <div className="provider-models">
+                  <form className="provider-model-manual stack" onSubmit={(event) => {
+                    event.preventDefault();
+                    void registerModel(catalogProvider);
+                  }}>
+                    <strong>Register a model manually</strong>
+                    <p>Discovery is optional. Enter the exact model ID or deployment name accepted by this endpoint. Capability choices declare intended use, not verified support. Verify checks a response and tool calling, or embeddings or System One decisions for dedicated models. Image understanding is not tested.</p>
+                    <label className="field">
+                      Model or deployment name
+                      <input
+                        value={manualName}
+                        maxLength={255}
+                        required
+                        disabled={modelUpdateBusy}
+                        onChange={(event) => {
+                          setManualName(event.target.value);
+                          setManualError(null);
+                        }}
+                      />
+                    </label>
+                    <fieldset disabled={modelUpdateBusy}>
+                      <legend>Model capabilities</legend>
+                      <div className="button-row">
+                        {modelCapabilities.map((capability) => (
+                          <label key={capability}>
+                            <input type="checkbox" checked={manualCapabilities.includes(capability)} onChange={(event) => {
+                              setManualCapabilities((current) => event.target.checked
+                                ? [...current, capability] : current.filter((item) => item !== capability));
+                            }} />
+                            {capability}
+                          </label>
+                        ))}
+                      </div>
+                    </fieldset>
+                    {manualError ? <p role="alert">{manualError}</p> : null}
+                    <div><button className="button secondary small" type="submit" disabled={modelUpdateBusy || !manualName.trim()}>
+                      {busy === `register:${catalogProvider.id}` ? 'Registering…' : 'Register model'}
+                    </button></div>
+                  </form>
                   {visibleCatalogModels.map((model) => {
                     const key = `${catalogProvider.id}:${model.name}`;
                     const result = verification[key];
@@ -556,42 +843,11 @@ export function ProviderProfilesPanel({
                             </label>
                           ))}
                         </span>
-                        <label className="provider-model-context-window">
-                          Context
-                          <input
-                            type="number"
-                            min={model.capabilities?.includes('decision') && !model.capabilities.some((value) => ['chat', 'tools', 'vision'].includes(value)) ? 128 : 4096}
-                            max={2000000}
-                            step={128}
-                            defaultValue={model.context_window_tokens ?? ''}
-                            placeholder="fallback"
-                            disabled={modelUpdateBusy}
-                            aria-label={`${model.name} context window tokens`}
-                            onBlur={(event) => {
-                              const nextValue = event.target.value
-                                ? Number(event.target.value)
-                                : null;
-                              if (
-                                nextValue !== (model.context_window_tokens ?? null)
-                                && (
-                                  nextValue === null
-                                  || (
-                                    Number.isInteger(nextValue)
-                                    && nextValue >= (model.capabilities?.includes('decision') && !model.capabilities.some((value) => ['chat', 'tools', 'vision'].includes(value)) ? 128 : 4096)
-                                    && nextValue <= 2000000
-                                  )
-                                )
-                              ) {
-                                void setModelContextWindow(
-                                  catalogProvider,
-                                  model.name,
-                                  nextValue,
-                                );
-                              }
-                            }}
-                          />
-                          tokens
-                        </label>
+                        <ModelContextField
+                          model={model}
+                          disabled={modelUpdateBusy}
+                          onSave={(value) => setModelContextWindow(catalogProvider, model.name, value)}
+                        />
                         <details className="provider-model-reasoning">
                           <summary>
                             Thinking: {
@@ -662,13 +918,25 @@ export function ProviderProfilesPanel({
                         <button
                           className="button secondary small"
                           type="button"
-                          disabled={busy === `verify:${key}`}
+                          disabled={busy !== null}
                           onClick={() => void verify(catalogProvider, model.name)}
                         >
-                          Verify
+                          {busy === `verify:${key}` ? 'Verifying…' : 'Verify'}
                         </button>
+                        {busy === `verify:${key}` ? <p role="status">Checking {model.name} capabilities…</p> : null}
+                        {verificationErrors[key] ? <p className="notice danger provider-verification" role="alert">Verification failed: {verificationErrors[key]}</p> : null}
                         {result ? (
-                          <StatusPill value={result.reachable ? 'reachable' : 'failed'} />
+                          <div className="provider-verification" role="status">
+                            <strong>
+                              {!result.reachable ? 'Verification failed'
+                                : model.capabilities?.includes('decision') && !model.capabilities.some((capability) => ['chat', 'tools', 'vision'].includes(capability))
+                                  ? 'Decision response verified · tools not tested'
+                                  : model.capabilities?.includes('embedding') && !model.capabilities.some((capability) => ['chat', 'tools'].includes(capability))
+                                    ? 'Embedding response verified · tools not tested'
+                                    : result.tool_calling ? 'Response and tool calling verified' : 'Response received · tool calling not verified'}
+                            </strong>
+                            <p>{result.detail}</p>
+                          </div>
                         ) : null}
                       </div>
                     );

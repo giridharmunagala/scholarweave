@@ -23,8 +23,8 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-async function render(count: number, running = true, total = 20) {
-  await act(async () => root.render(<ProgressTiming count={count} total={total} running={running} />));
+async function render(count: number, running = true, total = 20, windowSeconds?: number) {
+  await act(async () => root.render(<ProgressTiming count={count} total={total} running={running} windowSeconds={windowSeconds} />));
 }
 
 async function advance(seconds: number) {
@@ -45,20 +45,40 @@ it('measures new completions, not historical counts, and updates ETA during wait
   expect(container.textContent).toContain('not model-request RPM/RPS');
 });
 
-it('resets on pause, resume, and counter rollback instead of including inactive time', async () => {
-  await render(0);
+it.each([undefined, 120])('resets on pause, resume, and counter rollback with window %s', async (windowSeconds) => {
+  const update = (count: number, running = true) => render(count, running, 20, windowSeconds);
+  await update(0);
   await advance(60);
-  await render(2);
-  await render(2, false);
+  await update(2);
+  await update(2, false);
   expect(container.textContent).toContain('Not running');
   await advance(600);
-  await render(2);
+  await update(2);
   expect(container.textContent).toContain('Measuring speed');
   await advance(60);
-  await render(4);
+  await update(4);
   expect(container.textContent).toContain('2.0 papers/min');
-  await render(1);
+  await update(1);
   expect(container.textContent).toContain('Measuring speed');
+});
+
+it('uses only completions in the rolling two-minute window and withholds ETA after a stall', async () => {
+  await render(10, true, 100, 120);
+  await advance(60);
+  await render(22, true, 100, 120);
+  expect(container.textContent).toContain('12.0 papers/min');
+  await advance(60);
+  await render(24, true, 100, 120);
+  expect(container.textContent).toContain('7.0 papers/min');
+  await advance(60);
+  await render(28, true, 100, 120);
+  expect(container.textContent).toContain('3.0 papers/min');
+  expect(container.textContent).toContain('~24 min remaining');
+  await advance(120);
+  expect(container.textContent).toContain('No papers completed in the last 2 min');
+  expect(container.textContent).not.toMatch(/~\d/);
+  await render(29, true, 100, 120);
+  expect(container.textContent).toContain('0.5 papers/min');
 });
 
 it('marks completed tasks without forecasting more work and handles growing totals', async () => {

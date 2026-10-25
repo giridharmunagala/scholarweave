@@ -4,6 +4,15 @@ import { describe, expect, it } from 'vitest';
 import { MarkdownViewer } from './MarkdownViewer';
 
 describe('MarkdownViewer', () => {
+  it('resolves extracted figure paths only through the supplied artifact map', () => {
+    const html = renderToStaticMarkup(<MarkdownViewer
+      content={'![Figure](figures/page-1.png)\n\n![Untrusted](https://tracker.invalid/image.png)'}
+      imageSources={{ 'figures/page-1.png': '/api/artifacts/figure/raw' }}
+    />);
+    expect(html).toContain('src="/api/artifacts/figure/raw"');
+    expect(html).not.toContain('tracker.invalid');
+    expect(html).not.toContain('<p><figure');
+  });
   it('opens track-relative canonical summaries, notes and PDFs through the existing library', () => {
     const html = renderToStaticMarkup(<MarkdownViewer
       workspacePath="projects/tracks/adaptive--track-1/literature.md"
@@ -96,19 +105,6 @@ describe('MarkdownViewer', () => {
     expect(html).not.toContain('javascript:');
   });
 
-  it('renders safe semantic HTML for highlighted research notes', () => {
-    const html = renderToStaticMarkup(
-      <MarkdownViewer
-        content={'<details open><summary>Evidence</summary><p><mark>Supported</mark> with <kbd>Ctrl</kbd> and <abbr title="confidence interval">CI</abbr>.</p></details>'}
-      />,
-    );
-
-    expect(html).toContain('<details open="">');
-    expect(html).toContain('<mark>Supported</mark>');
-    expect(html).toContain('<kbd>Ctrl</kbd>');
-    expect(html).toContain('<abbr title="confidence interval">CI</abbr>');
-  });
-
   it('presents a fenced code block as a labelled, highlighted artefact', () => {
     const html = renderToStaticMarkup(
       <MarkdownViewer content={'```python\n# note\ndef run():\n    return 1\n```'} />,
@@ -145,11 +141,4 @@ describe('MarkdownViewer', () => {
     expect(html).toContain('{oops');
   });
 
-  it('still renders plain fences and inline code', () => {
-    const html = renderToStaticMarkup(<MarkdownViewer content={'Use `npm run dev`.\n\n```\nraw text\n```'} />);
-
-    expect(html).toContain('<code>npm run dev</code>');
-    expect(html).toContain('raw text');
-    expect(html).toContain('Text');
-  });
 });

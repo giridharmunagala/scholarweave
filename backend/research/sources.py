@@ -38,6 +38,10 @@ _WEB_PAGE_HEADERS = {
 }
 
 
+class SourceDownloadError(RuntimeError):
+    pass
+
+
 class WebSourceUnavailable(ValueError):
     def __init__(self, url: str, reason: str) -> None:
         super().__init__(reason)
@@ -502,7 +506,7 @@ class SourceDownloadService:
                         parts.append(part)
                     return b"".join(parts), str(response.url), response.headers
             except httpx.HTTPError as exc:
-                raise RuntimeError(f"Remote download failed: {exc}") from exc
+                raise SourceDownloadError(f"Remote download failed: {exc}") from exc
         raise ValueError("Remote resource redirected too many times.")
 
     @asynccontextmanager

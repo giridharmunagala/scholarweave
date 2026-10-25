@@ -1,0 +1,17 @@
+.writing-workspace { display: grid; gap: 1rem; min-width: 0; }
+.writing-workspace .panel { padding: 1rem; min-width: 0; }
+.writing-workspace label { display: grid; gap: .35rem; margin-block: .75rem; }
+.writing-workspace textarea { width: 100%; min-height: 5rem; }
+.writing-workspace .track-textarea { min-height: 24rem; }
+.writing-workspace pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+.writing-workspace code { overflow-wrap: anywhere; }
+.writing-workspace select { max-width: 100%; }
+.writing-claim-list { display: grid; gap: .75rem; margin-block: 1rem; }
+.writing-claim { border-bottom: 1px solid var(--border); padding-block: .75rem; }
+.writing-claim details { margin-block: .5rem; }
+.writing-source-picker { display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; }
+.writing-source-picker label:first-child { flex: 1; min-width: 12rem; }
+.writing-source-picker input { width: 6rem; }
+.writing-source, .writing-comparison { margin-block: 1rem; }
+.writing-evidence-draft { display: flex; gap: .5rem; align-items: start; padding-block: .5rem; overflow-wrap: anywhere; }
+.writing-evidence-draft span { flex: 1; min-width: 0; }

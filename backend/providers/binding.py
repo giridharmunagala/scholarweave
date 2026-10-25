@@ -94,4 +94,5 @@ class ProfileModelResolver:
             tool_reasoning_effort=resolved.tool_reasoning_effort,
             api_mode=resolved.api_mode,
             provider_profile_id=resolved.profile_id,
+            supports_vision=resolved.supports_vision,
         )

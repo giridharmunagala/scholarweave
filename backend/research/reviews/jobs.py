@@ -9,13 +9,14 @@ from dataclasses import replace
 from typing import Any, overload
 from urllib.parse import urlsplit, urlunsplit
 
-from openai import NotFoundError as ProviderNotFoundError
+from openai import NotFoundError as ProviderNotFoundError, pydantic_function_tool
 
 from backend.agents.blueprint import AgentBlueprint, ModelReferenceSpec
 from backend.agents.compiler import AgentCompiler, CompiledAgent
-from backend.agents.context_budget import ContextBudgetPolicy, model_context_budget
+from backend.agents.context_budget import ContextBudgetPolicy, IMAGE_INPUT_TOKEN_RESERVE, _estimated_tokens, model_context_budget
 from backend.agents.input_budget import InputBudget
 from backend.core.errors import NotFoundError, ValidationError
+from backend.documents.service import DocumentService
 from backend.prompting.registry import PromptRegistry
 from backend.providers.decisions import decision_input_size, score_decisions
 from backend.providers.inference import inference_priority
@@ -47,12 +48,14 @@ class ReviewJobs:
     def __init__(
         self, repository: ReviewRepository, runs: RunService, compiler: AgentCompiler,
         runtime: ModelRuntime, prompts: PromptRegistry,
+        documents: DocumentService,
     ) -> None:
         self.repository = repository
         self.runs = runs
         self.compiler = compiler
         self.runtime = runtime
         self.prompts = prompts
+        self.documents = documents
 
     def usage(self, review_id: str) -> tuple[int, bool]:
         jobs = self.repository.jobs(review_id)
@@ -137,6 +140,8 @@ class ReviewJobs:
         budget = InputBudget(resolved.model, min(input_limit, input_tokens) if input_tokens is not None else input_limit)
         # The wire schema and runtime system information are additional to agent instructions.
         budget.limit -= (budget.count("", json_text(schema.model_json_schema())) if schema is not None else 0) + 1024
+        if prompt_id in {"literature-evidence", "literature-compact-summary", "literature-references"}:
+            budget.limit -= input_limit // 3
         if budget.limit <= 0:
             raise ValidationError("The selected model context cannot accommodate this worker's instructions and request overhead.")
         if prompt_id == "literature-analysis-sources":
@@ -154,6 +159,27 @@ class ReviewJobs:
                 prompt_registry=self.prompts, request_token_counter=count_request,
             ))
         return compiled, budget, output_limit
+
+    def _paper_input(self, packet: dict, prepared: tuple[CompiledAgent, InputBudget, int]) -> tuple[str, list[dict]]:
+        compiled, _, _ = prepared
+        numbers = list(dict.fromkeys(
+            row["page"] for row in packet.get("records", [])
+            if isinstance(row, dict) and isinstance(row.get("page"), int) and "text" in row
+        ))
+        if not packet.get("document_id") or not numbers:
+            return json_text(packet), []
+        input_limit, _, _ = model_context_budget(
+            compiled.context_window_tokens or self.runtime.settings.agent_context_window_tokens,
+            compiled.entry_agent.model_settings.max_tokens,
+        )
+        allowance = input_limit // 3
+        images = max(0, (allowance - 1024) // (IMAGE_INPUT_TOKEN_RESERVE + 128)) if compiled.entry_agent.binding.supports_vision else 0
+        evidence = self.documents.paper_context(
+            packet["document_id"], numbers, include_images=compiled.entry_agent.binding.supports_vision,
+            max_images=images, max_chars=max(0, allowance - images * (IMAGE_INPUT_TOKEN_RESERVE + 128)) // 2,
+        )
+        content = [part for part in evidence.pop("source_content") if part["type"] == "image_url"]
+        return json_text({**packet, "paper_evidence": evidence}), content
 
     def packets(
         self, records: Iterable[dict], frame: dict, prepared: tuple[CompiledAgent, InputBudget, int],
@@ -312,11 +338,16 @@ class ReviewJobs:
         compiled, budget, reserve = prepared
         prompt = json_text(packet)
         binding = compiled.entry_agent.binding
+        has_paper_source = bool(packet.get("document_id") and any(
+            isinstance(row, dict) and isinstance(row.get("page"), int) and "text" in row
+            for row in packet.get("records", [])
+        ))
         provenance = {
             "model": binding.model_name, "provider_profile_id": binding.provider_profile_id,
             "api_mode": binding.api_mode, "context_tokens": compiled.context_window_tokens,
             "prompt_hash": digest(compiled.entry_agent.instructions), "input_hash": digest(packet),
             "endpoint_hash": digest(str(binding.client.base_url)), "provider_kind": binding.provider_kind,
+            **({"paper_context": {"version": 1, "vision": binding.supports_vision}} if has_paper_source else {}),
         }
         job_key = f"{key}:{digest(provenance)}"
         state = self.repository.get(review_id).state
@@ -328,7 +359,7 @@ class ReviewJobs:
                 if (
                     previous.get("status") in {"completed", "settled"}
                     and previous.get("key") == f"{key}:{digest(prior_provenance)}"
-                    and all(prior_provenance.get(field) == provenance[field] for field in ("prompt_hash", "input_hash"))
+                    and all(prior_provenance.get(field) == provenance.get(field) for field in ("prompt_hash", "input_hash", "paper_context"))
                 ):
                     return self._validate_result(review_id, previous["key"], stage, {
                         **previous, "raw_result": previous.get("result", previous.get("raw_result")),
@@ -351,8 +382,28 @@ class ReviewJobs:
                      if budget.method == "provider-tokenize" else budget.count(compiled.entry_agent.instructions, prompt))
         if estimated > budget.limit:
             raise ValidationError("Review input exceeds its admitted context. No truncated request was sent.")
+        prompt, source_content = self._paper_input(packet, prepared)
+        if has_paper_source:
+            estimated = (
+                await self._provider_input_count(prompt, prepared) if budget.method == "provider-tokenize"
+                else budget.count(compiled.entry_agent.instructions, prompt)
+            ) + _estimated_tokens(source_content)
+            input_limit, _, _ = model_context_budget(
+                compiled.context_window_tokens or self.runtime.settings.agent_context_window_tokens,
+                compiled.entry_agent.model_settings.max_tokens,
+            )
+            if estimated > budget.limit + input_limit // 3:
+                raise ValidationError(
+                    "Paper layout and image evidence exceed this source packet's admitted context. "
+                    "Use a narrower source range or a larger model context; no oversized request was sent."
+                )
         if self.repository.get(review_id).state["status"] != "running":
             raise ReviewPaused()
+        if self.repository.get(review_id).specification.get("embedding_model"):
+            return await self._workspace_call(
+                review_id, stage, job_key, saved, packet, prepared, schema, validate, estimated,
+                prompt=prompt, source_content=source_content,
+            )
         run = None
         if saved.get("run_id"):
             try:
@@ -375,7 +426,9 @@ class ReviewJobs:
                 self.repository.save_job(review_id, job_key, stage, saved)
             with inference_priority("background"):
                 run = self.runs.create(
-                    compiled, prompt, conversation_id=None,
+                    compiled, [{"role": "user", "content": [
+                        {"type": "text", "text": prompt}, *source_content,
+                    ]}] if source_content else prompt, conversation_id=None,
                     runtime_metadata={"autonomous_work": True, "literature_review_id": review_id},
                     run_id=saved["run_id"],
                 )
@@ -411,6 +464,84 @@ class ReviewJobs:
             raise ValidationError(run.error or f"The isolated review task was {run.status}. Resume retries only this unfinished task.")
         return self._validate_result(review_id, job_key, stage, saved, schema, validate)
 
+    async def _workspace_call(
+        self, review_id: str, stage: str, key: str, saved: dict, packet: dict,
+        prepared: tuple[CompiledAgent, InputBudget, int], schema: type[ReviewSchema] | None,
+        validate: Callable[[dict], None] | None, estimated: int,
+        *, prompt: str, source_content: list[dict],
+    ) -> dict | str:
+        compiled, _, reserve = prepared
+        binding = compiled.entry_agent.binding
+        resolved = self.runtime.resolve("chat", model_reference=ModelReference(
+            provider_profile_id=binding.provider_profile_id, model=binding.model_name,
+        ))
+        role = self.repository.get(review_id).state.get("summary_model",
+            self.repository.get(review_id).specification.get("summary_model"))
+        if stage == "reading" and role and role.get("reasoning_effort") is not None:
+            resolved = replace(resolved, default_reasoning_effort=role["reasoning_effort"])
+        self.reserve(review_id, estimated + reserve)
+        previous_estimated = saved.get("usage_estimated", False)
+        saved = {**saved, "status": "running", "usage_estimated": True,
+                 "tokens_spent": saved.get("tokens_spent", 0) + estimated + reserve}
+        self.repository.save_job(review_id, key, stage, saved)
+        format_ = None
+        if schema is not None:
+            schema_parameters = pydantic_function_tool(schema)["function"]["parameters"]
+            format_ = (
+                schema_parameters
+                if resolved.kind == "ollama"
+                else {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": schema.__name__, "schema": schema_parameters, "strict": True,
+                    },
+                }
+            )
+        try:
+            with inference_priority("background"):
+                response = await self.runtime.generate(
+                    resolved, prompt,
+                    system=compiled.entry_agent.instructions,
+                    images=[
+                        part["image_url"]["url"].split(",", 1)[1]
+                        for part in source_content if part.get("type") == "image_url"
+                    ] or None,
+                    image_media_type="image/jpeg",
+                    max_output_tokens=reserve, context_window_tokens=compiled.context_window_tokens,
+                    format_=format_,
+                )
+        except BaseException:
+            self.repository.save_job(review_id, key, stage, {**saved, "status": "interrupted"})
+            raise
+        text = response.get("response") or (response.get("message") or {}).get("content") or ""
+        usage = (response.get("raw") or {}).get("usage") or {}
+        tokens = usage.get("total_tokens")
+        if tokens is not None:
+            saved.update(tokens_spent=saved["tokens_spent"] - estimated - reserve + tokens,
+                         usage_estimated=previous_estimated)
+        saved.update(status="settled", raw_result=text)
+        self.repository.save_job(review_id, key, stage, saved)
+        raw = response.get("raw") or {}
+        if (raw.get("status") == "incomplete" or response.get("done_reason") == "length"
+                or any(choice.get("finish_reason") in {"length", "content_filter"} for choice in raw.get("choices", []))):
+            error = "The research response was incomplete or filtered. Increase the output budget or choose another model before resuming."
+            self.repository.save_job(review_id, key, stage, {**saved, "status": "invalid", "validation_error": error})
+            raise InvalidReviewOutput(error)
+        if not text.strip():
+            self.repository.save_job(review_id, key, stage, {
+                **saved, "status": "invalid", "validation_error": "The research model returned an empty response.",
+            })
+            raise InvalidReviewOutput("The research model returned an empty response.")
+        if schema:
+            try:
+                saved["raw_result"] = json.loads(text)
+            except ValueError as exc:
+                self.repository.save_job(review_id, key, stage, {
+                    **saved, "status": "invalid", "validation_error": str(exc),
+                })
+                raise InvalidReviewOutput(f"Invalid structured research output: {exc}") from exc
+        return self._validate_result(review_id, key, stage, saved, schema, validate)
+
     def _validate_result(
         self, review_id: str, key: str, stage: str, saved: dict, schema: type[ReviewSchema] | None,
         validate: Callable[[dict], None] | None,
@@ -420,7 +551,8 @@ class ReviewJobs:
             self.repository.save_job(review_id, key, stage, {**saved, "status": "completed", "result": result})
             return result
         try:
-            result = schema.model_validate(saved["raw_result"]).model_dump(mode="json")
+            raw = saved["raw_result"]
+            result = (schema.model_validate_json(raw) if isinstance(raw, str) else schema.model_validate(raw)).model_dump(mode="json")
             if validate:
                 validate(result)
         except (ValueError, ValidationError) as exc:

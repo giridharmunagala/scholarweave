@@ -9,11 +9,15 @@ description = "Local-first LLM research workspace with autonomous planning and p
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "beautifulsoup4>=4.12,<5",
   "brotli>=1.1,<2",
   "ddgs>=9.11.2,<10",
   "fastapi>=0.115,<1",
   "httpx>=0.27,<1",
+  "indra-ocr==1.1.2",
+  "numpy>=1.26,<3",
   "jsonschema>=4.23,<5",
+  "markdownify>=1.2,<2",
   "openai>=1.99,<3",
   "pydantic>=2.8,<3",
   "pydantic-settings>=2.4,<3",
@@ -30,7 +34,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.3,<9"
+  "pytest>=8.3,<9",
+  "pytest-xdist>=3.8,<4",
 ]
 tui = [
   "textual>=1.0,<2"
@@ -47,5 +52,6 @@ include = ["backend*", "scholarweave_tui*"]
 "scholarweave_tui" = ["*.tcss"]
 
 [tool.pytest.ini_options]
+addopts = "-n logical --maxprocesses=20 --dist=worksteal"
 pythonpath = ["."]
 testpaths = ["backend/tests"]

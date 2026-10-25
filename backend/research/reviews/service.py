@@ -10,8 +10,9 @@ from urllib.parse import quote
 
 import httpx
 from openai import OpenAIError
+from pypdf.errors import PyPdfError
 
-from backend.core.errors import ConflictError, NotFoundError, ValidationError
+from backend.core.errors import ConflictError, DocumentProcessingError, NotFoundError, ValidationError
 from backend.documents import DocumentService
 from backend.documents.formatting import manifest_pages
 from backend.persistence.files import StorageError
@@ -19,8 +20,10 @@ from backend.providers.types import ModelReference, ProviderRuntimeError
 from backend.providers.inference import inference_parallel_group
 from backend.research.reviews.discovery import ScholarlyDiscovery, candidate_key, normalize_candidate, normalized_doi, source_url
 from backend.research.sources import _arxiv_key
+from backend.research.schemas import ArxivPaperInput, PdfPaperInput
 from backend.research.reviews.jobs import InvalidReviewOutput, ReviewJobs, ReviewPaused, digest, json_text
 from backend.research.reviews.repository import ReviewRepository
+from backend.research.reviews.topics import TopicResearch
 from backend.research.reviews.schemas import (
     STAGES, AnalysisProgress, AnalysisSources, Candidate, CandidatePage, EvidencePacket, PaperProgress, PaperProgressCounts, PaperProgressPage,
     PaperReview, ReadingPlan, ReadingGroups, SelectiveSummary,
@@ -28,14 +31,18 @@ from backend.research.reviews.schemas import (
     ScreeningBatch, SummaryRole, Synthesis, ReferenceExtraction, ReviewReference, WorkBudget,
     ReviewActivity, ReviewActivityPage, ReviewActivityDetail,
 )
-from backend.research.sources import SourceDownloadService
+from backend.research.sources import SourceDownloadError, SourceDownloadService
 from backend.tracks.service import TrackService
 from backend.utils import as_utc
 from backend.workspace.layout import WorkspaceLayout
 from backend.workspace.service import WorkspaceService
 
 _logger = logging.getLogger(__name__)
-_MAX_DISCOVERED_PAPERS = 500
+_MAX_DISCOVERED_PAPERS = 100
+_UNAVAILABLE_SOURCE_ERRORS = (
+    DocumentProcessingError, SourceDownloadError, PyPdfError, httpx.HTTPError,
+    ValidationError, NotFoundError, ValueError, FileNotFoundError,
+)
 _ANALYSIS_PAGE_BATCH = 20
 _AUTO_RELEVANCE = {"HIGHLY_RELEVANT", "RELEVANT"}
 _SCREEN_QUESTIONS = {
@@ -87,6 +94,7 @@ class LiteratureReviewService:
         self.downloads = downloads
         self.workspace = workspace
         self.tracks = tracks
+        self.topic_research = TopicResearch(self)
         self._tasks: dict[str, asyncio.Task] = {}
         self._closing = False
         self._commands: dict[str, asyncio.Lock] = {}
@@ -183,6 +191,10 @@ class LiteratureReviewService:
         self.jobs.runtime.resolve("chat", model_reference=ModelReference.model_validate(request.main_model.model_dump()))
         if request.summary_model:
             self._prepare_summary(request.summary_model)
+        if request.embedding_model:
+            self.jobs.runtime.resolve("embedding", model_reference=ModelReference.model_validate(
+                request.embedding_model.model_reference.model_dump(),
+            ))
         if request.decision_model:
             capability = "decision" if request.decision_model.protocol == "systemone" else "chat"
             resolved = self.jobs.runtime.resolve(
@@ -193,12 +205,26 @@ class LiteratureReviewService:
         if request.track_id:
             self.tracks.get(request.track_id)
         identifier = str(uuid.uuid4())
+        workspace_path = None
+        if request.embedding_model:
+            parent = (
+                WorkspaceLayout.named_component(self.tracks.get(request.track_id).title, request.track_id)
+                if request.track_id else "unlinked"
+            )
+            workspace_path = f"research/{parent}/{WorkspaceLayout.named_component(request.title, identifier)}"
         self.repository.create(identifier, request.model_dump(mode="json"), {
             "status": "running", "stage": "scope", "approval": None,
             "scope": None, "allowance_tokens": None, "active_run_id": None,
             "stage_history": {}, "notices": [], "error": None, "output_path": None,
             "origin_key": origin_key,
+            "workspace_path": workspace_path,
+            "references_skipped": bool(request.embedding_model),
+            **({"discovery_limit": 24} if request.embedding_model and request.reading_mode == "targeted" else {}),
         })
+        if workspace_path:
+            self.topic_research.write(identifier, "research.json", {
+                "review_id": identifier, "specification": request.model_dump(mode="json"),
+            })
         self._schedule(identifier)
         return self.get(identifier)
 
@@ -214,6 +240,11 @@ class LiteratureReviewService:
             id=record.id, revision=record.revision, title=spec.title, objective=spec.objective,
             main_model=spec.main_model, main_parallel_requests=spec.main_parallel_requests,
             decision_model=spec.decision_model, summary_model=spec.summary_model,
+            embedding_model=spec.embedding_model, workspace_path=state.get("workspace_path"),
+            topics=self.topic_research.topics(review_id) if spec.embedding_model else [],
+            selected_topic_ids=state.get("selected_topic_ids", []),
+            reading_mode=spec.reading_mode, question_focus=state.get("question_focus"),
+            provisional_path=state.get("provisional_path"),
             conversation_id=spec.conversation_id, track_id=spec.track_id,
             status=state["status"], stage=state["stage"], approval=state.get("approval"),
             work_budget=state.get("work_budget"), work_used=self.jobs.work_usage(review_id),
@@ -304,7 +335,7 @@ class LiteratureReviewService:
                         ]
                         if not self.tracks.remove_literature_review(job["track_id"], job["body"], remove_paper_ids=removable):
                             result.preserved_paths.append(job.get("path") or f"track:{job['track_id']}/literature")
-                if record.specification.get("track_id") and record.state.get("output_path") and not any(
+                if record.specification.get("track_id") and not record.specification.get("embedding_model") and record.state.get("output_path") and not any(
                     job.get("kind") == "publication_artifact" for job in jobs
                 ):
                     result.preserved_paths.append(record.state["output_path"])
@@ -345,10 +376,52 @@ class LiteratureReviewService:
                     self.jobs.runs.delete(run_id)
                 except NotFoundError:
                     pass
+            if record.specification.get("embedding_model"):
+                manifest = self.repository.job(review_id, "workspace-files") or {"files": {}}
+                storage = self.repository.storage
+                root = record.state["workspace_path"]
+                # Delete only hash-verified files; receipts are immutable and content-addressed.
+                for path in storage.list_workspace_files():
+                    if not path.startswith(f"{root}/"):
+                        continue
+                    expected = manifest["files"].get(path)
+                    if path.startswith(f"{root}/receipts/"):
+                        expected = path.rsplit("-", 1)[-1].removesuffix(".json")
+                    if expected and storage.file_hash(storage.settings.workspace_dir, path) == expected:
+                        self.workspace.delete_file(path)
+                    else:
+                        result.preserved_paths.append(path)
+                for path, expected in manifest["files"].items():
+                    if not path.endswith(".pdf"):
+                        continue
+                    try:
+                        if storage.file_hash(storage.settings.workspace_dir, path) == expected:
+                            storage.delete_stored_file(storage.settings.workspace_dir, path)
+                        else:
+                            result.preserved_paths.append(path)
+                    except FileNotFoundError:
+                        pass
             self.repository.delete(review_id)
             for queue in self._progress_subscribers.get(review_id, ()):
                 queue.put_nowait(None)
             return result
+
+    async def assign_track(self, review_id: str, track_id: str, expected_revision: int) -> ReviewResponse:
+        async with self._commands.setdefault(review_id, asyncio.Lock()):
+            record = self.repository.get(review_id)
+            if record.revision != expected_revision:
+                raise ConflictError("The review changed. Refresh saved reviews before moving it.")
+            self.tracks.get(track_id)
+            if record.specification.get("track_id") == track_id:
+                return self.get(review_id)
+            task = self._tasks.get(review_id)
+            if record.state["status"] == "running" or (task and not task.done()):
+                raise ConflictError("Pause the review in Deep Work before moving it to another track.")
+            if record.state.get("control") == "clear":
+                raise ConflictError("Review cleanup is incomplete. Finish cleanup before moving it.")
+            self.repository.assign_track(review_id, track_id, expected_revision)
+            self._publish_progress(review_id)
+            return self.get(review_id)
 
     def candidates(
         self, review_id: str, *, limit: int = 50, offset: int = 0,
@@ -372,7 +445,8 @@ class LiteratureReviewService:
     ) -> PaperReview:
         version = None
         pages = []
-        document = self.documents.get_document(candidate.document_id) if candidate.document_id else None
+        unavailable = jobs.get(f"source-unavailable:{candidate.id}", {}).get("status") == "skipped"
+        document = self.documents.get_document(candidate.document_id) if candidate.document_id and not unavailable else None
         if candidate.selected and document and document.status == "ready":
             version = self.documents.source_revision(document.id)["source_version"]
         plan = jobs.get(f"reading-plan:{candidate.id}:{version}:{_READING_POLICY}", {})
@@ -381,6 +455,9 @@ class LiteratureReviewService:
             if job.get("kind") == "evidence" and job["candidate_id"] == candidate.id and job["source_version"] == version
             and job.get("reading_policy") == _READING_POLICY
         ]
+        brief = jobs.get(plan.get("brief_key"), {})
+        if plan.get("brief_key"):
+            receipts = [job for job in receipts if job["key"] in brief.get("receipt_keys", [])]
         if receipts and include_details:
             pages, _, _ = self._paper(candidate)
         analysis_receipts = [
@@ -402,6 +479,8 @@ class LiteratureReviewService:
             if spans:
                 (read if end >= len(page["text"]) else partial).append(page["page"])
         return PaperReview(
+            document_id=candidate.document_id,
+            brief=brief.get("summary"),
             candidate_id=candidate.id, title=candidate.title, source_version=version, pages=plan.get("pages", []),
             collected=document is not None, prepared=version is not None,
             plan_complete=plan.get("status") == "completed", error=candidate.error,
@@ -411,7 +490,8 @@ class LiteratureReviewService:
             partial_summaries=[{
                 "sections": job["partial_summary"], "spans": job["spans"], "limitations": job["limitations"],
             } for job in receipts if job.get("partial_summary")] if include_details else [],
-            selective_summary=jobs.get(f"paper-summary:{candidate.id}:{version}:{_SUMMARY_POLICY}:{digest(receipts)}", {}).get("summary"),
+            selective_summary=(brief.get("summary") if plan.get("brief_key") else
+                               jobs.get(f"paper-summary:{candidate.id}:{version}:{_SUMMARY_POLICY}:{digest(receipts)}", {}).get("summary")),
             operation=jobs.get(f"paper-operation:{candidate.id}", {}).get("operation") if running else None,
         )
 
@@ -563,7 +643,7 @@ class LiteratureReviewService:
             numbers = {row["page"] for row in plan["pages"] if row.get("reference_page")}
             if not numbers:
                 self._notice(review_id, f"{candidate.title}: decision model identified no reference pages; reference coverage is limited.")
-            frame = {**self._frame(review_id), "title": candidate.title, **revision}
+            frame = {**self._frame(review_id), "document_id": candidate.document_id, "title": candidate.title, **revision}
             for packet in self._source_packets([page for page in pages if page["page"] in numbers], frame, prepared):
                 def validate(result: dict) -> None:
                     for row in result["references"]:
@@ -704,6 +784,8 @@ class LiteratureReviewService:
 
     def _continue_paper_gate(self, review_id: str) -> None:
         record = self.repository.get(review_id)
+        if record.specification.get("embedding_model"):
+            return
         gate = record.state.get("approval")
         if gate == "papers":
             identifiers = [row.id for row in self._candidates(review_id)
@@ -761,7 +843,103 @@ class LiteratureReviewService:
             action = command.action
             if state.get("control") == "clear":
                 raise ConflictError("Review cleanup is incomplete. Retry Clear review before starting fresh.")
-            if action in {"extend_analysis", "write_report"}:
+            if action == "stop_stage" and record.specification.get("embedding_model"):
+                raise ConflictError("Pause topic-led research instead. Topic approval and complete paper summaries cannot be skipped.")
+            if action == "refine_understanding":
+                if state["status"] not in {"completed", "paused", "blocked"}:
+                    raise ConflictError("Wait for the reading batch to finish or pause before comparing evidence.")
+                self.jobs.checkpoint(
+                    review_id, status="running", error=None,
+                    workspace_action="refine_understanding", workspace_return_status=state["status"],
+                    workspace_return_error=state.get("error"),
+                )
+                self._schedule(review_id)
+            elif action == "revise_selection":
+                if not record.specification.get("embedding_model") or state["status"] not in {"paused", "blocked", "completed"}:
+                    raise ConflictError("Pause topic-led research before revising its selection.")
+                self.jobs.checkpoint(
+                    review_id, status="awaiting_approval", approval="topics", stage="screening",
+                    control=None, error=None, output_path=None, output_hash=None, synthesis=None,
+                    workspace_action=None, workspace_return_status=None, workspace_return_error=None,
+                    stage_history={key: value for key, value in state.get("stage_history", {}).items()
+                                   if STAGES.index(key) < STAGES.index("screening")},
+                )
+            elif action in {"add_arxiv_papers", "add_pdf_paper"}:
+                self._require_approval(state, "topics")
+                if not record.specification.get("embedding_model"):
+                    raise ValidationError("Additional paper inputs require a topic-led research task.")
+                if command.pdf_paper is not None:
+                    self._add_pdf_input(review_id, command.pdf_paper)
+                else:
+                    self._add_input_papers(review_id, command.input_papers or [])
+                self.jobs.checkpoint(
+                    review_id, status="running", approval=None, stage="screening",
+                    topic_action=None, error=None,
+                )
+                self._schedule(review_id)
+            elif action == "find_more_topics":
+                self._require_approval(state, "topics")
+                if not record.specification.get("embedding_model"):
+                    raise ValidationError("Additional topics require a topic-led research task.")
+                topics = {row.id for row in self.topic_research.topics(review_id)}
+                identifiers = list(dict.fromkeys(command.topic_ids or []))
+                if not set(identifiers) <= topics:
+                    raise ValidationError("Choose topics from this review.")
+                self.jobs.checkpoint(
+                    review_id, status="running", approval=None, stage="discovery",
+                    selected_topic_ids=identifiers, topic_action="more",
+                    topic_round=str(uuid.uuid4()), topic_feedback=command.feedback,
+                    topic_discovery_queries=None,
+                    discovery_limit=self.repository.candidates(review_id, limit=1)[1] + 100,
+                    error=None,
+                )
+                self._schedule(review_id)
+            elif action in {"explore_topics", "approve_topics"}:
+                self._require_approval(state, "topics")
+                topics = {row.id: row for row in self.topic_research.topics(review_id)}
+                identifiers = list(dict.fromkeys(command.topic_ids or []))
+                if not identifiers or not set(identifiers) <= topics.keys():
+                    raise ValidationError("Choose at least one topic from this review.")
+                if action == "explore_topics":
+                    self.jobs.checkpoint(
+                        review_id, status="running", approval=None, stage="screening",
+                        selected_topic_ids=identifiers, topic_feedback=command.feedback,
+                        topic_action="explore", topic_round=str(uuid.uuid4()), error=None,
+                    )
+                else:
+                    candidate_ids = list(dict.fromkeys(
+                        identifier for topic_id in identifiers for identifier in topics[topic_id].candidate_ids
+                    ))
+                    if command.candidate_ids is not None:
+                        if not command.candidate_ids or not set(command.candidate_ids) <= set(candidate_ids):
+                            raise ValidationError("Choose a nonempty reading batch from the selected topics.")
+                        candidate_ids = list(dict.fromkeys(command.candidate_ids))
+                    focus = (command.feedback.strip() or None) if command.feedback is not None else state.get("question_focus")
+                    previous_mode = self._spec(review_id).reading_mode
+                    reading_mode = command.reading_mode or previous_mode
+                    self.repository.select_candidates(
+                        review_id, candidate_ids, revision=record.revision,
+                        state={**state, "selected_topic_ids": identifiers, "status": "running",
+                               "approval": None, "stage": "reading_plan", "topic_action": None,
+                               "approval_revision": record.revision, "topic_cleanup_pending": False,
+                               "question_focus": focus, "output_path": None, "output_hash": None,
+                               "reading_mode": reading_mode,
+                               "synthesis": None, "error": None},
+                    )
+                    self.topic_research.write(review_id, "selection.json", {
+                        "topic_ids": identifiers, "candidate_ids": candidate_ids, "question_focus": focus,
+                    })
+                    if reading_mode != previous_mode or (
+                        reading_mode == "targeted" and focus != state.get("question_focus")
+                    ):
+                        for job in self.repository.paper_jobs(review_id):
+                            if job["key"].startswith("reading-plan:") and job.get("candidate_id") in candidate_ids:
+                                self.repository.save_job(review_id, job["key"], "reading_plan", {
+                                    **job, "status": "pending", "brief_key": f"pending:{record.revision}",
+                                })
+                    self.topic_research.publish_provisional(review_id)
+                self._schedule(review_id)
+            elif action in {"extend_analysis", "write_report"}:
                 self._require_approval(state, "analysis")
                 if state["stage"] != "synthesis":
                     raise ConflictError("Synthesis reading is not awaiting a decision.")
@@ -874,6 +1052,9 @@ class LiteratureReviewService:
                     raise ConflictError("The review is already running.")
                 if command.stage and STAGES.index(command.stage) > STAGES.index(state["stage"]):
                     raise ValidationError("Resume cannot skip a required stage.")
+                if state.get("topic_cleanup_pending") or state.get("topic_selection_pruned"):
+                    if command.stage in {"scope", "discovery", "screening"}:
+                        raise ValidationError("Unselected topics were discarded after collection approval. Start a new task to explore a different selection.")
                 model_updates = {}
                 if command.main_model is not None:
                     self.jobs.runtime.resolve(
@@ -887,6 +1068,8 @@ class LiteratureReviewService:
                 if command.main_parallel_requests is not None:
                     model_updates["main_parallel_requests"] = command.main_parallel_requests
                 if "summary_model" in command.model_fields_set:
+                    if self._spec(review_id).embedding_model and command.summary_model is None:
+                        raise ValidationError("Topic-led research requires a summary model.")
                     if command.summary_model:
                         self._prepare_summary(command.summary_model)
                     model_updates["summary_model"] = (
@@ -945,6 +1128,15 @@ class LiteratureReviewService:
 
     async def _execute(self, review_id: str) -> None:
         try:
+            state = self.repository.get(review_id).state
+            if state.get("workspace_action") == "refine_understanding":
+                await self.topic_research.refine_understanding(review_id)
+                self.jobs.checkpoint(
+                    review_id, status=state.get("workspace_return_status") or "paused",
+                    error=state.get("workspace_return_error"),
+                    workspace_action=None, workspace_return_status=None, workspace_return_error=None, active_run_id=None,
+                )
+                return
             for job in self.repository.jobs(review_id, "progress"):
                 if job.get("operation"):
                     self.repository.save_job(review_id, job["key"], "progress", {**job, "operation": None})
@@ -1027,7 +1219,7 @@ class LiteratureReviewService:
             "synthesis": lambda: bool(state.get("synthesis")),
             "publication": lambda: bool(state.get("output_path")),
         }[stage]()
-        if state.get("approval") in {"plan", "budget"}:
+        if state.get("approval") in {"plan", "budget", "topics"}:
             self.jobs.checkpoint(
                 review_id, status="awaiting_approval", control=None,
                 error="Stopped by the researcher. Scope and budget approval cannot be skipped.",
@@ -1058,6 +1250,7 @@ class LiteratureReviewService:
             **({"main_parallel_requests": record.state["main_parallel_requests"]}
                if "main_parallel_requests" in record.state else {}),
             **({"summary_model": record.state["summary_model"]} if "summary_model" in record.state else {}),
+            **({"reading_mode": record.state["reading_mode"]} if "reading_mode" in record.state else {}),
         })
 
     def _prepare_summary(self, role: SummaryRole) -> tuple:
@@ -1072,6 +1265,8 @@ class LiteratureReviewService:
         scope = record.state.get("scope") or {}
         return {
             "objective": record.specification["objective"],
+            **({"question_focus": record.state["question_focus"]} if record.state.get("question_focus") else {}),
+            **({"reading_mode": "targeted"} if self._spec(review_id).reading_mode == "targeted" else {}),
             "questions": scope.get("questions", []),
             "inclusion_criteria": scope.get("inclusion_criteria", []),
             "exclusion_criteria": scope.get("exclusion_criteria", []),
@@ -1179,6 +1374,10 @@ class LiteratureReviewService:
                 **({"track_context": track_context} if track_context is not None else {}),
             }, prepared, ReviewScope, validate,
         )
+        if spec.embedding_model:
+            scope = {**scope, "suggested_work_budget": {
+                **scope["suggested_work_budget"], "screened_papers": 100, "read_papers": 100,
+            }}
         self.jobs.checkpoint(
             review_id, scope=scope, suggested_work_budget=scope["suggested_work_budget"],
         )
@@ -1188,16 +1387,48 @@ class LiteratureReviewService:
 
     def _discovery_remaining(self, review_id: str) -> int:
         _, count = self.repository.candidates(review_id, limit=1)
-        remaining = max(0, _MAX_DISCOVERED_PAPERS - count)
+        limit = self.repository.get(review_id).state.get("discovery_limit", _MAX_DISCOVERED_PAPERS)
+        remaining = max(0, limit - count)
         if not remaining:
-            self._notice(review_id, "Discovery stopped at the 500-paper cap. Screen and consume the retrieved papers before starting another review; no further sources were requested.")
+            self._notice(review_id, f"Discovery stopped at the {limit}-paper cap. Explore the retrieved topics or explicitly request more topics before collecting papers.")
         return remaining
+
+    def _add_input_papers(self, review_id: str, papers: list[ArxivPaperInput]) -> None:
+        for paper in papers:
+            candidate = normalize_candidate(review_id, {
+                **paper.model_dump(), "url": f"https://arxiv.org/abs/{paper.arxiv_id}",
+                "pdf_url": f"https://arxiv.org/pdf/{paper.arxiv_id}",
+            }, "arxiv", "Explicitly supplied by the researcher from arXiv search; metadata only.")
+            self.repository.save_candidate(review_id, candidate_key(candidate), candidate)
+
+    def _add_pdf_input(self, review_id: str, paper: PdfPaperInput) -> None:
+        candidate = normalize_candidate(review_id, {
+            "url": str(paper.url), "pdf_url": str(paper.url), "title": paper.title,
+        }, "web", "PDF URL explicitly supplied by the researcher; source not yet read.")
+        matches = [
+            item for item in self._candidates(review_id)
+            if candidate_key(item) == candidate_key(candidate)
+            or candidate.url in {item.url, item.pdf_url}
+        ]
+        if len(matches) > 1:
+            raise ValidationError("Multiple shortlist papers match this PDF URL. Resolve their identities before adding it.")
+        if matches:
+            existing = matches[0]
+            candidate = existing.model_copy(update={
+                "title": paper.title or existing.title, "pdf_url": candidate.pdf_url,
+                "discovery": list(dict.fromkeys([*existing.discovery, *candidate.discovery])),
+            })
+        self.repository.save_candidate(review_id, candidate_key(candidate), candidate)
 
     async def _discovery(self, review_id: str) -> None:
         spec = self._spec(review_id)
         scope = ReviewScope.model_validate(self.repository.get(review_id).state["scope"])
+        if self.repository.get(review_id).state.get("topic_action") == "more":
+            queries = await self.topic_research.search_queries(review_id)
+            scope = scope.model_copy(update={"queries": queries})
         if not self._discovery_remaining(review_id):
             return
+        self._add_input_papers(review_id, spec.input_papers[:self._discovery_remaining(review_id)])
         context = self.repository.job(review_id, "track-context")
         if context is not None:
             for document_id in context["paper_ids"]:
@@ -1278,6 +1509,14 @@ class LiteratureReviewService:
 
     async def _screening(self, review_id: str) -> None:
         spec = self._spec(review_id)
+        if spec.embedding_model:
+            if self.repository.get(review_id).state.get("topic_action") == "explore":
+                await self.topic_research.explore(review_id)
+            else:
+                await self.topic_research.categorize(review_id)
+            self.jobs.checkpoint(review_id, topic_action=None, topic_discovery_queries=None, topic_feedback=None)
+            self.jobs.checkpoint(review_id, status="awaiting_approval", approval="topics", stage="screening")
+            return
         pending = [item for item in self._candidates(review_id) if item.screening is None]
         budget = self.repository.get(review_id).state.get("work_budget")
         deferred = []
@@ -1435,6 +1674,49 @@ class LiteratureReviewService:
 
     async def _reading_plan(self, review_id: str, *, candidates: list[Candidate] | None = None) -> None:
         spec = self._spec(review_id)
+        if spec.embedding_model:
+            if self.repository.get(review_id).state.get("topic_cleanup_pending"):
+                self.topic_research.prune_selection(review_id)
+            for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
+                self._paper_operation(review_id, candidate.id, "Collecting approved paper and extracting text")
+                try:
+                    candidate = await self._prepare_paper(review_id, candidate)
+                    pages, _, revision = await asyncio.to_thread(self._paper, candidate)
+                    if not any(page["text"].strip() for page in pages):
+                        raise DocumentProcessingError("No readable source pages were extracted.")
+                except StorageError:
+                    raise
+                except _UNAVAILABLE_SOURCE_ERRORS as exc:
+                    self.topic_research.skip_source(review_id, candidate, exc)
+                    continue
+                try:
+                    self.topic_research.capture_paper(review_id, candidate)
+                except FileNotFoundError as exc:
+                    self.topic_research.skip_source(review_id, candidate, exc)
+                    continue
+                skipped_key = f"source-unavailable:{candidate.id}"
+                if self.repository.job(review_id, skipped_key):
+                    self.repository.save_job(review_id, skipped_key, "reading_plan", {
+                        "key": skipped_key, "candidate_id": candidate.id, "status": "ready",
+                    })
+                    self.topic_research.write(
+                        review_id, "skipped-sources.json",
+                        list(self.topic_research.unavailable_sources(review_id).values()),
+                    )
+                key = f"reading-plan:{candidate.id}:{revision['source_version']}:{_READING_POLICY}"
+                self.repository.save_job(review_id, key, "reading_plan", {
+                    "key": key, "status": "completed", "candidate_id": candidate.id, **revision,
+                    "pages": [{"page": row["page"], "action": "read", "reason": "Researcher-approved topic; summarize the complete extracted paper.",
+                               "reference_page": False} for row in pages],
+                })
+                if spec.reading_mode == "targeted":
+                    await self.topic_research.brief(review_id, candidate)
+                self._paper_operation(review_id, candidate.id, None)
+            unavailable = self.topic_research.unavailable_sources(review_id)
+            if not any(row.id not in unavailable
+                       for row in self._candidates(review_id, selected=True)):
+                raise ValidationError("None of the approved papers is readable. Unavailable sources were recorded; link a readable paper and resume collection.")
+            return
         prepared_papers: list[tuple[Candidate, list[dict], dict]] = []
         for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
             try:
@@ -1619,7 +1901,7 @@ class LiteratureReviewService:
                 "evidence_ids": [claims[index]["id"] for index in section["claim_indexes"]],
                 **({"source_pages": section["source_pages"]} if "source_pages" in section else {}),
             } for section in result["partial_summary"]],
-            **({"summary_role": packet["summary_role"], "summary_method": "compact-v1"}
+            **({"summary_role": packet["summary_role"], "summary_method": packet.get("summary_method", "compact-v1")}
                if "summary_role" in packet else {}),
         }
         self.repository.save_job(review_id, key, "reading", receipt)
@@ -1633,16 +1915,29 @@ class LiteratureReviewService:
         prepared = self._prepare_summary(role)
         completed_summary = False
         pending = []
+        unavailable = self.topic_research.unavailable_sources(review_id) if self._spec(review_id).embedding_model else {}
         for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
+            if candidate.id in unavailable:
+                continue
             try:
                 paper = self.paper(review_id, candidate.id)
                 if paper.selective_summary:
+                    if self._spec(review_id).embedding_model:
+                        self.topic_research.save_summary(review_id, candidate, paper.selective_summary)
+                        self.topic_research.publish_provisional(review_id)
                     completed_summary = True
                     continue
                 if not paper.plan_complete:
                     await self._reading_plan(review_id, candidates=[candidate])
+                    if candidate.id in self.topic_research.unavailable_sources(review_id):
+                        continue
                 pending.append(candidate)
-            except (ValueError, RuntimeError) as exc:
+            except (ValueError, RuntimeError, PyPdfError, FileNotFoundError) as exc:
+                if self._spec(review_id).embedding_model:
+                    if isinstance(exc, StorageError) or not isinstance(exc, _UNAVAILABLE_SOURCE_ERRORS):
+                        raise
+                    self.topic_research.skip_source(review_id, candidate, exc)
+                    continue
                 if candidates is not None:
                     raise
                 self._notice(review_id, f"{candidate.title} remains unread: {exc}")
@@ -1652,7 +1947,12 @@ class LiteratureReviewService:
             self._paper_operation(review_id, candidate.id, "Preparing compact paper summary")
             try:
                 pages, _, revision = await asyncio.to_thread(self._paper, candidate)
-            except (ValueError, RuntimeError) as exc:
+            except (ValueError, RuntimeError, PyPdfError, FileNotFoundError) as exc:
+                if self._spec(review_id).embedding_model:
+                    if isinstance(exc, StorageError) or not isinstance(exc, _UNAVAILABLE_SOURCE_ERRORS):
+                        raise
+                    self.topic_research.skip_source(review_id, candidate, exc)
+                    return False
                 if candidates is not None:
                     raise
                 self._notice(review_id, f"{candidate.title} remains unread: {exc}")
@@ -1667,7 +1967,7 @@ class LiteratureReviewService:
                 raise ValidationError("A paper's source or page plan changed before summarization. Resume page decisions.")
             selected = {row["page"] for row in plan["pages"] if row["action"] == "read"}
             frame = {
-                "title": candidate.title, "page_count": len(pages), **revision,
+                "document_id": candidate.document_id, "title": candidate.title, "page_count": len(pages), **revision,
                 "reading_policy": _READING_POLICY, "summary_method": "compact-v1",
                 "summary_role": role.model_dump(mode="json", exclude={"parallel_requests"}),
             }
@@ -1689,7 +1989,9 @@ class LiteratureReviewService:
                     if job.get("key", "").startswith(f"compact-summary:{candidate.document_id}:")
                     and job.get("status") in {"invalid", "retry_requested", "completed", "settled"}
                     and isinstance(job.get("raw_result"), dict) and job["raw_result"].get("partial_summary")
-                    and job.get("provenance", {}).get("input_hash") == digest(packet)
+                    and job.get("provenance", {}).get("input_hash") in {
+                        digest(packet), digest({key: value for key, value in packet.items() if key != "document_id"}),
+                    }
                     and job.get("provenance", {}).get("model") == role.model_reference.model
                     and job.get("provenance", {}).get("provider_profile_id") == role.model_reference.provider_profile_id
                 ), None)
@@ -1748,6 +2050,11 @@ class LiteratureReviewService:
                         ])),
                     },
                 })
+                if self._spec(review_id).embedding_model:
+                    self.topic_research.save_summary(
+                        review_id, candidate, self.repository.job(review_id, key)["summary"],
+                    )
+                    self.topic_research.publish_provisional(review_id)
                 self.jobs.checkpoint(review_id)
             else:
                 self._notice(review_id, f"{candidate.title}: no supported compact summary was produced.")
@@ -1785,6 +2092,11 @@ class LiteratureReviewService:
 
     async def _reading(self, review_id: str, *, candidates: list[Candidate] | None = None) -> None:
         spec = self._spec(review_id)
+        if spec.embedding_model and spec.reading_mode == "targeted":
+            for candidate in candidates if candidates is not None else self._candidates(review_id, selected=True):
+                if candidate.id not in self.topic_research.unavailable_sources(review_id):
+                    await self.topic_research.brief(review_id, candidate)
+            return
         if spec.summary_model:
             await self._compact_reading(review_id, spec.summary_model, candidates=candidates)
             return
@@ -1812,7 +2124,7 @@ class LiteratureReviewService:
                     break
                 selected_pages = [page_map[number] for number in numbers]
                 frame = {
-                    "title": candidate.title, "page_count": len(pages), "reading_policy": _READING_POLICY,
+                    "document_id": candidate.document_id, "title": candidate.title, "page_count": len(pages), "reading_policy": _READING_POLICY,
                     "source_version": revision["source_version"],
                 }
                 grouping = self.jobs.prepare(spec.main_model, "literature-page-groups", ReadingGroups)
@@ -2114,7 +2426,7 @@ class LiteratureReviewService:
             page_map = {page["page"]: page for page in pages}
             numbers = {page["page"] for page in selected}
             frame = {
-                "title": candidate.title, "page_count": len(pages), **revision,
+                "document_id": candidate.document_id, "title": candidate.title, "page_count": len(pages), **revision,
                 "reading_policy": _READING_POLICY, "analysis_source": True,
             }
             source_packets = self._source_packets(
@@ -2151,6 +2463,9 @@ class LiteratureReviewService:
 
     async def _synthesis(self, review_id: str) -> None:
         spec = self._spec(review_id)
+        if spec.embedding_model:
+            await self.topic_research.synthesize(review_id)
+            return
         evidence = self._evidence(review_id)
         summaries = self._analysis_summaries(review_id) if spec.summary_model else []
         if not evidence and not summaries:
@@ -2254,6 +2569,30 @@ class LiteratureReviewService:
 
     async def _publication(self, review_id: str) -> None:
         record = self.repository.get(review_id)
+        if self._spec(review_id).embedding_model:
+            if not record.state.get("output_path"):
+                raise ValidationError("The research report has not been saved.")
+            spec = self._spec(review_id)
+            if spec.track_id:
+                path = record.state["output_path"]
+                marker = f"<!-- scholarweave-topic-review:{review_id} -->"
+                body = f"{marker}\n\n## {spec.title}\n\n[Research report](/library/notes?path={quote(path, safe='')})\n\nWorkspace: `{record.state['workspace_path']}`"
+                key = "topic-publication"
+                key, previous = self._publication_receipt(review_id, key, spec.track_id)
+                unavailable = self.topic_research.unavailable_sources(review_id)
+                paper_ids = [row.document_id for row in self._candidates(review_id, selected=True)
+                             if row.document_id and row.id not in unavailable]
+                artifact = {
+                    "key": key, "kind": "publication_artifact", "body": body, "track_id": spec.track_id,
+                    "added_paper_ids": previous["added_paper_ids"] if previous else
+                    sorted(set(paper_ids) - set(self.tracks.get(spec.track_id).paper_ids)),
+                }
+                self.repository.save_job(review_id, key, "publication", artifact)
+                self.tracks.append_literature_review(
+                    spec.track_id, body, marker=marker,
+                    paper_ids=paper_ids,
+                )
+            return
         synthesis = record.state.get("synthesis")
         if not synthesis:
             raise ValidationError("No audited synthesis is ready to save.")
@@ -2267,7 +2606,8 @@ class LiteratureReviewService:
         artifact_key = f"publication-artifact:{digest(content)}"
         artifact = {"key": artifact_key, "kind": "publication_artifact", "status": "pending",
                     "body": body, "track_id": spec.track_id}
-        previous_artifact = self.repository.job(review_id, artifact_key)
+        artifact_key, previous_artifact = self._publication_receipt(review_id, artifact_key, spec.track_id)
+        artifact["key"] = artifact_key
         paper_ids = sorted({
             item.document_id for item in self._candidates(review_id, selected=True)
             if item.document_id and self.documents.get_document(item.document_id) is not None
@@ -2301,6 +2641,13 @@ class LiteratureReviewService:
             "sha256": (previous_artifact or {}).get("sha256") or self.workspace.read_file(path).sha256,
         })
         self.jobs.checkpoint(review_id, output_path=path, output_hash=digest(content))
+
+    def _publication_receipt(self, review_id: str, key: str, track_id: str | None) -> tuple[str, dict | None]:
+        previous = self.repository.job(review_id, key)
+        if previous and previous.get("track_id") != track_id:
+            key = f"{key}:track:{track_id or 'unlinked'}"
+            previous = self.repository.job(review_id, key)
+        return key, previous
 
     def _render(self, review_id: str, synthesis: dict, evidence: list[dict]) -> str:
         record = self.repository.get(review_id)

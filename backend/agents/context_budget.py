@@ -51,6 +51,7 @@ from backend.providers.reasoning import REASONING_EFFORTS, infer_reasoning_effor
 from backend.utils import to_jsonable
 
 CHECKPOINT_MESSAGE_PREFIX = "[ScholarWeave context checkpoint]"
+IMAGE_INPUT_TOKEN_RESERVE = 4096
 _CHECKPOINTS_KEY = "context_checkpoints"
 _MAX_INLINE_HISTORY_ARCHIVES = 8
 _IMPORTANT_KEYS = {
@@ -973,8 +974,22 @@ async def _apply_steering(
 
 
 def _estimated_tokens(value: Any) -> int:
-    """Byte-based sizing heuristic; provider tokenizers are not available here."""
-    return math.ceil(len(json.dumps(to_jsonable(value), ensure_ascii=False).encode("utf-8")) / 4)
+    """Size text by bytes and reserve visual tokens rather than tokenizing base64."""
+    image_tokens = 0
+
+    def text_payload(item: Any) -> Any:
+        nonlocal image_tokens
+        if isinstance(item, dict):
+            if item.get("type") in ("image_url", "input_image") and "image_url" in item:
+                image_tokens += IMAGE_INPUT_TOKEN_RESERVE
+                return {**item, "image_url": "[image]"}
+            return {key: text_payload(part) for key, part in item.items()}
+        if isinstance(item, list):
+            return [text_payload(part) for part in item]
+        return item
+
+    encoded = json.dumps(text_payload(to_jsonable(value)), ensure_ascii=False).encode("utf-8")
+    return math.ceil(len(encoded) / 4) + image_tokens
 
 
 def _token_estimate_ratio(agent: AgentDefinition, context: ScholarWeaveContext) -> float:

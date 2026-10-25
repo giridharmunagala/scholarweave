@@ -15,18 +15,18 @@ class HealthResponse(BaseModel):
     database_path: str
     data_dir: str
     frontend_available: bool
-    ocr_available: bool
+    ocr_available: bool | None
 
 
 @router.get("/health", response_model=HealthResponse)
-def health(container=Depends(services)) -> HealthResponse:
+def health(check_ocr: bool = True, container=Depends(services)) -> HealthResponse:
     return HealthResponse(
         status="ok",
         runtime_version=container.runtime_version,
         database_path=str(container.settings.database_path),
         data_dir=str(container.settings.data_dir),
         frontend_available=container.settings.frontend_dist_dir.exists(),
-        ocr_available=container.documents.ocr_available(),
+        ocr_available=container.documents.ocr_available() if check_ocr else None,
     )
 
 

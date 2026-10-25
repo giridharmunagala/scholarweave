@@ -37,6 +37,31 @@ class WorkspaceSearchResponse(WorkspaceFileResponse):
     excerpt: str | None = None
 
 
+class ReaderNoteResponse(WorkspaceSchema):
+    id: str
+    paper_id: str
+    paper_name: str
+    path: str
+    page: int
+    text: str
+    sha256: str
+    connection_ids: list[str]
+    match_type: Literal["direct", "connected"]
+    connected_via: list[str]
+
+
+class ReaderNotePage(WorkspaceSchema):
+    items: list[ReaderNoteResponse]
+    total: int
+    next_offset: int | None
+
+
+class ReaderNoteConnectionRequest(WorkspaceSchema):
+    source_id: str = Field(min_length=1)
+    target_id: str = Field(min_length=1)
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class WorkspaceIndexResponse(WorkspaceSchema):
     engine: Literal["sqlite-fts5-bm25"]
     indexed_files: int
@@ -62,3 +87,30 @@ class WorkspaceNoteCreateRequest(WorkspaceSchema):
     name: str = Field(min_length=1, max_length=300)
     content: str = ""
     tags: list[str] = Field(default_factory=list, max_length=32)
+
+
+class WorkspaceNoteCleanupCandidate(WorkspaceSchema):
+    path: str = Field(min_length=1, max_length=512)
+    size_bytes: int = Field(ge=0, lt=1024)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class WorkspaceNoteCleanupIssue(WorkspaceSchema):
+    path: str
+    reason: str
+
+
+class WorkspaceNoteCleanupPreview(WorkspaceSchema):
+    threshold_bytes: Literal[1024] = 1024
+    candidates: list[WorkspaceNoteCleanupCandidate]
+    failed: list[WorkspaceNoteCleanupIssue]
+
+
+class WorkspaceNoteCleanupRequest(WorkspaceSchema):
+    candidates: list[WorkspaceNoteCleanupCandidate]
+
+
+class WorkspaceNoteCleanupResponse(WorkspaceSchema):
+    deleted_paths: list[str]
+    skipped: list[WorkspaceNoteCleanupIssue]
+    failed: list[WorkspaceNoteCleanupIssue]

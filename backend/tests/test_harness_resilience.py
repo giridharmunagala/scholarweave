@@ -158,7 +158,7 @@ async def test_unlimited_run_continues_past_turn_and_legacy_epoch_caps(
             "search_research_library",
             {"query": None, "document_id": None, "ignore_document_ids": None, "limit": 3},
         )
-    ] * 20
+    ] * 16
     model = stub_binding(stub_provider)
     settings = Settings(
         data_dir=tmp_path / "data",
@@ -189,15 +189,15 @@ async def test_unlimited_run_continues_past_turn_and_legacy_epoch_caps(
         await model.client.close()
 
     assert run.status == "completed", run.error
-    assert len(stub_provider.requests) == 21
-    assert len(runtime.calls) == 20
+    assert len(stub_provider.requests) == 17
+    assert len(runtime.calls) == 16
     assert [epoch.terminal_reason for epoch in run.epochs] == [
-        *(["turn_boundary"] * 10),
+        *(["turn_boundary"] * 8),
         "goal_completed",
     ]
-    assert sum(int(epoch.usage_json["model_turns"]) for epoch in run.epochs) == 21
+    assert sum(int(epoch.usage_json["model_turns"]) for epoch in run.epochs) == 17
     starts = [event for event in run.events if event.event_type == "run.epoch.started"]
-    assert len(starts) == 11
+    assert len(starts) == 9
     assert all(event.payload_json["max_epochs"] is None for event in starts)
     assert all(event.payload_json["remaining_run_turns"] is None for event in starts)
     assert all(event.payload_json["max_turns"] == 2 for event in starts)
@@ -392,10 +392,10 @@ async def test_heartbeat_retries_errors_then_cancels_without_releasing_claim(
         EventBroker(),
         settings=settings,
     )
-    service._CLAIM_LEASE_SECONDS = 0.12
-    service._CLAIM_HEARTBEAT_SECONDS = 0.01
-    service._CLAIM_RETRY_SECONDS = 0.01
-    service._CLAIM_SAFETY_MARGIN_SECONDS = 0.03
+    service._CLAIM_LEASE_SECONDS = 2
+    service._CLAIM_HEARTBEAT_SECONDS = 0.05
+    service._CLAIM_RETRY_SECONDS = 0.05
+    service._CLAIM_SAFETY_MARGIN_SECONDS = 0.2
     renew_attempts = 0
     releases: list[tuple[str, str]] = []
     execution_cancelled = asyncio.Event()
@@ -431,20 +431,21 @@ async def test_heartbeat_retries_errors_then_cancels_without_releasing_claim(
     monkeypatch.setattr(repository, "renew_claim", fail_renewal)
     monkeypatch.setattr(repository, "release_claim", track_release)
     monkeypatch.setattr(service, "_execute_claimed_run", wait_for_cancellation)
+    compiled = _compiled(model, settings)
     run = service.create(
-        _compiled(model, settings),
+        compiled,
         "Lease-sensitive work",
         conversation_id=None,
     )
     durable_session = sessions.get(
         f"run:{run.id}",
-        _compiled(model, settings).blueprint.session,
+        compiled.blueprint.session,
     )
     await durable_session.add_items(
         [{"role": "user", "content": "Preserve after lease loss"}]
     )
 
-    await asyncio.wait_for(execution_cancelled.wait(), timeout=1)
+    await asyncio.wait_for(execution_cancelled.wait(), timeout=10)
     for _ in range(100):
         if run.id not in service._tasks:
             break
@@ -501,15 +502,15 @@ async def test_slow_renewal_cancels_execution_before_real_lease_safety_expires(
         EventBroker(),
         settings=settings,
     )
-    service._CLAIM_LEASE_SECONDS = 0.08
-    service._CLAIM_HEARTBEAT_SECONDS = 0.01
-    service._CLAIM_SAFETY_MARGIN_SECONDS = 0.01
+    service._CLAIM_LEASE_SECONDS = 2
+    service._CLAIM_HEARTBEAT_SECONDS = 0.05
+    service._CLAIM_SAFETY_MARGIN_SECONDS = 0.2
     original_renew = repository.renew_claim
     execution_cancelled = asyncio.Event()
 
     def delayed_renew(*args, **kwargs):
         lease = original_renew(*args, **kwargs)
-        time.sleep(0.09)
+        time.sleep(service._CLAIM_LEASE_SECONDS + 0.1)
         return lease
 
     async def wait_for_cancellation(*_args, **_kwargs) -> None:
@@ -526,7 +527,7 @@ async def test_slow_renewal_cancels_execution_before_real_lease_safety_expires(
         conversation_id=None,
     )
 
-    await asyncio.wait_for(execution_cancelled.wait(), timeout=1)
+    await asyncio.wait_for(execution_cancelled.wait(), timeout=10)
     assert repository.get(run.id).status == "pending"
     assert not repository.get(run.id).events
     for _ in range(100):

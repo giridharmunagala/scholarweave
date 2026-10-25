@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
@@ -9,6 +10,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.utils import utcnow
 from backend.persistence.database import Base, JSONText
+
+
+class PaperUsefulness(StrEnum):
+    UNRATED = "unrated"
+    USEFUL = "useful"
+    MAYBE_USEFUL = "maybe_useful"
+    NOT_USEFUL = "not_useful"
 
 
 class TimestampMixin:

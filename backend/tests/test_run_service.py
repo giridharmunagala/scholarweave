@@ -370,11 +370,19 @@ async def test_new_run_reuses_persistent_compact_context_but_keeps_audit_history
     assert "Measured accuracy was 91%" in json.dumps(stub_provider.requests[-1]["messages"])
     clock_messages = [
         message["content"] for message in stub_provider.requests[-1]["messages"]
-        if str(message.get("content", "")).startswith("Context recorded when this request")
+        if str(message.get("content", "")).startswith("[Application context: request submitted at ")
     ]
     assert len(clock_messages) == 2
-    assert clock_messages[0].endswith(first.runtime_metadata_json["system_information"])
-    assert clock_messages[1].endswith(second.runtime_metadata_json["system_information"])
+    assert clock_messages[0].endswith("\n\nFirst follow-up.")
+    assert clock_messages[1].endswith("\n\nSecond follow-up.")
+    for message, run in zip(clock_messages, (first, second), strict=True):
+        clock = run.runtime_metadata_json["system_information"].splitlines()
+        timestamp = f"{clock[1].removeprefix('Current date: ')} {clock[2].removeprefix('Current time: ')}"
+        assert message.startswith(f"[Application context: request submitted at {timestamp}]")
+    assert all(
+        message["role"] not in {"system", "developer"}
+        for message in stub_provider.requests[-1]["messages"][1:]
+    )
     instructions = stub_provider.requests[-1]["messages"][0]["content"]
     assert "conversations/ survive run cleanup" in instructions
     assert "may expire during run cleanup" in instructions
@@ -430,8 +438,14 @@ async def test_recovery_reuses_persisted_turn_context_without_reading_clock(
         assert recovered.status == "completed", recovered.error
         assert len(stub_provider.requests) == 1
         messages = stub_provider.requests[0]["messages"]
-        assert sum(clock in str(message.get("content")) for message in messages) == int(has_clock)
-        assert sum(message.get("content") == "Original request." for message in messages) == 1
+        context = "[Application context: request submitted at 2026-08-09 23:59:15 IST (UTC+05:30)]"
+        assert sum(context in str(message.get("content")) for message in messages) == int(has_clock)
+        expected = f"{context}\n\nOriginal request." if has_clock else "Original request."
+        assert sum(
+            message.get("role") == "user" and message.get("content") == expected
+            for message in messages
+        ) == 1
+        assert all(message["role"] not in {"system", "developer"} for message in messages[1:])
         assert messages[0]["content"].startswith(compiled.entry_agent.instructions)
         assert service.prompt_snapshot(record.id)["agents"][0]["effective_instructions"] == (
             compiled.entry_agent.instructions
@@ -774,7 +788,7 @@ async def test_failed_completion_preserves_user_message_for_next_turn(
     third_request_messages = stub_provider.requests[2]["messages"]
     assert any(
         message.get("role") == "user"
-        and message.get("content") == "Second turn must survive."
+        and message.get("content", "").partition("\n\n")[2] == "Second turn must survive."
         for message in third_request_messages
     )
     await binding.client.close()

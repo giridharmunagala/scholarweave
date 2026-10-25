@@ -70,6 +70,7 @@ describe('chat attachment requests', () => {
       expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
         content: 'Discuss this',
         response_effort: effort ?? 'auto',
+        turn_intent: 'chat',
         web_enabled: false,
         reasoning_effort: 'high',
         context_window_tokens: 32768,
@@ -84,14 +85,23 @@ describe('chat attachment requests', () => {
     vi.stubGlobal('fetch', fetchMock);
     await chatApi.send('conv 1', 'Hello');
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
-      content: 'Hello', response_effort: 'auto', web_enabled: true,
+      content: 'Hello', response_effort: 'auto', web_enabled: true, turn_intent: 'chat',
     });
   });
 
-  it('surfaces upload errors without starting a conversation or run', async () => {
+  it('preserves explicit ideation intent', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
-      ok: false, status: 413, json: async () => ({ message: 'File exceeds the upload limit' }),
+      ok: true, status: 200, json: async () => ({}),
     });
+    vi.stubGlobal('fetch', fetchMock);
+    await chatApi.send('conv 1', 'Explore this', { turn_intent: 'ideation' });
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).turn_intent).toBe('ideation');
+  });
+
+  it('surfaces upload errors without starting a conversation or run', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(
+      JSON.stringify({ message: 'File exceeds the upload limit' }), { status: 413 },
+    ));
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(chatApi.uploadAttachment(new File(['notes'], 'notes.txt')))

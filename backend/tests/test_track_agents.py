@@ -35,6 +35,38 @@ def test_track_tools_available_offline_at_every_effort():
         assert policy.mutating and not policy.safe_retry
 
 
+def test_manuscript_reads_claims_and_citation_keys_with_real_provider(test_settings, stub_provider):
+    with TestClient(create_app(test_settings)) as client:
+        profile = configure_provider(client, stub_provider)
+        track = client.post("/api/tracks", json={"title": "Evidence-backed writing"}).json()
+        claims = client.post(f"/api/tracks/{track['id']}/writing/claims", json={
+            "statement": "A hypothesis, not an established finding.", "interpretation": "",
+            "evidence": [], "expected_sha256": None,
+        }).json()
+        client.post("/api/references", json={
+            "expected_revision": 0, "reference": {"citation_key": "example2026", "title": "Example reference"},
+        }).raise_for_status()
+        goal = "Inspect my claims and reference keys, then save the requested manuscript outline."
+        content = f"# Manuscript\n\nTentative hypothesis [claim:{claims['claims'][0]['id']}]. See [@example2026]."
+        stub_provider.tool_plans = [
+            (goal, "read_research_track", {
+                "action": action, "track_id": None, "section": None, "limit": 10, "offset": 0,
+            }) for action in ("claims", "references")
+        ] + [(goal, "write_research_track", {
+            "track_id": None, "section": "exploration/manuscript", "content": content, "expected_sha256": None,
+        })]
+        conversation = client.post("/api/agent/conversations", json={
+            "track_id": track["id"], "model_reference": {"provider_profile_id": profile, "model": "stub-model"},
+        }).json()
+        response = client.post(f"/api/agent/conversations/{conversation['id']}/messages", json={
+            "content": goal, "web_enabled": False, "response_effort": "quick",
+        })
+        assert response.status_code == 202, response.text
+        run = wait_for_run(client, response.json()["run"]["id"])
+        assert run["status"] == "completed", run["error"]
+        assert client.get(f"/api/tracks/{track['id']}/writing/manuscript").json()["content"] == content
+
+
 @pytest.mark.parametrize("effort", ["auto", "quick", "thorough"])
 def test_llm_creates_and_reads_exploration_with_real_provider(test_settings, stub_provider, effort):
     with TestClient(create_app(test_settings)) as client:

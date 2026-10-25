@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, File, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile
 
 from backend.core.http import services
+from backend.workspace.schemas import ReaderNotePage
 from backend.tracks.schemas import (
     ImportApplyRequest, ImportPreviewRequest, ImportPreviewResponse, RevisionResponse,
     TrackCreateRequest, TrackDetailResponse, TrackSection, TrackSectionResponse,
@@ -30,6 +31,15 @@ def get_track(track_id: str, container=Depends(services)):
 @router.get("/{track_id}/sections/{section}", response_model=TrackSectionResponse)
 def read_section(track_id: str, section: TrackSection, container=Depends(services)):
     return container.tracks.read_section(track_id, section)
+
+
+@router.get("/{track_id}/reader-notes", response_model=ReaderNotePage)
+def reader_notes(
+    track_id: str, query: str | None = Query(default=None, min_length=1, max_length=2000),
+    limit: int = Query(default=25, ge=1, le=100), offset: int = Query(default=0, ge=0),
+    container=Depends(services),
+) -> ReaderNotePage:
+    return ReaderNotePage.model_validate(container.tracks.reader_notes(track_id, query=query, limit=limit, offset=offset))
 
 
 @router.get("/{track_id}/exploration/{name}", response_model=TrackSectionResponse)

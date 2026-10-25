@@ -17,7 +17,7 @@
   justify-content: center;
   gap: .45rem;
   min-height: 2.25rem;
-  padding: .45rem .95rem;
+  padding: .45rem .9rem;
   border: 1px solid var(--accent);
   border-radius: var(--radius-md);
   background: var(--accent);
@@ -39,7 +39,7 @@
 .button:disabled, .button[aria-disabled='true'] { opacity: .5; cursor: not-allowed; }
 .button svg { flex: none; }
 
-.button.secondary { border-color: var(--border-strong); background: var(--surface); color: var(--text-strong); }
+.button.secondary { border-color: var(--border); background: var(--surface); color: var(--text-strong); box-shadow: var(--shadow-sm); }
 .button.secondary:hover:not(:disabled) { border-color: color-mix(in srgb, var(--text-strong) 30%, var(--border-strong)); background: var(--surface-2); color: var(--text-strong); }
 
 .button.ghost { border-color: transparent; background: transparent; color: var(--muted); }
@@ -55,7 +55,7 @@
   color: var(--accent-strong);
 }
 
-.button.small { min-height: 1.9rem; padding: .3rem .7rem; font-size: var(--text-xs); }
+.button.small { min-height: 2rem; padding: .35rem .75rem; font-size: var(--text-xs); }
 .button.icon { padding: .45rem; }
 .button.block { width: 100%; }
 
@@ -91,6 +91,37 @@
   color: var(--danger);
 }
 .icon-button.small { width: 1.75rem; height: 1.75rem; }
+
+.icon-button.settings-trigger,
+.topbar .nav-link.settings-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  gap: .45rem;
+  width: auto;
+  min-width: 2.25rem;
+  height: 2.25rem;
+  padding: 0 .9rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--radius-md);
+  background: var(--accent-tint);
+  color: var(--accent-strong);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.settings-trigger svg { flex: none; }
+.icon-button.settings-trigger:hover:not(:disabled),
+.topbar .nav-link.settings-trigger:hover,
+.settings-trigger[aria-expanded='true'],
+.topbar .nav-link.settings-trigger.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  text-decoration: none;
+}
 
 /*
  * Destructive row actions stay out of the way until you are actually on the
@@ -179,50 +210,47 @@ button.meter:hover { border-color: var(--border-strong); background: var(--surfa
 .segmented button[aria-pressed='true'] { background: var(--surface); color: var(--accent-strong); box-shadow: var(--shadow-sm), inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent); }
 
 .page-tabs {
-  display: inline-flex;
-  gap: 4px;
-  margin-bottom: var(--space-4);
-  padding: 4px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: var(--shadow-sm);
+  display: flex;
+  gap: var(--space-5);
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
 }
 .page-tabs a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: .45rem;
-  min-width: 7.5rem;
-  padding: .5rem .95rem;
-  border-radius: var(--radius-md);
+  flex: none;
+  padding: .65rem .1rem .85rem;
+  border-bottom: 2px solid transparent;
   color: var(--muted);
   font-size: var(--text-sm);
   font-weight: 650;
   text-decoration: none;
   transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease), box-shadow var(--dur-med) var(--ease);
 }
-.page-tabs a:hover { background: var(--hover-bg); color: var(--accent-strong); }
-.page-tabs a.active { background: var(--accent-soft); color: var(--accent-strong); }
+.page-tabs a:hover { color: var(--text-strong); }
+.page-tabs a.active { border-bottom-color: var(--accent); color: var(--accent-strong); }
 
 /* -------------------------------------------------------- Surfaces/cards --- */
 
 .panel {
   min-width: 0;
-  padding: var(--space-5);
+  padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   background: var(--glass-panel);
-  box-shadow: var(--shadow-sm);
+  box-shadow: none;
 }
 .panel-header {
   display: flex;
   align-items: start;
   justify-content: space-between;
   gap: var(--space-3);
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-3);
 }
-.panel-header h2 { margin: 0 0 .2rem; font-size: var(--text-lg); }
+.panel-header h2 { margin: 0 0 .35rem; font-size: var(--text-lg); letter-spacing: -.025em; }
 .panel-header p { margin: 0; font-size: var(--text-sm); }
 .panel-flush { padding: 0; overflow: hidden; }
 
@@ -648,6 +676,8 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
 }
 .palette {
   width: min(560px, 100%);
+  max-height: calc(100dvh - clamp(3rem, 12vh, 8rem) - var(--space-4));
+  overflow-y: auto;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   background: var(--surface);
@@ -673,6 +703,12 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
   font-size: 1rem;
 }
 .palette-input input:focus { box-shadow: none; }
+.palette-input input { min-width: 0; }
+.palette-input button { flex: none; }
+.palette-help, .palette-status, .palette-errors { margin: 0; padding: var(--space-2) var(--space-4); font-size: var(--text-xs); }
+.palette-status { color: var(--muted); }
+.palette-errors { color: var(--danger); }
+.palette-errors p { color: inherit; margin-bottom: var(--space-1); }
 .palette-list { max-height: 320px; padding: var(--space-2); overflow-y: auto; }
 .palette-group {
   padding: var(--space-2) var(--space-2) var(--space-1);
@@ -699,7 +735,8 @@ details.disclosure > *:not(summary) { padding: 0 .7rem .7rem; }
 .palette-item[data-active='true'] { background: var(--accent-soft); color: var(--text-strong); }
 .palette-item svg { flex: none; color: var(--muted); }
 .palette-item[data-active='true'] svg { color: var(--accent-strong); }
-.palette-item small { margin-left: auto; color: var(--muted); }
+.palette-label { min-width: 0; flex: 1; }
+.palette-item small { margin-left: auto; max-width: 45%; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .palette-empty { padding: var(--space-5); color: var(--muted); text-align: center; font-size: var(--text-sm); }
 .palette-foot {
   display: flex;

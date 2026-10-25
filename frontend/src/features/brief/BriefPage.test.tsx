@@ -2,7 +2,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { RouterProvider } from '../../app/router';
+import { Link, RouterProvider } from '../../app/router';
 import BriefPage from './BriefPage';
 import type { BriefCatalog, BriefEdition, BriefItem, BriefHighlight } from './api';
 
@@ -122,6 +122,9 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 const mount = async () => { await act(async () => root.render(<RouterProvider><BriefPage /></RouterProvider>)); };
+const mountWithExit = async () => {
+  await act(async () => root.render(<RouterProvider><><BriefPage /><Link to="/library">Leave brief</Link></></RouterProvider>));
+};
 
 it('shows cached highlights before sources without generating again and keeps the daily archive after clearing', async () => {
   edition.highlights = { status: 'ready', summary: highlights, completed_parts: 1, total_parts: 1 };
@@ -147,6 +150,7 @@ it('persists an independent brief model choice without changing chat settings', 
   providerModels = [{ id: 'brief-profile', name: 'Brief provider', kind: 'openai_compatible', state: 'active',
     models: [{ name: 'brief-model', enabled: true, capabilities: ['chat'] }] }];
   await mount();
+  await openSettings();
   const picker = container.querySelector<HTMLButtonElement>('[aria-label="Morning Brief model"]')!;
   expect(picker.textContent).toContain('Same as chat');
   await act(async () => picker.click());
@@ -159,11 +163,31 @@ it('persists an independent brief model choice without changing chat settings', 
   });
   expect(calls.some((call) => call.path === '/api/settings' && call.method === 'PUT')).toBe(false);
   expect(calls.some((call) => call.path === '/api/brief/refresh')).toBe(false);
+  await closeSettings();
   await click('Generate highlights');
   expect(calls.find((call) => call.path === '/api/brief/highlights')?.body).toEqual({
     model_reference: { provider_profile_id: 'brief-profile', model: 'brief-model' },
   });
   expect(button('Download PDF').disabled).toBe(false);
+});
+
+it('generates highlights only after the user explicitly asks', async () => {
+  providerModels = [{ id: 'brief-profile', name: 'Brief provider', kind: 'openai_compatible', state: 'active',
+    models: [{ name: 'brief-model', enabled: true, capabilities: ['chat'] }] }];
+  await mount();
+  expect(calls.some((call) => call.path === '/api/brief/highlights')).toBe(false);
+  await openSettings();
+  const picker = container.querySelector<HTMLButtonElement>('[aria-label="Morning Brief model"]')!;
+  await act(async () => picker.click());
+  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((value) => value.textContent?.includes('brief-model'))!;
+  await act(async () => option.click());
+  expect(calls.some((call) => call.path === '/api/brief/highlights')).toBe(false);
+  await closeSettings();
+  await click('Generate highlights');
+  expect(calls.find((call) => call.path === '/api/brief/highlights')?.body).toEqual({
+    model_reference: { provider_profile_id: 'brief-profile', model: 'brief-model' },
+  });
 });
 
 it('polls only active generation while the sources stay usable', async () => {
@@ -196,7 +220,16 @@ it('surfaces failed generation and allows a retry without hiding a previous summ
   expect(container.textContent).toContain('previous summary stays visible');
 });
 const button = (text: string) => [...container.querySelectorAll('button')].find((value) => value.textContent?.trim() === text)!;
-const click = async (text: string) => { await act(async () => button(text).click()); };
+const openSettings = async () => {
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Brief settings"]')!.click());
+};
+const closeSettings = async () => {
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close brief settings"]')!.click());
+};
+const click = async (text: string) => {
+  if (text === 'Clear fetched data') await openSettings();
+  await act(async () => button(text).click());
+};
 async function input(label: string, value: string) {
   const field = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`)!;
   await act(async () => {
@@ -294,10 +327,73 @@ it('allows retry after an initial connection error and respects clear cancellati
   expect(container.textContent).toContain(paper.title);
 });
 
+it('allows leaving while reads are pending and ignores their stale completion', async () => {
+  let finishEdition!: (response: Response) => void;
+  const fetch = globalThis.fetch;
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    if (path === '/api/brief' && (init?.method ?? 'GET') === 'GET') {
+      return new Promise<Response>((resolve) => { finishEdition = resolve; });
+    }
+    return fetch(input, init);
+  }));
+  await mountWithExit();
+  expect(button('Refresh').disabled).toBe(true);
+  await act(async () => container.querySelector<HTMLAnchorElement>('a[href="/library"]')!.click());
+  expect(window.location.pathname).toBe('/library');
+  await act(async () => root.render(<RouterProvider><div>Another page</div></RouterProvider>));
+  await act(async () => finishEdition(Response.json(edition)));
+  expect(container.textContent).toContain('Another page');
+  expect(container.textContent).not.toContain(paper.title);
+});
+
+it('guards only unsaved interest edits during navigation', async () => {
+  await mountWithExit();
+  await openSettings();
+  const field = [...container.querySelectorAll('label')]
+    .find((label) => label.textContent?.includes('Additional interests'))!.querySelector('input')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, 'unsaved interest');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await closeSettings();
+  confirmClear.mockReturnValue(false);
+  await act(async () => container.querySelector<HTMLAnchorElement>('a[href="/library"]')!.click());
+  expect(confirmClear).toHaveBeenCalledWith(expect.stringContaining('unsaved Morning Brief interest changes'));
+  expect(window.location.pathname).toBe('/brief');
+  confirmClear.mockReturnValue(true);
+  await act(async () => container.querySelector<HTMLAnchorElement>('a[href="/library"]')!.click());
+  expect(window.location.pathname).toBe('/library');
+});
+
+it('keeps configuration off the reading surface and retains interest drafts when dismissed', async () => {
+  await mount();
+  const dialog = container.querySelector<HTMLDialogElement>('#brief-settings')!;
+  expect(dialog.open).toBe(false);
+  expect(container.querySelector('[aria-label="Morning Brief model"]')!.closest('dialog')).toBe(dialog);
+  expect(button('Clear fetched data').closest('dialog')).toBe(dialog);
+  expect(button('Generate highlights').closest('dialog')).toBeNull();
+  const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Brief settings"]')!;
+  trigger.focus();
+  await openSettings();
+  const field = [...dialog.querySelectorAll('label')].find((label) => label.textContent?.includes('Additional interests'))!.querySelector('input')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, 'Keep my interest');
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await closeSettings();
+  expect(dialog.open).toBe(false);
+  expect(document.activeElement).toBe(trigger);
+  expect(calls.some((call) => call.method !== 'GET')).toBe(false);
+  await openSettings();
+  expect(field.value).toBe('Keep my interest');
+});
+
 it('fetches headlines only when there is no daily edition and reuses it after navigation', async () => {
   hasCachedEdition = false;
   await mount();
   expect(calls.filter((call) => call.path.endsWith('/refresh')).map((call) => call.body)).toEqual([{ force: false }]);
+  expect(calls.some((call) => call.path === '/api/brief/highlights')).toBe(false);
   hasCachedEdition = true;
   await act(async () => root.render(<RouterProvider><div>Another page</div></RouterProvider>));
   await mount();
@@ -312,7 +408,7 @@ it('fetches headlines only when there is no daily edition and reuses it after na
 
 it('persists interest settings and refreshes explicitly', async () => {
   await mount();
-  await click('Interests & sources');
+  await openSettings();
   const field = [...container.querySelectorAll('label')].find((label) => label.textContent?.includes('Additional interests'))!.querySelector('input')!;
   await act(async () => {
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, 'mixture of experts, diffusion');
@@ -324,7 +420,36 @@ it('persists interest settings and refreshes explicitly', async () => {
   expect(write.body).toMatchObject({ extra_interests: 'mixture of experts, diffusion', topic_ids: ['test-time', 'inference'] });
   const refreshes = calls.filter((call) => call.path.endsWith('/refresh'));
   expect(refreshes[refreshes.length - 1].body).toEqual({ force: true });
-  expect(container.querySelector('.brief-settings')).toBeNull();
+  expect(container.querySelector<HTMLDialogElement>('#brief-settings')!.open).toBe(false);
+});
+
+it('keeps a separately saved model choice when saving an older interests draft', async () => {
+  providerModels = [{ id: 'brief-profile', name: 'Brief provider', kind: 'openai_compatible', state: 'active',
+    models: [{ name: 'brief-model', enabled: true, capabilities: ['chat'] }] }];
+  await mount();
+  await openSettings();
+  const interest = [...container.querySelectorAll('label')]
+    .find((label) => label.textContent?.includes('Additional interests'))!.querySelector('input')!;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(interest, 'diffusion models');
+    interest.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  const picker = container.querySelector<HTMLButtonElement>('[aria-label="Morning Brief model"]')!;
+  await act(async () => picker.click());
+  const option = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((value) => value.textContent?.includes('brief-model'))!;
+  await act(async () => option.click());
+  const modelReference = { provider_profile_id: 'brief-profile', model: 'brief-model' };
+  expect(calls.filter((call) => call.path === '/api/brief/preferences')[0].body)
+    .toMatchObject({ summary_model_reference: modelReference });
+  await act(async () => container.querySelector('.brief-settings')!
+    .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  const writes = calls.filter((call) => call.path === '/api/brief/preferences');
+  expect(writes).toHaveLength(2);
+  expect(writes[1].body).toMatchObject({
+    extra_interests: 'diffusion models',
+    summary_model_reference: modelReference,
+  });
 });
 
 it('starts with a short reading list and lets the reader expand it', async () => {

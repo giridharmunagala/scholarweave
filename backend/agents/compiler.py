@@ -205,7 +205,8 @@ class AgentCompiler:
         compaction_model = None
         compaction_model_error = None
         if self._settings and getattr(self._settings, "agent_context_model_summary_enabled", True):
-            reference = getattr(self._settings, "default_model_references", {}).get("compaction")
+            defaults = getattr(self._settings, "default_model_references", {})
+            reference = defaults.get("compaction") or defaults.get("small_tasks")
             if reference and any(reference.values()):
                 try:
                     if not reference.get("provider_profile_id") or not reference.get("model"):

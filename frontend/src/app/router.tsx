@@ -1,5 +1,6 @@
 import {
   createContext,
+  startTransition,
   useCallback,
   useContext,
   useEffect,
@@ -13,7 +14,7 @@ import {
 interface RouterState {
   pathname: string;
   search: string;
-  navigate: (to: string, options?: { replace?: boolean }) => void;
+  navigate: (to: string, options?: { replace?: boolean }) => boolean;
   block: (guard: () => boolean) => () => void;
 }
 
@@ -55,21 +56,22 @@ export function RouterProvider({ children }: { children: ReactNode }) {
       }
       if (typeof targetIndex === 'number') historyIndex.current = targetIndex;
       currentUrl.current = window.location.pathname + window.location.search;
-      setLocation({ pathname: window.location.pathname, search: window.location.search });
+      startTransition(() => setLocation({ pathname: window.location.pathname, search: window.location.search }));
     };
     window.addEventListener('popstate', update);
     return () => window.removeEventListener('popstate', update);
   }, [canLeave]);
 
   const navigate = useCallback((to: string, options?: { replace?: boolean }) => {
-    if (restoringHistory.current || !canLeave()) return;
+    if (restoringHistory.current || !canLeave()) return false;
     if (!options?.replace) historyIndex.current += 1;
     window.history[options?.replace ? 'replaceState' : 'pushState'](
       { scholarweaveIndex: historyIndex.current }, '', to,
     );
     currentUrl.current = window.location.pathname + window.location.search;
-    setLocation({ pathname: window.location.pathname, search: window.location.search });
+    startTransition(() => setLocation({ pathname: window.location.pathname, search: window.location.search }));
     window.scrollTo({ top: 0 });
+    return true;
   }, [canLeave]);
 
   const value = useMemo(() => ({ ...location, navigate, block }), [location, navigate, block]);

@@ -41,7 +41,7 @@ function ActivityOutput({ reviewId, jobKey }: { reviewId: string; jobKey: string
 }
 
 export function ReviewActivityPanel({ review }: { review: Review }) {
-  const [open, setOpen] = useState(review.stage === 'synthesis');
+  const [open, setOpen] = useState(false);
   const [analysis, setAnalysis] = useState<AnalysisProgress | null>(null);
   const [activity, setActivity] = useState<ReviewActivityPage | null>(null);
   const [planOffset, setPlanOffset] = useState(0);
@@ -72,8 +72,8 @@ export function ReviewActivityPanel({ review }: { review: Review }) {
   }, [open, review.id, planOffset, jobOffset]);
 
   useEffect(() => {
-    if (review.stage === 'synthesis') setOpen(true);
-  }, [review.stage]);
+    if (review.stage === 'synthesis' && !review.embedding_model) setOpen(true);
+  }, [review.stage, review.embedding_model]);
 
   const pageTarget = analysis ? Math.min(analysis.total, analysis.page_limit) : 0;
   return <details open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -110,7 +110,7 @@ export function ReviewActivityPanel({ review }: { review: Review }) {
           Those are finite context-sized jobs, not further autonomous paper exploration.</p>
       </> : <p>No synthesis reading plan saved yet. Earlier completed jobs are available below.</p>}
       <h3>Saved jobs and intermediate results</h3>
-      <p>Local database records, newest updates first. Open a job to inspect its output, source quotes,
+      <p>Saved research receipts, newest updates first. Open a job to inspect its output, source quotes,
         selection reasons or draft sections. Results load only when requested.</p>
       <ul className="review-activity-jobs">{activity?.items.map((job) => <li key={job.key}>
         <button className="button ghost small" onClick={() => setSelected(job.key)}>

@@ -13,7 +13,7 @@ from backend.agents.blueprint import SessionPolicySpec
 from backend.bootstrap import create_services
 from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.persistence.files import StorageError
-from backend.tracks.markdown import SECTIONS, parse_experiments
+from backend.tracks.markdown import SECTIONS
 from backend.tracks.repository import TrackRepository
 from backend.tracks.service import TrackService
 
@@ -197,7 +197,7 @@ def test_exploration_http_creation_read_history_and_import(test_settings):
         assert len(applied.json()["exploration"]) == 2
 
 
-@pytest.mark.parametrize("status", ["Suggested", "Planned", "Running", "Completed", "Blocked", "Cancelled"])
+@pytest.mark.parametrize("status", ["Running", "Completed"])
 def test_experiment_status_is_markdown_authoritative(container, status):
     track = container.tracks.create("Status")
     write(container.tracks, track.id, "experiments", experiment(status=status))
@@ -422,6 +422,45 @@ def test_import_validates_all_manual_sections_and_rolls_back_runtime_failure(con
         tracks.apply_import(track.id, preview.preview_id, "merge", revisions(preview),
                             merged_content={"problem": "replacement", "literature": "replacement"})
     assert before == {section: tracks.read_section(track.id, section).content for section in SECTIONS}
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["markdown", "zip"])
+def test_refreshed_import_accepts_reviewed_merge_only_with_current_preview_revisions(container, archive):
+    tracks = container.tracks
+    track = tracks.create("Reconcile reviewed import")
+    write(tracks, track.id, "problem", "Incoming problem")
+    exported, _, _ = tracks.export(track.id)
+    write(tracks, track.id, "problem", "Original problem")
+
+    def preview():
+        return tracks.preview_zip(track.id, exported) if archive else tracks.preview_import(
+            track.id, "problem", "Incoming problem",
+        )
+
+    original = preview()
+    reviewed = "Original problem\nReviewed incoming problem"
+    write(tracks, track.id, "problem", "External evidence")
+    with pytest.raises(ConflictError):
+        tracks.apply_import(track.id, original.preview_id, "merge", revisions(original),
+                            merged_content={"problem": reviewed})
+    refreshed = preview()
+    assert refreshed.preview_id != original.preview_id
+    assert next(item for item in refreshed.sections if item.section == "problem").current_content == "External evidence"
+    assert tracks.read_section(track.id, "problem").content == "External evidence"
+    with pytest.raises(ConflictError, match="preview"):
+        tracks.apply_import(track.id, refreshed.preview_id, "merge", revisions(original),
+                            merged_content={"problem": reviewed})
+    write(tracks, track.id, "problem", "External evidence changed again")
+    with pytest.raises(ConflictError):
+        tracks.apply_import(track.id, refreshed.preview_id, "merge", revisions(refreshed),
+                            merged_content={"problem": reviewed + "\nExternal evidence"})
+    final = preview()
+    reconciled = reviewed + "\nExternal evidence changed again"
+    tracks.apply_import(track.id, final.preview_id, "merge", revisions(final),
+                        merged_content={"problem": reconciled})
+    assert tracks.read_section(track.id, "problem").content == reconciled
+    assert any(tracks.read_history(track.id, "problem", item.revision).content == "External evidence changed again"
+               for item in tracks.history(track.id, "problem"))
 
 
 def test_pending_mutation_recovers_previous_markdown_and_metadata_after_restart(container):

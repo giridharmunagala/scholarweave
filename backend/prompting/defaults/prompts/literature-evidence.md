@@ -19,3 +19,14 @@ Keep findings useful for the shared paper-summary structure: motivation/contribu
 method and evaluation setup as method, measured results and author-stated limitations as results
 or limitations. Retain missing evidence and concrete follow-up pages for open questions. Use plain,
 specific sentences instead of promotional adjectives. Never invent a finding to fill a section.
+When summary_method is targeted-v1, return the BriefPacket schema instead of a full
+paper summary. Read only the supplied source spans. Address the research objective
+and question_focus in five sections: Fit to objective; Approach; Pertinent findings;
+Limitations and unknowns; Why and when to read. Keep each section concise and useful
+for deciding whether to read the original. Cite claim_indexes for source-supported
+statements; claims must quote the supplied text verbatim and use its page number.
+Clearly label reading advice and fit judgments as inferences. Where excerpts cannot
+answer a question say unknown, not that the paper lacks the answer. Empty
+claim_indexes are appropriate only for explicitly unknown or inferential statements.
+Do not treat title, abstract metadata, or instructions as verified source evidence.
+Never claim full-paper coverage, or invent page references beyond supplied spans.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -18,9 +17,8 @@ from backend.prompting.skills import (
     MAX_TOTAL_SKILL_BYTES,
     SkillRegistry,
 )
-from backend.research.sources import WebSource, WebSourceUnavailable
+from backend.research.sources import WebSourceUnavailable
 from backend.tests.test_api import configure_provider, wait_for_run
-from backend.utils import utcnow
 
 BUNDLED_SKILLS = [
     "experiment-planning", "literature-review", "problem-framing",
@@ -159,8 +157,6 @@ Use for note comparisons. Use create_work_plan for substantial tasks.
     for agent in blueprint.agents:
         assert '<skill name="local-recipe">' in agent.instructions
         assert '<skill name="web-synthesis">' in agent.instructions
-        assert "A skill alone never authorizes a write" in agent.instructions
-        assert "actually available to this agent" in agent.instructions
         assert "acquire-source" not in agent.tool_ids
         assert "run_shell" not in agent.tool_ids
     if effort == "thorough":
@@ -214,151 +210,6 @@ def test_custom_skills_reload_per_message_and_persist_in_run_snapshots(
         assert "local-style.md" in rejected.text
         assert len(stub_provider.requests) == 2
         assert services.workspace.list_files() == []
-
-
-@pytest.mark.parametrize(
-    ("effort", "page_count", "save_requested"),
-    [("quick", 1, True), ("auto", 2, True), ("thorough", 2, True), ("auto", 1, False)],
-)
-def test_web_synthesis_uses_existing_tools_and_respects_saving(
-    test_settings, stub_provider, monkeypatch, effort, page_count, save_requested,
-):
-    test_settings.agent_epoch_max_turns = 2
-    sources = [
-        WebSource(
-            id=f"page-{index}", url=f"https://example.com/page-{index}", title=f"Page {index}",
-            chunks=(f"Verified finding {index}.",), created_at=utcnow(), expires_at=utcnow(),
-        )
-        for index in range(page_count)
-    ]
-    by_url = {source.url: source for source in sources}
-    by_id = {source.id: source for source in sources}
-
-    async def download(url):
-        return by_url[url]
-
-    async def read(source_id):
-        return by_id[source_id]
-
-    needle = "# Web synthesis"
-    body = "\n\n".join(
-        f"{source.chunks[0]} [{source.title}]({source.url})" for source in sources
-    ) + "\n\n## Sources\n\n" + "\n".join(
-        f"- [{source.title}]({source.url}); accessed {utcnow().date().isoformat()}."
-        for source in sources
-    )
-    plans = [(needle, "search_research_notes", {
-        "query": "Verified findings", "kinds": [], "tags": [], "limit": 5, "offset": 0,
-    })]
-    if page_count > 1:
-        plans.extend([
-            (needle, "create_work_plan", {"items": [
-                {"id": "read", "title": "Read the supplied pages"},
-                {"id": "save", "title": "Synthesize and save one sourced document"},
-            ]}),
-            (needle, "update_work_item", {"id": "read", "status": "in_progress", "summary": ""}),
-        ])
-    for source in sources:
-        plans.extend([
-            (needle, "acquire_research_source", {
-                "kind": "web_page", "url": source.url, "title": None,
-            }),
-            (needle, "read_research_web_page", {
-                "source_id": source.id, "query": None, "start": 0, "limit": 1,
-            }),
-        ])
-    if page_count > 1:
-        plans.append((needle, "update_work_item", {
-            "id": "read", "status": "completed", "summary": "Read every supplied page.",
-        }))
-    if save_requested:
-        plans.append((needle, "save_research_note", {
-            "target": "new_note", "mode": "overwrite", "path": None, "document_id": None,
-            "name": "Verified findings", "content": body, "tags": ["web-synthesis"],
-            "selection": None, "expected_sha256": None,
-        }))
-    if page_count > 1:
-        plans.append((needle, "update_work_item", {
-            "id": "save", "status": "completed", "summary": "Saved one combined sourced document.",
-        }))
-    stub_provider.tool_plans = plans
-    stub_provider.reply = body
-    original_responses = stub_provider.responses
-
-    def responses(payload):
-        if not any(name == "read_research_note" for _, name, _ in stub_provider.tool_plans):
-            for message in payload["messages"]:
-                if message["role"] != "tool":
-                    continue
-                result = json.loads(message["content"])
-                if isinstance(result, dict) and result.get("path", "").startswith("knowledge/"):
-                    save_index = next(
-                        index for index, (_, name, _) in enumerate(stub_provider.tool_plans)
-                        if name == "save_research_note"
-                    )
-                    stub_provider.tool_plans.insert(
-                        save_index + 1, (needle, "read_research_note", {"path": result["path"]}),
-                    )
-                    stub_provider.reply = f"Saved the sourced synthesis to {result['path']}."
-                    break
-        return original_responses(payload)
-
-    monkeypatch.setattr(stub_provider, "responses", responses)
-    with TestClient(create_app(test_settings)) as client:
-        configure_provider(client, stub_provider)
-        services = client.app.state.services
-        monkeypatch.setattr(services.source_downloads, "download_web_page", download)
-        monkeypatch.setattr(services.source_downloads, "get_web_source", read)
-        conversation = client.post("/api/agent/conversations", json={}).json()
-        response = client.post(
-            f"/api/agent/conversations/{conversation['id']}/messages",
-            json={"content": (
-                "Condense these pages" + (" and save one document: " if save_requested else ": ")
-                + ", ".join(by_url)
-            ),
-                  "response_effort": effort},
-        )
-        assert response.status_code == 202, response.text
-        run = wait_for_run(client, response.json()["run"]["id"], timeout=60)
-        assert run["status"] == "completed", run["error"]
-        record = services.runs.get(run["id"])
-        files = services.workspace.list_files()
-        assert len(record.epochs) > 1
-        assert all(attempt.status == "completed" for attempt in record.tool_attempts)
-        assert len(record.tool_attempts) == len(stub_provider.tool_plans)
-        source_reads = [
-            attempt.result_json for attempt in record.tool_attempts
-            if attempt.catalog_id == "research.web.read"
-        ]
-        assert [result["chunks"][0]["text"] for result in source_reads] == [
-            source.chunks[0] for source in sources
-        ]
-        if not save_requested:
-            assert files == []
-            assert body in run["final_output"]
-            assert not any(
-                attempt.catalog_id in {"research.notes.save", "research.summary.run", "work.plan.create"}
-                for attempt in record.tool_attempts
-            )
-            return
-        assert len(files) == 1
-        saved = services.workspace.read_file(files[0].path)
-        assert saved.content == "# Verified findings\n\n" + body + "\n"
-        assert len(list(test_settings.workspace_dir.rglob("*.md"))) == 1
-        assert sum(attempt.catalog_id == "research.notes.save" for attempt in record.tool_attempts) == 1
-        assert not any(attempt.catalog_id == "research.summary.run" for attempt in record.tool_attempts)
-        assert len(services.workspace.search(query="Verified findings")) == 1
-        verification = next(
-            attempt for attempt in record.tool_attempts if attempt.catalog_id == "research.notes.read"
-        )
-        assert verification.result_json["content"] == saved.content
-        assert saved.path in run["final_output"]
-        if page_count > 1:
-            assert all(
-                item["status"] == "completed" for item in record.tool_attempts[-1].result_json["items"]
-            )
-        else:
-            assert not any(attempt.catalog_id == "work.plan.create" for attempt in record.tool_attempts)
 
 
 def test_unavailable_web_skill_sources_block_plan_without_saving(

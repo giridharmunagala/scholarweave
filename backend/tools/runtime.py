@@ -20,7 +20,8 @@ from backend.documents import DocumentService
 from backend.documents.formatting import manifest_pages
 from backend.documents.retrieval import RetrievalService
 from backend.agents.context import ScholarWeaveContext, ToolReceipt
-from backend.agents.harness import current_tool_model_identity
+from backend.agents.harness import current_tool_model_identity, current_tool_model_binding
+from backend.agents.context_budget import IMAGE_INPUT_TOKEN_RESERVE, model_context_budget
 from backend.runs.repository import LeaseOwnershipError, RunRepository
 from backend.utils import to_jsonable
 from backend.persistence.files import SafeStorage, StorageError
@@ -35,6 +36,8 @@ from backend.workspace.layout import WorkspaceLayout
 
 if TYPE_CHECKING:
     from backend.tracks.service import TrackService
+    from backend.tracks.writing import WritingService
+    from backend.references.service import ReferenceService
     from backend.research.reviews.service import LiteratureReviewService
 
 
@@ -303,6 +306,8 @@ class ApplicationToolRuntime:
         prompts: PromptRegistry | None = None,
         run_repository: RunRepository | None = None,
         tracks: TrackService | None = None,
+        writing: WritingService | None = None,
+        references: ReferenceService | None = None,
     ) -> None:
         self._settings = settings
         self._documents = documents
@@ -315,6 +320,8 @@ class ApplicationToolRuntime:
         self._prompts = prompts
         self._runs = run_repository
         self._tracks = tracks
+        self._writing = writing
+        self._references = references
         self._paper_summary_lock = asyncio.Lock()
         self._summary_save_lock = threading.RLock()
         self._mutation_lock = asyncio.Lock()
@@ -331,7 +338,7 @@ class ApplicationToolRuntime:
     async def _literature_review(self, arguments: dict[str, Any], context: ScholarWeaveContext) -> dict:
         from backend.agents.blueprint import AgentBlueprint
         from backend.providers.types import ModelReference
-        from backend.research.reviews.schemas import ReviewControlRequest, ReviewCreateRequest
+        from backend.research.reviews.schemas import EmbeddingRole, SummaryRole, ReviewControlRequest, ReviewCreateRequest
 
         service = self._review_service
         if service is None or self._runs is None:
@@ -345,9 +352,24 @@ class ApplicationToolRuntime:
             blueprint = AgentBlueprint.model_validate(parent.blueprint_json)
             reference = next(agent.model for agent in blueprint.agents if agent.id == blueprint.entry_agent_id)
             resolved = service.jobs.runtime.resolve("chat", model_reference=ModelReference.model_validate(reference.model_dump()))
+            embedding = service.jobs.runtime.settings.default_model_references.get("embedding")
+            if not embedding:
+                raise ToolInputError("Configure a default embedding model in Settings before starting paper discovery in the Research workspace.")
+            summary = ModelReference.model_validate(
+                service.jobs.runtime.settings.default_model_references.get("summary")
+                or service.jobs.runtime.settings.default_model_references.get("small_tasks") or {},
+            )
             request = ReviewCreateRequest(
                 title=arguments["title"], objective=arguments["objective"],
                 main_model={"provider_profile_id": resolved.profile_id, "model": resolved.model},
+                summary_model=SummaryRole(model_reference={
+                    "provider_profile_id": summary.provider_profile_id,
+                    "model": summary.model,
+                } if summary.provider_profile_id or summary.model else {
+                    "provider_profile_id": resolved.profile_id, "model": resolved.model,
+                }),
+                embedding_model=EmbeddingRole(model_reference=embedding),
+                reading_mode="targeted",
                 conversation_id=context.conversation_id, track_id=context.metadata.get("research_track_id"),
                 web_enabled=any(tool.catalog_id == "research.sources.search" for tool in blueprint.tools),
             )
@@ -393,6 +415,27 @@ class ApplicationToolRuntime:
                 "next_offset": offset + limit if len(tracks) > offset + limit else None,
             }
         track_id = self._track_id(arguments, context)
+        if action == "references":
+            if arguments["section"] is not None or self._references is None:
+                raise ToolInputError("References requires section=null and an available reference service.")
+            service.get(track_id)
+            library = self._references.list()
+            offset, limit = arguments["offset"], arguments["limit"]
+            return {
+                "results": [item.model_dump(mode="json") for item in library.references[offset:offset + limit]],
+                "next_offset": offset + limit if len(library.references) > offset + limit else None,
+                "notice": "Use existing citation_key values as [@key]. Bibliographic metadata is not source evidence.",
+            }
+        if action == "claims":
+            if arguments["section"] is not None or self._writing is None:
+                raise ToolInputError("Claims requires section=null and an available writing service.")
+            collection = self._writing.claims(track_id)
+            offset, limit = arguments["offset"], arguments["limit"]
+            return {
+                "results": [claim.model_dump(mode="json") for claim in collection.claims[offset:offset + limit]],
+                "next_offset": offset + limit if len(collection.claims) > offset + limit else None,
+                "notice": "Quotes were attribution-checked, not scientifically verified. Preserve source status, contradictions and interpretation.",
+            }
         if action == "inspect":
             if arguments["section"] is not None:
                 raise ToolInputError("Inspect requires section to be null.")
@@ -805,6 +848,7 @@ class ApplicationToolRuntime:
             "next_offset": evidence.get("next_offset", 0),
             "evidence_path": state["checkpoint_path"],
             "model": _paper_model_provenance(context),
+            "visuals": context.metadata.get("paper_summary_visuals"),
             "content_hash": hashlib.sha256((content + "\n").encode()).hexdigest(),
             **{key: state[key] for key in ("source_hash", "extraction_hash", "source_version")},
         }
@@ -1538,11 +1582,11 @@ class ApplicationToolRuntime:
                     context, document, "read",
                     citations=sorted({str(item["citation"]) for item in bounded if item.get("citation")}),
                 )
-            return {
+            return self._with_paper_evidence(document_id, bounded, {
                 "document_id": document_id, "query": query, "matches": bounded,
                 "coverage": "targeted search, not a complete paper read",
                 "instruction": "Use chunk_index and match_offset with action=chunks to expand a hit.",
-            }
+            })
         start = arguments.get("start")
         limit = int(arguments["limit"]) if arguments.get("limit") is not None else None
         if action == "pages":
@@ -2210,7 +2254,7 @@ class ApplicationToolRuntime:
             )
         next_page = int(selected[-1]["page_number"]) + (0 if next_offset else 1)
         has_more = complete < len(available) or bool(next_offset)
-        return {
+        return self._with_paper_evidence(document_id, selected, {
             "document_id": document_id,
             "title": document.title,
             "page_count": len(pages),
@@ -2218,7 +2262,7 @@ class ApplicationToolRuntime:
             "next_page": next_page if has_more else None,
             "next_offset": next_offset,
             "pages": selected,
-        }
+        })
 
     def _read_document_chunks(
         self,
@@ -2267,7 +2311,7 @@ class ApplicationToolRuntime:
             )
         next_start = start + complete
         has_more = next_start < chunk_count
-        return {
+        return self._with_paper_evidence(document_id, selected, {
             "document_id": document_id,
             "title": document.title,
             "chunk_count": chunk_count,
@@ -2276,7 +2320,30 @@ class ApplicationToolRuntime:
             "next_start": next_start if has_more else None,
             "next_offset": next_offset,
             "chunks": selected,
-        }
+        })
+
+    def _with_paper_evidence(
+        self, document_id: str, sources: list[dict[str, Any]], result: dict[str, Any],
+    ) -> dict[str, Any]:
+        pages = sorted({
+            number for source in sources
+            for number in range(
+                int(source.get("page_number") or source.get("page_start") or 1),
+                int(source.get("page_number") or source.get("page_end") or source.get("page_start") or 1) + 1,
+            )
+        })
+        if not pages:
+            return result
+        binding = current_tool_model_binding()
+        input_tokens, _, _ = model_context_budget(
+            (binding.context_window_tokens if binding else None) or self._settings.agent_context_window_tokens,
+        )
+        evidence = self._documents.paper_context(
+            document_id, pages, include_images=bool(binding and binding.supports_vision),
+            max_images=input_tokens // (2 * IMAGE_INPUT_TOKEN_RESERVE),
+        )
+        content = evidence.pop("source_content")
+        return {**result, "paper_evidence": evidence, **({"source_content": content} if content else {})}
 
     def _bounded_source_items(
         self, items: list[dict[str, Any]], *, offset: int, max_chars: int | None = None,

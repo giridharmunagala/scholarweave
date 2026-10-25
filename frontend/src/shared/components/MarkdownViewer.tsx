@@ -23,6 +23,9 @@ import { Icon } from './Icons';
 
 const MARKDOWN_COMPONENTS: Components = {
   img: MarkdownImage,
+  p: ({ node, children, ...props }) =>
+    node?.children.some((child) => child.type === 'element' && child.tagName === 'img')
+      ? <div>{children}</div> : <p {...props}>{children}</p>,
   table: MarkdownTable,
   pre: MarkdownPre,
 };
@@ -50,10 +53,11 @@ const SAFE_HTML_SCHEMA = {
   },
 };
 
-export const MarkdownViewer = memo(function MarkdownViewer({ content, workspacePath, onNavigate }: {
+export const MarkdownViewer = memo(function MarkdownViewer({ content, workspacePath, onNavigate, imageSources }: {
   content: string;
   workspacePath?: string;
   onNavigate?: (to: string) => void;
+  imageSources?: Record<string, string>;
 }) {
   const components: Components = workspacePath ? {
     ...MARKDOWN_COMPONENTS,
@@ -81,7 +85,10 @@ export const MarkdownViewer = memo(function MarkdownViewer({ content, workspaceP
           [rehypeSanitize, SAFE_HTML_SCHEMA],
           rehypeKatex,
         ]}
-        components={components}
+        components={imageSources ? {
+          ...components,
+          img: ({ src, ...props }) => <MarkdownImage {...props} src={src ? imageSources[src] : undefined} />,
+        } : components}
       >
         {normalizeModelMath(content)}
       </ReactMarkdown>

@@ -19,10 +19,8 @@
 .track-create {
   display: grid;
   gap: var(--space-2);
-  padding: var(--space-4);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
+  padding: 0 0 var(--space-5);
+  border-bottom: 1px solid var(--border);
 }
 .track-create label { color: var(--text-strong); font-size: var(--text-sm); font-weight: 650; }
 .track-create .button { justify-self: start; }
@@ -149,7 +147,7 @@
   border-radius: var(--radius-md);
   background: var(--surface);
 }
-.track-document .markdown-viewer { margin: 0 auto; }
+.track-document .markdown-viewer { margin: 0 auto; font-size: 1rem; }
 .track-document.editing { padding: 0; border: 0; background: transparent; }
 .track-document-empty { margin: 0; color: var(--muted); font-style: italic; }
 .track-textarea {
@@ -216,6 +214,8 @@
 .track-card-hint { margin: 0; color: var(--muted); font-size: var(--text-xs); line-height: 1.5; }
 .track-inline-form { display: grid; gap: var(--space-2); }
 .track-inline-form .button { justify-self: start; }
+.track-add-existing-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: var(--space-4); }
+.track-add-existing-grid select { width: 100%; }
 .track-files, .track-links, .track-updates { display: grid; gap: 1px; margin: 0; padding: 0; list-style: none; }
 .track-files li, .track-links li { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .track-file {
@@ -292,3 +292,41 @@
   .track-document { padding: var(--space-4); }
   .track-association { flex-wrap: wrap; }
 }
+
+/* ------------------------------------------------------ Progress overview --- */
+
+.track-overview { display: grid; gap: var(--space-4); }
+.track-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--space-2); }
+.track-stats > div { display: grid; gap: .1rem; padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+.track-stats strong { color: var(--text-strong); font-size: 1.5rem; font-weight: 650; letter-spacing: -.02em; line-height: 1.1; }
+.track-stats strong small { color: var(--muted); font-size: .9rem; font-weight: 500; }
+.track-stats span { color: var(--muted); font-size: var(--text-xs); }
+.track-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--space-3); }
+.track-card {
+  display: grid;
+  gap: var(--space-2);
+  align-content: start;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  color: var(--text);
+  transition: border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+.track-card:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); text-decoration: none; transform: translateY(-1px); }
+.track-card-title { color: var(--text-strong); font-size: 1rem; line-height: 1.3; }
+.track-card-meta { display: flex; gap: var(--space-3); flex-wrap: wrap; color: var(--muted); font-size: var(--text-xs); }
+.track-card-meta > span { display: inline-flex; align-items: center; gap: .3rem; }
+.track-sections { display: flex; gap: 4px; flex-wrap: wrap; }
+.track-sections > span { padding: .1rem .45rem; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .7rem; text-transform: capitalize; }
+.track-sections > span.done { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); background: var(--accent-tint); color: var(--accent-strong); }
+.experiment-bar { display: flex; gap: 2px; height: 6px; overflow: hidden; border-radius: 99px; background: var(--hover-bg); }
+.experiment-bar > span { min-width: 4px; }
+.exp-completed { background: var(--success, #2e9d5b); }
+.exp-running { background: var(--accent); }
+.exp-planned { background: color-mix(in srgb, var(--accent) 40%, var(--bg)); }
+.exp-suggested { background: var(--border); }
+.exp-blocked { background: var(--danger, #d0453b); }
+.exp-cancelled { background: var(--muted); opacity: .4; }
+.track-card-updated { color: var(--muted); font-size: var(--text-xs); }
+.track-card-warning { color: var(--danger, #d0453b); font-size: var(--text-xs); }

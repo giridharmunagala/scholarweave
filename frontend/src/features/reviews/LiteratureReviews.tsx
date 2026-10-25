@@ -1,792 +1,706 @@
-import { useEffect, useRef, useState } from 'react';
-import { subscribeToReview } from '../../api/events';
+﻿import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigationGuard } from '../../app/router';
+import { useAsk } from '../../app/ask';
 import { ModelSelect, type ModelSelectValue } from '../../shared/components/ModelSelect';
-import { ErrorNotice, Loading, StatusPill } from '../../shared/components/Ui';
+import { ErrorNotice, IconButton } from '../../shared/components/Ui';
+import { SettingsDrawer } from '../../shared/components/SettingsDrawer';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
-import { capabilityOptions } from '../providers/ModelDefaultsPanel';
+import { Icon } from '../../shared/components/Icons';
 import { providersApi, type Provider } from '../providers/api';
-import {
-  reviewsApi, REVIEW_STAGES, type Candidate, type CandidatePage, type CandidateSort,
-  type LocalPaper, type PaperProgressPage, type PaperReview, type Review, type ReviewControl, type ReviewReference, type SummaryRole,
-} from './api';
-import './reviews.css';
-import { ProgressTiming } from './ProgressTiming';
+import { capabilityOptions } from '../providers/ModelDefaultsPanel';
+import { IdeasPanel } from '../chat/IdeasPanel';
+import { ArxivSearch } from '../documents/ArxivSearch';
+import { reviewsApi, type Candidate, type PaperReview, type Review, type ReviewControl, type SummaryRole, type Understanding } from './api';
 import { ReviewActivityPanel } from './ReviewActivityPanel';
+import './reviews.css';
 
-const label = (value: string) => value.replace(/_/g, ' ');
+type ReviewDraft = { chosen: string[]; focus: string };
+type WorkBudget = NonNullable<Review['work_budget']>;
+type WorkBudgetKey = keyof WorkBudget;
 
-export function LiteratureReviews({
-  conversationId, trackId, initialModel = {}, initialObjective = '', webEnabled = true,
+const REVIEW_DRAFTS_KEY = 'scholarweave:literature-review-drafts:v1';
+const DEFAULT_WORK_BUDGET: WorkBudget = { screened_papers: 100, read_papers: 20, comparison_passes: 1 };
+const WORK_BUDGET_FIELDS: { key: WorkBudgetKey; label: string; cap: number }[] = [
+  { key: 'screened_papers', label: 'Screened papers', cap: 5000 },
+  { key: 'read_papers', label: 'Read papers', cap: 5000 },
+  { key: 'comparison_passes', label: 'Comparison passes', cap: 100 },
+];
+
+function readReviewDrafts(): Record<string, ReviewDraft> {
+  try {
+    const stored: unknown = JSON.parse(window.sessionStorage.getItem(REVIEW_DRAFTS_KEY) ?? '{}');
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return {};
+    return Object.fromEntries(Object.entries(stored).flatMap(([id, value]) => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+      const draft = value as Partial<ReviewDraft>;
+      return [[id, {
+        chosen: Array.isArray(draft.chosen) ? draft.chosen.filter((item): item is string => typeof item === 'string') : [],
+        focus: typeof draft.focus === 'string' ? draft.focus : '',
+      }]];
+    }));
+  } catch {
+    return {};
+  }
+}
+
+function sameModel(left: ModelSelectValue, right: ModelSelectValue | null | undefined): boolean {
+  return left.provider_profile_id === right?.provider_profile_id && left.model === right?.model;
+}
+
+function modelValue(reference: ModelSelectValue | null | undefined): ModelSelectValue {
+  return reference ? { provider_profile_id: reference.provider_profile_id, model: reference.model } : {};
+}
+
+/** Saved tasks are never migrated or cleared by this workspace. */
+export function LiteratureReviews({ conversationId, trackId, initialModel = {}, initialObjective = '', webEnabled = true,
+  ensureConversation, onReviewChange, embedded = false, selectedReview, showSetup = true,
+  progress, activity, onDiscuss, onIntentChange, onWebEnabledChange, disabled = false, onBusyChange,
+  settingsControl,
 }: {
-  conversationId?: string;
-  trackId?: string;
-  initialModel?: ModelSelectValue;
-  initialObjective?: string;
-  webEnabled?: boolean;
+  conversationId?: string; trackId?: string; initialModel?: ModelSelectValue; initialObjective?: string; webEnabled?: boolean;
+  ensureConversation?: (model: ModelSelectValue) => Promise<string>;
+  onReviewChange?: (review: Review | undefined) => void;
+  embedded?: boolean; selectedReview?: Review; showSetup?: boolean;
+  progress?: ReactNode; activity?: ReactNode;
+  onDiscuss?: (draft: string) => void;
+  onIntentChange?: (intent: 'chat' | 'ideation') => void;
+  onWebEnabledChange?: (enabled: boolean) => void;
+  disabled?: boolean; onBusyChange?: (busy: boolean) => void;
+  settingsControl?: { open: boolean; onOpenChange: (open: boolean) => void };
 }) {
+  const ask = useAsk();
   const [reviews, setReviews] = useState<Review[]>([]);
-  const [selectedId, setSelectedId] = useState(() => new URLSearchParams(window.location.search).get('review') ?? '');
-  const [providers, setProviders] = useState<Provider[]>([]);
+  const params = new URLSearchParams(window.location.search);
+  const [id, setId] = useState(params.get('new') === '1' ? '' : params.get('review') ?? '');
+  const [newDraft, setNewDraft] = useState(params.get('new') === '1');
+  const [objective, setObjective] = useState(initialObjective || params.get('objective') || params.get('question') || '');
   const [main, setMain] = useState(initialModel);
-  const [mainParallelRequests, setMainParallelRequests] = useState(1);
-  const [decision, setDecision] = useState<ModelSelectValue>({});
-  const [summary, setSummary] = useState<SummaryRole | null>(null);
-  const [protocol, setProtocol] = useState<'off' | 'systemone' | 'generation'>('off');
-  const [inputTokens, setInputTokens] = useState(8192);
-  const [title, setTitle] = useState('Literature review');
-  const [objective, setObjective] = useState(initialObjective);
-  const [external, setExternal] = useState(webEnabled);
-  const [creating, setCreating] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [summary, setSummary] = useState<ModelSelectValue>({});
+  const [embedding, setEmbedding] = useState<ModelSelectValue>({});
+  const [localSettingsOpen, setLocalSettingsOpen] = useState(false);
+  const settingsOpen = settingsControl?.open ?? localSettingsOpen;
+  const setSettingsOpen = settingsControl?.onOpenChange ?? setLocalSettingsOpen;
+  const [providers, setProviders] = useState<Provider[]>([]);
   const [error, setError] = useState<unknown>(null);
-  const [clearReceipt, setClearReceipt] = useState('');
-  const [parallelCalls, setParallelCalls] = useState(8);
-  const [liveError, setLiveError] = useState('');
-  const requestVersion = useRef(0);
-  const mounted = useRef(true);
-  const selected = selectedId ? reviews.find((review) => review.id === selectedId) : reviews[0];
-  useNavigationGuard(busy || ((creating || !reviews.length) && !!objective.trim()),
-    'Leave Deep Work and discard this review setup? Running reviews will continue.', !busy);
-
+  const [pending, setPending] = useState(false);
+  const busy = pending || disabled;
+  const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [papers, setPapers] = useState<PaperReview[]>([]);
+  const [reviewDrafts, setReviewDrafts] = useState<Record<string, ReviewDraft>>(readReviewDrafts);
+  const [paperId, setPaperId] = useState('');
+  const [query, setQuery] = useState('');
+  const [showPdfInput, setShowPdfInput] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState('');
+  const [pdfTitle, setPdfTitle] = useState('');
+  const [topicId, setTopicId] = useState('');
+  const [selectedOnly, setSelectedOnly] = useState(false);
+  const [replacementMain, setReplacementMain] = useState<ModelSelectValue>({});
+  const [replacementSummary, setReplacementSummary] = useState<ModelSelectValue>({});
+  const [budgetProposal, setBudgetProposal] = useState<WorkBudget>(DEFAULT_WORK_BUDGET);
+  const [tab, setTab] = useState('Papers');
+  const openedReview = useRef('');
+  const questionInput = useRef<HTMLTextAreaElement>(null);
+  const paperReader = useRef<HTMLElement>(null);
+  const [understanding, setUnderstanding] = useState<Understanding | null>(null);
+  const review = embedded ? selectedReview : reviews.find((item) => item.id === id);
+  const draftReviewId = review?.id ?? id;
+  const reviewDraft = reviewDrafts[draftReviewId] ?? { chosen: [], focus: '' };
+  const chosen = reviewDraft.chosen;
+  const focus = reviewDraft.focus;
+  const archived = review?.reading_mode !== 'targeted';
+  const paper = papers.find((item) => item.candidate_id === paperId);
+  const candidate = candidates.find((item) => item.id === paperId);
+  const summaryModel = summary.model || summary.provider_profile_id ? summary : main;
+  const valid = !!(main.model && main.provider_profile_id && embedding.model && embedding.provider_profile_id
+    && summaryModel.model && summaryModel.provider_profile_id);
+  const landscapeStage = review && ['discovery', 'screening'].includes(review.stage);
+  const recovering = !!review && !archived && ['paused', 'blocked'].includes(review.status);
+  const workBudget = review?.work_budget ?? review?.scope?.suggested_work_budget ?? DEFAULT_WORK_BUDGET;
+  const workUsed = review?.work_used ?? { screened_papers: 0, read_papers: 0, comparison_passes: 0 };
+  const validBudgetProposal = WORK_BUDGET_FIELDS.every(({ key, cap }) =>
+    Number.isInteger(budgetProposal[key]) && budgetProposal[key] >= Math.max(workBudget[key], workUsed[key]) &&
+      budgetProposal[key] <= cap);
+  const extendsExhaustedBudget = WORK_BUDGET_FIELDS.some(({ key }) =>
+    workUsed[key] >= workBudget[key] && budgetProposal[key] > workBudget[key]);
   useEffect(() => {
-    mounted.current = true;
-    let active = true;
-    let inFlight = false;
-    requestVersion.current += 1;
-    setBusy(false);
-    setReviews([]);
-    setLoading(true);
-    const load = async () => {
-      if (inFlight) return;
-      inFlight = true;
-      const version = requestVersion.current;
-      try {
-        const items = await reviewsApi.list(conversationId, trackId);
-        if (active && mounted.current && version === requestVersion.current) setReviews((previous) => items.map((item) => {
-          const current = previous.find((review) => review.id === item.id);
-          return current && current.revision > item.revision ? current : item;
-        }));
-      } catch (reason) {
-        if (active && mounted.current) setError(reason);
-      } finally {
-        inFlight = false;
-        if (active && mounted.current) setLoading(false);
-      }
-    };
-    void load();
-    void Promise.all([providersApi.list(), providersApi.settings()]).then(([items, settings]) => {
-      if (!active || !mounted.current) return;
-      setProviders(items);
-      setParallelCalls(settings.decision_parallel_requests);
-      setMain((value) => value.provider_profile_id && value.model ? value : settings.default_model_references.chat ?? {});
-      const defaultDecision = settings.default_model_references.decision;
-      if (defaultDecision?.provider_profile_id && defaultDecision.model) {
-        setDecision(defaultDecision);
-        setProtocol('systemone');
-      }
-    }).catch((reason) => { if (active && mounted.current) setError(reason); });
-    const timer = window.setInterval(() => void load(), 3000);
-    return () => { active = false; mounted.current = false; window.clearInterval(timer); };
-  }, [conversationId, trackId]);
-
-  useEffect(() => {
-    setLiveError('');
-    if (!selected || selected.status !== 'running') return;
-    if (typeof EventSource === 'undefined') {
-      setLiveError('Live streaming is unavailable; progress refreshes every three seconds.');
+    if (!review) {
+      openedReview.current = '';
+      setTab('Papers');
       return;
     }
-    return subscribeToReview(selected.id, (review) => {
-      if (review.id !== selected.id) return;
-      setLiveError('');
-      setReviews((items) => items.map((item) => item.id === review.id && item.revision <= review.revision ? review : item));
-    }, () => setLiveError('Live updates interrupted; reconnecting. Progress still refreshes every three seconds.'));
-  }, [selected?.id, selected?.status]);
-
-  const perform = async (action: () => Promise<Review>) => {
-    if (busy) return;
-    const version = ++requestVersion.current;
-    setBusy(true);
-    setError(null);
-    try {
-      const review = await action();
-      if (!mounted.current || version !== requestVersion.current) return;
-      setReviews((items) => [review, ...items.filter((item) => item.id !== review.id)]);
-      setSelectedId(review.id);
-      setCreating(false);
-    } catch (reason) {
-      if (mounted.current && version === requestVersion.current) setError(reason);
-    } finally {
-      if (mounted.current && version === requestVersion.current) {
-        requestVersion.current += 1;
-        setBusy(false);
-      }
-    }
-  };
-  const start = () => perform(() => reviewsApi.create({
-    title: title.trim(), objective: objective.trim(), main_model: main,
-    main_parallel_requests: mainParallelRequests,
-    summary_model: summary,
-    decision_model: protocol === 'off' ? null : {
-      model_reference: decision, protocol, input_tokens: inputTokens,
-    },
-    conversation_id: conversationId ?? null, track_id: trackId || null,
-    web_enabled: external && webEnabled, openalex_enabled: false,
-  }));
-  const clear = async () => {
-    if (!selected || busy || !window.confirm(
-      `Clear "${selected.title}"? This stops all its work and removes its history and task-owned downloads. Pre-existing, shared, edited, or unverified artifacts will be kept. This cannot be undone.`,
-    )) return;
-    const version = ++requestVersion.current;
-    setBusy(true);
-    setError(null);
-    try {
-      const current = await reviewsApi.get(selected.id);
-      const result = await reviewsApi.clear(selected.id, current.revision);
-      if (!mounted.current || version !== requestVersion.current) return;
-      setReviews((items) => items.filter((item) => item.id !== selected.id));
-      setSelectedId('');
-      setTitle(selected.title);
-      setObjective(selected.objective);
-      setCreating(true);
-      setClearReceipt(`Review cleared. Removed ${result.deleted_document_ids.length} task-owned papers. Kept ${result.preserved_document_ids.length} pre-existing, shared, or unverified papers and ${result.preserved_paths.length} modified or unverified output files.`);
-    } catch (reason) {
-      if (mounted.current && version === requestVersion.current) setError(reason);
-    } finally {
-      if (mounted.current && version === requestVersion.current) {
-        requestVersion.current += 1;
-        setBusy(false);
-      }
-    }
-  };
-  const validModels = !!main.provider_profile_id && !!main.model
-    && validParallelRequests(mainParallelRequests)
-    && validSummary(summary)
-    && (protocol === 'off' || (!!decision.provider_profile_id && !!decision.model));
-  const decisionOptions = capabilityOptions(providers, protocol === 'systemone' ? 'decision' : 'chat')
-    .filter((option) => protocol !== 'systemone' || option.providerKind === 'openai_compatible');
-
-  return <section className="literature-reviews" aria-label="Literature review workspace">
-    <header className="review-heading">
-      <div><h2>Literature reviews</h2><p>A focused shortlist, grounded findings, and explicit reading decisions.</p></div>
-      <button className="button secondary small" disabled={busy} onClick={() => setCreating(!creating)}>
-        {creating ? 'Close setup' : 'New review'}
-      </button>
-    </header>
-    <ErrorNotice error={error} />
-    {liveError ? <p role="status" className="field-hint">{liveError}</p> : null}
-    {clearReceipt ? <p className="review-receipt" role="status">{clearReceipt}</p> : null}
-    {reviews.some((review) => review.status === 'awaiting_approval') ? <div className="review-approval" role="status">
-      <strong>Decisions needed</strong>
-      <div className="button-row">{reviews.filter((review) => review.status === 'awaiting_approval').map((review) =>
-        <button className="button secondary small" key={review.id} disabled={busy} onClick={() => setSelectedId(review.id)}>
-          {review.title}: {review.approval === 'budget' ? 'Review allowance' : review.approval === 'plan' ? 'Approve scope and allowance' : 'Continue automatic reading'}
-        </button>)}</div>
-    </div> : null}
-    {loading ? <Loading label="Loading reviews..." /> : null}
-    {!loading && selectedId && !selected ? <p role="alert">The linked review is unavailable in this selection. Choose another review or clear the track filter.</p> : null}
-    {creating || (!loading && !reviews.length) ? <form className="review-setup" onSubmit={(event) => { event.preventDefault(); void start(); }}>
-      <label>Review title<input value={title} maxLength={200} required onChange={(event) => setTitle(event.target.value)} /></label>
-      <label>Research objective<textarea value={objective} required maxLength={20000} rows={4}
-        placeholder="Define the field, research question and relevant constraints." onChange={(event) => setObjective(event.target.value)} /></label>
-      <div className="review-models">
-        <label>Main research model<ModelSelect ariaLabel="Main research model" options={capabilityOptions(providers, 'chat')} value={main} onChange={setMain} /></label>
-        <label>Main model parallel requests<input type="number" min={1} max={32} step={1} required
-          value={mainParallelRequests} onChange={(event) => setMainParallelRequests(Number(event.target.value))} /></label>
-        <label>Decision role<select value={protocol} onChange={(event) => {
-          const value = event.target.value;
-          if (value === 'off' || value === 'systemone' || value === 'generation') { setProtocol(value); setDecision({}); }
-        }}>
-          <option value="off">Settings default (main model if unset)</option>
-          <option value="systemone">Native llama.cpp System One</option>
-          <option value="generation">Structured generation (local or API)</option>
-        </select></label>
-        {protocol !== 'off' ? <label>Decision model<ModelSelect ariaLabel="Decision model" options={decisionOptions} value={decision} onChange={setDecision} /></label> : null}
-        {protocol === 'systemone' ? <label>Verified decision input allowance<input type="number" min={128} max={131072} step={1}
-          value={inputTokens} required onChange={(event) => setInputTokens(Number(event.target.value))} /></label> : null}
-      </div>
-      <SummaryModelFields providers={providers} value={summary} onChange={setSummary} disabled={busy} />
-      <p className="field-hint">The main model defaults to one request at a time; increase its limit only when the selected server can safely run concurrent requests. System One screens up to {parallelCalls} papers in parallel. <Link to="/settings">Choose the decision model and parallel-call limit in Settings.</Link> Main-model fallback uses batches, not one generation per paper.</p>
-      <details className="review-technical"><summary>Model and source limits</summary>
-      <p className="field-hint">Native probabilities are not calibrated relevance or scientific-quality scores; oversized or uncertain inputs use the main model. Generation and model switches remain serialized. To keep only one model resident in a llama.cpp router, configure its server with <code>--models-max 1</code>.</p>
-      <p className="field-hint">Every paper is rated before the shortlist: highly relevant, relevant, or somewhat relevant. Irrelevant papers are automatically excluded; the strongest matches appear first.</p>
-      <div className="button-row">
-        <label><input type="checkbox" checked={external && webEnabled} disabled={!webEnabled} onChange={(event) => setExternal(event.target.checked)} /> Allow arXiv and web discovery</label>
-      </div>
-      <p className="field-hint">Discovery stops at 500 papers, then screens what it found. arXiv requests run one at a time, at least 3 seconds apart. DuckDuckGo retains its existing rate and request limits. OpenAlex is disabled.</p>
-      <p className="field-hint">First, approve the model's plan and paper/comparison limits. Highly relevant and relevant papers are then collected and read automatically, including shared references after screening. Ambiguous publication identities are skipped with a visible notice, not guessed. Results save to the track's literature section or a local note; existing paper summaries and notes are kept.</p>
-      </details>
-      <button className="button primary" type="submit" disabled={busy || !validModels || !title.trim() || !objective.trim()}>Propose review plan</button>
-    </form> : null}
-    {reviews.length && !creating ? <div className="review-workspace">
-      <nav className="review-list" aria-label="Reviews">
-        <span className="review-eyebrow">Your reviews</span>
-        {reviews.map((review) => <button key={review.id} disabled={busy} aria-pressed={selected?.id === review.id}
-          onClick={() => setSelectedId(review.id)}>
-          <strong>{review.title}</strong><span>{label(review.stage)} · {label(review.status)}</span>
-          <small>{review.candidate_count} discovered · {review.selected_count} automatically selected</small>
-        </button>)}
-      </nav>
-      {selected ? <ReviewDetails key={selected.id} review={selected} busy={busy} clear={clear}
-        providers={providers}
-        control={(payload) => perform(() => reviewsApi.control(selected.id, { ...payload, expected_revision: selected.revision }))} /> : null}
-    </div> : null}
-  </section>;
-}
-
-const validSummary = (role: SummaryRole | null) => !role || (
-  !!role.model_reference.provider_profile_id && !!role.model_reference.model
-  && Number.isSafeInteger(role.max_output_tokens) && role.max_output_tokens >= 512 && role.max_output_tokens <= 26214
-  && Number.isSafeInteger(role.parallel_requests ?? 1) && (role.parallel_requests ?? 1) >= 1 && (role.parallel_requests ?? 1) <= 32
-);
-const validParallelRequests = (value: number) => Number.isSafeInteger(value) && value >= 1 && value <= 32;
-
-function SummaryModelFields({ providers, value, onChange, disabled }: {
-  providers: Provider[];
-  value: SummaryRole | null;
-  onChange: (value: SummaryRole | null) => void;
-  disabled: boolean;
-}) {
-  const efforts = providers.find((provider) => provider.id === value?.model_reference.provider_profile_id)
-    ?.models.find((model) => model.name === value?.model_reference.model)?.reasoning_efforts ?? [];
-  return <fieldset disabled={disabled}>
-    <legend>Paper summaries</legend>
-    <label><input type="checkbox" checked={!!value} onChange={(event) => onChange(event.target.checked
-      ? { model_reference: {}, max_output_tokens: 26214, parallel_requests: 1, reasoning_effort: null } : null)} />
-      Use a separate compact summary model</label>
-    {value ? <div className="review-models">
-      <label>Summary model<ModelSelect ariaLabel="Summary model" options={capabilityOptions(providers, 'chat')}
-        value={value.model_reference} disabled={disabled}
-        onChange={(model_reference) => onChange({ ...value, model_reference, reasoning_effort: null })} /></label>
-      <label>Summary output token limit<input type="number" min={512} max={26214} step={1} required
-        value={value.max_output_tokens} onChange={(event) => onChange({ ...value, max_output_tokens: Number(event.target.value) })} /></label>
-      <label>Parallel summaries<input type="number" min={1} max={32} step={1} required
-        value={value.parallel_requests ?? 1} onChange={(event) => onChange({ ...value, parallel_requests: Number(event.target.value) })} /></label>
-      <label>Summary reasoning<select value={value.reasoning_effort ?? ''}
-        onChange={(event) => {
-          const effort = efforts.find((item) => item === event.target.value);
-          onChange({ ...value, reasoning_effort: effort ?? null });
-        }}>
-        <option value="">Provider default</option>
-        {efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
-      </select></label>
-    </div> : null}
-    <p className="field-hint">{value
-      ? 'Plain-text summaries with flexible section and sentence guidance, without content checks or repair calls. Context is capped at 128K (131,072 tokens) per request, or the smaller configured model context; 20% is reserved for output, up to 26,214 tokens including reasoning. Safety and prompt overhead also reduce available input. Papers can run concurrently on the same summary model; other models wait. Your server must support the selected parallel slots and context per slot. Oversized papers use bounded packets combined locally. Choose low or no reasoning when supported.'
-      : 'Uses the existing main-model reading, combination and audit workflow. Discovery, screening and page selection are unchanged in either mode.'}</p>
-  </fieldset>;
-}
-
-function ReviewDetails({ review, busy, control, clear, providers }: {
-  review: Review;
-  busy: boolean;
-  control: (payload: Omit<ReviewControl, 'expected_revision'>) => Promise<void>;
-  clear: () => Promise<void>;
-  providers: Provider[];
-}) {
-  const [workBudget, setWorkBudget] = useState({ screened_papers: 100, read_papers: 20, comparison_passes: 1 });
-  const [resumeStage, setResumeStage] = useState(review.stage);
-  const [main, setMain] = useState<ModelSelectValue>(review.main_model);
-  const [mainParallelRequests, setMainParallelRequests] = useState(review.main_parallel_requests ?? 1);
-  const [summary, setSummary] = useState<SummaryRole | null>(review.summary_model ?? null);
-  const [offset, setOffset] = useState(0);
-  const [sort, setSort] = useState<CandidateSort>('relevance');
-  const [page, setPage] = useState<CandidatePage | null>(null);
-  const [priorSelection, setPriorSelection] = useState<string[]>([]);
-  const [error, setError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(false);
-  const approved = new Set(priorSelection);
-  const pendingOffset = offset;
-  const visibleCandidates = page?.items ?? [];
-  const pendingTotal = page?.total ?? 0;
-  const budget = review.suggested_work_budget ?? review.work_budget ?? review.scope?.suggested_work_budget;
-  const screenedPapers = budget?.screened_papers ?? 100;
-  const readPapers = budget?.read_papers ?? 20;
-  const comparisonPasses = budget?.comparison_passes ?? 1;
-  const canChangeModels = ['paused', 'blocked', 'completed'].includes(review.status);
+    if (openedReview.current === review.id) return;
+    openedReview.current = review.id;
+    setTab(review.status === 'completed' ? 'Findings' : 'Papers');
+  }, [review?.id, review?.status]);
+  useEffect(() => { onBusyChange?.(pending); }, [pending, onBusyChange]);
+  useNavigationGuard(!review && showSetup && !!objective.trim() || busy, 'Discard this research question? Running work will continue.', !busy);
 
   useEffect(() => {
-    setWorkBudget({ screened_papers: screenedPapers, read_papers: readPapers, comparison_passes: comparisonPasses });
-  }, [review.approval, screenedPapers, readPapers, comparisonPasses]);
-  useEffect(() => { setResumeStage(review.stage); }, [review.stage]);
-  useEffect(() => { setMain(review.main_model); },
-    [review.main_model.provider_profile_id, review.main_model.model]);
-  useEffect(() => { setMainParallelRequests(review.main_parallel_requests ?? 1); },
-    [review.main_parallel_requests]);
-  useEffect(() => { setSummary(review.summary_model ?? null); },
-    [review.summary_model?.model_reference.provider_profile_id, review.summary_model?.model_reference.model,
-      review.summary_model?.max_output_tokens, review.summary_model?.reasoning_effort, review.summary_model?.parallel_requests]);
+    try { window.sessionStorage.setItem(REVIEW_DRAFTS_KEY, JSON.stringify(reviewDrafts)); } catch { /* Storage is optional. */ }
+  }, [reviewDrafts]);
+
   useEffect(() => {
-    if (!review.candidate_count) { setPage(null); return; }
+    if (embedded) return;
     let active = true;
-    setLoading(true);
-    reviewsApi.candidates(review.id, offset, sort).then((result) => {
-      if (!active) return;
-      setPage(result);
-      setPriorSelection(result.selected_ids);
-      setError(null);
-    }).catch((reason) => { if (active) setError(reason); }).finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [review.id, review.revision, review.candidate_count, offset, sort]);
-
-  return <div className="review-detail">
-    <header className="review-heading"><div><span className="review-eyebrow">{label(review.stage)}</span><h2>{review.title}</h2></div>
-      <StatusPill value={review.status} /></header>
-    <div className="review-utility">
-    <Link to={`/deep-work?review=${encodeURIComponent(review.id)}${review.track_id ? `&track=${encodeURIComponent(review.track_id)}` : ''}`}>Link to this review</Link>
-      <a href={reviewsApi.exportUrl(review.id)} download>Export evidence JSON</a>
-      <button className="button ghost small review-clear" disabled={busy} onClick={() => void clear()}>Clear review</button>
-    </div>
-    <div className="review-budget">
-      <span>Screened papers: {review.work_used?.screened_papers ?? 0} / {review.work_budget?.screened_papers ?? 'not approved'}</span>
-      <span>Collection/read allowance used: {review.work_used?.read_papers ?? 0} / {review.work_budget?.read_papers ?? 'not approved'}</span>
-      <span>Comparison passes: {review.work_used?.comparison_passes ?? 0} / {review.work_budget?.comparison_passes ?? 'not approved'}</span>
-    </div>
-    <p className="review-objective">{review.objective}</p>
-    <dl className="review-metrics">
-      <div><dt>Discovered</dt><dd>{review.candidate_count}<small> / 500</small></dd></div>
-      <div><dt>Rated</dt><dd>{review.screened_count}</dd></div>
-      <div><dt>Excluded</dt><dd>{review.excluded_count}</dd></div>
-      <div><dt>Automatically selected</dt><dd>{review.selected_count}</dd></div>
-    </dl>
-    <p className="field-hint">Main: {review.main_model.model} (up to {review.main_parallel_requests ?? 1} parallel). Decision: {review.decision_model?.model_reference.model ?? 'main model (batched)'}. {review.evidence_count} verified source excerpts.</p>
-    <p className="field-hint">Paper summaries: {review.summary_model
-      ? `${review.summary_model.model_reference.model} (up to ${review.summary_model.parallel_requests ?? 1} parallel, ${review.summary_model.max_output_tokens} output tokens maximum, 128K context maximum)`
-      : 'main model, multi-pass source auditing'}.</p>
-    <section aria-label="Main model settings">
-      <h3>Main model for remaining research</h3>
-      <label>Main research model<ModelSelect ariaLabel="Resume main research model"
-        options={capabilityOptions(providers, 'chat')} value={main} onChange={setMain}
-        disabled={busy || !canChangeModels} /></label>
-      <label>Main model parallel requests<input type="number" min={1} max={32} step={1} required
-        value={mainParallelRequests} disabled={busy || !canChangeModels}
-        onChange={(event) => setMainParallelRequests(Number(event.target.value))} /></label>
-      {canChangeModels
-        ? <p className="field-hint">Choose a model, then Resume review to continue from the saved stage. Collected papers, completed summaries, verified evidence and approved work limits are retained. Earlier outputs keep their original model provenance.</p>
-        : <><p className="field-hint">Pause before switching the main model. Completed work is retained, and pending scope or work-limit approvals still apply.</p>
-          <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'pause' })}>
-            Pause to switch main model
-          </button></>}
-    </section>
-    <section aria-label="Summary model settings">
-      <h3>Summary model for unfinished papers</h3>
-      <SummaryModelFields providers={providers} value={summary} onChange={setSummary}
-        disabled={busy || !canChangeModels} />
-      {canChangeModels
-        ? <p className="field-hint">Choose the summary model above, then Resume review to apply it. Completed paper summaries and earlier exploration are retained.</p>
-        : <><p className="field-hint">Pause the review to choose a separate summary model. The current request is stopped safely; completed work is retained. Your selection applies when you resume.</p>
-          <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'pause' })}>
-            Pause to choose summary model
-          </button></>}
-    </section>
-    {review.status === 'running' ? <div className="review-progress" role="status" aria-live="polite">
-      <Loading label={`${label(review.stage)} in progress...`} />
-      {review.stage === 'screening' && review.candidate_count > 0
-        ? <><progress aria-label="Paper screening progress" value={review.screened_count} max={review.candidate_count} />
-          <span>{review.screened_count} of {review.candidate_count} papers rated</span>
-          <ProgressTiming key={`${review.id}:${review.stage}`} count={review.screened_count}
-            total={review.candidate_count} running /></>
-        : <progress aria-label={`${label(review.stage)} progress`} />}
-      {review.stage !== 'screening' || !review.candidate_count
-        ? <p className="field-hint">Time remaining unavailable: this stage has no fixed progress total.</p> : null}
-      <p className="field-hint">Updates after each completed decision. You can leave this page without stopping the review.</p>
-    </div> : null}
-    {review.screened_count > 0 ? <p className="field-hint">
-      {review.screened_count} papers rated; {review.excluded_count} irrelevant papers automatically excluded.
-      Excluded records remain in the evidence export, not the reading shortlist.
-    </p> : null}
-    <ol className="review-stages" aria-label="Research stages">{REVIEW_STAGES.map((stage) =>
-      <li key={stage} aria-current={review.stage === stage ? 'step' : undefined}>
-        {label(stage)}<small>{review.stage_history[stage] ?? (stage === review.stage ? label(review.status) : 'not started')}</small>
-      </li>)}</ol>
-    <ErrorNotice error={review.error} />
-    <ErrorNotice error={error} />
-    {review.notices.length ? <details><summary>Coverage and source notices ({review.notices.length})</summary>
-      <ul>{review.notices.map((notice, index) => <li key={index}>{notice}</li>)}</ul></details> : null}
-    {review.scope ? <details open={review.approval === 'plan'}>
-      <summary>Proposed scope and search waves</summary>
-      <p>{review.scope.rationale}</p>
-      <ul>{review.scope.questions.map((question, index) => <li key={index}>{question}</li>)}</ul>
-      <p>Include: {review.scope.inclusion_criteria.join('; ') || 'Not specified'}</p>
-      <p>Exclude: {review.scope.exclusion_criteria.join('; ') || 'Not specified'}</p>
-      <ul>{review.scope.queries.map((query, index) => <li key={index}>{query.provider}: {query.query} ({query.pages} suggested pages)</li>)}</ul>
-    </details> : null}
-    {review.status === 'awaiting_approval' && (review.approval === 'plan' || review.approval === 'budget') ? <div className="review-approval">
-      <h3>{review.approval === 'plan' ? 'Approve the research scope' : 'Review needs a work-budget extension'}</h3>
-      {(['screened_papers', 'read_papers', 'comparison_passes'] as const).map((kind) => <label key={kind}>
-        {kind === 'screened_papers' ? 'Papers screened limit' : kind === 'read_papers' ? 'Papers collected/read limit (including references)' : 'Cross-paper comparison passes limit'}
-        <input type="number" min={Math.max(1, review.work_used?.[kind] ?? 0)} max={kind === 'comparison_passes' ? 100 : 5000} step={1}
-          value={workBudget[kind]} onChange={(event) => setWorkBudget((current) => ({ ...current, [kind]: Number(event.target.value) }))} />
-      </label>)}
-      <p className="field-hint">Distinct papers count once across retries and resume, including supplemental references. One comparison pass compares the read set against the research questions, not every pair or model chunk. Source/context safety remains automatic.</p>
-      <button className="button primary" disabled={busy || Object.entries(workBudget).some(([kind, value]) =>
-        !Number.isSafeInteger(value) || value < Math.max(1, review.work_used?.[kind as keyof typeof workBudget] ?? 0))}
-        onClick={() => void control({ action: review.approval === 'plan' ? 'approve_plan' : 'extend_budget', work_budget: workBudget })}>
-        {review.approval === 'plan' ? 'Approve plan and work limits' : 'Extend work limits'}
-      </button>
-    </div> : null}
-    <div className="button-row review-controls">
-      {review.approval === 'analysis' && review.status === 'awaiting_approval' ? <>
-        <button className="button primary" disabled={busy}
-          onClick={() => void control({ action: 'extend_analysis' })}>Approve up to 20 more source pages</button>
-        <button className="button secondary" disabled={busy || review.evidence_count === 0}
-          onClick={() => void control({ action: 'write_report' })}>Write report with current evidence</button>
-      </> : null}
-      {!review.references_skipped && review.status !== 'completed'
-        && REVIEW_STAGES.indexOf(review.stage) <= REVIEW_STAGES.indexOf('reference_collection')
-        ? <button className="button secondary" disabled={busy}
-          onClick={() => void control({ action: 'skip_references' })}>Skip references</button> : null}
-      {review.status !== 'completed' && review.status !== 'paused' ? <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'pause' })}>Pause review</button> : null}
-      {review.status !== 'completed' ? <button className="button secondary" disabled={busy} onClick={() => void control({ action: 'stop_stage' })}>Stop stage and use valid partial results</button> : null}
-      {(['paused', 'blocked', 'completed'].includes(review.status) || (review.status === 'awaiting_approval' && review.approval !== 'budget')) ? <>
-        {review.approval !== 'budget' ? <label>Resume from<select value={resumeStage} onChange={(event) => {
-          const stage = REVIEW_STAGES.find((item) => item === event.target.value);
-          if (stage) setResumeStage(stage);
-        }}>{REVIEW_STAGES.slice(0, REVIEW_STAGES.indexOf(review.stage) + 1).map((stage) => <option key={stage} value={stage}>{label(stage)}</option>)}</select></label> : null}
-        <button className="button primary" disabled={busy || !validSummary(summary)
-          || !validParallelRequests(mainParallelRequests) || !main.provider_profile_id || !main.model} onClick={() => void control({
-          action: 'resume', stage: review.approval === 'budget' ? null : resumeStage,
-          ...(canChangeModels && (main.provider_profile_id !== review.main_model.provider_profile_id
-            || main.model !== review.main_model.model) ? { main_model: main } : {}),
-          ...(canChangeModels && mainParallelRequests !== (review.main_parallel_requests ?? 1)
-            ? { main_parallel_requests: mainParallelRequests } : {}),
-          ...(['paused', 'blocked', 'completed'].includes(review.status) ? { summary_model: summary } : {}),
-        })}>
-          {review.approval === 'plan' || review.approval === 'budget' || review.approval === 'analysis'
-            ? 'Return to pending approval' : 'Resume review'}
-        </button>
-      </> : null}
-    </div>
-    {review.references_skipped ? <p className="field-hint">Reference expansion skipped. Initial-paper work and completed results are retained; the review continues to synthesis without further reference lookup or collection.</p> : null}
-    <ReviewActivityPanel key={`activity:${review.id}`} review={review} />
-    {review.output_path ? <div className="review-saved">
-      <Link className="button primary small" to={review.track_id
-        ? `/tracks?id=${encodeURIComponent(review.track_id)}&section=literature&review=${encodeURIComponent(review.id)}&revision=${review.revision}`
-        : `/library/notes?path=${encodeURIComponent(review.output_path)}`}>Open saved review</Link>
-      <p className="field-hint">{review.output_path}</p>
-    </div> : null}
-    {review.selected_count > 0 && REVIEW_STAGES.indexOf(review.stage) >= REVIEW_STAGES.indexOf('reading_plan')
-      ? <CapturedPages key={review.id} review={review} /> : null}
-    {REVIEW_STAGES.indexOf(review.stage) >= REVIEW_STAGES.indexOf('references')
-      ? <ReferenceTable review={review} busy={busy} control={control} /> : null}
-    {review.candidate_count ? <section className="review-shortlist" aria-label="Paper shortlist">
-      <div className="review-heading"><div><h3>Paper shortlist</h3><p className="field-hint">Highly relevant and relevant papers are automatically collected and read. Somewhat relevant papers remain metadata only.</p></div><label>Order by<select value={sort} onChange={(event) => {
-        const value = event.target.value;
-        if (value === 'relevance' || value === 'year' || value === 'title') { setSort(value); setOffset(0); }
-      }}><option value="relevance">Relevance</option><option value="year">Newest first</option><option value="title">Title</option></select></label></div>
-      {loading ? <Loading label="Loading candidates..." /> : null}
-      {!loading && page?.total === 0 ? <p>No papers remain in the shortlist. Review the exclusions in the evidence export or start a new review with a revised objective.</p> : null}
-      <div className="review-candidates">
-        {visibleCandidates.map((candidate) => <CandidateCard key={candidate.id} candidate={candidate} reviewId={review.id} revision={review.revision}
-          checked={approved.has(candidate.id)} selectable={false}
-          linkable={review.status !== 'running' && !busy}
-          onLink={(documentId) => control({ action: 'link_paper', candidate_ids: [candidate.id], document_id: documentId })}
-          onSelect={() => {}} />)}
-      </div>
-      <div className="button-row">
-        <button className="button ghost small" disabled={loading || pendingOffset === 0} onClick={() => setOffset(Math.max(0, pendingOffset - 25))}>Previous papers</button>
-        <span>{pendingTotal ? `${pendingOffset + 1}-${pendingOffset + visibleCandidates.length} of ${pendingTotal}` : '0 papers'}</span>
-        <button className="button ghost small" disabled={loading || pendingOffset + 25 >= pendingTotal} onClick={() => setOffset(pendingOffset + 25)}>Next papers</button>
-      </div>
-    </section> : null}
-  </div>;
-}
-
-function PaperSummaries({ paper }: { paper: PaperReview }) {
-  const [showPackets, setShowPackets] = useState(false);
-  const renderSummary = (summary: Record<string, unknown>) => {
-    const sections = (summary.sections ?? []) as { title: string; content: string }[];
-    const limitations = (summary.limitations ?? []) as string[];
-    return <>
-      {sections.map((section, index) => <div key={index}>
-        <MarkdownViewer content={`#### ${section.title}\n\n${section.content}`} />
-      </div>)}
-      {limitations.length ? <details><summary>Limitations and coverage</summary>
-        <ul>{limitations.map((value, index) => <li key={index}>{value}</li>)}</ul>
-      </details> : null}
-    </>;
-  };
-  return <>
-    {paper.selective_summary ? <section aria-label="Selective paper summary">
-      <h4>Selective paper summary</h4>
-      <p>Admitted source spans only; not a canonical full-paper summary.</p>
-      {renderSummary(paper.selective_summary)}
-    </section> : null}
-    {(paper.partial_summaries ?? []).length ? <details onToggle={(event) => setShowPackets(event.currentTarget.open)}>
-      <summary>Paper summary packets ({paper.partial_summaries?.length})</summary>
-      {showPackets ? (paper.partial_summaries ?? []).map((summary, index) => <section key={index}>
-        <h4>Source packet {index + 1}</h4>{renderSummary(summary)}
-      </section>) : null}
-    </details> : null}
-  </>;
-}
-
-function PaperReader({ reviewId, candidateId, title, onClose }: {
-  reviewId: string; candidateId: string; title: string; onClose: () => void;
-}) {
-  const [paper, setPaper] = useState<PaperReview | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [refresh, setRefresh] = useState(0);
-  const [showSources, setShowSources] = useState(false);
-  const reader = useRef<HTMLElement>(null);
-  useEffect(() => {
-    reader.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    reader.current?.focus({ preventScroll: true });
-  }, []);
-  useEffect(() => {
-    let active = true;
-    setPaper(null);
-    setError(null);
-    setShowSources(false);
-    void reviewsApi.paper(reviewId, candidateId).then((result) => {
-      if (active) setPaper(result);
-    }).catch((reason: unknown) => {
-      if (active) setError(reason);
-    });
-    return () => { active = false; };
-  }, [reviewId, candidateId, refresh]);
-  return <section className="review-paper-reader" aria-label={`Summary for ${title}`} ref={reader} tabIndex={-1}>
-    <div className="review-heading">
-      <h3>{title}</h3>
-      <div className="button-row">
-        <button className="button ghost small" onClick={() => setRefresh((value) => value + 1)}>Refresh paper</button>
-        <button className="button ghost small" onClick={onClose}>Close paper</button>
-      </div>
-    </div>
-    <ErrorNotice error={error} />
-    {!paper && !error ? <Loading label="Loading paper summary..." /> : null}
-    {paper ? <>
-      <ErrorNotice error={paper.error} />
-      {paper.selective_summary ? <PaperSummaries paper={paper} /> : <p>No summary saved yet.</p>}
-      <details onToggle={(event) => setShowSources(event.currentTarget.open)}>
-        <summary>Source details and page decisions</summary>
-        {showSources ? <>
-          {paper.operation ? <p role="status">{paper.operation}</p> : null}
-          <p>Source version: {paper.source_version}. Read pages: {paper.read_pages.join(', ') || 'none'}.
-            Partial pages: {paper.partial_pages.join(', ') || 'none'}.</p>
-          <p>{paper.evidence_count} verified excerpts. Summary prose itself is not verified source evidence.</p>
-          <ul>{paper.pages.map((page) => <li key={page.page}>Page {page.page}: {page.action}
-            {page.reference_page ? ' · reference page' : ''} — {page.reason}</li>)}</ul>
-          {(paper.findings ?? []).map((finding, index) => <div key={index}><p>{String(finding.finding ?? '')}</p>
-            {finding.quote ? <blockquote>{String(finding.quote)}</blockquote>
-              : <p>Source quotation pending; verify against the original page during analysis.</p>}
-            <small>Page {String(finding.page ?? '')}</small></div>)}
-        </> : null}
-      </details>
-    </> : null}
-  </section>;
-}
-
-function CapturedPages({ review }: { review: Review }) {
-  const [page, setPage] = useState<PaperProgressPage | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [offset, setOffset] = useState(0);
-  const [summariesOnly, setSummariesOnly] = useState(true);
-  const [selected, setSelected] = useState<{ candidate_id: string; title: string } | null>(null);
-  const revision = useRef(review.revision);
-  revision.current = review.revision;
-  useEffect(() => {
-    let active = true;
-    let inFlight = false;
-    let loadedRevision = -1;
-    setPage(null);
+    let loading = false;
     const load = async () => {
-      if (inFlight || loadedRevision === revision.current) return;
-      inFlight = true;
-      const requestedRevision = revision.current;
+      if (loading) return;
+      loading = true;
       try {
-        const result = await reviewsApi.paperProgress(review.id, offset, summariesOnly);
-        if (active) {
-          if (offset > 0 && offset >= result.total) {
-            setOffset(Math.floor(Math.max(0, result.total - 1) / 25) * 25);
-          } else {
-            setPage(result); setError(null); loadedRevision = requestedRevision;
-          }
-        }
-      } catch (reason) {
-        if (active) setError(reason);
-      } finally {
-        inFlight = false;
-      }
+        const items = await reviewsApi.list(conversationId, trackId);
+        const requested = params.get('review') || id;
+        if (!newDraft && requested && !items.some((item) => item.id === requested)) items.unshift(await reviewsApi.get(requested));
+        if (active) setReviews((old) => items.map((item) => {
+          const previous = old.find((value) => value.id === item.id);
+          return previous && previous.revision > item.revision ? previous : item;
+        }));
+      } catch (reason) { if (active) setError(reason); }
+      finally { loading = false; }
     };
     void load();
     const timer = window.setInterval(() => void load(), 3000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [review.id, offset, summariesOnly]);
-  const total = page?.counts.total ?? 0;
-  return <section aria-label="Paper summaries and progress">
-    <h3>Paper collection and reading progress</h3>
-    <ErrorNotice error={error} />
-    {!page && !error ? <Loading label="Loading paper progress..." /> : null}
-    {page && total ? <div className="review-progress" aria-label="Paper progress">
-      {([
-        ['PDFs collected or reused', page.counts.collected],
-        ['Source text prepared', page.counts.prepared],
-        ['Page decisions complete', page.counts.plan_complete],
-        ['Papers read and summarized', page.counts.summarized],
-      ] as const).map(([title, count]) => <div key={title}>
-        <span>{title}: {count} / {total}</span>
-        <progress aria-label={title} value={count} max={total} />
-        <ProgressTiming key={`${review.id}:${title}`} count={count} total={total} running={review.status === 'running'} />
-      </div>)}
-      <p className="field-hint">Counts refer to selected papers, not the work allowance. Collection and extraction happen before page decisions and selective reading; collected does not mean read.</p>
-      {page.counts.failed ? <p role="status">{page.counts.failed} {page.counts.failed === 1 ? 'paper needs' : 'papers need'} attention; choose All papers to inspect errors.</p> : null}
-      {page.operations.map((paper) => <p role="status" key={paper.candidate_id}>{paper.operation}: {paper.title}</p>)}
-    </div> : null}
-    {selected ? <PaperReader key={`${review.id}:${selected.candidate_id}`} reviewId={review.id}
-      candidateId={selected.candidate_id} title={selected.title} onClose={() => setSelected(null)} /> : null}
-    <div className="review-heading">
-      <h3>Paper summaries</h3>
-      <label>Show <select value={summariesOnly ? 'summaries' : 'all'} onChange={(event) => {
-        setSummariesOnly(event.target.value === 'summaries'); setOffset(0);
-      }}>
-        <option value="summaries">Summaries ready</option>
-        <option value="all">All papers</option>
-      </select></label>
-    </div>
-    <p className="field-hint">Summary text loads only when you open a paper.</p>
-    <ul className="review-paper-list">
-      {page?.items.map((paper) => <li key={paper.candidate_id}>
-        <div><strong>{paper.title || paper.candidate_id}</strong><small>
-          {paper.error ? 'Needs attention' : paper.summary_complete ? 'Summary ready' : paper.operation
-            || (paper.plan_complete ? 'Waiting for summary' : paper.prepared ? 'Prepared' : paper.collected ? 'Collected' : 'Queued')}
-        </small></div>
-        <button className="button ghost small" aria-label={`${paper.summary_complete ? 'View summary' : 'View progress'} for ${paper.title}`}
-          onClick={() => setSelected(paper)}>{paper.summary_complete ? 'View summary' : 'View progress'}</button>
-      </li>)}
-    </ul>
-    {page && !page.total ? <p>{summariesOnly ? 'No summaries saved yet. Reading progress appears above.' : 'No selected papers yet.'}</p> : null}
-    <div className="button-row">
-      <button className="button ghost small" disabled={!page || offset === 0}
-        onClick={() => setOffset(Math.max(0, offset - 25))}>Previous summaries</button>
-      <span>{page?.total ? `${offset + 1}-${offset + page.items.length} of ${page.total}` : '0 papers'}</span>
-      <button className="button ghost small" disabled={!page || page.next_offset == null}
-        onClick={() => { if (page?.next_offset != null) setOffset(page.next_offset); }}>Next summaries</button>
-    </div>
-  </section>;
-}
+  }, [conversationId, trackId, embedded, newDraft, id]);
 
-function ReferenceTable({ review, busy, control }: {
-  review: Review; busy: boolean; control: (command: Omit<ReviewControl, 'expected_revision'>) => Promise<void>;
-}) {
-  const [rows, setRows] = useState<ReviewReference[]>([]);
-  const [error, setError] = useState<unknown>(null);
   useEffect(() => {
+    if (embedded && !showSetup && !recovering) return;
+    if (embedded && selectedReview && !recovering) return;
     let active = true;
-    void reviewsApi.references(review.id).then((items) => {
-      if (active) { setRows(items); setError(null); }
+    void Promise.all([providersApi.list(), providersApi.settings()]).then(([items, settings]) => {
+      if (!active) return;
+      setProviders(items);
+      setMain((value) => value.model ? value : settings.default_model_references.chat ?? {});
+      setSummary((value) => value.model || value.provider_profile_id ? value
+        : settings.default_model_references.summary ?? settings.default_model_references.small_tasks ?? {});
+      setEmbedding(settings.default_model_references.embedding ?? {});
     }).catch((reason) => { if (active) setError(reason); });
     return () => { active = false; };
-  }, [review.id, review.revision]);
-  const choosing = review.status === 'awaiting_approval' && review.approval === 'references';
-  const collecting = review.status === 'awaiting_approval' && review.approval === 'reference_pdfs';
-  return <section aria-label="Captured references">
-    <h3>Captured references</h3>
-    <p>Counts are distinct originally selected citing papers, not extraction attempts. Supplemental PDFs never expand this list.</p>
-    <a href={reviewsApi.referencesExportUrl(review.id)} download>Export references CSV</a>
+  }, [embedded, showSetup, selectedReview?.id, recovering]);
+
+  useEffect(() => {
+    setCandidates([]); setPapers([]); setPaperId('');
+    setUnderstanding(null); setQuery(''); setTopicId(''); setSelectedOnly(false);
+    setShowPdfInput(false); setPdfUrl(''); setPdfTitle('');
+  }, [embedded ? selectedReview?.id : id]);
+
+  useEffect(() => {
+    if (!review) return;
+    setReplacementMain(modelValue(review.main_model));
+    setReplacementSummary(modelValue(review.summary_model?.model_reference));
+  }, [review?.id, recovering]);
+
+  useEffect(() => {
+    if (!review || review.approval !== 'budget') return;
+    setBudgetProposal(review.suggested_work_budget ?? workBudget);
+  }, [review?.id, review?.approval]);
+
+  useEffect(() => {
+    if (!review) return;
+    let active = true;
+    void Promise.all([reviewsApi.allCandidates(review.id, 'relevance'), reviewsApi.papers(review.id), reviewsApi.understanding(review.id)]).then(([page, items, comparison]) => {
+      if (!active) return;
+      setCandidates(page.items); setPapers(items); setUnderstanding(comparison);
+      const candidateIds = new Set(page.items.map((item) => item.id));
+      setReviewDrafts((old) => {
+        const saved = old[review.id];
+        if (!saved || saved.chosen.every((item) => candidateIds.has(item))) return old;
+        return { ...old, [review.id]: { ...saved, chosen: saved.chosen.filter((item) => candidateIds.has(item)) } };
+      });
+    }).catch((reason) => { if (active) setError(reason); });
+    return () => { active = false; };
+  }, [review?.id, review?.revision]);
+
+  const updateReviewDraft = (update: Partial<ReviewDraft>) => {
+    if (!draftReviewId) return;
+    setReviewDrafts((items) => ({
+      ...items,
+      [draftReviewId]: { ...(items[draftReviewId] ?? { chosen: [], focus: '' }), ...update },
+    }));
+  };
+
+  const perform = async (operation: () => Promise<Review>) => {
+    if (busy) return false;
+    setPending(true); setError(null);
+    try {
+      const result = await operation();
+      setReviews((items) => [result, ...items.filter((item) => item.id !== result.id)]);
+      setId(result.id);
+      setNewDraft(false);
+      onReviewChange?.(result);
+      return true;
+    } catch (reason) { setError(reason); }
+    finally { setPending(false); }
+    return false;
+  };
+  const control = (action: ReviewControl['action'], values: Partial<ReviewControl> = {}) => {
+    if (review) void perform(() => reviewsApi.control(review.id, { action, expected_revision: review.revision, ...values }));
+  };
+  const addPdfPaper = async () => {
+    if (!review || busy || !pdfUrl.trim()) return;
+    const added = await perform(() => reviewsApi.control(review.id, {
+      action: 'add_pdf_paper', expected_revision: review.revision,
+      pdf_paper: { url: pdfUrl.trim(), title: pdfTitle.trim() || null },
+    }));
+    if (added) {
+      setPdfUrl(''); setPdfTitle(''); setShowPdfInput(false);
+    }
+  };
+  const toggle = (value: string) => updateReviewDraft({
+    chosen: chosen.includes(value) ? chosen.filter((item) => item !== value) : [...chosen, value],
+  });
+  const askAboutPaper = (draft?: string) => {
+    if (!candidate?.document_id) return;
+    if (onDiscuss) {
+      onDiscuss([
+        draft || `Help me understand "${candidate.title}".`,
+        `Local paper ID: ${candidate.document_id}`,
+        context,
+      ].join('\n\n'));
+    } else ask.ask(draft, { context: { document_id: candidate.document_id, title: candidate.title } });
+  };
+  const context = [
+    `Research question: ${review?.objective ?? objective}`,
+    `Direction: ${focus || review?.question_focus || 'Not narrowed yet'}`,
+    ...candidates.filter((item) => item.id === paperId || chosen.includes(item.id)).slice(0, 6).map((item) => {
+      const source = papers.find((value) => value.candidate_id === item.id);
+      return `${item.title}\nAbstract (metadata, not source verification): ${(item.abstract ?? 'Unavailable').slice(0, 1200)}\n` +
+        (source?.brief?.findings.slice(0, 3).map((finding) => `Verified source quote, p.${finding.page}: "${finding.quote}"`).join('\n') ?? 'Source not yet read.');
+    }),
+  ].join('\n\n').slice(0, 10000);
+
+  const step = !review ? 0 : review.stage === 'scope' || review.approval === 'plan' ? 1 : landscapeStage || review.approval === 'topics' ? 2 : 3;
+  const selecting = !archived && review?.approval === 'topics';
+  const briefCount = papers.filter((item) => item.brief).length;
+  const selectedTopic = review?.topics?.find((item) => item.id === topicId);
+  const visible = candidates.filter((item) => (!selectedOnly || chosen.includes(item.id)) &&
+    (!selectedTopic || selectedTopic.candidate_ids.includes(item.id)) &&
+    `${item.title} ${item.abstract ?? ''}`.toLowerCase().includes(query.toLowerCase()));
+  const nextStep = review ? researchNextStep(review) : null;
+  const showEvidence = archived || candidates.length > 0 || step === 3 || selecting;
+  const budget = review?.scope?.suggested_work_budget;
+  const recoveryValues = (): Partial<ReviewControl> => {
+    const values: Partial<ReviewControl> = {};
+    if (replacementMain.model && replacementMain.provider_profile_id && !sameModel(replacementMain, review?.main_model)) {
+      values.main_model = {
+        provider_profile_id: replacementMain.provider_profile_id,
+        model: replacementMain.model,
+      };
+    }
+    if (replacementSummary.model && replacementSummary.provider_profile_id &&
+      !sameModel(replacementSummary, review?.summary_model?.model_reference)) {
+      const prior = review?.summary_model;
+      const summary: SummaryRole = {
+        model_reference: {
+          provider_profile_id: replacementSummary.provider_profile_id,
+          model: replacementSummary.model,
+        },
+        max_output_tokens: prior?.max_output_tokens ?? 4096,
+        parallel_requests: prior?.parallel_requests ?? 1,
+        reasoning_effort: prior?.reasoning_effort ?? null,
+      };
+      values.summary_model = summary;
+    }
+    return values;
+  };
+
+  return <section className="research-workspace" aria-label="Research workspace">
     <ErrorNotice error={error} />
-    <table className="review-reference-table"><thead><tr><th>Automatic lookup</th><th>Reference</th><th>Citing original papers</th><th>Metadata / decision</th></tr></thead>
-      <tbody>{rows.map((row) => <tr key={row.id}>
-        <td>{row.selected ? 'Selected automatically' : 'Not shared'}</td>
-        <td><strong>{row.title}</strong><p>{(row.authors ?? []).join(', ')} {row.year ?? ''}</p><p>{row.doi ?? row.arxiv_id ?? 'No printed identifier'}</p>
-          <details><summary>Captured citation evidence</summary>{row.citations.map((citation, index) =>
-            <p key={index}>{String(citation.title ?? citation.candidate_id)} · page {String(citation.page)} · source {String(citation.source_version)}<br />{String(citation.quote)}</p>)}</details>
-        </td>
-        <td>{row.citing_count}</td>
-        <td>{row.metadata ? <><a href={row.metadata.url ?? undefined} target="_blank" rel="noreferrer">{row.metadata.title}</a>
-          <p>{row.metadata.abstract ?? 'No abstract available'}</p></> : <p>Unresolved</p>}
-          {row.screening ? <p>{label(row.screening.relevance)}: {row.screening.reason}</p> : <p>Not screened</p>}
-          {row.error ? <p role="alert">{row.error}</p> : null}
-          {row.document_id ? <Link to={`/library?paper=${encodeURIComponent(row.document_id)}`}>Open supplemental PDF</Link> : null}
-        </td>
-      </tr>)}</tbody></table>
-    {choosing || collecting ? <div className="review-approval">
-      <p>{choosing ? 'Shared references are looked up automatically. Continue this saved review to apply automatic selection.'
-        : 'Relevant verified references are collected and read automatically. Ambiguous identities are skipped with visible notices.'}</p>
-      <button className="button primary" disabled={busy} onClick={() => void control({
-        action: 'resume',
-      })}>Continue automatically</button>
+    {!embedded ? <div className="research-saved">
+      <details>
+        <summary><span>Saved research</span><span className="research-count">{reviews.length}</span></summary>
+        <p className="field-hint">Existing research and files are preserved. Full-reading legacy tasks are available as read-only history.</p>
+        <ul className="research-saved-list">{reviews.map((item) => <li key={item.id}>
+          <button type="button" className={item.id === review?.id ? 'is-current' : ''} onClick={() => { setId(item.id); setNewDraft(false); }}>
+            <span>{item.title}</span><span className={`status-pill status-${item.status}`}>{statusText(item.status)}</span>
+          </button>
+        </li>)}</ul>
+      </details>
+      <button className="button secondary small" onClick={() => { setId(''); setNewDraft(true); }}>New paper question</button>
     </div> : null}
+
+    {!review ? showSetup ? <form className="research-setup" onSubmit={(event) => {
+      event.preventDefault();
+      if (!valid || !objective.trim()) return;
+      void perform(async () => reviewsApi.create({
+        title: objective.trim().slice(0, 200), objective: objective.trim(), main_model: main, main_parallel_requests: 1,
+        summary_model: { model_reference: summaryModel, max_output_tokens: 4096, parallel_requests: 1, reasoning_effort: null },
+        embedding_model: { model_reference: embedding, batch_size: 16 }, reading_mode: 'targeted',
+        input_papers: [],
+        conversation_id: conversationId ?? (ensureConversation ? await ensureConversation(main) : null),
+        track_id: trackId || null, web_enabled: webEnabled, openalex_enabled: false,
+      }));
+    }}>
+      <header className="research-setup-head">
+        <div>
+          <h2>What do you want to understand?</h2>
+          <p>Turn a research question into a comparison of evidence, with source quotes you can check.</p>
+        </div>
+        {!settingsControl ? <IconButton icon="settings" size={20} className="settings-trigger" visibleLabel="Settings" label="Research settings" onClick={() => setSettingsOpen(true)} /> : null}
+      </header>
+      <div className="research-question-box">
+      <label className="research-question">Research question
+        <textarea ref={questionInput} value={objective} disabled={busy} onChange={(event) => setObjective(event.target.value)} required
+          placeholder="e.g. How well do calibration methods transfer across domain shift?" />
+      </label>
+      {!objective.trim() ? <div className="research-question-examples" aria-label="Question starters">
+        <span className="field-hint">Start with a direction:</span>
+        {[
+          { label: 'Compare approaches', question: 'Compare the main approaches to [your topic]. How do their results and limitations differ?' },
+          { label: 'Find a research gap', question: 'What is known about [your topic], and which important questions remain unanswered?' },
+          { label: 'Understand a topic', question: 'Help me understand [your topic]: its main ideas, supporting evidence and open debates.' },
+        ].map((example) => <button key={example.label} type="button" disabled={busy} onClick={() => {
+          setObjective(example.question);
+          questionInput.current?.focus();
+        }}>{example.label}</button>)}
+      </div> : null}
+      <div className="research-submit">
+        <div>
+          {onWebEnabledChange ? <label className="check-row"><input type="checkbox" checked={webEnabled} disabled={busy} onChange={(event) => onWebEnabledChange(event.target.checked)} /> Allow web access</label> : null}
+          <p className="field-hint">First, review a proposed scope. No papers are read yet.</p>
+        </div>
+        <button className="button" disabled={busy || !valid || !objective.trim()}>{pending ? 'Preparing your research...' : embedded ? 'Start research' : 'Explore the landscape'}<Icon name="arrowRight" size={16} /></button>
+      </div>
+      </div>
+      <ol className="research-steps" aria-label="How research works">
+        <li><strong>Confirm the scope</strong><span>Approve the question and work limits before the search begins.</span></li>
+        <li><strong>Choose your papers</strong><span>Browse topics and abstracts. You choose which papers to read.</span></li>
+        <li><strong>Build an answer</strong><span>Compare focused findings with checked source quotes, then explore gaps.</span></li>
+      </ol>
+      {!valid ? <div role="alert" className="research-warning">
+        <p>Choose a research model and embedding model before starting.</p>
+        <button type="button" className="button secondary small" onClick={() => setSettingsOpen(true)}>Open research settings</button>
+      </div> : null}
+    </form> : null : <>
+      {!embedded ? <ResearchHeading review={review} /> : null}
+
+      <div className="button-row research-run-controls" aria-label="Review controls">
+        {!archived && !embedded && review.status === 'running' ? <button className="button secondary small" disabled={busy} onClick={() => control('pause')}>Pause</button> : null}
+        {!settingsControl ? <IconButton icon="settings" size={20} className="settings-trigger" visibleLabel="Settings" label="Research settings" onClick={() => setSettingsOpen(true)} /> : null}
+      </div>
+
+      {!archived ? <ol className="research-stepper" aria-label="Research progress">
+        {['Confirm scope', 'Choose papers', 'Read & compare'].map((name, index) => <li key={name}
+          className={index + 1 < step ? 'is-done' : index + 1 === step ? 'is-current' : ''} aria-current={index + 1 === step ? 'step' : undefined}>
+          <span className="research-stepper-dot">{index + 1 < step ? '\u2713' : index + 1}</span>{name}
+        </li>)}
+      </ol> : null}
+
+      {!archived && nextStep ? <section className="research-next-step" aria-label="Next step">
+        <div className="research-next-step-intro" aria-live="polite">
+        <div>
+          <span className="research-eyebrow">{review.status === 'running' ? 'In progress' : review.status === 'completed' ? 'Ready to explore' : 'Your next step'}</span>
+          <h3>{nextStep.title}</h3>
+          <p>{nextStep.description}</p>
+        </div>
+        {review.status === 'completed' && tab !== 'Findings' ? <button className="button" onClick={() => setTab('Findings')}>View findings</button> : null}
+        {selecting && tab !== 'Papers' ? <button className="button" onClick={() => setTab('Papers')}>Choose papers</button> : null}
+        {review.status === 'running' ? <span className="research-spinner" aria-hidden="true" /> : null}
+        </div>
+
+      {recovering ? <section className="research-recovery" aria-label="Resume review">
+        <div className="button-row">
+          <button className="button" disabled={busy} onClick={() => control('resume', recoveryValues())}>Resume research</button>
+        </div>
+      </section> : null}
+
+      {review.approval === 'plan' ? <section className="research-plan">
+        {review.scope?.rationale ? <p>{review.scope.rationale}</p> : null}
+        {review.scope?.questions.length ? <ul>{review.scope.questions.map((question) => <li key={question}>{question}</li>)}</ul> : null}
+        <dl className="research-stats" aria-label="Work limits">
+          <div><dt>Papers to screen</dt><dd>{budget?.screened_papers ?? 'Not set'}</dd></div>
+          <div><dt>Papers to read</dt><dd>{budget?.read_papers ?? 'Not set'}</dd></div>
+          <div><dt>Comparison passes</dt><dd>{budget?.comparison_passes ?? 'Not set'}</dd></div>
+        </dl>
+        <div className="button-row"><button className="button" disabled={busy} onClick={() => control('approve_plan')}>Approve scope and find papers</button></div>
+      </section> : null}
+
+      {review.approval === 'budget' ? <section className="research-plan" aria-label="Extend work limits">
+        <p>Choose total limits for the next batch. This approval covers all work up to those totals, so you can request several papers at once.</p>
+        <dl className="research-stats" aria-label="Current work budget">
+          {WORK_BUDGET_FIELDS.map(({ key, label }) => <div key={key}>
+            <dt>{label}</dt><dd>{workUsed[key]} used / {workBudget[key]} current / {budgetProposal[key]} proposed</dd>
+          </div>)}
+        </dl>
+        <div className="research-options" aria-label="Proposed work limits">
+          {WORK_BUDGET_FIELDS.map(({ key, label, cap }) => <label key={key}>Proposed {label.toLowerCase()}
+            <input aria-label={`Proposed ${label.toLowerCase()}`} type="number" step={1}
+              min={Math.max(workBudget[key], workUsed[key])} max={cap}
+              disabled={busy}
+              value={Number.isFinite(budgetProposal[key]) ? budgetProposal[key] : ''}
+              onChange={(event) => {
+                const value = event.currentTarget.value === '' ? Number.NaN : event.currentTarget.valueAsNumber;
+                setBudgetProposal((current) => ({ ...current, [key]: value }));
+              }} />
+          </label>)}
+        </div>
+        <p className="field-hint">Limits cannot be reduced below approved or used work; maxima are 5,000 papers and 100 comparison passes.</p>
+        <div className="button-row"><button className="button" disabled={busy || !validBudgetProposal || !extendsExhaustedBudget}
+          onClick={() => control('extend_budget', { work_budget: budgetProposal })}>Approve additional work limits</button></div>
+      </section> : null}
+
+        {selecting && tab === 'Papers' ? <section className="research-actionbar" aria-label="Reading batch">
+          <label>What should the reading focus on?<input aria-label="Reading question / follow-up focus" value={focus} disabled={busy}
+            onChange={(event) => updateReviewDraft({ focus: event.target.value })} placeholder={review.question_focus || review.objective} /></label>
+          <div className="research-batch-submit">
+            <span className="field-hint" role="status">{chosen.length} paper{chosen.length === 1 ? '' : 's'} selected</span>
+            <button className="button" disabled={busy || !chosen.length} onClick={() => control('approve_topics', {
+              topic_ids: (review.topics ?? []).filter((topic) => topic.candidate_ids.some((value) => chosen.includes(value))).map((topic) => topic.id),
+              candidate_ids: chosen, feedback: focus || review.question_focus || review.objective, reading_mode: 'targeted',
+            })}>Read selected papers ({chosen.length})</button>
+          </div>
+          <p className="field-hint research-batch-hint">Only focused passages are checked; references are not added automatically.</p>
+        </section> : null}
+      </section> : <p role="note" className="research-warning">Archived full-reading workspace (read-only). Start a new question for focused research.</p>}
+
+      {progress}
+
+      {showEvidence ? <>
+      <nav className="segmented research-tabs" aria-label="Research views">{(embedded ? ['Papers', 'Findings'] : ['Papers', 'Findings', 'Ideas']).map((value) =>
+        <button key={value} type="button" aria-pressed={tab === value} onClick={() => {
+          setTab(value); onIntentChange?.(value === 'Ideas' ? 'ideation' : 'chat');
+        }}><Icon name={value === 'Papers' ? 'papers' : value === 'Findings' ? 'overview' : 'bulb'} size={16} />{value}{value === 'Papers' && candidates.length ? <span className="research-count">{candidates.length}</span> : null}
+          {value === 'Findings' && briefCount ? <span className="research-count">{briefCount}</span> : null}</button>)}</nav>
+
+      {tab === 'Papers' ? <>
+        <div className="research-discovery">
+        {review.topics?.length ? <details className="research-landscape">
+          <summary>Explore topics <span className="field-hint">({review.topics.length} groups from titles and abstracts)</span></summary>
+          <div className="research-topics">{review.topics.map((topic) => <article key={topic.id} className="card">
+            <h3>{topic.title}</h3><p>{topic.description}</p>
+            <small className="field-hint">{topic.candidate_ids.length} paper{topic.candidate_ids.length === 1 ? '' : 's'}
+              {selecting ? ` / ${topic.candidate_ids.filter((value) => chosen.includes(value)).length} selected` : ''}</small>
+            {topic.exploration ? <MarkdownViewer content={topic.exploration} /> : null}
+            {selecting ? <div className="button-row">
+              <button className="button ghost small" disabled={busy} onClick={() => control('explore_topics', { topic_ids: [topic.id], feedback: focus || null })}>Explain fit and recommend reading</button>
+            </div> : null}
+          </article>)}</div>
+        </details> : null}
+        {selecting && webEnabled ? <details className="research-more-papers"><summary>Expand the shortlist</summary>
+          <p className="field-hint">Find more options without starting a reading batch. Your current choices are preserved.</p>
+          <button className="button secondary small" disabled={busy} title="Discovers up to 100 additional papers without downloading PDFs"
+            onClick={() => control('find_more_topics', { feedback: focus || null })}>Find more topics</button>
+        </details> : null}
+        {selecting ? <details className="research-add-papers"><summary>Add papers from arXiv</summary>
+          <p className="field-hint">Add search results to this shortlist. PDFs are collected only after you approve a reading batch.</p>
+          {webEnabled ? <ArxivSearch actionLabel="Add to shortlist" disabled={busy} chosenIds={candidates.flatMap((item) => item.arxiv_id ? [item.arxiv_id] : [])}
+            onChoose={({ arxiv_id, title, summary, authors }) => control('add_arxiv_papers', {
+              input_papers: [{ arxiv_id, title, summary, authors }],
+            })} /> : <p className="field-hint">Enable web access to search arXiv. Your local papers remain available.</p>}
+        </details> : null}
+        {selecting ? <section className="research-pdf-input">
+          <button className="button secondary small" type="button" disabled={busy} aria-expanded={showPdfInput}
+            aria-controls="research-pdf-form" onClick={() => setShowPdfInput((value) => !value)}>
+            <Icon name="plus" size={15} />Add PDF link
+          </button>
+          {showPdfInput ? <form id="research-pdf-form" onSubmit={(event) => { event.preventDefault(); void addPdfPaper(); }}>
+            <p className="field-hint">Paste a direct public PDF URL. This only adds it to the shortlist; download and reading wait for your approval.</p>
+            <label>PDF URL<input aria-label="PDF URL" type="url" required maxLength={2048} value={pdfUrl} disabled={busy}
+              onChange={(event) => setPdfUrl(event.target.value)} placeholder="https://example.org/paper.pdf" /></label>
+            <label>Paper title (optional)<input aria-label="PDF paper title" maxLength={2000} value={pdfTitle} disabled={busy}
+              onChange={(event) => setPdfTitle(event.target.value)} placeholder="Helps identify and group this paper" /></label>
+            <button className="button small" type="submit" disabled={busy || !pdfUrl.trim()}>
+              {busy ? 'Adding paper…' : 'Add PDF to shortlist'}
+            </button>
+          </form> : null}
+        </section> : null}
+        </div>
+
+        <div className="research-reader">
+          <div className="research-list">
+            <div className="research-list-heading">
+              <h3>Paper shortlist</h3>
+              <span className="field-hint">{visible.length} of {candidates.length}</span>
+            </div>
+            <input className="research-search" type="search" aria-label="Search shortlist" placeholder={`Search ${candidates.length} papers...`}
+              value={query} onChange={(event) => setQuery(event.target.value)} />
+            {review.topics?.length ? <label className="research-topic-filter">Browse by topic
+              <select aria-label="Filter shortlist by topic" value={selectedTopic?.id ?? ''} onChange={(event) => setTopicId(event.target.value)}>
+                <option value="">All topics</option>
+                {review.topics.map((topic) => <option key={topic.id} value={topic.id}>{topic.title} ({topic.candidate_ids.length})</option>)}
+              </select>
+            </label> : null}
+            {selectedTopic ? <p className="field-hint">{selectedTopic.description}</p> : null}
+            {selecting ? <div className="research-selection-tools">
+              <button className="button secondary small" aria-pressed={selectedOnly} onClick={() => setSelectedOnly((value) => !value)}>Selected only ({chosen.length})</button>
+              <button className="button ghost small" disabled={busy || !chosen.length} onClick={() => updateReviewDraft({ chosen: [] })}>Clear selection</button>
+            </div> : null}
+            <div className="research-paper-list" aria-label="Paper shortlist">
+              {visible.map((item) => {
+                const read = papers.find((value) => value.candidate_id === item.id)?.brief;
+                return <article key={item.id} className={`research-paper${item.id === paperId ? ' is-open' : ''}${chosen.includes(item.id) ? ' is-chosen' : ''}`}>
+                  {selecting ? <input type="checkbox" disabled={busy} aria-label={`Read ${item.title}`} checked={chosen.includes(item.id)} onChange={() => toggle(item.id)} /> : null}
+                  <button type="button" aria-pressed={item.id === paperId} onClick={() => {
+                    setPaperId(item.id);
+                    paperReader.current?.focus();
+                  }}>
+                    <span className="research-paper-title">{item.title}</span>
+                    <small className={read ? 'research-badge is-verified' : 'research-badge'}>{read ? 'Verified excerpts' : 'Abstract only'}</small>
+                  </button>
+                </article>;
+              })}
+              {!visible.length ? <div className="research-empty"><p className="field-hint">{selectedOnly && !chosen.length ? 'No papers selected yet.' : candidates.length ? 'No papers match these filters.' : review.status === 'running' ? 'Papers will appear here as they are discovered...' : 'No papers on the shortlist yet.'}</p>
+                {query || selectedOnly || selectedTopic ? <button className="button ghost small" onClick={() => { setQuery(''); setTopicId(''); setSelectedOnly(false); }}>Show all papers</button> : null}
+              </div> : null}
+            </div>
+          </div>
+          <article ref={paperReader} tabIndex={-1} aria-label="Paper reader" className="research-paper-view">
+            {candidate ? <>
+              <h3>{candidate.title}</h3>
+              <p className="research-abstract">{candidate.abstract || 'No abstract available.'}</p>
+              {candidate.document_id ? <div className="button-row paper-reading-actions">
+                <button className="button secondary small" onClick={() => askAboutPaper('Summarize this paper: explain its motivation, approach, main findings and limitations. Distinguish source evidence from inference and disclose unread coverage.')}>Summarize paper</button>
+                <button className="button secondary small" onClick={() => askAboutPaper()}>Ask a question about this paper</button>
+                <span className="row-spacer" />
+                <Link to={`/library?paper=${encodeURIComponent(candidate.document_id)}`}>Open full source</Link>
+              </div> : <p className="field-hint">Select this paper and approve the reading batch to collect its source. Until then, only its metadata is available.</p>}
+              {paper?.brief ? <>
+                <p className="field-hint">Reading focus: {paper.brief.question_focus || review.objective}. Brief prose is model interpretation; only the quotations below are source-verified.</p>
+                {paper.brief.sections.map((section) => <section key={section.title}><h4>{section.title}</h4><MarkdownViewer content={section.content} /></section>)}
+                <h4>Verified source quotations</h4>
+                {paper.brief.findings.map((finding) => <blockquote key={finding.id}>{finding.quote}<footer>Page {finding.page}: {finding.finding}</footer></blockquote>)}
+                {paper.brief.limitations.length ? <ul className="field-hint">{paper.brief.limitations.map((item) => <li key={item}>{item}</li>)}</ul> : null}
+              </> : <p className="field-hint">{paper?.error || 'No verified brief yet. Abstracts are leads, not source evidence.'}</p>}
+            </> : <div className="research-empty"><Icon name="papers" size={28} /><strong>Preview before you choose</strong>
+              <p className="field-hint">Click a paper title to see its abstract or verified brief.{selecting ? ' Use the checkbox to add it to your reading batch.' : ''}</p></div>}
+          </article>
+        </div>
+
+      </> : tab === 'Findings' ? <section className="research-understanding">
+        <div><h3>What the evidence says</h3><p className="field-hint">Compare the findings below, then return to Papers to inspect their sources.</p></div>
+        <dl className="research-stats" aria-label="Evidence coverage">
+          <div><dt>Verified briefs</dt><dd>{briefCount}</dd></div>
+          <div><dt>Selected papers</dt><dd>{review.selected_count}</dd></div>
+          <div><dt>Compared</dt><dd>{understanding?.candidate_ids.length ?? 0}</dd></div>
+        </dl>
+        <p className="field-hint">Coverage is limited to admitted source passages, not full-paper understanding.</p>
+        <div className="button-row">
+          <button className="button secondary" onClick={() => {
+            const draft = `${context}\n\nCompare agreements, disagreements and open questions. Distinguish source evidence from inference and missing coverage.`;
+            if (onDiscuss) onDiscuss(draft);
+            else ask.ask(draft, { intent: 'chat' });
+          }}>{embedded ? 'Compare this evidence' : 'Compare selected evidence in chat'}</button>
+          {!archived && ['completed', 'paused', 'blocked'].includes(review.status) ? <>
+            <button className="button" disabled={busy || !papers.some((item) => item.brief)} onClick={() => control('refine_understanding')}>Refine understanding</button>
+            <button className="button ghost" disabled={busy} onClick={() => { setTab('Papers'); control('revise_selection'); }}>Choose follow-up reading</button>
+          </> : null}
+          {review.output_path ? <Link to={`/library/notes?path=${encodeURIComponent(review.output_path)}`}>Open saved cross-paper synthesis</Link> : null}
+        </div>
+        {understanding ? <article className="card research-comparison">
+          <p className="field-hint">Model comparison of {understanding.candidate_ids.length} papers for "{understanding.question_focus || review.objective}". New briefs are not included until you refine. Separate comparison groups do not establish relationships across groups.</p>
+          {understanding.question_focus !== review.question_focus ? <p role="note" className="research-warning">This comparison belongs to an earlier focus. Finish the new reading batch before treating it as an answer to the current question.</p> : null}
+          <MarkdownViewer content={understanding.markdown} />
+        </article> : <div className="research-empty"><strong>No cross-paper comparison yet</strong><p className="field-hint">Incoming briefs appear below without regenerating earlier comparisons.</p></div>}
+        {briefCount ? <h3>Findings per paper</h3> : null}
+        {papers.filter((item) => item.brief).map((item) => <article key={item.candidate_id} className="card">
+          <h4>{candidates.find((value) => value.id === item.candidate_id)?.title}</h4>
+          <MarkdownViewer content={item.brief?.sections.find((section) => section.title === 'Pertinent findings')?.content ?? ''} />
+        </article>)}
+      </section> : <IdeasPanel objective={review.objective} context={context} trackId={trackId} />}
+      </> : null}
+
+      <details className="research-controls" open={review.approval === 'budget' || ['paused', 'blocked', 'failed'].includes(review.status) || undefined}>
+        <summary>Activity and errors{review.notices.length ? <span className="research-count">{review.notices.length}</span> : null}</summary>
+        <ErrorNotice error={review.error} />
+        {review.notices.map((notice) => <p key={notice} className="field-hint">{notice}</p>)}
+        <ReviewActivityPanel review={review} />
+        {activity}
+      </details>
+    </>}
+    <SettingsDrawer id="research-settings" title="Research settings" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
+        <div className="research-settings-body">
+          {!review ? <>
+            <p className="field-hint">These models apply to this question when you start research. Your global defaults stay unchanged.</p>
+            <label>Research model<ModelSelect ariaLabel="Research model" inline disabled={busy}
+              options={capabilityOptions(providers, 'chat')} value={main} onChange={setMain} /></label>
+            <p className="field-hint">Plans research and compares findings.</p>
+            <label>Paper summary model<ModelSelect ariaLabel="Paper summary model" inline disabled={busy}
+              options={capabilityOptions(providers, 'summary')} value={summary} onChange={setSummary}
+              emptyOptionLabel="Use research model" /></label>
+            <p className="field-hint">Summarizes individual papers. Defaults to your separate summary model when configured.</p>
+            <label>Embedding model<ModelSelect ariaLabel="Embedding model" inline disabled={busy}
+              options={capabilityOptions(providers, 'embedding')} value={embedding} onChange={setEmbedding} /></label>
+            <p className="field-hint">Groups related papers and finds relevant passages.</p>
+            {!valid ? <p className="research-warning">Choose both models before starting research.</p> : null}
+          </> : recovering ? <>
+            <p className="field-hint">Keep the saved models or choose replacements for unfinished work. Changes apply when you resume research.</p>
+            <label>Research model<ModelSelect ariaLabel="Replacement research model" inline disabled={busy}
+              options={capabilityOptions(providers, 'chat')} value={replacementMain} onChange={setReplacementMain} /></label>
+            <label>Synthesis model<ModelSelect ariaLabel="Replacement synthesis model" inline disabled={busy}
+              options={capabilityOptions(providers, 'chat')} value={replacementSummary}
+              emptyOptionLabel="Keep current synthesis model" onChange={setReplacementSummary} /></label>
+            {!capabilityOptions(providers, 'chat').length ? <p className="research-warning">No enabled chat models are available. Configure a model in Settings before replacing one.</p> : null}
+          </> : <>
+            <dl className="research-settings-models">
+              <div><dt>Research model</dt><dd>{review.main_model?.model || 'Not recorded'}</dd></div>
+              <div><dt>Embedding model</dt><dd>{review.embedding_model?.model_reference.model || 'Not recorded'}</dd></div>
+              <div><dt>Synthesis model</dt><dd>{review.summary_model?.model_reference.model || 'Not recorded'}</dd></div>
+            </dl>
+            <p className="field-hint">{review.status === 'running' && !archived
+              ? 'Pause research to choose replacement models for unfinished work.'
+              : 'These are the models saved with this research. New questions use your configured defaults.'}</p>
+          </>}
+        </div>
+        <footer>
+          <Link to="/settings">Global model settings</Link>
+          <button type="button" className="button" onClick={() => setSettingsOpen(false)}>Done</button>
+        </footer>
+    </SettingsDrawer>
   </section>;
 }
 
-function CandidateCard({ candidate, reviewId, revision, checked, selectable, linkable, onSelect, onLink }: {
-  candidate: Candidate; reviewId: string; revision: number; checked: boolean; selectable: boolean;
-  linkable: boolean;
-  onSelect: (checked: boolean) => void;
-  onLink: (documentId: string) => Promise<void>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [paper, setPaper] = useState<PaperReview | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [localQuery, setLocalQuery] = useState(candidate.title);
-  const [localPapers, setLocalPapers] = useState<LocalPaper[] | null>(null);
-  const [localId, setLocalId] = useState('');
-  const [searching, setSearching] = useState(false);
-  const searchVersion = useRef(0);
-  useEffect(() => () => { searchVersion.current += 1; }, []);
-  const findLocal = async () => {
-    const version = ++searchVersion.current;
-    setSearching(true);
-    setError(null);
-    try {
-      const matches = await reviewsApi.localPapers(localQuery.trim());
-      if (version !== searchVersion.current) return;
-      setLocalPapers(matches);
-      setLocalId('');
-    } catch (reason) {
-      if (version === searchVersion.current) setError(reason);
-    } finally {
-      if (version === searchVersion.current) setSearching(false);
-    }
+function statusText(status: string) {
+  const text = status.replace(/_/g, ' ');
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+export function ResearchHeading({ review }: { review: Review }) {
+  return <header className="research-head">
+    <div>
+      <span className="research-eyebrow">Research question</span>
+      <h2>{review.objective}</h2>
+      {review.question_focus && review.question_focus !== review.objective ? <p>Reading focus: {review.question_focus}</p> : null}
+    </div>
+    <span className={`status-pill status-${review.status}`}>{statusText(review.status)}</span>
+  </header>;
+}
+
+function researchNextStep(review: Review): { title: string; description: string } {
+  if (review.approval === 'budget') return {
+    title: 'A work limit has been reached',
+    description: 'Review the work already used and approve new total limits below before more work can run.',
   };
-  useEffect(() => {
-    if (!open || !candidate.selected) return;
-    let active = true;
-    reviewsApi.paper(reviewId, candidate.id).then((value) => { if (active) { setPaper(value); setError(null); } })
-      .catch((reason) => { if (active) setError(reason); });
-    return () => { active = false; };
-  }, [open, candidate.id, candidate.selected, reviewId, revision]);
-  return <article className="review-candidate">
-    <div className="review-candidate-row">
-    <button type="button" className="review-candidate-select" aria-label={`Explore ${candidate.title}`} aria-pressed={checked}
-      disabled={!selectable} onClick={() => onSelect(!checked)}>
-      <strong>{candidate.title}</strong>
-      <span className="field-hint"><span className="review-rating" data-relevance={candidate.screening?.relevance}>{candidate.screening ? label(candidate.screening.relevance).toLowerCase() : 'Not screened'}</span> {candidate.year ?? 'Year unknown'} - {candidate.screening?.kind ?? candidate.source_kind ?? 'Unclassified'}</span>
-      {candidate.screening ? <span className="field-hint">{candidate.screening.reason}</span> : null}
-    </button>
-    <button type="button" className="button secondary review-candidate-expand" aria-label={`Details for ${candidate.title}`}
-      aria-expanded={open} aria-controls={`candidate-details-${candidate.id}`} onClick={() => setOpen(!open)}>
-      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-        <path d={open ? 'M6 9l6 6 6-6' : 'M9 6l6 6-6 6'} />
-      </svg>
-    </button>
-    </div>
-    {candidate.document_id ? <p className="field-hint"><Link to={`/library?paper=${encodeURIComponent(candidate.document_id)}`}>Open local paper</Link></p> : null}
-    <div id={`candidate-details-${candidate.id}`} hidden={!open}>
-      {candidate.url && /^https?:\/\//i.test(candidate.url) ? <a href={candidate.url} target="_blank" rel="noreferrer">Publication source</a> : null}
-      <p>{(candidate.authors ?? []).join(', ')}</p><p>{candidate.abstract ?? 'No abstract available; relevance is uncertain.'}</p>
-      <ul>{(candidate.discovery ?? []).map((trail, index) => <li key={index}>{trail}</li>)}</ul>
-      <ErrorNotice error={candidate.error ?? error} />
-      {linkable ? <div className="review-local-source">
-        <p>Missing or incorrect PDF? <Link to="/library/papers">Upload it in the paper library</Link>, then explicitly link its local copy here. Titles are never matched automatically.</p>
-        <label>Find local paper<input value={localQuery} maxLength={1000} onChange={(event) => setLocalQuery(event.target.value)} /></label>
-        <button className="button secondary small" disabled={searching || !localQuery.trim()} onClick={() => void findLocal()}>Find local copy</button>
-        {localPapers?.length ? <div className="button-row">
-          <label>Local paper<select value={localId} onChange={(event) => setLocalId(event.target.value)}>
-            <option value="">Select the exact paper</option>
-            {localPapers.map((item) => <option key={item.id} value={item.id}>{item.title} - {item.source_filename}</option>)}
-          </select></label>
-          <button className="button secondary small" disabled={!localId || searching} onClick={() => void onLink(localId)}>Link local paper</button>
-        </div> : localPapers ? <p>No matches. Try a narrower title or a phrase from the paper.</p> : null}
-      </div> : null}
-      {paper ? <><p>{paper.evidence_count} verified excerpts. Fully read pages: {paper.read_pages.join(', ') || 'none'}.
-        {' '}Partially read pages: {paper.partial_pages.join(', ') || 'none'}.</p>
-        <ul>{paper.pages.map((page) => <li key={page.page}>Page {page.page}: {page.action}{page.reference_page ? ' · reference page' : ''}{paper.read_pages.includes(page.page) && page.action === 'defer' ? ' (subsequently read for follow-up)' : ''} - {page.reason}</li>)}</ul>
-        <PaperSummaries paper={paper} />
-      </> : null}
-    </div>
-  </article>;
+  if (['paused', 'blocked'].includes(review.status)) return {
+    title: review.status === 'paused' ? 'Research is paused' : 'Research is blocked',
+    description: 'Your evidence and selections are saved. Review any errors below, then resume the same research when you are ready.',
+  };
+  if (review.approval === 'plan') return {
+    title: 'Confirm your search',
+    description: 'Check the proposed questions and work limits below, then approve the search. You will choose the papers before reading starts.',
+  };
+  if (review.approval === 'topics') return {
+    title: 'Choose your reading batch',
+    description: 'Preview the shortlist below and select paper checkboxes. Nothing is read until you approve this batch.',
+  };
+  if (review.status === 'completed') return {
+    title: 'Your findings are ready',
+    description: 'Review the findings and their source quotes, or choose follow-up reading to investigate remaining gaps.',
+  };
+  if (review.status === 'running') {
+    if (review.stage === 'scope') return {
+      title: 'Preparing your search plan',
+      description: 'You will confirm the proposed questions and work limits before discovery starts.',
+    };
+    if (['discovery', 'screening'].includes(review.stage)) return {
+      title: 'Finding relevant papers',
+      description: 'Searching and grouping titles and abstracts. No PDFs are being collected yet. You can leave this page and return later.',
+    };
+    return {
+      title: 'Building your evidence',
+      description: 'Focused briefs appear as papers are read. Browse available findings now; leaving this page will not cancel the work.',
+    };
+  }
+  return {
+    title: 'Review your research progress',
+    description: 'Your saved evidence is available below. Check Activity and errors for the current state and any decisions still needed.',
+  };
 }

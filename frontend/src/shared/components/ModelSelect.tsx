@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons';
 
 export type ModelOption = {
@@ -13,6 +13,9 @@ export type ModelSelectValue = {
   provider_profile_id?: string | null;
   model?: string | null;
 };
+
+const rowKey = (option: ModelOption | null) =>
+  option ? JSON.stringify([option.providerId, option.model]) : 'default';
 
 /**
  * Searchable, keyboard-navigable model picker grouped by provider profile.
@@ -46,9 +49,11 @@ export function ModelSelect({
   const [open, setOpen] = useState(false);
   const [dropUp, setDropUp] = useState(false);
   const [query, setQuery] = useState('');
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeKey, setActiveKey] = useState<string | null>(null);
+  const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
   const selected = options.find(
@@ -67,12 +72,6 @@ export function ModelSelect({
     );
   }, [options, query]);
 
-  // Flat list of selectable rows so arrow keys can cross provider groups.
-  const rows = useMemo<(ModelOption | null)[]>(
-    () => (emptyOptionLabel && !query.trim() ? [null, ...filtered] : filtered),
-    [emptyOptionLabel, filtered, query],
-  );
-
   const groups = useMemo(() => {
     const byProvider = new Map<string, { name: string; kind?: string; models: ModelOption[] }>();
     for (const option of filtered) {
@@ -88,6 +87,14 @@ export function ModelSelect({
     return [...byProvider.entries()];
   }, [filtered]);
 
+  // Follow the rendered provider groups, even when incoming options are interleaved.
+  const rows = useMemo<(ModelOption | null)[]>(() => {
+    const models = groups.flatMap(([, group]) => group.models);
+    return emptyOptionLabel && !query.trim() ? [null, ...models] : models;
+  }, [emptyOptionLabel, groups, query]);
+  const activeIndex = rows.findIndex((row) => rowKey(row) === activeKey);
+  const activeRowId = activeIndex >= 0 ? `${listId}-option-${activeIndex}` : undefined;
+
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: MouseEvent) => {
@@ -99,21 +106,17 @@ export function ModelSelect({
 
   useEffect(() => {
     if (!open) return;
-    setQuery('');
-    setActiveIndex(Math.max(0, rows.findIndex((row) => row === selected)));
     const bounds = rootRef.current?.getBoundingClientRect();
     // Flip above the trigger when there is not enough room below it.
     if (bounds) setDropUp(window.innerHeight - bounds.bottom < 340 && bounds.top > 340);
     inputRef.current?.focus();
-    // Only re-run when the popover toggles.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   useEffect(() => {
     if (!open) return;
     listRef.current
       ?.querySelector<HTMLElement>('[data-active="true"]')
-      ?.scrollIntoView({ block: 'nearest' });
+      ?.scrollIntoView?.({ block: 'nearest' });
   }, [activeIndex, open]);
 
   const commit = (option: ModelOption | null) => {
@@ -121,23 +124,45 @@ export function ModelSelect({
       option ? { provider_profile_id: option.providerId, model: option.model } : {},
     );
     setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  const showOptions = () => {
+    setQuery('');
+    setActiveKey(selected ? rowKey(selected)
+      : hasSelection ? null
+        : emptyOptionLabel ? rowKey(null) : options[0] ? rowKey(options[0]) : null);
+    setOpen(true);
   };
 
   const onKeyDown = (event: React.KeyboardEvent) => {
+    if (!open) return;
     if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
       setOpen(false);
+      triggerRef.current?.focus();
+      return;
+    }
+    if (event.key === 'Tab') {
+      setOpen(false);
+      // Continue normal tab navigation from the trigger, not the removed search field.
+      triggerRef.current?.focus();
       return;
     }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       if (!rows.length) return;
       const step = event.key === 'ArrowDown' ? 1 : -1;
-      setActiveIndex((index) => (index + step + rows.length) % rows.length);
+      const nextIndex = activeIndex < 0
+        ? step > 0 ? 0 : rows.length - 1
+        : (activeIndex + step + rows.length) % rows.length;
+      setActiveKey(rowKey(rows[nextIndex]));
       return;
     }
     if (event.key === 'Enter') {
       event.preventDefault();
-      if (rows.length) commit(rows[activeIndex] ?? null);
+      if (activeIndex >= 0) commit(rows[activeIndex]);
     }
   };
 
@@ -151,16 +176,28 @@ export function ModelSelect({
     <div
       className={`model-select${open ? ' open' : ''}${inline ? ' inline' : ''}`}
       ref={rootRef}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
+      }}
+      onKeyDown={onKeyDown}
     >
       <button
         type="button"
+        ref={triggerRef}
         id={id}
         aria-label={ariaLabel}
         className={`model-select-trigger${missing ? ' missing' : ''}`}
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => open ? setOpen(false) : showOptions()}
+        onKeyDown={(event) => {
+          if (!open && ['ArrowDown', 'ArrowUp'].includes(event.key)) {
+            event.preventDefault();
+            event.stopPropagation();
+            showOptions();
+          }
+        }}
       >
         <span className="model-select-value">
           {selected ? <small>{selected.providerName}</small> : null}
@@ -181,22 +218,32 @@ export function ModelSelect({
               value={query}
               placeholder="Search models…"
               aria-label="Search models"
-              onKeyDown={onKeyDown}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={open}
+              aria-controls={listId}
+              aria-activedescendant={activeRowId}
               onChange={(event) => {
-                setQuery(event.target.value);
-                setActiveIndex(0);
+                const nextQuery = event.target.value;
+                setQuery(nextQuery);
+                const needle = nextQuery.trim().toLocaleLowerCase();
+                const first = options.find((option) =>
+                  `${option.providerName} ${option.model} ${option.capabilities.join(' ')}`
+                    .toLocaleLowerCase().includes(needle));
+                setActiveKey(!needle && emptyOptionLabel ? rowKey(null) : first ? rowKey(first) : null);
               }}
             />
           </div>
-          <div className="model-select-list" role="listbox" ref={listRef}>
+          <div className="model-select-list" id={listId} role="listbox" ref={listRef}>
             {emptyOptionLabel && !query.trim() ? (
               <button
                 type="button"
                 role="option"
+                id={`${listId}-option-0`}
                 aria-selected={!hasSelection}
                 data-active={activeIndex === 0}
                 className="model-select-option"
-                onMouseEnter={() => setActiveIndex(0)}
+                onMouseEnter={() => setActiveKey(rowKey(null))}
                 onClick={() => commit(null)}
               >
                 <span className="model-select-option-body">
@@ -219,11 +266,12 @@ export function ModelSelect({
                     <button
                       type="button"
                       role="option"
+                      id={`${listId}-option-${index}`}
                       aria-selected={isSelected}
                       data-active={index === activeIndex}
                       className="model-select-option"
-                      key={`${option.providerId}:${option.model}`}
-                      onMouseEnter={() => setActiveIndex(index)}
+                      key={rowKey(option)}
+                      onMouseEnter={() => setActiveKey(rowKey(option))}
                       onClick={() => commit(option)}
                     >
                       <span className="model-select-option-body">

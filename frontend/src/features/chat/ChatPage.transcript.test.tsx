@@ -395,7 +395,7 @@ async function flush(times = 6) {
   for (let index = 0; index < times; index += 1) {
     await act(async () => {
       await Promise.resolve();
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      await vi.advanceTimersByTimeAsync(40);
     });
   }
 }
@@ -409,6 +409,7 @@ describe('chat transcript detail', () => {
   let root: Root;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     server.reset();
     lastMessageRequest = null;
     lastSteeringRequest = null;
@@ -416,6 +417,7 @@ describe('chat transcript detail', () => {
     conversationDeleted = false;
     conversationKind = 'autonomous';
     window.localStorage.clear();
+    window.sessionStorage.clear();
     window.history.replaceState({}, '', '/');
     installFetch();
     vi.stubGlobal('EventSource', FakeEventSource as unknown as typeof EventSource);
@@ -495,6 +497,94 @@ describe('chat transcript detail', () => {
     expect(container.querySelector('[aria-label="Delete Recorded chat"]')).toBeNull();
   });
 
+  it('drafts idea actions without sending and restores the selected idea with its conversation', async () => {
+    window.history.replaceState({}, '', '/chat?conversation=conv-1');
+    window.localStorage.setItem('scholarweave.idea.conv-1', 'A selected direction');
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
+    await act(async () => options.querySelector('summary')!.click());
+    const selection = container.querySelector<HTMLTextAreaElement>('.composer-ideation-hint textarea')!;
+    expect(selection.value).toBe('A selected direction');
+    const develop = Array.from(container.querySelectorAll('button')).find((button) => button.textContent === 'Develop')!;
+    await act(async () => develop.click());
+    expect(options.open).toBe(false);
+    expect(container.querySelector<HTMLTextAreaElement>('.composer-box textarea')!.value).toContain('Develop this selected idea:\nA selected direction');
+    expect(lastMessageRequest).toBeNull();
+    const link = Array.from(container.querySelectorAll('a')).find((item) => item.textContent === 'Check against literature')!;
+    const url = new URL(link.href);
+    expect(url.searchParams.get('view')).toBe('reviews');
+    expect(url.searchParams.get('new')).toBe('1');
+    expect(url.searchParams.get('objective')).toContain('A selected direction');
+    expect(url.searchParams.has('send')).toBe(false);
+    await act(async () => container.querySelector<HTMLButtonElement>('.composer-send')!.click());
+    await flush(2);
+    expect(lastMessageRequest).toMatchObject({ turn_intent: 'ideation' });
+    expect(lastMessageRequest!.content).toContain('Develop this selected idea');
+  });
+
+  it('embeds an unsent human-readable ideas question without a second chat engine', async () => {
+    const { IdeasPanel } = await import('./IdeasPanel');
+    await mount(() => <IdeasPanel objective="Why does this effect occur?" context="Paper A, abstract only: an association." />);
+    expect(container.querySelector<HTMLTextAreaElement>('.composer-box textarea')!.value).toContain('Paper A, abstract only');
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Conversation intent"]')!.value).toBe('ideation');
+    expect(lastMessageRequest).toBeNull();
+    expect(container.textContent).toContain('Novelty is unverified');
+  });
+
+  it('recovers an idea from sent conversation history and keeps edits scoped to that conversation', async () => {
+    const { ideaActionDraft } = await import('./ideas');
+    server.sessionItems.push({
+      id: 'idea-message', type: 'message', role: 'user',
+      text: ideaActionDraft('Challenge', 'An uncertain premise'),
+      created_at: new Date().toISOString(),
+    });
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    await act(async () => container.querySelector<HTMLElement>('.composer-options > summary')!.click());
+    const selection = container.querySelector<HTMLTextAreaElement>('.composer-ideation-hint textarea')!;
+    expect(selection.value).toBe('An uncertain premise');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(selection, 'A revised premise');
+      selection.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(window.localStorage.getItem('scholarweave.idea.conv-1')).toBe('A revised premise');
+    expect(lastMessageRequest).toBeNull();
+    const combine = Array.from(container.querySelectorAll('button')).find((button) => button.textContent === 'Combine')!;
+    expect(combine.disabled).toBe(true);
+  });
+
+  it('dismisses mode and idea controls after choosing or sending without resetting the selected mode', async () => {
+    const { default: ChatPage } = await import('./ChatPage');
+    await mount(ChatPage as () => JSX.Element);
+    const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
+    const mode = options.querySelector<HTMLSelectElement>('[aria-label="Conversation intent"]')!;
+    expect(options.open).toBe(false);
+    await act(async () => options.querySelector('summary')!.click());
+    await act(async () => {
+      mode.value = 'ideation';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(options.open).toBe(false);
+    expect(document.activeElement).toBe(container.querySelector('[aria-label="Message"]'));
+    await act(async () => options.querySelector('summary')!.click());
+    expect(options.querySelector('.composer-ideation-hint')).not.toBeNull();
+    await runTurn(0, { stream: false });
+    expect(lastMessageRequest).toMatchObject({ turn_intent: 'ideation' });
+    expect(options.open).toBe(false);
+    expect(mode.value).toBe('ideation');
+    await act(async () => options.querySelector('summary')!.click());
+    await act(async () => {
+      mode.value = 'chat';
+      mode.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(options.open).toBe(false);
+    expect(options.querySelector('.composer-ideation-hint')).toBeNull();
+    await runTurn(1, { stream: false });
+    expect(lastMessageRequest).toMatchObject({ turn_intent: 'chat' });
+    expect(options.open).toBe(false);
+  });
+
   it.each([30_000, 262_144])('restores the latest chat context %s instead of provider metadata', async (contextWindow) => {
     const previous = server.startRun('Earlier turn');
     previous.status = 'completed';
@@ -549,6 +639,7 @@ describe('chat transcript detail', () => {
 
     expect(lastMessageRequest).toEqual({
       content: 'Investigate this thoroughly',
+      turn_intent: 'chat',
       reasoning_effort: 'high',
       web_enabled: true,
       response_effort: effort,
@@ -582,12 +673,12 @@ describe('chat transcript detail', () => {
 
   it('opens old Deep Work conversations in the dedicated workspace', async () => {
     conversationKind = 'deep_work';
-    window.history.replaceState({}, '', '/?conversation=conv-1');
+    window.history.replaceState({}, '', '/chat?conversation=conv-1');
     vi.stubGlobal('scrollTo', vi.fn());
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     expect(window.location.pathname).toBe('/deep-work');
-    expect(window.location.search).toBe('?view=tasks&conversation=conv-1');
+    expect(window.location.search).toBe('?conversation=conv-1');
     expect(lastMessageRequest).toBeNull();
   });
 
@@ -612,7 +703,7 @@ describe('chat transcript detail', () => {
 
   it('opens library context as an editable draft without starting work or reopening the last chat', async () => {
     const draft = 'Analyze the saved summary at papers/paper-1/summary.md without rewriting it.';
-    window.history.replaceState({}, '', `/?research=${encodeURIComponent(draft)}`);
+    window.history.replaceState({}, '', `/chat?research=${encodeURIComponent(draft)}`);
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     expect(container.querySelector('textarea')!.value).toBe(draft);
@@ -660,7 +751,7 @@ describe('chat transcript detail', () => {
 
   it('focuses the workspace without losing the draft or access to observability', async () => {
     const draft = 'Compare the evidence without changing my notes.';
-    window.history.replaceState({}, '', `/?research=${encodeURIComponent(draft)}`);
+    window.history.replaceState({}, '', `/chat?research=${encodeURIComponent(draft)}`);
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     await act(async () => {
@@ -691,7 +782,7 @@ describe('chat transcript detail', () => {
 
   it('dismisses options on outside pointer presses without changing settings or the draft', async () => {
     const draft = 'Explain the attached proposal.';
-    window.history.replaceState({}, '', `/?research=${encodeURIComponent(draft)}`);
+    window.history.replaceState({}, '', `/chat?research=${encodeURIComponent(draft)}`);
     const { default: ChatPage } = await import('./ChatPage');
     await mount(ChatPage as () => JSX.Element);
     const options = container.querySelector<HTMLDetailsElement>('.composer-options')!;
@@ -876,7 +967,6 @@ describe('chat transcript detail', () => {
 
   it('repairs a silently stalled stream without requiring an error or a new turn', async () => {
     const { default: ChatPage } = await import('./ChatPage');
-    vi.useFakeTimers();
     server.startRun('Inspect source').status = 'running';
     root = createRoot(container);
     await act(async () => root.render(<RouterProvider><ChatPage /></RouterProvider>));

@@ -14,4 +14,4 @@ if ! "$python" -c "import uvicorn"; then
     exit 1
 fi
 
-exec "$python" -m scholarweave_tui --web --build-frontend "$@"
+exec "$python" -m scholarweave_tui --web --ensure-frontend "$@"

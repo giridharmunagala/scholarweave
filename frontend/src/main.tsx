@@ -9,6 +9,7 @@ import './shared/styles/base.css';
 import './shared/styles/components.css';
 import './shared/styles/code.css';
 import './shared/styles/layout.css';
+import './shared/styles/polish.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

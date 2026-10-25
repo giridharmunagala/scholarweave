@@ -1,56 +1,140 @@
-import type { ReactNode } from 'react';
-import { Link, NavLink } from './router';
-import { Icon, type IconName } from '../shared/components/Icons';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Link, useLocation } from './router';
+import { AskContextProvider, type AskApi, type AskOptions } from './ask';
+import { CommandPalette } from './CommandPalette';
+import { Icon } from '../shared/components/Icons';
 import { ThemeSwitcher } from '../shared/components/ThemeSwitcher';
+import { Loading } from '../shared/components/Ui';
 
-interface NavEntry {
-  to: string;
-  label: string;
-  icon: IconName;
-}
+const AskPanel = lazy(() => import('../features/chat/AskPanel'));
 
 /*
- * One flat list of destinations. Grouping six items under "Research" and "Operate"
- * headings added reading work without adding meaning, so the rail now just shows
- * every place you can go, labelled, in one column.
+ * Research material is the face of the app: the bar names what you have
+ * collected and what you are working on. The assistant is summoned (Ctrl+J)
+ * and takes over part of the screen only while you need it.
  */
-const NAV_ITEMS: NavEntry[] = [
-  { to: '/', label: 'Chat', icon: 'chat' },
-  { to: '/deep-work', label: 'Deep Work', icon: 'runs' },
-  { to: '/brief', label: 'Morning Brief', icon: 'bulb' },
-  { to: '/tracks', label: 'Research Tracks', icon: 'workspace' },
-  { to: '/library', label: 'Library', icon: 'papers' },
-  { to: '/settings', label: 'Settings', icon: 'settings' },
+const NAV = [
+  { to: '/', label: 'Papers', match: ['/', '/library', '/papers'], exclude: ['/library/notes'] },
+  { to: '/library/notes', label: 'Notes', match: ['/library/notes', '/workspace'] },
+  { to: '/tracks', label: 'Tracks', match: ['/tracks'] },
+  { to: '/deep-work', label: 'Reviews', match: ['/deep-work'] },
+  { to: '/runs', label: 'Runs', match: ['/runs'] },
+  { to: '/brief', label: 'Brief', match: ['/brief'] },
 ];
 
-/*
- * The shell is deliberately thin: a rail of destinations and the page. Everything
- * else a page needs to say about itself — its title, its actions, its status — is
- * the page's own job, so there is exactly one place to read each thing.
- */
+function isActive(pathname: string, item: (typeof NAV)[number]) {
+  if (item.exclude?.some((prefix) => pathname.startsWith(prefix))) return false;
+  return item.match.some((prefix) => prefix === '/' ? pathname === '/' : pathname === prefix || pathname.startsWith(`${prefix}/`));
+}
+
 export function AppShell({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation();
+  const [askDraft, setAskDraft] = useState<(AskOptions & { text?: string; nonce: number }) | null>(null);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const askRequest = useRef(0);
+  const content = useRef<HTMLElement>(null);
+  const onChatPage = pathname === '/chat' || pathname.startsWith('/chat/');
+
+  useLayoutEffect(() => {
+    const element = content.current;
+    const motion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    if (!element?.animate || motion?.matches) return;
+    const animation = element.animate(
+      [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }],
+      { duration: 220, easing: 'cubic-bezier(.2,.7,.2,1)' },
+    );
+    const reduceMotion = () => { if (motion?.matches) animation.cancel(); };
+    motion?.addEventListener('change', reduceMotion);
+    return () => { animation.cancel(); motion?.removeEventListener('change', reduceMotion); };
+  }, [pathname]);
+
+  const ask = useCallback((text?: string, options?: AskOptions) => setAskDraft({ text, ...options, nonce: ++askRequest.current }), []);
+  const close = useCallback(() => setAskDraft(null), []);
+  const askApi = useMemo<AskApi>(() => ({ ask, close, open: askDraft !== null }), [ask, close, askDraft]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setPaletteOpen((value) => !value);
+      } else if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'j' && !onChatPage) {
+        event.preventDefault();
+        setAskDraft((value) => value ? null : { nonce: ++askRequest.current });
+      } else if (event.key === 'Escape' && !event.defaultPrevented && askDraft && !paletteOpen) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest('.ask-panel details[open], .ask-panel [role="dialog"]')) return;
+        setAskDraft(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [askDraft, paletteOpen, onChatPage]);
+
+  useEffect(() => { if (onChatPage) setAskDraft(null); }, [onChatPage]);
+
   return (
-    <div className="app-shell">
-      <nav className="rail" aria-label="Primary">
-        <Link className="rail-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
-          <span className="rail-mark">SW</span>
-        </Link>
+    <AskContextProvider value={askApi}>
+      <div className={`app-shell${askDraft ? ' ask-open' : ''}`}>
+        <header className="topbar">
+          <Link className="topbar-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
+            <span className="rail-mark">SW</span>
+            <span className="topbar-wordmark">ScholarWeave</span>
+          </Link>
+          <nav className="topbar-nav" aria-label="Primary">
+            {NAV.map((item) => {
+              const active = isActive(pathname, item);
+              return (
+                <Link key={item.to} to={item.to} className={active ? 'nav-link active' : 'nav-link'} aria-current={active ? 'page' : undefined}>
+                  {item.label}
+                </Link>
+              );
+            })}
+          </nav>
+          <span className="topbar-spacer" />
+          {!onChatPage ? (
+            <button type="button" className="ask-trigger" aria-label="Explore ideas" title="Explore ideas" onClick={() => ask(undefined, { intent: 'ideation' })}>
+              <Icon name="sparkle" size={15} /><span>Explore ideas</span>
+            </button>
+          ) : null}
+          <button type="button" className="search-trigger" onClick={() => setPaletteOpen(true)} aria-label="Search everything (Ctrl+K)">
+            <Icon name="search" size={15} />
+            <span>Search</span>
+            <kbd>Ctrl K</kbd>
+          </button>
+          {!onChatPage ? (
+            <button
+              type="button"
+              className={`ask-trigger${askDraft ? ' active' : ''}`}
+              aria-pressed={askDraft !== null}
+              aria-label="Ask"
+              title="Ask the assistant (Ctrl+J)"
+              onClick={() => (askDraft ? close() : ask())}
+            >
+              <Icon name="sparkle" size={15} />
+              <span>Ask</span>
+            </button>
+          ) : null}
+          <div className="topbar-tools">
+            <ThemeSwitcher />
+            <Link to="/settings" title="Settings" className={`nav-link settings-trigger${pathname === '/settings' ? ' active' : ''}`} aria-current={pathname === '/settings' ? 'page' : undefined}>
+              <Icon name="settings" size={20} />
+              <span>Settings</span>
+            </Link>
+          </div>
+        </header>
 
-        <div className="rail-nav">
-          {NAV_ITEMS.map((item) => (
-            <NavLink key={item.to} to={item.to} title={item.label}>
-              <Icon name={item.icon} size={19} />
-              <span className="rail-label">{item.label}</span>
-            </NavLink>
-          ))}
-        </div>
+        <main ref={content} className="app-main">{children}</main>
 
-        <div className="rail-foot">
-          <ThemeSwitcher />
-        </div>
-      </nav>
-
-      <main className="app-main">{children}</main>
-    </div>
+        {askDraft ? (
+          <aside className="ask-panel" aria-label="Assistant">
+            <Suspense fallback={<Loading label="Opening the assistant…" />}>
+              <AskPanel key={askDraft.nonce} draft={askDraft.text} autoSend={askDraft.send} context={askDraft.context} intent={askDraft.intent} onClose={close} />
+            </Suspense>
+          </aside>
+        ) : null}
+        {paletteOpen ? <CommandPalette onClose={() => setPaletteOpen(false)} onAsk={ask} /> : null}
+      </div>
+    </AskContextProvider>
   );
 }

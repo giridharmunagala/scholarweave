@@ -87,8 +87,8 @@ def test_decision_parallelism_default_validation_and_persistence(test_settings):
             SettingsUpdate(decision_parallel_requests=value)
 
 
-@pytest.mark.parametrize("capability", ["compaction", "decision"])
-def test_optional_compaction_default_persists_and_can_be_unset(test_settings, capability):
+@pytest.mark.parametrize("capability", ["compaction", "decision", "summary", "small_tasks"])
+def test_optional_model_default_persists_and_can_be_unset(test_settings, capability):
     factory = create_session_factory(test_settings)
     service = SettingsService(test_settings, factory)
     reference = {"provider_profile_id": "local-profile", "model": "gemma4-12b"}
@@ -103,3 +103,43 @@ def test_optional_compaction_default_persists_and_can_be_unset(test_settings, ca
     SettingsService(reloaded, factory).load()
     assert capability not in reloaded.default_model_references
     assert reloaded.default_model_references["chat"]["model"] == "main-model"
+
+
+def test_optional_ocr_models_can_be_cleared_repeatedly(test_settings):
+    factory = create_session_factory(test_settings)
+    service = SettingsService(test_settings, factory)
+    service.update(SettingsUpdate(
+        ocr_llm_model="legacy-vision", ocr_llm_triage_model="legacy-triage",
+    ))
+    for parallel in (2, 3):
+        response = service.update(SettingsUpdate(
+            ocr_surya_parallel=parallel, ocr_llm_model=None, ocr_llm_triage_model=None,
+        ))
+        assert response.ocr_surya_parallel == parallel
+        assert response.ocr_llm_model is None
+        assert response.ocr_llm_triage_model is None
+        with factory() as session:
+            assert session.get(AppSetting, "ocr_llm_model") is None
+            assert session.get(AppSetting, "ocr_llm_triage_model") is None
+    reloaded = test_settings.model_copy()
+    SettingsService(reloaded, factory).load()
+    assert reloaded.ocr_surya_parallel == 3
+    assert reloaded.ocr_llm_model is None
+    assert reloaded.ocr_llm_triage_model is None
+
+
+def test_failed_settings_save_keeps_runtime_values(test_settings, monkeypatch):
+    factory = create_session_factory(test_settings)
+    service = SettingsService(test_settings, factory)
+    original_parallel = test_settings.ocr_surya_parallel
+    with factory() as session:
+        def fail_commit():
+            raise RuntimeError("Settings could not be committed")
+
+        monkeypatch.setattr(session, "commit", fail_commit)
+        monkeypatch.setattr(service, "_sessions", lambda: session)
+        with pytest.raises(RuntimeError, match="Settings could not be committed"):
+            service.update(SettingsUpdate(ocr_surya_parallel=original_parallel + 1))
+    assert test_settings.ocr_surya_parallel == original_parallel
+    with factory() as session:
+        assert session.get(AppSetting, "ocr_surya_parallel") is None

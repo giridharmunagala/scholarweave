@@ -1,0 +1,6 @@
+.reader-notes-panel { display: grid; gap: var(--space-3); min-width: 0; }
+.reader-notes-panel h3 { margin: 0; }
+.reader-highlight-list { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.reader-highlight-list > li { display: grid; gap: var(--space-2); padding: var(--space-3); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.reader-highlight-list blockquote { margin: 0; padding-left: var(--space-3); border-left: 2px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; }
+.reader-notes-panel q { overflow-wrap: anywhere; }

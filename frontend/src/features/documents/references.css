@@ -1,0 +1,13 @@
+.reference-panel { padding: 1rem; border: 1px solid var(--border); border-radius: 8px; margin-block: 1rem; }
+.reference-columns { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr); gap: 1rem; }
+.reference-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+.reference-panel label { display: grid; gap: .3rem; margin-bottom: .6rem; }
+.reference-panel input, .reference-panel select, .reference-panel textarea { width: 100%; min-width: 0; }
+.reference-panel textarea { min-height: 5rem; }
+.reference-panel fieldset { border: 0; padding: 0; min-width: 0; }
+.reference-list { padding: 0; list-style: none; max-height: 34rem; overflow: auto; }
+.reference-list button { width: 100%; text-align: left; white-space: normal; justify-content: start; }
+.reference-list small { display: block; }
+.reference-panel details { margin-top: 1rem; }
+.collection-tree { display: flex; flex-direction: column; align-items: flex-start; gap: .25rem; }
+@media (max-width: 760px) { .reference-columns, .reference-fields { grid-template-columns: 1fr; } }

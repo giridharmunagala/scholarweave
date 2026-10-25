@@ -74,6 +74,14 @@ async def discover_models(
     return await service.discover(profile_id)
 
 
+@router.post("/{profile_id}/restore", response_model=ProviderResponse)
+def restore_provider(
+    profile_id: str,
+    service: ProviderService = Depends(provider_service),
+) -> ProviderResponse:
+    return service.restore(profile_id)
+
+
 @router.post("/{profile_id}/verify", response_model=ProviderVerifyResponse)
 async def verify_provider(
     profile_id: str,

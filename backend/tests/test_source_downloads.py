@@ -5,6 +5,7 @@ import pytest
 
 from backend.bootstrap import create_services
 from backend.research.sources import (
+    SourceDownloadError,
     SourceDownloadService,
     WebSourceUnavailable,
     _is_public_address,
@@ -48,6 +49,8 @@ def _remote_client() -> httpx.AsyncClient:
             )
         if request.url.path == "/blocked":
             return httpx.Response(403, text="Access denied")
+        if request.url.path == "/unavailable":
+            return httpx.Response(503, text="Temporarily unavailable")
         if request.url.path == "/empty":
             return httpx.Response(
                 200,
@@ -57,6 +60,30 @@ def _remote_client() -> httpx.AsyncClient:
         return httpx.Response(404)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(respond))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path,error_type", [
+    ("/blocked", WebSourceUnavailable), ("/unavailable", SourceDownloadError),
+])
+async def test_pdf_http_failure_preserves_typed_source_error(test_settings, monkeypatch, path, error_type):
+    services = create_services(test_settings)
+    client = _remote_client()
+    downloads = SourceDownloadService(test_settings, services.documents, services.workspace, client=client)
+
+    async def allow_public_url(_url):
+        return None
+
+    monkeypatch.setattr(downloads, "_validate_public_url", allow_public_url)
+    try:
+        with pytest.raises(error_type) as error:
+            await downloads.download_pdf(f"https://papers.test{path}", title="Unavailable paper")
+        if error_type is SourceDownloadError:
+            assert isinstance(error.value.__cause__, httpx.HTTPStatusError)
+    finally:
+        await downloads.close()
+        await client.aclose()
+        await services.close()
 
 
 @pytest.mark.anyio

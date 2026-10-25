@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-import socket
+import sys
 import threading
 import time
 from typing import Any
@@ -18,12 +18,6 @@ import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def _split(text: str, size: int = 12) -> list[str]:
@@ -59,6 +53,7 @@ class StubProvider:
         self.tool_arguments: dict[str, Any] = {}
         self.tool_plans: list[tuple[str, str, dict[str, Any]]] = []
         self.stream_delay_seconds = 0.0
+        self.completion_delay_seconds = 0.0
         self.stream_gates: dict[str, threading.Event] = {}
         self.tool_plan_cursor = 0
         self.base_url = ""
@@ -71,6 +66,7 @@ class StubProvider:
         self.max_active_inference = 0
         self.tokenizer_enabled = False
         self.tokenizer_requests: list[dict[str, Any]] = []
+        self.embedding_vectors: dict[str, list[float]] = {}
 
     def tokenize(self, payload: dict) -> dict:
         import tiktoken
@@ -270,10 +266,7 @@ class StubProvider:
         return names
 
 
-@pytest.fixture()
-def stub_provider():
-    """Run the stub on a real socket so the native client uses its production path."""
-    provider = StubProvider()
+def _provider_app(provider: StubProvider) -> FastAPI:
     app = FastAPI()
 
     @app.post("/tokenize")
@@ -303,6 +296,8 @@ def stub_provider():
 
             return StreamingResponse(chunks(), media_type="text/event-stream")
         with provider.inference():
+            if provider.completion_delay_seconds:
+                await asyncio.sleep(provider.completion_delay_seconds)
             return provider.responses(payload)
 
     @app.post("/v1/systemone")
@@ -339,24 +334,98 @@ def stub_provider():
         return {
             "object": "list",
             "model": payload.get("model", "stub-model"),
-            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2, 0.3]}],
+            "data": [{"object": "embedding", "index": index,
+                      "embedding": provider.embedding_vectors.get(text, [0.1, 0.2, 0.3])}
+                     for index, text in enumerate(payload["input"] if isinstance(payload["input"], list) else [payload["input"]])],
             "usage": {"prompt_tokens": 1, "total_tokens": 1},
         }
 
-    port = _free_port()
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    thread = threading.Thread(target=server.run, daemon=True)
+    return app
+
+
+class _ProviderServer:
+    """Reuse an event-loop thread while keeping each test's HTTP server isolated."""
+
+    def __init__(self) -> None:
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.stop: asyncio.Event | None = None
+        self.ready = threading.Event()
+
+    async def serve(self) -> None:
+        self.loop = asyncio.get_running_loop()
+        self.stop = asyncio.Event()
+        self.ready.set()
+        await self.stop.wait()
+
+    def run(self) -> None:
+        # Windows Proactor reset errors can skip listener detachment indefinitely.
+        # This socket-only thread needs neither Proactor subprocesses nor pipes.
+        loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+        with asyncio.Runner(loop_factory=loop_factory) as runner:
+            runner.run(self.serve())
+
+    async def _start(self, provider: StubProvider) -> uvicorn.Server:
+        config = uvicorn.Config(
+            _provider_app(provider), host="127.0.0.1", port=0, log_level="error",
+            timeout_graceful_shutdown=1,
+        )
+        config.load()
+        server = uvicorn.Server(config)
+        server.lifespan = config.lifespan_class(config)
+        await server.startup()
+        if not server.started:
+            raise RuntimeError("Stub provider did not start")
+        await server.on_tick(0)
+        port = server.servers[0].sockets[0].getsockname()[1]
+        provider.base_url = f"http://127.0.0.1:{port}"
+        return server
+
+    async def _close(self, server: uvicorn.Server) -> None:
+        # Uvicorn's CLI shutdown polls and always sleeps 100ms, even with no work.
+        # Await the actual listeners/tasks instead; retain its one-second grace.
+        for listener in server.servers:
+            listener.close()
+        for connection in list(server.server_state.connections):
+            connection.shutdown()
+        tasks = set(server.server_state.tasks)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=server.config.timeout_graceful_shutdown)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        await asyncio.gather(*(listener.wait_closed() for listener in server.servers))
+        await server.lifespan.shutdown()
+
+    @contextmanager
+    def provider(self):
+        provider = StubProvider()
+        server = asyncio.run_coroutine_threadsafe(self._start(provider), self.loop).result(timeout=15)
+        try:
+            yield provider
+        finally:
+            asyncio.run_coroutine_threadsafe(self._close(server), self.loop).result(timeout=10)
+
+
+@pytest.fixture(scope="session")
+def _stub_server():
+    runner = _ProviderServer()
+    thread = threading.Thread(target=runner.run, daemon=True)
     thread.start()
-    deadline = time.time() + 15
-    while not server.started and time.time() < deadline:
-        time.sleep(0.05)
-    if not server.started:
-        server.should_exit = True
-        pytest.skip("Stub provider did not start in time")
-    provider.base_url = f"http://127.0.0.1:{port}"
     try:
-        yield provider
+        if not runner.ready.wait(timeout=15):
+            pytest.fail("Stub provider event loop did not start in time")
+        yield runner
     finally:
-        server.should_exit = True
+        if runner.loop is not None:
+            runner.loop.call_soon_threadsafe(runner.stop.set)
         thread.join(timeout=10)
+        if thread.is_alive():
+            pytest.fail("Stub provider event loop did not stop in time")
+
+
+@pytest.fixture()
+def stub_provider(_stub_server):
+    """Use real HTTP with a fresh socket, app and script for every test."""
+    with _stub_server.provider() as provider:
+        yield provider

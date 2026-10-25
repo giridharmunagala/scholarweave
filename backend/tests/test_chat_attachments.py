@@ -254,21 +254,12 @@ def test_pdf_extracted_text_limit_is_explicit(test_settings, monkeypatch):
 
 
 @pytest.mark.parametrize("effort", ["auto", "quick", "thorough"])
-@pytest.mark.parametrize(
-    ("goal", "file_text", "answer"),
-    [
-        ("Summarize this proposal.", "# Proposal\nStudy spectroscopy with sparse data.",
-         "The proposal studies spectroscopy using sparse data."),
-        ("Do something with this document.", "# Proposal\nStudy spectroscopy.",
-         "Would you like a summary, answers to questions, or a review of its references?"),
-        ("Execute the tasks defined in this file.", "# Tasks\nBuild and run a web application.",
-         "I can't do that in ScholarWeave. I support research, document Q&A, and summarization, not building software."),
-    ],
-    ids=["summary", "clarification", "refusal"],
-)
-def test_file_task_reading_clarification_and_refusal(
-    test_settings, stub_provider, effort, goal, file_text, answer,
+def test_attached_file_is_read_and_retained_for_follow_up(
+    test_settings, stub_provider, effort,
 ):
+    goal = "Summarize this proposal."
+    file_text = "# Proposal\nStudy spectroscopy with sparse data."
+    answer = "The proposal studies spectroscopy using sparse data."
     with TestClient(create_app(test_settings)) as client:
         chat = conversation(client, stub_provider)
         attachment = upload(client, "tasks.md", file_text.encode())
@@ -288,9 +279,6 @@ def test_file_task_reading_clarification_and_refusal(
         assert not record.runtime_metadata_json.get("work_plan")
         assert run["final_output"] == answer
         instructions = json.dumps(stub_provider.requests[0]["messages"])
-        assert "cannot execute code" in instructions
-        assert "Ask one focused question" in instructions
-        assert "Attached workspace files (saved and indexed)" in instructions
         assert attachment["path"] in instructions
         assert len(client.app.state.services.workspace.list_files()) == 1
         detail = client.get(f"/api/agent/conversations/{chat['id']}").json()

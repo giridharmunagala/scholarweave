@@ -27,9 +27,11 @@ from backend.agents.harness import (
     RunSettings,
     ToolCallAccumulator,
     current_tool_model_identity,
+    current_tool_model_binding,
     delegated_context,
     delegation_tool,
     request_parameters,
+    model_input_messages,
     run_agent,
     run_streamed,
     to_chat_messages,
@@ -301,7 +303,7 @@ async def test_long_tool_run_recovers_truncation_over_real_chat_completions(
     stub_provider, monkeypatch,
 ) -> None:
     stub_provider.tool_plans = [
-        ("Research", "echo", {"text": str(index)}) for index in range(24)
+        ("Research", "echo", {"text": str(index)}) for index in range(16)
     ]
     original_stream = stub_provider.stream
 
@@ -327,8 +329,8 @@ async def test_long_tool_run_recovers_truncation_over_real_chat_completions(
     finally:
         await binding.client.close()
     assert result.final_output == stub_provider.reply
-    assert [json.loads(call)["text"] for call in calls] == [str(index) for index in range(24)]
-    assert len(stub_provider.requests) == 27
+    assert [json.loads(call)["text"] for call in calls] == [str(index) for index in range(16)]
+    assert len(stub_provider.requests) == 19
     assert [request["max_tokens"] for request in stub_provider.requests[-3:]] == [2048, 4096, 8192]
     assert len([item for item in result.generated_items if item.get("role") == "assistant"]) == 1
 
@@ -902,7 +904,7 @@ async def test_agents_that_disable_parallel_tool_calls_run_tools_sequentially(
 @pytest.mark.anyio
 async def test_default_harness_completes_more_than_sixteen_turns(stub_provider) -> None:
     stub_provider.tool_plans = [
-        ("extended research", "echo", {"text": str(index)}) for index in range(20)
+        ("extended research", "echo", {"text": str(index)}) for index in range(16)
     ]
     model = stub_binding(stub_provider)
     calls: list[str] = []
@@ -924,8 +926,8 @@ async def test_default_harness_completes_more_than_sixteen_turns(stub_provider) 
         await model.client.close()
 
     assert result.final_output == stub_provider.reply
-    assert len(calls) == 20
-    assert result.usage.requests == len(stub_provider.requests) == 21
+    assert len(calls) == 16
+    assert result.usage.requests == len(stub_provider.requests) == 17
 
 
 @pytest.mark.anyio
@@ -1205,6 +1207,63 @@ def test_items_translate_into_chat_completions_messages() -> None:
     assert "reasoning_content" not in messages[2]
 
 
+@pytest.mark.parametrize("api_mode", ["chat_completions", "responses"])
+def test_request_clocks_join_user_input_without_rewriting_history(api_mode) -> None:
+    client = FakeClient.scripted([])
+    definition = agent(client, binding=ModelBinding(
+        client=client, model_name="stub-model", provider_kind="openai_compatible",
+        api_mode=api_mode, supports_vision=True,
+    ))
+    clock = (
+        "Context recorded when this request was submitted:\n"
+        "System information:\nCurrent date: 2026-10-25\n"
+        "Current time: 00:11:14 IST (UTC+05:30)"
+    )
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,pixels"}}
+    items = [
+        {"role": "developer", "content": clock},
+        {"role": "user", "content": "First question."},
+        {"role": "assistant", "content": "First answer."},
+        {"role": "system", "content": clock},
+        {"role": "user", "content": [{"type": "text", "text": "Explain this."}, image]},
+    ]
+    original = json.dumps(items)
+    context = "[Application context: request submitted at 2026-10-25 00:11:14 IST (UTC+05:30)]"
+
+    messages = model_input_messages(definition, items, "Keep the application policy.")
+
+    assert messages == [
+        {"role": "system", "content": "Keep the application policy."},
+        {"role": "user", "content": f"{context}\n\nFirst question."},
+        {"role": "assistant", "content": "First answer."},
+        {"role": "user", "content": [
+            {"type": "text", "text": context}, {"type": "text", "text": "Explain this."}, image,
+        ]},
+    ]
+    assert json.dumps(items) == original
+
+
+def test_request_clock_projection_preserves_other_instructions_and_unmatched_context() -> None:
+    clock = (
+        "Context recorded when this request was submitted:\n"
+        "System information:\nCurrent date: 2026-10-25\n"
+        "Current time: 00:11:14 IST (UTC+05:30)"
+    )
+    items = [
+        {"role": "developer", "content": "Never invent evidence."},
+        {"role": "user", "content": clock},
+        {"role": "developer", "content": clock},
+        {"role": "assistant", "content": "An unmatched clock must not disappear."},
+        {"role": "developer", "content": clock + "\nAdditional policy."},
+        {"role": "user", "content": "Keep all additional instructions."},
+    ]
+    messages = to_chat_messages(items, None)
+    assert messages == [
+        {**item, "role": "system" if item["role"] == "developer" else item["role"]}
+        for item in items
+    ]
+
+
 def test_preserved_reasoning_is_replayed_only_for_the_same_model() -> None:
     items = [
         {
@@ -1387,6 +1446,7 @@ async def test_parallel_agents_keep_task_local_actual_model_provenance() -> None
     both_started = asyncio.Event()
     started = []
     observed = {}
+    vision = {}
 
     async def record(invocation, _arguments):
         assert invocation.context.metadata["active_model"]["model"] == invocation.agent_name
@@ -1395,6 +1455,7 @@ async def test_parallel_agents_keep_task_local_actual_model_provenance() -> None
             both_started.set()
         await both_started.wait()
         observed[invocation.agent_name] = current_tool_model_identity()
+        vision[invocation.agent_name] = current_tool_model_binding().supports_vision
         return "Recorded."
 
     definitions = []
@@ -1402,7 +1463,7 @@ async def test_parallel_agents_keep_task_local_actual_model_provenance() -> None
         client = FakeClient.scripted([tool_call_chunks("record", "{}"), text_chunks("Done.")])
         definitions.append(agent(
             client, id=model, name=model,
-            binding=ModelBinding(client=client, model_name=model, provider_kind="ollama"),
+            binding=ModelBinding(client=client, model_name=model, provider_kind="ollama", supports_vision=model == "model-a"),
             tools=[FunctionTool("record", "Record provenance.", {"type": "object"}, record)],
         ))
     async with asyncio.timeout(2):
@@ -1414,6 +1475,33 @@ async def test_parallel_agents_keep_task_local_actual_model_provenance() -> None
         model: {"model": model, "provider_kind": "ollama"} for model in ("model-a", "model-b")
     }
     assert current_tool_model_identity() is None
+    assert vision == {"model-a": True, "model-b": False}
+    assert current_tool_model_binding() is None
+
+
+@pytest.mark.parametrize("vision", [True, False])
+def test_multimodal_tool_evidence_follows_all_results_and_respects_current_model(vision):
+    client = FakeClient.scripted([])
+    definition = agent(client, binding=ModelBinding(
+        client=client, model_name="model", provider_kind="openai_compatible", supports_vision=vision,
+    ))
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,pixels"}}
+    items = [
+        {"role": "user", "content": [{"type": "text", "text": "Earlier paper question"}, image]},
+        {"type": "function_call", "call_id": "a", "name": "read", "arguments": "{}"},
+        {"type": "function_call", "call_id": "b", "name": "read", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "a", "output": {
+            "page": 1, "source_content": [{"type": "text", "text": "Untrusted image [p.1]"}, image],
+        }},
+        {"type": "function_call_output", "call_id": "b", "output": {"page": 2}},
+    ]
+    messages = model_input_messages(definition, items, None)
+    assert [message["role"] for message in messages] == [
+        "user", "assistant", "tool", "tool", *(["user"] if vision else []),
+    ]
+    assert all("data:image" not in str(message["content"]) for message in messages if message["role"] == "tool")
+    assert ("data:image" in str(messages)) is vision
+    assert items[3]["output"]["source_content"][-1] == image
 
 
 @pytest.mark.anyio

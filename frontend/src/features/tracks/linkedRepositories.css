@@ -1,0 +1,30 @@
+.linked-repositories { display: grid; gap: var(--space-3); min-width: 0; }
+.linked-repositories fieldset {
+  display: grid; gap: var(--space-3); min-width: 0; margin: 0;
+  padding: var(--space-4); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+.linked-repositories legend { padding: 0 var(--space-2); color: var(--text-strong); font-weight: 650; }
+.linked-repositories label { display: grid; gap: var(--space-1); font-size: var(--text-sm); }
+.linked-repositories label:has(input[type="checkbox"]) { display: flex; align-items: center; gap: var(--space-2); }
+.linked-repositories .button { justify-self: start; }
+.linked-repositories input:not([type="checkbox"]), .linked-repositories select, .linked-repositories textarea { width: 100%; min-width: 0; }
+.linked-repositories textarea { font-family: var(--font-mono, monospace); }
+.linked-repositories p { margin: 0; overflow-wrap: anywhere; }
+.linked-repositories code { overflow-wrap: anywhere; font-size: var(--text-xs); }
+.repository-muted { color: var(--muted); font-size: var(--text-xs); }
+.repository-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.repository-files, .repository-receipts { list-style: none; padding: 0; display: grid; gap: var(--space-2); margin: 0; }
+.repository-files { max-height: 280px; overflow: auto; }
+.repository-receipts > li { padding: var(--space-3); display: grid; gap: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.repository-preview { display: grid; gap: var(--space-3); min-width: 0; }
+.repository-preview > img { max-width: 100%; max-height: 500px; object-fit: contain; }
+.repository-text-preview { max-height: 500px; overflow: auto; background: var(--surface); margin: 0; }
+pre.repository-text-preview, .repository-text-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.repository-text-preview table { border-collapse: collapse; width: 100%; font-size: var(--text-sm); }
+.repository-text-preview td { border: 1px solid var(--border); padding: var(--space-2); white-space: pre-wrap; }
+.repository-pdf { display: grid; gap: var(--space-3); min-width: 0; }
+.repository-pdf-canvas { overflow: auto; max-height: 650px; background: var(--hover-bg); padding: var(--space-2); }
+.repository-pdf-canvas canvas { display: block; margin: auto; }
+.repository-pdf-text { font-family: inherit; user-select: text; padding: var(--space-2); }
+.repository-promotion { display: grid; gap: var(--space-3); padding: var(--space-3); background: var(--accent-soft); border-radius: var(--radius-md); }

@@ -1,6 +1,6 @@
 {
   "label": "Literature review",
-  "description": "Explicit saved literature reviews; inherits the main model, web permission and attached track. Uses saved notebook context and screens linked papers before human reading approval. Publication links canonical papers without replacing summaries or notes. Reconcile chat plans, report ID and end at handoff: no polling, duplicate workers or pending plans. Papers/allowance require human panel approval. Claim completion only after publication.",
+  "description": "Paper discovery and focused reading inside the Research workspace; inherits the main model, default embedding model, web permission, investigation and attached track. Inspect an existing workspace review before starting another. New work is topic-led with targeted excerpts, not full-paper reading. Uses saved notebook context and linked papers before human reading approval. Publication links canonical papers without replacing summaries or notes. Reconcile the work plan, report the review ID and hand off to the workspace's paper controls: no polling or duplicate workers. Scope, reading batches and extra work require human approval. Claim completion only after publication.",
   "parameter_descriptions": {
     "action": "Operation.",
     "review_id": "Null for start.",

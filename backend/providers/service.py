@@ -145,6 +145,14 @@ class ProviderService:
         self._clients.invalidate_profile(profile_id)
         return self._response(record)
 
+    def restore(self, profile_id: str) -> ProviderResponse:
+        record = self._repository.restore(profile_id)
+        self._runtime.inference_scheduler.configure(
+            record.id, serialize_model_switches=serializes_model_switches(record),
+        )
+        self._clients.invalidate_profile(profile_id)
+        return self._response(record)
+
     async def discover(self, profile_id: str) -> ProviderModelsResponse:
         record = self._repository.get(profile_id)
         existing_models = {

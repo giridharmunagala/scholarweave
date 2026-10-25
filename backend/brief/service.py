@@ -160,18 +160,11 @@ class BriefService:
             self._edition.highlights.status = "interrupted"
             self._edition.highlights.error = "Highlights generation was stopped. Generate again to retry."
 
-    def _start_summary(self, reference: ModelReferenceSpec, *, force: bool = False) -> None:
+    def _start_summary(self, reference: ModelReferenceSpec) -> None:
         if self._summaries is None:
             raise ValidationError("Morning Brief highlights are not configured.")
         prior = self._edition.highlights.summary
         self._cancel_summary()
-        if (
-            not force and prior is not None and prior.model_reference == reference
-            and prior.source_hash == self._summaries.source_hash(self._edition)
-        ):
-            self._edition.highlights = BriefSummaryState(status="ready", summary=prior)
-            self._persist()
-            return
         self._summaries.clear_temporary()
         self._edition.highlights = BriefSummaryState(status="running", summary=prior)
         self._persist()
@@ -224,7 +217,7 @@ class BriefService:
                 raise ValidationError("Collect headlines before generating highlights.")
             if self._summary_task is not None:
                 raise ValidationError("Highlights are already being generated.")
-            self._start_summary(reference or self._summary_reference(), force=True)
+            self._start_summary(reference or self._summary_reference())
             return self._snapshot()
 
     def summary_history(self, *, limit: int, offset: int) -> list[BriefHighlightSummary]:
@@ -269,11 +262,6 @@ class BriefService:
     async def edition(self) -> BriefEditionResponse:
         async with self._lock:
             self._expire()
-            if (
-                self._edition.items and self._edition.highlights.status == "idle"
-                and self._summaries is not None and self._summary_reference().model
-            ):
-                self._start_summary(self._summary_reference())
             return self._snapshot()
 
     async def refresh(self, *, force: bool = False) -> BriefEditionResponse:
@@ -370,8 +358,6 @@ class BriefService:
                 highlights=self._edition.highlights.model_copy(deep=True),
             )
             self._cancel_summary()
-            if retained and self._summaries is not None and self._summary_reference().model:
-                self._start_summary(self._summary_reference())
             self._persist()
             return self._snapshot()
 

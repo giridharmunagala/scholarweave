@@ -2,6 +2,7 @@ import { apiUrl, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 
 export type Review = components['schemas']['ReviewResponse'];
+export type Understanding = components['schemas']['UnderstandingSnapshot'];
 export type ReviewCreate = components['schemas']['ReviewCreateRequest'];
 export type ReviewControl = components['schemas']['ReviewControlRequest'];
 export type SummaryRole = NonNullable<Review['summary_model']>;
@@ -15,19 +16,22 @@ export type ReviewActivityDetail = components['schemas']['ReviewActivityDetail']
 export type ReviewReference = components['schemas']['ReviewReference'];
 export type LocalPaper = components['schemas']['DocumentSearchResponse'];
 export type CandidateSort = 'relevance' | 'year' | 'title';
-export const REVIEW_STAGES = ['scope', 'discovery', 'screening', 'reading_plan', 'reading', 'references', 'reference_screening', 'reference_collection', 'synthesis', 'publication'] as const;
 
 const path = (id: string) => `/literature-reviews/${encodeURIComponent(id)}`;
 export const reviewsApi = {
   get: (id: string) => request<Review>(path(id)),
+  understanding: (id: string) => request<Understanding | null>(`${path(id)}/understanding`),
   list: (conversationId?: string, trackId?: string) => {
     const query = new URLSearchParams();
     if (trackId) query.set('track_id', trackId);
-    else if (conversationId) query.set('conversation_id', conversationId);
+    if (conversationId) query.set('conversation_id', conversationId);
     return request<Review[]>(`/literature-reviews?${query}`);
   },
   create: (payload: ReviewCreate) => request<Review>('/literature-reviews', json('POST', payload)),
   control: (id: string, payload: ReviewControl) => request<Review>(`${path(id)}/control`, json('POST', payload)),
+  assignTrack: (id: string, trackId: string, revision: number) => request<Review>(`${path(id)}/track`, json('PUT', {
+    track_id: trackId, expected_revision: revision,
+  } satisfies components['schemas']['ReviewTrackRequest'])),
   clear: (id: string, revision: number) => request<components['schemas']['ReviewClearResponse']>(
     `${path(id)}/clear`, json('POST', { expected_revision: revision }),
   ),

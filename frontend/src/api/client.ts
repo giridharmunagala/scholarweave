@@ -25,8 +25,10 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       typeof details === 'object' && details && 'message' in details
         ? String(details.message)
         : typeof details === 'object' && details && 'detail' in details
-          ? JSON.stringify(details.detail)
-          : `${response.status} ${response.statusText}`;
+          ? typeof details.detail === 'string' ? details.detail : JSON.stringify(details.detail)
+          : typeof details === 'string' && details
+            ? details
+            : `${response.status} ${response.statusText}`;
     throw new ApiError(response.status, message, details);
   }
   if (response.status === 204) return undefined as T;
@@ -45,9 +47,11 @@ export function apiUrl(path: string): string {
 }
 
 async function readError(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text.trim()) return undefined;
   try {
-    return await response.json();
+    return JSON.parse(text);
   } catch {
-    return { message: await response.text() };
+    return { message: text };
   }
 }

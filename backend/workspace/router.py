@@ -10,11 +10,33 @@ from backend.workspace.schemas import (
     WorkspaceIndexResponse,
     WorkspaceKind,
     WorkspaceNoteCreateRequest,
+    WorkspaceNoteCleanupPreview,
+    WorkspaceNoteCleanupRequest,
+    WorkspaceNoteCleanupResponse,
     WorkspaceNoteEditRequest,
     WorkspaceSearchResponse,
+    ReaderNotePage, ReaderNoteConnectionRequest,
 )
 
 router = APIRouter(prefix="/workspace", tags=["workspace"])
+
+
+@router.get("/reader-notes", response_model=ReaderNotePage)
+def reader_notes(
+    query: str | None = Query(default=None, min_length=1, max_length=2000),
+    paper_id: str | None = None, connected_to: str | None = None, note_id: str | None = None,
+    limit: int = Query(default=25, ge=1, le=100), offset: int = Query(default=0, ge=0),
+    container=Depends(services),
+) -> ReaderNotePage:
+    return ReaderNotePage.model_validate(container.workspace.reader_notes(
+        query=query, paper_ids=[paper_id] if paper_id else None,
+        connected_to=connected_to, note_id=note_id, limit=limit, offset=offset,
+    ))
+
+
+@router.post("/reader-notes/connections", response_model=WorkspaceFileContentResponse)
+def connect_reader_notes(payload: ReaderNoteConnectionRequest, container=Depends(services)) -> WorkspaceFileContentResponse:
+    return WorkspaceFileContentResponse.model_validate(container.workspace.connect_reader_notes(**payload.model_dump()))
 
 
 @router.get("/files", response_model=list[WorkspaceFileResponse])
@@ -33,6 +55,23 @@ def list_notes(
         WorkspaceFileResponse.model_validate(item)
         for item in container.workspace.list_collection("notes", limit=limit, offset=offset)
     ]
+
+
+@router.post("/notes/cleanup/preview", response_model=WorkspaceNoteCleanupPreview)
+def preview_note_cleanup(container=Depends(services)) -> WorkspaceNoteCleanupPreview:
+    """Inspect current note bytes without deleting anything."""
+    return WorkspaceNoteCleanupPreview.model_validate(container.workspace.preview_note_cleanup())
+
+
+@router.post("/notes/cleanup", response_model=WorkspaceNoteCleanupResponse)
+def cleanup_notes(
+    payload: WorkspaceNoteCleanupRequest,
+    container=Depends(services),
+) -> WorkspaceNoteCleanupResponse:
+    """Delete only confirmed note revisions still smaller than 1024 bytes."""
+    return WorkspaceNoteCleanupResponse.model_validate(
+        container.workspace.cleanup_notes([item.model_dump() for item in payload.candidates])
+    )
 
 
 @router.get("/summaries", response_model=list[WorkspaceFileResponse])
@@ -57,7 +96,7 @@ def search_workspace(
     offset: int = Query(default=0, ge=0),
     container=Depends(services),
 ) -> list[WorkspaceSearchResponse]:
-    """BM25 lexical search (any query word), or filtered browsing with query omitted."""
+    """BM25 search plus directly connected reader highlights, or browsing without a query."""
     return [
         WorkspaceSearchResponse.model_validate(item)
         for item in container.workspace.search(
@@ -91,7 +130,7 @@ def write_file(
     container=Depends(services),
 ) -> WorkspaceFileContentResponse:
     return WorkspaceFileContentResponse.model_validate(
-        container.workspace.write_file(
+        container.workspace.write_user_file(
             payload.path, payload.content, tags=payload.tags,
             expected_sha256=payload.expected_sha256,
         )
@@ -126,7 +165,7 @@ def delete_file(
     path: str = Query(min_length=1),
     container=Depends(services),
 ) -> Response:
-    container.workspace.delete_file(path)
+    container.workspace.delete_user_file(path)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

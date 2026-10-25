@@ -16,9 +16,55 @@ from backend.providers.types import ProviderRuntimeError
 from backend.providers.ollama import OllamaClient
 from backend.providers.logging import ScheduledTransport
 from backend.providers.repository import ProviderRepository
-from backend.providers.runtime import ResolvedModel, _compatible_context_window
+from backend.providers.runtime import ResolvedModel, _compatible_context_window, _embedding_vectors
 from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderUpdate
 from backend.providers.types import AgentModelDefaults, ModelReference
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("native", [False, True])
+async def test_embedding_response_formats_preserve_input_order(test_settings, monkeypatch, native):
+    services = create_services(test_settings)
+    entries = [
+        {"index": 1, "embedding": [[0.3, 0.4]] if native else [0.3, 0.4]},
+        {"index": 0, "embedding": [[0.1, 0.2]] if native else [0.1, 0.2]},
+    ]
+
+    def respond(request):
+        assert request.url.path == "/v1/embeddings"
+        body = json.loads(request.content)
+        assert body["input"] == ["first", "second"]
+        assert body["encoding_format"] == "float"
+        return httpx.Response(200, json=entries if native else {
+            "object": "list", "model": "embed", "data": entries,
+            "usage": {"prompt_tokens": 2, "total_tokens": 2},
+        })
+
+    monkeypatch.setattr(services.model_runtime, "client", lambda resolved: AsyncOpenAI(
+        base_url=resolved.base_url, api_key="unused",
+        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    ))
+    try:
+        resolved = ResolvedModel("test", "Test", "openai_compatible", "http://localhost/v1", None, "embed")
+        assert await services.model_runtime.embed(resolved, ["first", "second"]) == [[0.1, 0.2], [0.3, 0.4]]
+    finally:
+        await services.close()
+
+
+@pytest.mark.parametrize("payload", [
+    {},
+    [],
+    [{"index": 0, "embedding": [0.1]}],
+    [{"index": 0, "embedding": [0.1]}, {"index": 0, "embedding": [0.2]}],
+    [{"index": 0, "embedding": [0.1]}, {"index": 2, "embedding": [0.2]}],
+    [{"index": 0, "embedding": [[0.1], [0.2]]}, {"index": 1, "embedding": [0.2]}],
+    [{"index": 0, "embedding": [float("nan")]}, {"index": 1, "embedding": [0.2]}],
+    [{"index": 0, "embedding": [True]}, {"index": 1, "embedding": [0.2]}],
+    [{"index": 0, "embedding": [0.1]}, {"index": 1, "embedding": [0.2, 0.3]}],
+])
+def test_embedding_response_rejects_invalid_vectors(payload):
+    with pytest.raises(ProviderRuntimeError):
+        _embedding_vectors(payload, 2)
 
 
 def test_provider_reasoning_overrides_persist_clear_and_validate(test_settings):
@@ -307,6 +353,38 @@ def test_provider_profile_crud_masks_key_persists_and_archives(test_settings) ->
     assert archived.status_code == 200
     assert archived.json()["state"] == "archived"
     assert profile_id not in {profile["id"] for profile in restarted.get("/api/providers").json()}
+
+
+def test_provider_port_update_preserves_saved_configuration(test_settings) -> None:
+    with TestClient(create_app(test_settings)) as client:
+        created = client.post("/api/providers", json={
+            "name": "Local gateway",
+            "kind": "openai_compatible",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "api_key": "saved-key",
+            "api_mode": "responses",
+            "default_reasoning_effort": "high",
+            "tool_reasoning_effort": "none",
+            "serialize_model_switches": False,
+            "models": [{
+                "name": "custom-model", "capabilities": ["chat", "tools"],
+                "context_window_tokens": 32768, "preserve_thinking": True,
+                "reasoning_efforts": ["none", "high"], "enabled": False,
+            }],
+        })
+        assert created.status_code == 201
+        original = created.json()
+        path = f"/api/providers/{original['id']}"
+        updated = client.put(path, json={"base_url": "http://127.0.0.1:9090/v1/"})
+        assert updated.status_code == 200
+        expected = {**original, "base_url": "http://127.0.0.1:9090/v1"}
+        expected["updated_at"] = updated.json()["updated_at"]
+        assert updated.json() == expected
+        profile = client.app.state.services.model_runtime.profiles()
+        assert next(item for item in profile if item.id == original["id"]).api_key == "saved-key"
+
+    with TestClient(create_app(test_settings)) as restarted:
+        assert restarted.get(path).json() == expected
 
 
 def test_last_chat_model_reference_persists_across_restarts(test_settings) -> None:

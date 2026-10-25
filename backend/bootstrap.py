@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from backend.agents.compiler import AgentCompiler
 from backend.brief.service import BriefService
 from backend.brief.summaries import BriefSummaryService
+from backend.documents.topics import PaperTopicService
 from backend.conversations.attachments import ConversationAttachmentService
 from backend.conversations.turns import (
     ConversationTurnService,
@@ -19,10 +20,13 @@ from backend.core.config import RUNTIME_VERSION, Settings
 from backend.conversations.repository import ConversationRepository
 from backend.conversations.service import ConversationService
 from backend.core.settings_service import SettingsService
+from backend.core.path_picker import PathPickerService
 from backend.documents import DocumentService
 from backend.documents.formatting import DocumentFormatter
 from backend.documents.ingestion import DocumentIngestion
 from backend.documents.ocr import DocumentOCR
+from backend.documents.ocr_batch_repository import OcrBatchRepository
+from backend.documents.ocr_batches import OcrBatchService
 from backend.documents.repository import DocumentRepository
 from backend.documents.vision import VisionEnhancer
 from backend.runs.events import EventBroker
@@ -53,6 +57,9 @@ from backend.workspace.repository import WorkspaceRepository
 from backend.workspace.upgrade import WorkspaceUpgrade
 from backend.tracks.repository import TrackRepository
 from backend.tracks.service import TrackService
+from backend.tracks.writing import WritingService
+from backend.tracks.linked_repositories import LinkedRepositoryService
+from backend.references.service import ReferenceService
 from backend.documents.summaries import (
     PAPER_SUMMARY_COMPLETION_POLICY_ID,
     PaperSummaryService,
@@ -65,6 +72,7 @@ class ApplicationServices:
     settings: Settings
     session_factory: sessionmaker[Session]
     settings_service: SettingsService
+    path_picker: PathPickerService
     storage: SafeStorage
     ollama: OllamaClient
     model_runtime: ModelRuntime
@@ -81,8 +89,13 @@ class ApplicationServices:
     document_formatter: DocumentFormatter
     document_ingestion: DocumentIngestion
     documents: DocumentService
+    ocr_batches: OcrBatchService
+    paper_topics: PaperTopicService
     workspace: WorkspaceService
     tracks: TrackService
+    writing: WritingService
+    linked_repositories: LinkedRepositoryService
+    references: ReferenceService
     prompts: PromptRegistry
     skills: SkillService
     tool_catalog: Any
@@ -116,6 +129,7 @@ class ApplicationServices:
     async def close(self) -> None:
         await self.reviews.close()
         await self.brief.close()
+        await self.ocr_batches.close()
         await self.documents.close()
         await self.runs.close()
         await self.research_search.close()
@@ -183,6 +197,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         workspace,
     )
     tracks = TrackService(workspace, storage, documents, TrackRepository(session_factory))
+    writing = WritingService(tracks, documents, workspace, storage)
+    references = ReferenceService(storage, documents)
     source_downloads = SourceDownloadService(
         resolved,
         documents,
@@ -211,6 +227,8 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         documents=documents,
         workspace=workspace,
         tracks=tracks,
+        writing=writing,
+        references=references,
         retrieval=retrieval,
         research_search=research_search,
         source_downloads=source_downloads,
@@ -245,6 +263,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         conversation_attachments,
         prompts,
         tracks=tracks,
+        documents=documents,
     )
     summaries = PaperSummaryService(
         compiler,
@@ -252,11 +271,12 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         documents,
         workspace,
         prompts,
+        settings=resolved,
     )
     tool_runtime.set_summary_runner(summaries.run_for_agent)
-    review_repository = ReviewRepository(session_factory)
+    review_repository = ReviewRepository(session_factory, storage)
     reviews = LiteratureReviewService(
-        review_repository, ReviewJobs(review_repository, runs, compiler, model_runtime, prompts),
+        review_repository, ReviewJobs(review_repository, runs, compiler, model_runtime, prompts, documents),
         ScholarlyDiscovery(resolved, research_search, review_repository),
         documents, source_downloads, workspace, tracks,
     )
@@ -272,6 +292,7 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         settings=resolved,
         session_factory=session_factory,
         settings_service=settings_service,
+        path_picker=PathPickerService(),
         storage=storage,
         ollama=ollama,
         model_runtime=model_runtime,
@@ -291,9 +312,14 @@ def create_services(settings: Settings | None = None) -> ApplicationServices:
         document_formatter=document_formatter,
         document_ingestion=document_ingestion,
         documents=documents,
+        paper_topics=PaperTopicService(documents, model_runtime, storage, prompts),
+        ocr_batches=OcrBatchService(OcrBatchRepository(storage), documents),
         workspace=workspace,
         tracks=tracks,
+        writing=writing,
         prompts=prompts,
+        linked_repositories=LinkedRepositoryService(storage, tracks),
+        references=references,
         skills=skills,
         tool_catalog=tool_catalog,
         compiler=compiler,

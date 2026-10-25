@@ -52,10 +52,10 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.tracks.read",
         "read_research_track",
-        "List notebooks, inspect exploration files, or read one track document and revision.",
+        "List notebooks, read track documents, inspect source-backed claims, or find stable bibliography keys.",
         _object_schema(
             {
-                "action": {"type": "string", "enum": ["list", "inspect", "section"]},
+                "action": {"type": "string", "enum": ["list", "inspect", "section", "claims", "references"]},
                 "track_id": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
                 "section": {"type": ["string", "null"], "pattern": "^(problem|literature|experiments|results|exploration/[a-z0-9][a-z0-9_-]{0,79})$"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -320,7 +320,7 @@ APPLICATION_TOOLS: tuple[ApplicationToolDefinition, ...] = (
     (
         "research.notes.search",
         "search_research_notes",
-        "Search workspace content, titles, and tags with BM25-ranked lexical matches.",
+        "Search workspace content, titles, and tags with BM25-ranked matches and directly connected reader highlights.",
         _object_schema(
             {
                 "query": {"type": ["string", "null"], "minLength": 1, "maxLength": 2000},

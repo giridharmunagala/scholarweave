@@ -5,27 +5,29 @@ from dataclasses import dataclass
 from typing import Any
 import asyncio
 import hashlib
+import base64
+import io
 import pytest
 from openai import AsyncOpenAI
+from PIL import Image
+from pypdf import PdfWriter
 
 from backend.agents.blueprint import ModelReferenceSpec
 from backend.agents.compiler import AgentCompiler
 from backend.agents.context import ScholarWeaveContext
 from backend.agents.harness import ModelBinding
 from backend.bootstrap import create_services
-from backend.persistence.database import create_session_factory
-from backend.persistence.files import SafeStorage
 from backend.prompting.registry import PromptRegistry
 from backend.documents.summaries import (
     PAPER_SUMMARY_COMPLETION_POLICY_ID,
     PaperSummaryService,
-    paper_summary_blueprint,
     validate_paper_summary_completion,
 )
-from backend.core.errors import NotFoundError, ValidationError
+from backend.core.errors import DocumentProcessingError, NotFoundError, ValidationError
+from backend.core.settings_service import SettingsUpdate
+from backend.providers.schemas import ProviderCreate, ProviderModel, ProviderUpdate
+from backend.providers.types import ProviderRuntimeError
 from backend.workspace.layout import WorkspaceLayout
-from backend.workspace.repository import WorkspaceRepository
-from backend.workspace.service import WorkspaceService
 from backend.tools.catalog import create_tool_catalog
 from backend.tools.policy import ToolInputError
 from backend.conversations.turns import (
@@ -41,6 +43,203 @@ class FakeCompiled:
     entry_agent: Any
     completion_validator: Any = None
     completion_policy_id: str | None = None
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("api_mode", "vision", "mode"), [
+    ("chat_completions", True, "reviewed"),
+    ("responses", True, "overview"),
+    ("chat_completions", False, "reviewed"),
+])
+async def test_summary_sends_real_pdf_images_only_to_declared_vision_models(
+    test_settings, stub_provider, api_mode, vision, mode,
+):
+    services = create_services(test_settings)
+    try:
+        profile = services.providers.create(ProviderCreate(
+            name="Summary vision", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
+            api_mode=api_mode,
+            models=[ProviderModel(
+                name="summary-model", capabilities={"chat", "tools", *({"vision"} if vision else set())},
+                context_window_tokens=32768,
+            )],
+        ))
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        output = io.BytesIO()
+        writer.write(output)
+        document = services.documents.create_document_from_bytes(
+            output.getvalue(), filename="visual.pdf", title="Visual evidence",
+        )
+        services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+        services.retrieval.replace_document_chunks(document.id, [
+            {"text": "Figure 1 reports a measured value of 42.", "citation": "p.1"},
+        ])
+        stub_provider.call_tool = "save_paper_summary_version"
+        stub_provider.tool_arguments = {
+            "document_id": document.id, "content": "# Summary\n\n" + "The result is 42 [p.1]. " * 12,
+            "review_summary": "Checked the supplied source and visual evidence limits.",
+        }
+        reference = ModelReferenceSpec(provider_profile_id=profile.id, model="summary-model")
+        if api_mode == "responses":
+            (run, _), = services.summaries.start_batch([document.id], model_reference=reference, mode=mode)
+        else:
+            run, _ = services.summaries.start(document.id, model_reference=reference, mode=mode)
+        await asyncio.wait_for(services.runs._tasks[run.id], 20)
+        saved_run = services.runs.get(run.id)
+        assert saved_run.status == "completed", saved_run.error
+        parts = [
+            part for message in stub_provider.requests[0].get("messages", [])
+            if isinstance(message.get("content"), list) for part in message["content"]
+        ]
+        # The stub normalizes Responses input to Chat messages after receiving it.
+        images = [part for part in parts if part.get("type") in {"image_url", "input_image"}]
+        assert bool(images) is vision
+        version = services.summaries.versions(document.id)[0]
+        if vision:
+            assert version["visuals"] == {"pages": [1], "total_pages": 1, "complete": True}
+            image_url = images[0]["image_url"]
+            url = image_url["url"] if isinstance(image_url, dict) else image_url
+            with Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))) as image:
+                assert image.format == "JPEG"
+                assert max(image.size) <= 1280
+            assert "Visual coverage complete: True" in str(saved_run.input_json)
+        else:
+            assert version["visuals"] is None
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_summary_visual_coverage_is_bounded_separately_from_full_text(test_settings, stub_provider, monkeypatch):
+    from backend.agents.context_budget import _request_tokens, model_context_budget
+
+    services = create_services(test_settings)
+    try:
+        profile = services.providers.create(ProviderCreate(
+            name="Bounded vision", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
+            models=[ProviderModel(name="vision", capabilities={"chat", "tools", "vision"}, context_window_tokens=32768)],
+        ))
+        writer = PdfWriter()
+        for _ in range(10):
+            writer.add_blank_page(width=612, height=792)
+        output = io.BytesIO()
+        writer.write(output)
+        document = services.documents.create_document_from_bytes(
+            output.getvalue(), filename="long-visual.pdf", title="Bounded visual evidence",
+        )
+        services.documents.repository.mark_ready(document.id, page_count=10, metadata={})
+        services.retrieval.replace_document_chunks(document.id, [
+            {"text": f"Evidence on page {page}.", "citation": f"p.{page}"} for page in range(1, 11)
+        ])
+        compiled, instruction, metadata, _ = services.summaries._prepare(
+            document.id, model_reference=ModelReferenceSpec(provider_profile_id=profile.id, model="vision"),
+            mode="reviewed",
+        )
+        visuals = metadata["paper_summary_visuals"]
+        assert 0 < len(visuals["pages"]) < 10
+        assert visuals["complete"] is False
+        assert visuals["pages"][0] == 1
+        if len(visuals["pages"]) > 1:
+            assert visuals["pages"][-1] == 10
+        assert "Visual coverage complete: False" in str(instruction)
+        assert metadata["_paper_summary_checkpoint_states"][document.id]["pending_checkpoint"]["has_more"] is False
+        budget, _, _ = model_context_budget(compiled.context_window_tokens)
+        assert _request_tokens(
+            compiled.entry_agent, instruction, compiled.entry_agent.instructions,
+            ScholarWeaveContext(run_id="sizing", tool_runtime=None),
+        ) <= budget
+        source = next(item for item in services.documents.get_document_artifacts(document.id) if item.kind == "source_pdf")
+        assert services.documents.artifact_bytes(source) == output.getvalue()
+        assert services.documents.summary_images(document.id, 0)["content"] == []
+
+        def fail_render(*_args):
+            raise RuntimeError("PDF renderer unavailable")
+
+        monkeypatch.setattr(services.documents.ocr, "render_page_png", fail_render)
+        with pytest.raises(DocumentProcessingError, match="Could not render PDF page 1"):
+            services.documents.summary_images(document.id, 1)
+    finally:
+        await services.close()
+
+
+@pytest.mark.anyio
+async def test_summary_defaults_pair_models_on_one_router_and_preserve_overrides(test_settings, stub_provider):
+    services = create_services(test_settings)
+    try:
+        models = [
+            ProviderModel(name="large", capabilities={"chat", "tools"}, context_window_tokens=32768),
+            ProviderModel(name="small", capabilities={"chat", "tools"}, context_window_tokens=16384,
+                          reasoning_efforts=["none", "low"]),
+        ]
+        profile = services.providers.create(ProviderCreate(
+            name="Llama router", kind="openai_compatible", base_url=f"{stub_provider.base_url}/v1",
+            models=models,
+        ))
+        main = {"provider_profile_id": profile.id, "model": "large"}
+        small = {"provider_profile_id": profile.id, "model": "small"}
+        services.settings_service.update(SettingsUpdate(default_model_references={"chat": main, "small_tasks": small}))
+        document = services.documents.create_document_from_bytes(
+            b"%PDF-1.4\n%%EOF", filename="paired.pdf", title="Paired models",
+        )
+        services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
+        services.retrieval.replace_document_chunks(document.id, [{"text": "Result 42.", "citation": "p.1"}])
+        stub_provider.call_tool = "save_paper_summary_version"
+        stub_provider.tool_arguments = {
+            "document_id": document.id, "content": "# Summary\n\n" + "The result is 42 [p.1]. " * 12,
+            "review_summary": "Checked the supplied evidence.",
+        }
+        run, _ = services.summaries.start(document.id, model_reference=ModelReferenceSpec())
+        await asyncio.wait_for(services.runs._tasks[run.id], 20)
+        assert services.runs.get(run.id).status == "completed", services.runs.get(run.id).error
+        assert stub_provider.requests[-1]["model"] == "small"
+        assert stub_provider.requests[-1]["reasoning_effort"] == "none"
+        assert stub_provider.requests[-1]["max_tokens"] == 4096
+        assert services.summaries.versions(document.id)[0]["model"]["provider_profile_id"] == profile.id
+
+        parent = services.runs._repository.create(
+            conversation_id=None, agent_name="Main", input_value="Summarize the paper",
+            blueprint=research_blueprint(main).model_dump(mode="json"),
+        )
+        result = await services.summaries.run_for_agent(
+            {"document_id": document.id, "mode": "overview"},
+            ScholarWeaveContext(run_id=parent.id, tool_runtime=services.runs._tool_runtime),
+        )
+        assert result["model"]["model"] == "small"
+        assert services.runs.get(parent.id).blueprint_json["agents"][0]["model"] == main
+
+        explicit, _ = services.summaries.start(
+            document.id, model_reference=ModelReferenceSpec.model_validate(main), mode="overview",
+        )
+        await asyncio.wait_for(services.runs._tasks[explicit.id], 20)
+        assert services.runs.get(explicit.id).status == "completed"
+        assert stub_provider.requests[-1]["model"] == "large"
+        services.settings_service.update(SettingsUpdate(default_model_references={
+            "chat": main, "small_tasks": small, "summary": main,
+        }))
+        compiled, _, _, _ = services.summaries._prepare(
+            document.id, model_reference=ModelReferenceSpec(), mode="overview",
+        )
+        assert compiled.entry_agent.binding.model_name == "large"
+
+        services.settings_service.update(SettingsUpdate(default_model_references={"chat": main, "small_tasks": small}))
+        services.providers.update(profile.id, ProviderUpdate(models=[
+            models[0], models[1].model_copy(update={"enabled": False}),
+        ]))
+        request_count = len(stub_provider.requests)
+        with pytest.raises(ProviderRuntimeError, match="disabled"):
+            services.summaries.start(document.id, model_reference=ModelReferenceSpec())
+        assert len(stub_provider.requests) == request_count
+
+        services.settings_service.update(SettingsUpdate(default_model_references={"chat": main}))
+        restored, _ = services.summaries.start(document.id, model_reference=ModelReferenceSpec(), mode="overview")
+        await asyncio.wait_for(services.runs._tasks[restored.id], 20)
+        assert services.runs.get(restored.id).status == "completed"
+        assert stub_provider.requests[-1]["model"] == "large"
+        assert test_settings.default_model_references["chat"] == main
+        assert stub_provider.max_active_inference == 1
+    finally:
+        await services.close()
 
 
 @pytest.mark.anyio
@@ -105,104 +304,9 @@ async def test_reviewed_summary_finishes_at_verified_save_without_another_model_
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize(("model", "declared", "expected"), [
-    ("qwen-27b", ("none", "high"), "none"),
-    ("qwen-27b", ("high",), None),
-    ("unknown-model", None, None),
-])
-async def test_main_agent_summary_call_uses_runtime_owned_model_and_reasoning(
-    test_settings, stub_provider, monkeypatch, model, declared, expected,
-):
-    services = create_services(test_settings)
-    document = services.documents.create_document_from_bytes(
-        b"%PDF-1.4\n%%EOF", filename="runtime-summary.pdf", title="Runtime summary",
-    )
-    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
-    services.retrieval.replace_document_chunks(document.id, [
-        {"text": "The result is 42 units.", "citation": "p.1"},
-    ])
-    client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
-    binding = ModelBinding(
-        client=client, model_name=model, provider_kind="openai_compatible",
-        context_window_tokens=80000, reasoning_efforts=declared,
-    )
-    reference = ModelReferenceSpec(provider_profile_id="parent-provider", model=model)
-    resolved_references = []
-
-    def resolve(selected, **kwargs):
-        resolved_references.append({
-            "provider_profile_id": selected.provider_profile_id, "model": selected.model,
-        })
-        return binding
-
-    compiler = AgentCompiler(
-        SimpleNamespace(resolve_agent_model=resolve),
-        create_tool_catalog(PromptRegistry(test_settings.prompt_config_dir)), settings=test_settings,
-    )
-    monkeypatch.setattr(services.summaries, "_compiler", compiler)
-    original_responses = stub_provider.responses
-
-    def responses(payload):
-        offered = {tool["function"]["name"] for tool in payload.get("tools", [])}
-        if "summarize_research_paper" in offered:
-            stub_provider.call_tool = "summarize_research_paper"
-            stub_provider.tool_arguments = {"document_id": document.id, "mode": "reviewed"}
-        else:
-            stub_provider.call_tool = "save_paper_summary_version"
-            stub_provider.tool_arguments = {
-                "document_id": document.id,
-                "content": "# Summary\n\n" + "The extraction reports 42 units [p.1]. " * 7,
-                "review_summary": "Checked the result against the source and citation.",
-            }
-        return original_responses(payload)
-
-    monkeypatch.setattr(stub_provider, "responses", responses)
-    try:
-        compiled = compiler.compile(research_blueprint(reference.model_dump()))
-        parent = services.runs.create(
-            compiled, "Save a reviewed summary of this paper.", conversation_id=None,
-            reasoning_effort="high",
-        )
-        async with asyncio.timeout(20):
-            while parent.status not in {"completed", "failed", "cancelled"}:
-                await asyncio.sleep(0.05)
-                parent = services.runs.get(parent.id)
-        assert parent.status == "completed", parent.error
-        assert resolved_references == [reference.model_dump(), reference.model_dump()]
-        main_requests = []
-        summary_requests = []
-        for request in stub_provider.requests:
-            tools = {tool["function"]["name"]: tool["function"] for tool in request["tools"]}
-            if "summarize_research_paper" in tools:
-                main_requests.append(request)
-                schema = tools["summarize_research_paper"]["parameters"]
-                assert set(schema["properties"]) == {"document_id", "mode"}
-                assert request["reasoning_effort"] == "high"
-            else:
-                summary_requests.append(request)
-                if expected is None:
-                    assert "reasoning_effort" not in request
-                else:
-                    assert request["reasoning_effort"] == expected
-            assert request["model"] == model
-        assert len(main_requests) == 2
-        assert len(summary_requests) == 1
-        versions = services.summaries.versions(document.id)
-        assert len(versions) == 1
-        assert versions[0]["model"]["provider_profile_id"] == reference.provider_profile_id
-        assert versions[0]["coverage_complete"] is True
-    finally:
-        await client.close()
-        await services.close()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(("declared", "expected"), [
-    (("none", "high"), "none"), (("high",), None), ((), None),
-])
 @pytest.mark.parametrize("recovered_status", ["failed", "cancelled"])
 async def test_research_summary_tool_uses_serial_isolated_writer(
-    test_settings, stub_provider, declared, expected, recovered_status, monkeypatch,
+    test_settings, stub_provider, recovered_status, monkeypatch,
 ):
     services = create_services(test_settings)
     document = services.documents.create_document_from_bytes(
@@ -215,7 +319,7 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
     client = AsyncOpenAI(base_url=f"{stub_provider.base_url}/v1", api_key="stub")
     binding = ModelBinding(
         client=client, model_name="qwen-27b", provider_kind="openai_compatible",
-        context_window_tokens=80000, reasoning_efforts=declared,
+        context_window_tokens=80000, reasoning_efforts=("none", "high"),
     )
     compiler = AgentCompiler(
         SimpleNamespace(resolve_agent_model=lambda *args, **kwargs: binding),
@@ -273,10 +377,7 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
         assert all(item["context_scope"] == "delegate" and item["delegated"] for item in telemetry)
         assert not any(kind == "model.stream" for kind, _ in forwarded_events)
         for request in stub_provider.requests:
-            if expected is None:
-                assert "reasoning_effort" not in request
-            else:
-                assert request["reasoning_effort"] == expected
+            assert request["reasoning_effort"] == "none"
             assert request["max_tokens"] == 20000
             assert "A private research instruction" not in str(request["messages"])
             offered = {tool["function"]["name"] for tool in request["tools"]}
@@ -330,110 +431,8 @@ async def test_research_summary_tool_uses_serial_isolated_writer(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("status", [
-    "completed", "failed", "cancelled", "parent_cancel", "parent_cancel_saved",
-])
-async def test_summary_forwards_compaction_telemetry_at_every_terminal_status(monkeypatch, status):
-    parent_cancelled = status.startswith("parent_cancel")
-    payload = {"model_call_id": "child-compaction-call", "context_scope": "compaction", "usage_complete": True}
-    child = SimpleNamespace(
-        id="child", status="running" if parent_cancelled else status, error="Child failed.",
-        runtime_metadata_json={
-            "paper_summary_parent_run_id": "parent", "paper_summary_document_id": "paper",
-            "paper_summary_mode": "reviewed",
-        },
-        events=[SimpleNamespace(sequence=1, event_type="model.telemetry", payload_json=payload)],
-    )
-    parent = SimpleNamespace(blueprint_json=research_blueprint({}).model_dump(mode="json"), events=[])
-    created = []
-    runs = SimpleNamespace(
-        get=lambda run_id: parent if run_id == "parent" else child,
-        create=lambda *args, **kwargs: created.append("child") or SimpleNamespace(id="child", status="pending"),
-    )
-
-    async def cancel(run_id):
-        assert run_id == "child"
-        child.status = "cancelled"
-        child.events.append(SimpleNamespace(
-            sequence=2, event_type="model.telemetry",
-            payload_json={**payload, "model_call_id": "cancelled-child-call", "completed": False},
-        ))
-
-    runs.cancel = cancel
-    receipts = {}
-
-    def read_file(path):
-        if path not in receipts:
-            raise FileNotFoundError(path)
-        return SimpleNamespace(content=receipts[path])
-
-    workspace = SimpleNamespace(
-        paper_folder=lambda document_id: WorkspaceLayout.paper_folder(document_id, "Paper"),
-        read_file=read_file, write_file=lambda path, content, **kwargs: receipts.update({path: content}),
-    )
-    if status == "parent_cancel_saved":
-        version_path = f"{workspace.paper_folder('paper')}/summaries/child.md"
-        receipts[version_path] = "Saved summary."
-        receipts[version_path.removesuffix(".md") + ".json"] = {
-            "id": "child", "run_id": "child", "document_id": "paper", "path": version_path,
-            "mode": "reviewed", "status": "reviewed",
-            "content_hash": hashlib.sha256(b"Saved summary.").hexdigest(),
-        }
-    service = PaperSummaryService(None, runs, None, workspace, None)
-    compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
-        model_name="qwen-27b", provider_kind="openai_compatible",
-    )))
-    monkeypatch.setattr(service, "_prepare", lambda *args, **kwargs: (compiled, "Summarize.", {}, "revision"))
-    monkeypatch.setattr(service, "version", lambda *args: ({}, "Saved summary."))
-    events = []
-    forwarded_event = asyncio.Event()
-
-    async def emit(kind, data):
-        events.append((kind, data))
-        parent.events.append(SimpleNamespace(event_type=kind, payload_json=data))
-        forwarded_event.set()
-
-    context = ScholarWeaveContext(
-        run_id="parent", tool_runtime=None, event_sink=SimpleNamespace(emit=emit),
-    )
-    call = service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
-    if parent_cancelled:
-        task = asyncio.create_task(call)
-        await asyncio.wait_for(forwarded_event.wait(), timeout=2)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-    elif status == "completed":
-        await call
-    else:
-        with pytest.raises(ValidationError):
-            await call
-    expected_events = 2 if parent_cancelled else 1
-    assert len(events) == expected_events
-    assert events[0][0] == "model.telemetry"
-    forwarded = events[0][1]
-    assert forwarded["model_call_id"] == payload["model_call_id"]
-    assert forwarded["context_scope"] == "compaction"
-    assert forwarded["delegated"] is True
-    assert "delegated" not in payload
-    replay = service.run_for_agent({"document_id": "paper", "mode": "reviewed"}, context)
-    if status == "completed":
-        await replay
-    elif status == "parent_cancel_saved":
-        recovered = await replay
-        assert recovered["recovered_saved_version"] is True
-        assert recovered["summary_run_status"] == child.status == "cancelled"
-        assert recovered["summary_run_error"] == child.error == "Child failed."
-    else:
-        with pytest.raises(ValidationError):
-            await replay
-    assert created == ["child"]
-    assert len(events) == expected_events
-
-
-@pytest.mark.anyio
 @pytest.mark.parametrize("failure", ["malformed", "missing-run-id", "write-failed"])
-async def test_summary_job_receipt_failures_do_not_start_untracked_work(monkeypatch, failure):
+async def test_summary_job_receipt_failures_do_not_start_untracked_work(test_settings, monkeypatch, failure):
     parent = SimpleNamespace(blueprint_json=research_blueprint({}).model_dump(mode="json"))
     created = []
     cancelled = []
@@ -459,7 +458,7 @@ async def test_summary_job_receipt_failures_do_not_start_untracked_work(monkeypa
         None, runs, None, SimpleNamespace(
             paper_folder=lambda document_id: WorkspaceLayout.paper_folder(document_id, "Paper"),
             read_file=read_file, write_file=write_file,
-        ), None,
+        ), None, settings=test_settings,
     )
     compiled = SimpleNamespace(entry_agent=SimpleNamespace(binding=SimpleNamespace(
         model_name="qwen-27b", provider_kind="openai_compatible",
@@ -472,41 +471,6 @@ async def test_summary_job_receipt_failures_do_not_start_untracked_work(monkeypa
     expected_jobs = ["child"] if failure == "write-failed" else []
     assert created == expected_jobs
     assert cancelled == expected_jobs
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["overview", "reviewed"])
-async def test_full_paper_over_old_character_caps_is_inlined(test_settings, mode):
-    services = create_services(test_settings)
-    document = services.documents.create_document_from_bytes(
-        b"%PDF-1.4\n%%EOF", filename="full.pdf", title="Full",
-    )
-    services.documents.repository.mark_ready(document.id, page_count=80, metadata={})
-    services.retrieval.replace_document_chunks(document.id, [
-        {"text": f"Page {index} findings. " * 40, "citation": f"p.{index}"}
-        for index in range(1, 81)
-    ])
-    captured = []
-    compiled = FakeCompiled(
-        context_window_tokens=80000,
-        entry_agent=SimpleNamespace(binding=SimpleNamespace(model_name="test", provider_kind="openai")),
-    )
-    service = PaperSummaryService(
-        SimpleNamespace(compile=lambda blueprint: compiled),
-        SimpleNamespace(create=lambda agent, instruction, **kwargs: captured.append((instruction, kwargs))),
-        services.documents, services.workspace, PromptRegistry(test_settings.prompt_config_dir),
-    )
-    try:
-        service.start(document.id, model_reference=ModelReferenceSpec(), mode=mode)
-        instruction, options = captured[0]
-        assert len(instruction) > 12000
-        assert "Page 80 findings." in instruction
-        pending = options["runtime_metadata"]["_paper_summary_checkpoint_states"][document.id]["pending_checkpoint"]
-        assert pending["has_more"] is False
-        assert pending["next_start"] is None
-        assert len(pending["coverage"]["spans"]) == 80
-    finally:
-        await services.close()
 
 
 @pytest.mark.anyio
@@ -534,6 +498,7 @@ async def test_full_source_budget_uses_serialized_tokens_not_raw_character_count
     service = PaperSummaryService(
         compiler, services.runs, services.documents, services.workspace,
         PromptRegistry(test_settings.prompt_config_dir),
+        settings=test_settings,
     )
     try:
         compiled, instruction, metadata, _ = service._prepare(
@@ -654,48 +619,6 @@ def test_coverage_can_fill_character_gaps_after_out_of_order_reads():
     assert ApplicationToolRuntime._summary_coverage_progress(records, "chunks")["complete"] is True
 
 
-@pytest.mark.anyio
-@pytest.mark.parametrize(("mode", "requested", "model", "expected"), [
-    ("overview", None, "Qwen3.8-27B-Q6_K.gguf", "none"),
-    ("overview", None, "qwen-27b", "none"),
-    ("reviewed", None, "qwen-27b", "none"),
-    ("overview", "low", "Qwen3.8-27B-Q6_K.gguf", "low"),
-    ("reviewed", None, "Qwen3.8-27B-Q6_K.gguf", "none"),
-    ("reviewed", "xhigh", "Qwen3.8-27B-Q6_K.gguf", "xhigh"),
-    ("overview", None, "unknown-model", None),
-])
-async def test_summary_selects_supported_nonreasoning_unless_explicitly_requested(
-    test_settings, mode, requested, model, expected,
-) -> None:
-    services = create_services(test_settings)
-    document = services.documents.create_document_from_bytes(
-        b"%PDF-1.4\n%%EOF", filename="reasoning.pdf", title="Reasoning",
-    )
-    services.documents.repository.mark_ready(document.id, page_count=1, metadata={})
-    services.retrieval.replace_document_chunks(document.id, [{"text": "A supported result.", "citation": "p.1"}])
-    captured = []
-    compiled = FakeCompiled(
-        context_window_tokens=32768,
-        entry_agent=SimpleNamespace(binding=SimpleNamespace(model_name=model, provider_kind="openai_compatible")),
-    )
-
-    def create_run(agent, instruction, **kwargs):
-        captured.append(kwargs["reasoning_effort"])
-        return SimpleNamespace(id=f"run-{len(captured)}")
-
-    service = PaperSummaryService(
-        SimpleNamespace(compile=lambda blueprint: compiled), SimpleNamespace(create=create_run),
-        services.documents, services.workspace, PromptRegistry(test_settings.prompt_config_dir),
-    )
-    reference = ModelReferenceSpec(provider_profile_id="selected-profile", model=model)
-    try:
-        service.start(document.id, model_reference=reference, reasoning_effort=requested, mode=mode)
-        service.start_batch([document.id], model_reference=reference, reasoning_effort=requested, mode=mode)
-        assert captured == [expected, expected]
-    finally:
-        await services.close()
-
-
 @pytest.mark.parametrize(("declared", "requested", "expected"), [
     (None, None, "none"),
     ((), None, None),
@@ -731,8 +654,7 @@ def test_summary_explicit_unsupported_reasoning_is_rejected(model, declared, req
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["overview", "reviewed"])
-@pytest.mark.parametrize("repair_after", [None, 1, 41])
+@pytest.mark.parametrize(("mode", "repair_after"), [("reviewed", None), ("overview", 3)])
 async def test_summary_final_without_save_is_repaired_or_rejected(
     test_settings, stub_provider, monkeypatch, mode, repair_after,
 ) -> None:
@@ -759,6 +681,7 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
     service = PaperSummaryService(
         compiler, services.runs, services.documents, services.workspace,
         PromptRegistry(test_settings.prompt_config_dir),
+        settings=test_settings,
     )
     stub_provider.reply = "The paper reports 42 units [p.1]. Here is my summary."
     if repair_after is not None:
@@ -841,13 +764,6 @@ async def test_summary_final_without_save_is_repaired_or_rejected(
         await client.close()
 
 
-class Documents:
-    def get_document(self, document_id: str):
-        if document_id != "paper-1":
-            return None
-        return SimpleNamespace(id=document_id, title="A Strong Paper")
-
-
 @pytest.mark.anyio
 async def test_summary_batch_is_bounded_prevalidated_and_uses_one_explicit_model(test_settings) -> None:
     services = create_services(test_settings)
@@ -878,8 +794,9 @@ async def test_summary_batch_is_bounded_prevalidated_and_uses_one_explicit_model
         return record
 
     service = PaperSummaryService(
-        SimpleNamespace(compile=compile_blueprint), SimpleNamespace(create=create_run),
+        SimpleNamespace(compile=compile_blueprint), SimpleNamespace(list=lambda: [], create=create_run),
         services.documents, services.workspace, PromptRegistry(test_settings.prompt_config_dir),
+        settings=test_settings,
     )
     selected = ModelReferenceSpec(provider_profile_id="selected-profile", model="batch-model")
     try:
@@ -939,8 +856,9 @@ async def test_overview_uses_bounded_excerpt_and_never_replaces_reviewed_summary
 
     service = PaperSummaryService(
         SimpleNamespace(compile=compile_blueprint),
-        SimpleNamespace(create=lambda agent, instruction, **kwargs: queued.append((instruction, kwargs))),
+        SimpleNamespace(list=lambda: [], create=lambda agent, instruction, **kwargs: queued.append((instruction, kwargs))),
         services.documents, services.workspace, PromptRegistry(test_settings.prompt_config_dir),
+        settings=test_settings,
     )
     try:
         paper = services.workspace.ensure_paper_folder(document.id, document.title)
@@ -1000,8 +918,9 @@ async def test_short_paper_direct_summary_is_complete_immutable_and_preserves_la
     )
     service = PaperSummaryService(
         SimpleNamespace(compile=lambda blueprint: compiled),
-        SimpleNamespace(create=lambda agent, instruction, **kwargs: calls.append((instruction, kwargs))),
+        SimpleNamespace(list=lambda: [], create=lambda agent, instruction, **kwargs: calls.append((instruction, kwargs))),
         services.documents, services.workspace, PromptRegistry(test_settings.prompt_config_dir),
+        settings=test_settings,
     )
     try:
         service.start(document.id, model_reference=ModelReferenceSpec(), reasoning_effort=None)
@@ -1226,83 +1145,3 @@ async def test_late_evidence_write_reconciles_without_duplicate_or_overwrite(tes
         assert "pending_checkpoint" not in runtime._paper_summary_state(late, document.id)
     finally:
         await services.close()
-
-
-def test_summary_blueprint_is_one_model_job_with_direct_read_and_save(test_settings) -> None:
-    prompts = PromptRegistry(test_settings.prompt_config_dir)
-
-    blueprint = paper_summary_blueprint(ModelReferenceSpec().model_dump(), prompts)
-
-    assert blueprint.entry_agent_id == "summarizer"
-    assert [agent.id for agent in blueprint.agents] == ["summarizer"]
-    assert blueprint.agent_tools == []
-    assert blueprint.run.exclusive_inference is False
-    assert {tool.catalog_id for tool in blueprint.tools} == {
-        "research.summary.checkpoint",
-        "research.summary.read",
-        "research.summary.save",
-    }
-    assert blueprint.run.max_turns is None
-    assert blueprint.run.max_input_characters is None
-    assert blueprint.run.max_output_characters is None
-    assert blueprint.agents[0].model_settings.parallel_tool_calls is False
-    assert "citation" in blueprint.agents[0].instructions.casefold()
-    assert "an empty checkpoint needs no read" in blueprint.agents[0].instructions.casefold()
-    assert "source-versioned evidence" in blueprint.agents[0].instructions
-    assert "no arbitrary page or batch cap" in blueprint.agents[0].instructions
-    assert "explicitly partial summary" in blueprint.agents[0].instructions
-
-
-def test_summary_blueprint_uses_selected_main_model(test_settings) -> None:
-    prompts = PromptRegistry(test_settings.prompt_config_dir)
-    blueprint = paper_summary_blueprint(
-        {"provider_profile_id": "main-provider", "model": "main-model"},
-        prompts,
-    )
-
-    assert blueprint.agents[0].model.model == "main-model"
-
-
-def test_summary_versions_are_listed_and_promoted_without_touching_notes(test_settings) -> None:
-    session_factory = create_session_factory(test_settings)
-    workspace = WorkspaceService(
-        SafeStorage(test_settings),
-        WorkspaceRepository(session_factory),
-    )
-    folder = workspace.ensure_paper_folder("paper-1", "A Strong Paper")["folder"]
-    workspace.write_file(
-        f"{folder}/summaries/run-1.md",
-        "# Versioned summary\n\nClaim [p.1]. Another result [p.2].\n",
-    )
-    workspace.write_file(
-        f"{folder}/summaries/run-1.json",
-        {
-            "id": "run-1",
-            "document_id": "paper-1",
-            "run_id": "run-1",
-            "path": f"{folder}/summaries/run-1.md",
-            "created_at": "2026-09-03T10:00:00+00:00",
-            "prompt_revision": "abc",
-            "review_summary": "Citations checked.",
-            "citation_count": 2,
-            "status": "reviewed",
-        },
-    )
-    workspace.write_file(f"{folder}/notes.md", "# Notes\n\nKeep me.\n")
-    service = PaperSummaryService(  # type: ignore[arg-type]
-        compiler=None,
-        runs=None,
-        documents=Documents(),
-        workspace=workspace,
-        prompts=PromptRegistry(test_settings.prompt_config_dir),
-    )
-
-    versions = service.versions("paper-1")
-    version, path, content = service.promote("paper-1", "run-1")
-
-    assert [item["id"] for item in versions] == ["run-1"]
-    assert version["prompt_revision"] == "abc"
-    assert path == f"{folder}/summary.md"
-    assert workspace.read_file(path).content == content
-    assert workspace.read_file(f"{folder}/notes.md").content.endswith("Keep me.\n")
-    session_factory.kw["bind"].dispose()

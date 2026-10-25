@@ -7,11 +7,17 @@ from sqlalchemy.orm import Session, sessionmaker
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from backend.agents.blueprint import ModelReferenceSpec
-from backend.core.config import Settings
+from backend.core.config import LocalOCRURL, Settings
 from backend.core.models import AppSetting
 from backend.utils import utcnow
 
 PERSISTED_SETTING_KEYS = {
+    "ocr_engine",
+    "ocr_surya_base_url",
+    "ocr_surya_model",
+    "ocr_surya_parallel",
+    "ocr_surya_max_tokens",
+    "ocr_indra_fallback_enabled",
     "decision_parallel_requests",
     "ollama_base_url",
     "default_model_references",
@@ -39,6 +45,8 @@ PERSISTED_SETTING_KEYS = {
 }
 MODEL_DEFAULT_CAPABILITIES = {
     "chat",
+    "small_tasks",
+    "summary",
     "embedding",
     "vision",
     "compaction",
@@ -90,13 +98,24 @@ class SettingsResponse(SettingsSchema):
     user_timezone: str
     user_profile: str
     retrieval_max_context_chars: int
-    ocr_engine: Literal["tesseract"]
+    ocr_engine: Literal["tesseract", "surya"]
+    ocr_surya_base_url: str
+    ocr_surya_model: str
+    ocr_surya_parallel: int
+    ocr_surya_max_tokens: int
+    ocr_indra_fallback_enabled: bool
     ocr_llm_enhancement_enabled: bool
     ocr_llm_model: str | None
     ocr_llm_triage_model: str | None
 
 
 class SettingsUpdate(SettingsSchema):
+    ocr_engine: Literal["tesseract", "surya"] | None = None
+    ocr_surya_base_url: LocalOCRURL | None = None
+    ocr_surya_model: str | None = Field(default=None, min_length=1, max_length=200)
+    ocr_surya_parallel: int | None = Field(default=None, ge=1)
+    ocr_surya_max_tokens: int | None = Field(default=None, ge=512, le=32768)
+    ocr_indra_fallback_enabled: bool | None = None
     decision_parallel_requests: int | None = Field(default=None, ge=1, le=32)
     ollama_base_url: str | None = None
     default_model_references: dict[str, ModelReferenceSpec] | None = None
@@ -198,7 +217,12 @@ class SettingsService:
             user_timezone=self.settings.user_timezone,
             user_profile=self.settings.user_profile,
             retrieval_max_context_chars=self.settings.retrieval_max_context_chars,
-            ocr_engine="tesseract",
+            ocr_engine=self.settings.ocr_engine,
+            ocr_surya_base_url=self.settings.ocr_surya_base_url,
+            ocr_surya_model=self.settings.ocr_surya_model,
+            ocr_surya_parallel=self.settings.ocr_surya_parallel,
+            ocr_surya_max_tokens=self.settings.ocr_surya_max_tokens,
+            ocr_indra_fallback_enabled=self.settings.ocr_indra_fallback_enabled,
             ocr_llm_enhancement_enabled=self.settings.ocr_llm_enhancement_enabled,
             ocr_llm_model=_normalize_optional_model(self.settings.ocr_llm_model),
             ocr_llm_triage_model=_normalize_optional_model(
@@ -210,6 +234,8 @@ class SettingsService:
         values = payload.model_dump(exclude_unset=True)
         normalized: dict[str, Any] = {}
         for key, value in values.items():
+            if (key == "ocr_engine" or key.startswith(("ocr_surya_", "ocr_indra_"))) and value is None:
+                continue
             if key in {
                 "decision_parallel_requests",
                 "agent_working_context_tokens", "agent_context_response_reserve_tokens",
@@ -236,12 +262,16 @@ class SettingsService:
         candidate.derive_paths()
         with self._sessions() as session:
             for key, value in normalized.items():
-                setattr(self.settings, key, value)
                 record = session.get(AppSetting, key)
-                if record is None:
+                if key in OPTIONAL_MODEL_SETTING_KEYS and value is None:
+                    if record is not None:
+                        session.delete(record)
+                elif record is None:
                     session.add(AppSetting(key=key, value_json=value))
                 else:
                     record.value_json = value
                     record.updated_at = utcnow()
             session.commit()
+        for key, value in normalized.items():
+            setattr(self.settings, key, value)
         return self.response()

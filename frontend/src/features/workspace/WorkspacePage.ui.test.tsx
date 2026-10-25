@@ -1,11 +1,225 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { Link, RouterProvider } from '../../app/router';
 import WorkspacePage from './WorkspacePage';
 
 afterEach(() => vi.unstubAllGlobals());
+beforeEach(() => {
+  vi.stubGlobal('scrollTo', vi.fn());
+  HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+  HTMLDialogElement.prototype.close = function () { this.removeAttribute('open'); };
+});
+
+it.each(['cancel', 'success', 'preview-error', 'execute-error', 'empty', 'inspection-failed'])(
+  'cleans up only confirmed notes and preserves the open selection and draft: %s',
+  async (outcome) => {
+    (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+    const oldUrl = window.location.href;
+    window.history.replaceState({}, '', '/library/notes?path=knowledge%2Fopen.md');
+    const file = {
+      path: 'knowledge/open.md', name: 'open.md', note_name: 'Open note', content: 'Saved stub',
+      sha256: 'a'.repeat(64), media_type: 'text/markdown', size_bytes: 10,
+      modified_at: '2026-10-09T09:00:00Z', tags: [], kind: 'note',
+    };
+    const candidates = [file.path, 'knowledge/remove.md', 'knowledge/changed.md', 'knowledge/locked.md']
+      .map((path) => ({ path, size_bytes: 10, sha256: 'a'.repeat(64) }));
+    const confirm = vi.fn((_message?: string) => outcome !== 'cancel');
+    vi.stubGlobal('confirm', confirm);
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input);
+      if (path.endsWith('/cleanup/preview')) {
+        if (outcome === 'preview-error') return Response.json({ message: 'Cannot inspect notes' }, { status: 500 });
+        return Response.json({
+          threshold_bytes: 1024,
+          candidates: ['empty', 'inspection-failed'].includes(outcome) ? [candidates[0]] : candidates,
+          failed: outcome === 'inspection-failed' ? [{ path: 'knowledge/unreadable.md', reason: 'Cannot read note' }] : [],
+        });
+      }
+      if (path.endsWith('/notes/cleanup')) {
+        if (outcome === 'execute-error') return Response.json({ message: 'Cleanup unavailable' }, { status: 500 });
+        return Response.json({
+          deleted_paths: ['knowledge/remove.md'],
+          skipped: [{ path: 'knowledge/changed.md', reason: 'Note changed since preview' }],
+          failed: [{ path: 'knowledge/locked.md', reason: 'File is locked' }],
+        });
+      }
+      return Response.json(path.includes('/content?') ? file : [file]);
+    });
+    vi.stubGlobal('fetch', fetch);
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    const button = (text: string) => [...container.querySelectorAll('button')].find((item) => item.textContent === text)!;
+    try {
+      await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+      expect(container.querySelector('dialog')?.hasAttribute('open')).toBe(false);
+      expect(container.querySelector('[aria-label="Search notes"]')?.closest('dialog')).toBeNull();
+      expect(container.querySelector('[aria-label="New note name"]')?.closest('dialog')).toBeNull();
+      await act(async () => button('Edit').click());
+      await change(container.querySelector('[aria-label="Note content"]')!, 'Keep this unsaved evidence');
+      await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Notes settings"]')!.click());
+      expect(container.querySelector('dialog')?.hasAttribute('open')).toBe(true);
+      const trigger = container.querySelector('[aria-label="Notes settings"]')!;
+      expect(trigger.getAttribute('aria-haspopup')).toBe('dialog');
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      expect(trigger.getAttribute('aria-controls')).toBe('notes-settings');
+      await act(async () => button('Clean up notes under 1 KB').click());
+      const execute = fetch.mock.calls.find(([input]) => String(input).endsWith('/notes/cleanup'));
+      if (outcome === 'success' || outcome === 'execute-error') {
+        expect(JSON.parse(String(execute![1]!.body))).toEqual({ candidates: candidates.slice(1) });
+      } else expect(execute).toBeUndefined();
+      if (outcome === 'success') {
+        expect(container.textContent).toContain('Removed 1 note. 1 skipped; 1 failed.');
+        expect(container.textContent).toContain('Note changed since preview');
+        expect(container.textContent).toContain('File is locked');
+      } else if (outcome.endsWith('error')) {
+        expect(container.textContent).toContain('Cleanup could not be completed.');
+        expect(container.textContent).toContain(outcome === 'preview-error' ? 'Cannot inspect notes' : 'Cleanup unavailable');
+      } else if (outcome === 'cancel') {
+        expect(container.textContent).toContain('Cleanup canceled. No notes were removed.');
+      } else if (outcome === 'inspection-failed') {
+        expect(container.textContent).toContain('1 could not be inspected and were kept.');
+        expect(container.textContent).toContain('Cannot read note');
+      } else {
+        expect(container.textContent).toContain('No notes smaller than 1024 bytes to remove.');
+      }
+      if (['cancel', 'success', 'execute-error'].includes(outcome)) {
+        expect(confirm).toHaveBeenCalledTimes(1);
+        expect(confirm.mock.calls[0][0]).toContain('Permanently delete 3 notes');
+        expect(confirm.mock.calls[0][0]).toContain('open note are kept');
+      } else expect(confirm).not.toHaveBeenCalled();
+      await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close notes settings"]')!.click());
+      expect(container.querySelector('dialog')?.hasAttribute('open')).toBe(false);
+      expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Note content"]')!.value).toBe('Keep this unsaved evidence');
+      expect(container.querySelector('.file-row')?.getAttribute('aria-current')).toBe('true');
+      expect(container.querySelector('.workspace-reader h2')?.textContent).toBe('Open note');
+      expect(window.location.search).toContain('knowledge%2Fopen.md');
+      expect(fetch.mock.calls.some(([, init]) => init?.method === 'DELETE' || init?.method === 'PUT')).toBe(false);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+      window.history.replaceState({}, '', oldUrl);
+    }
+  },
+);
+
+it('keeps an unsaved new note and settings filters when closing and reopening Notes settings', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes');
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => Response.json(
+    String(input).endsWith('/cleanup/preview') ? { candidates: [], failed: [], threshold_bytes: 1024 } : [],
+  )));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const button = (text: string) => [...container.querySelectorAll('button')].find((item) => item.textContent?.trim() === text)!;
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    await change(container.querySelector('[aria-label="New note name"]')!, 'New evidence');
+    await act(async () => button('New').click());
+    await change(container.querySelector('[aria-label="Note content"]')!, 'Unsaved new note');
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Notes settings"]')!.click());
+    await change(container.querySelector('[aria-label="Filter by tags"]')!, 'keep');
+    await act(async () => button('Clean up notes under 1 KB').click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close notes settings"]')!.click());
+    expect(container.querySelector('[aria-label="Active note filters"]')?.textContent).toContain('Tags: keep');
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Notes settings"]')!.click());
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Filter by tags"]')!.value).toBe('keep');
+    expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Note content"]')!.value).toBe('Unsaved new note');
+    expect(container.querySelector('.workspace-reader h2')?.textContent).toBe('New evidence');
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Close notes settings"]')!.click());
+    await act(async () => button('Reset filters').click());
+    expect(container.querySelector('[aria-label="Active note filters"]')).toBeNull();
+    expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Note content"]')!.value).toBe('Unsaved new note');
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
+
+it('groups artifacts by storage location and searches nested folders without moving files', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes');
+  const files = [
+    'knowledge/idea.md',
+    'research/galaxies/review-1/report.md',
+    'research/biology/review-2/report.md',
+    'custom/archive/receipt.json',
+  ].map((path) => ({
+    path, name: path.split('/').pop(), size_bytes: 100,
+    modified_at: '2026-10-09T09:00:00Z', tags: [], kind: 'file', media_type: 'text/markdown',
+  }));
+  const fetch = vi.fn(async () => Response.json(files));
+  vi.stubGlobal('fetch', fetch);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const area = (label: string) => [...container.querySelectorAll<HTMLButtonElement>('.artifact-area')]
+    .find((button) => button.querySelector('strong')?.textContent === label)!;
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    const picker = container.querySelector<HTMLSelectElement>('[aria-label="Workspace view"]')!;
+    expect(picker).not.toBeNull();
+    expect(picker.closest('dialog')).toBeNull();
+    expect(picker.closest('.workspace-browser')).not.toBeNull();
+    expect(container.querySelector('dialog')?.hasAttribute('open')).toBe(false);
+    expect([...picker.options].map((option) => option.value)).toEqual(['notes', 'standalone', 'paper-notes', 'summaries', 'files']);
+    await change(container.querySelector('[aria-label="Workspace view"]')!, 'files');
+    expect(container.querySelectorAll('.file-row')).toHaveLength(4);
+    expect(area('Research artifacts').textContent).toContain('2 files');
+    await act(async () => area('Research artifacts').click());
+    expect(container.querySelectorAll('.file-row')).toHaveLength(2);
+    await change(container.querySelector('[aria-label="Find artifact"]')!, 'GALAXIES');
+    expect(container.querySelectorAll('.file-row')).toHaveLength(1);
+    expect(container.querySelector('.file-row')?.getAttribute('title')).toBe(files[1].path);
+    expect([...container.querySelectorAll<HTMLDetailsElement>('.file-tree-folder')].every((folder) => folder.open)).toBe(true);
+    expect(container.querySelector('.folder-delete-button')).toBeNull();
+    await change(container.querySelector('[aria-label="Find artifact"]')!, 'missing');
+    expect(container.textContent).toContain('No artifacts match this location or name.');
+    await change(container.querySelector('[aria-label="Find artifact"]')!, '');
+    await act(async () => area('All locations').click());
+    expect(container.querySelector('[title="custom/archive/receipt.json"]')).not.toBeNull();
+    expect(fetch.mock.calls).toHaveLength(2);
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
+
+it('preserves the editor draft and browsing filters when focusing the reader', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes?path=knowledge%2Fidea.md');
+  const file = {
+    path: 'knowledge/idea.md', name: 'idea.md', note_name: 'A readable research title',
+    content: 'Saved evidence', sha256: 'a'.repeat(64), media_type: 'text/markdown',
+    size_bytes: 100, modified_at: '2026-10-09T09:00:00Z', tags: [], kind: 'note',
+  };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) =>
+    Response.json(String(input).includes('/content?') ? file : [file])));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  const button = (text: string) => [...container.querySelectorAll('button')].find((item) => item.textContent === text)!;
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    expect(container.querySelector('.workspace-reader h2')?.textContent).toBe(file.note_name);
+    expect(container.querySelector('.file-row')?.getAttribute('aria-current')).toBe('true');
+    await act(async () => button('Edit').click());
+    await change(container.querySelector('[aria-label="Note content"]')!, 'Unsaved evidence');
+    await change(container.querySelector('[aria-label="Workspace view"]')!, 'summaries');
+    await act(async () => button('Focus reader').click());
+    expect(container.querySelector('.workspace-layout')?.classList.contains('workspace-focused')).toBe(true);
+    expect(button('Show artifact browser').getAttribute('aria-pressed')).toBe('true');
+    await act(async () => button('Show artifact browser').click());
+    expect(container.querySelector<HTMLTextAreaElement>('[aria-label="Note content"]')?.value).toBe('Unsaved evidence');
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Workspace view"]')?.value).toBe('summaries');
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
 
 async function change(element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement, value: string) {
   const prototype = element instanceof HTMLTextAreaElement ? window.HTMLTextAreaElement.prototype
@@ -15,6 +229,95 @@ async function change(element: HTMLInputElement | HTMLTextAreaElement | HTMLSele
     element.dispatchEvent(new Event(element instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }));
   });
 }
+
+it.each([{ value: [1, true, null] }, ['a', 2], 'a JSON string', 5, false, null])('saves JSON as typed content rather than double-encoded text: %j', async (content) => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes?path=data%2Fresult.json');
+  const file = {
+    path: 'data/result.json', name: 'result.json', content: { old: true },
+    sha256: 'a'.repeat(64), media_type: 'application/json', tags: [], kind: 'file',
+    size_bytes: 100, modified_at: '2026-10-09T09:00:00Z',
+  };
+  const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'PUT') return Response.json({ ...file, content: JSON.parse(String(init.body)).content });
+    return Response.json(String(input).includes('/content?') ? file : []);
+  });
+  vi.stubGlobal('fetch', fetch);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    await change(container.querySelector<HTMLTextAreaElement>('[aria-label="Note content"]')!, JSON.stringify(content));
+    const save = [...container.querySelectorAll('button')].find((button) => button.textContent === 'Save')!;
+    await act(async () => save.click());
+    const write = fetch.mock.calls.find(([, init]) => init?.method === 'PUT')![1]!;
+    expect(JSON.parse(String(write.body)).content).toEqual(content);
+    expect(container.querySelector<HTMLTextAreaElement>('textarea')!.value).toBe(JSON.stringify(content, null, 2));
+    expect(container.textContent).toContain('Saved locally');
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
+
+it('retains invalid JSON without sending a corrupt-success save', async () => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', '/library/notes?path=data%2Fresult.json');
+  const file = {
+    path: 'data/result.json', name: 'result.json', content: { old: true },
+    sha256: 'a'.repeat(64), media_type: 'application/json', tags: [], kind: 'file',
+    size_bytes: 100, modified_at: '2026-10-09T09:00:00Z',
+  };
+  const fetch = vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).includes('/content?') ? file : []));
+  vi.stubGlobal('fetch', fetch);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    await change(container.querySelector('textarea')!, '{ invalid JSON');
+    await act(async () => [...container.querySelectorAll('button')].find((button) => button.textContent === 'Save')!.click());
+    expect(fetch.mock.calls).toHaveLength(2);
+    expect(container.textContent).toContain('Invalid JSON');
+    expect(container.querySelector('textarea')!.value).toBe('{ invalid JSON');
+    expect(container.textContent).toContain('Save failed. Your draft is retained.');
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
+
+it.each([
+  ['projects/tracks/my-track--t1/problem.md', 'track_section', '/tracks?id=t1'],
+  ['library/papers/paper--p1/summaries/run.json', 'paper_file', '/library?paper=p1'],
+])('opens managed artifacts read-only with an owner link: %s', async (path, kind, owner) => {
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+  const oldUrl = window.location.href;
+  window.history.replaceState({}, '', `/library/notes?path=${encodeURIComponent(path)}`);
+  const file = {
+    path, kind, paper_id: kind === 'paper_file' ? 'p1' : null, name: path.split('/').pop(),
+    content: path.endsWith('.json') ? { receipt: true } : 'Managed problem',
+    sha256: 'a'.repeat(64), media_type: path.endsWith('.json') ? 'application/json' : 'text/markdown',
+    tags: [], size_bytes: 100, modified_at: '2026-10-09T09:00:00Z',
+  };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).includes('/content?') ? file : [])));
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
+    expect(container.textContent).toContain('Read-only artifact');
+    expect([...container.querySelectorAll('button')].find((button) => button.textContent === 'Save')).toBeUndefined();
+    expect(container.querySelector(`a[href="${owner}"]`)).not.toBeNull();
+    const source = [...container.querySelectorAll('button')].find((button) => button.textContent === 'View source');
+    if (source) await act(async () => source.click());
+    expect(container.querySelector('textarea')!.readOnly).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Tags"]')!.disabled).toBe(true);
+  } finally {
+    await act(async () => root.unmount());
+    window.history.replaceState({}, '', oldUrl);
+  }
+});
 
 it('organizes notes by kind and tags, labels canonical files by paper, and collapses individual folders', async () => {
   (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -233,9 +536,9 @@ it('hands saved notes to an editable research draft without leaking content or d
   const root = createRoot(container);
   try {
     await act(async () => root.render(<RouterProvider><WorkspacePage /></RouterProvider>));
-    expect(container.querySelector('a[href^="/?research="]')).toBeNull();
+    expect(container.querySelector('a[href^="/chat?research="]')).toBeNull();
     await act(async () => container.querySelector<HTMLButtonElement>('.file-row')!.click());
-    const link = container.querySelector<HTMLAnchorElement>('a[href^="/?research="]')!;
+    const link = container.querySelector<HTMLAnchorElement>('a[href^="/chat?research="]')!;
     const prompt = new URL(link.href).searchParams.get('research')!;
     expect(prompt).toContain(file.path);
     expect(prompt).toContain('Do not create another saved summary');
@@ -252,18 +555,18 @@ it('hands saved notes to an editable research draft without leaking content or d
       setValue.call(editor, 'Changed private content.');
       editor.dispatchEvent(new Event('input', { bubbles: true }));
     });
-    expect(container.querySelector('a[href^="/?research="]')).toBeNull();
+    expect(container.querySelector('a[href^="/chat?research="]')).toBeNull();
     expect(Array.from(container.querySelectorAll('button'))
       .find((button) => button.textContent === 'Analyze saved work')?.disabled).toBe(true);
     expect(container.textContent).toContain('Save your changes before discussing them in chat.');
     await act(async () => {
       Array.from(container.querySelectorAll('button')).find((button) => button.textContent === 'Save')!.click();
     });
-    expect(container.querySelector('a[href^="/?research="]')).not.toBeNull();
+    expect(container.querySelector('a[href^="/chat?research="]')).not.toBeNull();
     expect(file.content).toBe('Changed private content.');
     const requestCount = fetch.mock.calls.length;
-    await act(async () => container.querySelector<HTMLAnchorElement>('a[href^="/?research="]')!.click());
-    expect(window.location.pathname).toBe('/');
+    await act(async () => container.querySelector<HTMLAnchorElement>('a[href^="/chat?research="]')!.click());
+    expect(window.location.pathname).toBe('/chat');
     expect(new URLSearchParams(window.location.search).get('research')).toBe(prompt);
     expect(fetch.mock.calls).toHaveLength(requestCount);
   } finally {

@@ -61,6 +61,9 @@ class ProviderRepository:
     def archive(self, profile_id: str) -> ProviderProfile:
         return self.update(profile_id, state="archived")
 
+    def restore(self, profile_id: str) -> ProviderProfile:
+        return self.update(profile_id, state="active")
+
     def ensure_default_ollama(self, *, base_url: str) -> ProviderProfile:
         with self._sessions() as session:
             record = session.scalar(

@@ -101,16 +101,19 @@ def test_summary_routes_preserve_coverage_and_provenance(test_settings, monkeypa
         "source_version": "revision",
         "canonical_path": "papers/paper/summary.md",
         "canonical_updated": False,
+        "visuals": {"pages": [1], "total_pages": 3, "complete": False},
     }
     monkeypatch.setattr(summaries, "versions", lambda document_id: [version])
     monkeypatch.setattr(summaries, "version", lambda document_id, version_id: (version, "Overview"))
-    monkeypatch.setattr(summaries, "promote", lambda document_id, version_id: (
+    monkeypatch.setattr(summaries, "promote", lambda document_id, version_id, **kwargs: (
         version, "papers/paper/summary.md", "Overview",
     ))
     with TestClient(app) as client:
         listed = client.get("/api/documents/paper/summaries")
         opened = client.get("/api/documents/paper/summaries/version")
-        promoted = client.post("/api/documents/paper/summaries/version/promote")
+        promoted = client.post("/api/documents/paper/summaries/version/promote", json={
+            "expected_sha256": "a" * 64, "replace_existing": True,
+        })
     for response in (listed, opened, promoted):
         assert response.status_code == 200, response.text
     for payload in (listed.json()[0], opened.json()["version"], promoted.json()["version"]):
@@ -119,3 +122,4 @@ def test_summary_routes_preserve_coverage_and_provenance(test_settings, monkeypa
         assert payload["review_complete"] is False
         assert payload["canonical_updated"] is False
         assert payload["coverage"]["exact_spans_path"].endswith("/index.json")
+        assert payload["visuals"] == {"pages": [1], "total_pages": 3, "complete": False}

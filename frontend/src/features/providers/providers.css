@@ -1,14 +1,14 @@
 /* ------------------------------------------------------- Settings shell --- */
 
 .settings-page { padding-bottom: 4.5rem; }
-.settings-layout { display: grid; grid-template-columns: 216px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
+.settings-layout { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .settings-nav { position: sticky; top: var(--space-3); display: grid; gap: 2px; }
 .settings-nav-item {
   position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  padding: .55rem .6rem;
+  padding: .6rem .65rem;
   border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: transparent;
@@ -23,20 +23,9 @@
 .settings-nav-item small { color: var(--muted); font-size: var(--text-xs); }
 .settings-nav-item:hover { background: color-mix(in srgb, var(--accent) 7%, var(--surface-2)); color: var(--text); }
 .settings-nav-item.active {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
+  border-color: transparent;
   background: var(--accent-soft);
   color: var(--accent-strong);
-}
-/* Accent marker so the open section is legible even at a glance. */
-.settings-nav-item.active::before {
-  content: '';
-  position: absolute;
-  top: 22%;
-  bottom: 22%;
-  left: -1px;
-  width: 3px;
-  border-radius: 0 var(--radius-pill) var(--radius-pill) 0;
-  background: var(--accent);
 }
 .settings-nav-item.active svg { color: var(--accent); }
 .settings-nav-item.active strong { color: var(--accent-strong); }
@@ -66,10 +55,8 @@
   display: flex;
   align-items: center;
   gap: var(--space-4);
-  padding: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border);
 }
 
 .setting-label { display: grid; gap: .1rem; min-width: 0; }
@@ -112,17 +99,18 @@
 
 /* -------------------------------------------------------- Model defaults --- */
 
-.default-model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: var(--space-3); }
+.default-model-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: var(--space-3); align-items: start; }
 .default-model-card {
   display: grid;
+  align-items: start;
   align-content: start;
-  gap: var(--space-2);
-  padding: var(--space-3);
+  gap: var(--space-3);
+  padding: var(--space-4);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--surface-2);
-  box-shadow: var(--shadow-sm);
 }
+.default-model-card > label small { display: block; margin-top: var(--space-2); font-size: var(--text-xs); }
 .default-model-head { display: flex; align-items: start; gap: var(--space-2); }
 .default-model-head > div { display: grid; gap: .1rem; min-width: 0; }
 .default-model-head strong { color: var(--text-strong); font-size: var(--text-sm); font-weight: 650; }
@@ -146,6 +134,15 @@
   .settings-nav-item small { display: none; }
   .path-list > div { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
+@media (max-width: 600px) {
+  .default-model-card { grid-template-columns: minmax(0, 1fr); }
+  .default-model-card > label, .default-model-card > .field-hint { grid-column: 1; }
+  .settings-savebar { flex-wrap: wrap; }
+  .settings-savebar-status { flex-basis: 100%; }
+}
+@media (max-width: 760px) {
+  .settings-savebar { bottom: var(--space-2); }
+}
 
 .provider-form {
   display: grid;
@@ -157,6 +154,13 @@
   background: var(--surface-2);
 }
 .provider-lane-note { margin-bottom: var(--space-4); }
+.provider-archived { margin-top: var(--space-4); }
+.provider-model-manual { padding: var(--space-3); border-bottom: 1px solid var(--border); }
+.provider-model-manual p { margin: 0; font-size: var(--text-sm); }
+.provider-model-manual fieldset { min-width: 0; border: 1px solid var(--border); }
+.provider-verification { grid-column: 1 / -1; font-size: var(--text-sm); }
+.provider-verification p { margin: .25rem 0 0; overflow-wrap: anywhere; }
+.provider-model-context-window [aria-invalid='true'] { border-color: var(--danger); }
 .provider-model-catalog-trigger {
   display: flex;
   align-items: center;
@@ -328,12 +332,13 @@
 }
 .provider-model-capabilities input { margin: 0; }
 .provider-model-context-window {
-  display: inline-flex;
-  align-items: center;
-  gap: .3rem;
+  display: grid;
+  align-items: start;
+  gap: .25rem;
   color: var(--muted);
   font-size: var(--text-xs);
 }
+.provider-model-row .provider-model-context-window small { white-space: normal; overflow: visible; }
 .provider-model-context-window input {
   width: 7.5rem;
   padding: .3rem .4rem;

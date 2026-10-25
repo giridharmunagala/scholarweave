@@ -45,12 +45,19 @@ MAX_DELEGATION_DEPTH = 2
 _tool_model_identity: ContextVar[dict[str, str] | None] = ContextVar(
     "scholarweave_tool_model_identity", default=None
 )
+_tool_model_binding: ContextVar[ModelBinding | None] = ContextVar(
+    "scholarweave_tool_model_binding", default=None
+)
 
 
 def current_tool_model_identity() -> dict[str, str] | None:
     """Return task-local provenance, including when parallel delegates share metadata."""
     identity = _tool_model_identity.get()
     return dict(identity) if identity is not None else None
+
+
+def current_tool_model_binding() -> ModelBinding | None:
+    return _tool_model_binding.get()
 
 
 class HarnessError(RuntimeError):
@@ -193,6 +200,7 @@ class ModelBinding:
     tool_reasoning_effort: str | None = None
     api_mode: Literal["chat_completions", "responses"] = "chat_completions"
     provider_profile_id: str | None = None
+    supports_vision: bool = False
 
 
 @dataclass(slots=True)
@@ -406,6 +414,49 @@ def _tool_output_text(output: Any) -> str:
     return json.dumps(to_jsonable(output), ensure_ascii=False, separators=(",", ":"))
 
 
+def _request_context_items(items: Sequence[ConversationItem]) -> RunInputItems:
+    """Attach stored request clocks to user input without rewriting durable history."""
+    result: RunInputItems = []
+    prefix = "Context recorded when this request was submitted:\nSystem information:\n"
+    index = 0
+    while index < len(items):
+        item = items[index]
+        content = item.get("content") if isinstance(item, dict) else None
+        following = items[index + 1] if index + 1 < len(items) else None
+        if (
+            isinstance(item, dict)
+            and item.get("role") in {"developer", "system"}
+            and isinstance(content, str)
+            and content.startswith(prefix)
+            and isinstance(following, dict)
+            and following.get("role") == "user"
+        ):
+            lines = content[len(prefix):].splitlines()
+            user_content = following.get("content")
+            if (
+                len(lines) == 2
+                and lines[0].startswith("Current date: ")
+                and lines[1].startswith("Current time: ")
+                and isinstance(user_content, (str, list))
+            ):
+                timestamp = (
+                    f"{lines[0].removeprefix('Current date: ')} "
+                    f"{lines[1].removeprefix('Current time: ')}"
+                )
+                context = f"[Application context: request submitted at {timestamp}]"
+                combined = (
+                    f"{context}\n\n{user_content}"
+                    if isinstance(user_content, str)
+                    else [{"type": "text", "text": context}, *user_content]
+                )
+                result.append({**following, "content": combined})
+                index += 2
+                continue
+        result.append(item)
+        index += 1
+    return result
+
+
 def to_chat_messages(
     items: Sequence[ConversationItem],
     instructions: str | None,
@@ -419,6 +470,7 @@ def to_chat_messages(
     tool-call message's ``content`` so the model sees its own preamble exactly once
     and in the position providers expect.
     """
+    items = _request_context_items(items)
     messages: list[dict[str, Any]] = []
     if instructions:
         messages.append({"role": "system", "content": instructions})
@@ -529,15 +581,57 @@ def model_input_messages(
     agent: AgentDefinition, items: Sequence[ConversationItem], instructions: str | None,
 ) -> list[dict[str, Any]]:
     """Keep canonical opaque reasoning until the Responses request boundary."""
+    items = _source_content_items(items, supports_vision=agent.binding.supports_vision)
     if agent.binding.api_mode == "responses":
         return [
             *([{"role": "system", "content": instructions}] if instructions else []),
-            *items,
+            *_request_context_items(items),
         ]
     return to_chat_messages(
         items, instructions, preserve_thinking=agent.binding.preserve_thinking,
         model_name=agent.binding.model_name,
     )
+
+
+def _source_content_items(
+    items: Sequence[ConversationItem], *, supports_vision: bool,
+) -> RunInputItems:
+    """Project image evidence after tool results, never as JSON-encoded pixels."""
+    result: RunInputItems = []
+    pending: list[dict[str, Any]] = []
+
+    def flush() -> None:
+        if pending:
+            result.append({"role": "user", "content": list(pending)})
+            pending.clear()
+
+    for item in items:
+        field = "output" if item.get("type") == "function_call_output" else (
+            "content" if item.get("role") == "tool" else None
+        )
+        if field is None:
+            flush()
+            content = item.get("content")
+            if not supports_vision and isinstance(content, list):
+                text_content = [
+                    part for part in content if part.get("type") not in {"image_url", "input_image"}
+                ]
+                if len(text_content) != len(content):
+                    text_content.append({"type": "text", "text": "Images omitted: the current model does not support vision."})
+                item = {**item, "content": text_content}
+            result.append(item)
+            continue
+        output = item.get(field)
+        if isinstance(output, dict) and "source_content" in output:
+            source = output["source_content"]
+            item = {**item, field: {key: value for key, value in output.items() if key != "source_content"}}
+            if supports_vision:
+                pending.extend(source)
+            elif source:
+                item[field]["image_notice"] = "Images omitted: the current model does not support vision."
+        result.append(item)
+    flush()
+    return result
 
 
 def tool_payload(tool: FunctionTool) -> dict[str, Any]:
@@ -1354,6 +1448,7 @@ class AgentRunner:
         }
         self._context.metadata["active_model"] = identity
         token = _tool_model_identity.set(identity)
+        binding_token = _tool_model_binding.set(self._agent.binding)
         try:
             if self._hooks is not None:
                 await self._hooks.on_tool_start(
@@ -1374,6 +1469,7 @@ class AgentRunner:
                 )
             return result
         finally:
+            _tool_model_binding.reset(binding_token)
             _tool_model_identity.reset(token)
 
     def _final_output(self, text: str) -> Any:

@@ -1,4 +1,12 @@
 if (typeof window !== 'undefined') {
+  if (typeof HTMLDialogElement !== 'undefined' && !HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', ''); };
+    HTMLDialogElement.prototype.close = function () {
+      if (!this.open) return;
+      this.removeAttribute('open');
+      this.dispatchEvent(new Event('close'));
+    };
+  }
   const values = new Map<string, string>();
   const storage: Storage = {
     get length() {

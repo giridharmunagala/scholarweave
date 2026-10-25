@@ -1,718 +1,559 @@
 // @vitest-environment jsdom
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RouterProvider } from '../../app/router';
 import { LiteratureReviews } from './LiteratureReviews';
-import type { Candidate, Review } from './api';
 
-const main = { provider_profile_id: 'cloud', model: 'main' };
-const original: Review = {
-  id: 'review-1', revision: 7, title: 'Adaptive review', objective: 'Compare adaptive methods.',
-  main_model: main, main_parallel_requests: 1, decision_model: null, conversation_id: null, track_id: null,
-  status: 'awaiting_approval', stage: 'reading_plan', approval: 'papers', scope: null,
-  allowance_tokens: 100000, used_tokens: 1000, usage_estimated: false, suggested_allowance_tokens: null,
-  work_budget: { screened_papers: 100, read_papers: 20, comparison_passes: 1 },
-  work_used: { screened_papers: 50, read_papers: 1, comparison_passes: 0 },
-  candidate_count: 50, selected_count: 1, evidence_count: 0, active_run_id: null,
-  screened_count: 50, excluded_count: 0, references_skipped: false,
-  stage_history: { scope: 'completed', discovery: 'completed', screening: 'completed' },
-  notices: [], error: null, output_path: null, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
-};
+vi.mock('../chat/IdeasPanel', () => ({
+  IdeasPanel: ({ objective, context }: { objective: string; context: string }) =>
+    <section aria-label="Ideas panel">{objective}<pre>{context}</pre></section>,
+}));
+const model = { provider_profile_id: 'local', model: 'research' };
 let container: HTMLDivElement;
 let root: Root;
-let rows: Review[];
-let rejectControl: boolean;
-let candidateFields: Partial<Candidate>;
-let defaultDecision: { provider_profile_id: string; model: string } | null;
+let review: Record<string, unknown>;
 let writes: { path: string; body: Record<string, unknown> }[];
-let capturedPages: boolean;
-let pendingQuotes: boolean;
-let proseOnlySummary: boolean;
-let paperCount: number;
-let detailReads: string[];
-let rejectPaperDetails: boolean;
-let synthesisDetails: boolean;
-
+let configured: boolean;
+let hasBrief: boolean;
+let smallTasks: typeof model | undefined;
 const button = (text: string) => {
   const found = [...container.querySelectorAll('button')].find((item) => item.textContent?.includes(text));
-  if (!found) throw new Error(`Missing button: ${text}`);
+  if (!found) throw new Error(`Missing button ${text}`);
   return found;
 };
-
-const openDetails = async (text: string) => {
+async function input(selector: string, value: string) {
   await act(async () => {
-    const details = [...container.querySelectorAll('details')].find((item) => item.firstElementChild?.textContent === text)!;
-    details.open = true;
-    details.dispatchEvent(new Event('toggle'));
+    const element = container.querySelector(selector)!;
+    const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value')!.set!.call(element, value);
+    element.dispatchEvent(new Event('input', { bubbles: true }));
   });
-};
-
+}
+async function mount(selected = false) {
+  window.history.replaceState({}, '', selected ? '/deep-work?review=r1' : '/deep-work');
+  await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
+}
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
-  rows = [{ ...original }];
-  rejectControl = false;
-  candidateFields = {};
-  defaultDecision = null;
-  writes = [];
-  capturedPages = false;
-  pendingQuotes = false;
-  proseOnlySummary = false;
-  paperCount = 1;
-  detailReads = [];
-  rejectPaperDetails = false;
-  synthesisDetails = false;
-  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = new URL(String(input), 'http://localhost');
-    const respond = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
-    if (url.pathname === '/api/providers') return respond([
-      { id: 'cloud', name: 'Cloud main', kind: 'azure_openai', models: [
-        { name: 'main', capabilities: ['chat'], enabled: true, reasoning_efforts: ['none', 'low'] },
-        { name: 'replacement-main', capabilities: ['chat'], enabled: true },
-      ] },
-      { id: 'local', name: 'Local decision', kind: 'openai_compatible', models: [{ name: 'tiny-decision', capabilities: ['decision'], enabled: true }] },
-    ]);
-    if (url.pathname === '/api/settings') return respond({ decision_parallel_requests: 8, default_model_references: { chat: main, ...(defaultDecision ? { decision: defaultDecision } : {}) } });
+  window.sessionStorage.clear();
+  configured = true; hasBrief = false; writes = []; smallTasks = undefined;
+  review = {
+    id: 'r1', revision: 7, title: 'Saved question', objective: 'Compare calibration',
+    reading_mode: 'targeted', status: 'awaiting_approval', approval: 'topics', stage: 'screening',
+    main_model: model, embedding_model: { model_reference: model, batch_size: 16 },
+    summary_model: { model_reference: model, max_output_tokens: 4096, parallel_requests: 1 },
+    selected_count: 0, notices: [], error: null,
+    topics: [{ id: 't1', title: 'Calibration methods', description: 'Abstract-based grouping', candidate_ids: ['p1', 'p2'] }],
+  };
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    const path = new URL(String(url), 'http://localhost').pathname;
+    const respond = (value: unknown) => new Response(JSON.stringify(value));
     if (init?.method === 'POST') {
-      writes.push({ path: url.pathname, body: JSON.parse(String(init.body)) });
-      if (rejectControl) return respond({ message: 'The review changed. Reload before applying this decision.' }, 409);
-      if (url.pathname.endsWith('/clear')) {
-        rows = [];
-        return respond({ deleted_document_ids: ['owned'], preserved_document_ids: ['shared'], preserved_paths: [] });
-      }
-      return respond({ ...original, revision: 8, status: 'running', approval: null });
+      const body = JSON.parse(String(init.body));
+      writes.push({ path, body });
+      review = { ...review, revision: Number(review.revision) + 1 };
+      return respond(review);
     }
-    if (url.pathname === '/api/literature-reviews') return respond(rows);
-    if (url.pathname === '/api/literature-reviews/review-1') return respond(rows[0]);
-    if (url.pathname === '/api/literature-reviews/review-1/analysis') return respond(synthesisDetails ? {
-      phase: 'awaiting_extension', page_limit: 20, admitted_pages: 20, completed_pages: 20, pending_pages: 1,
-      selection_completed: 2, selection_total: 2, report_requested: false,
-      items: [{ candidate_id: 'paper-1', title: 'Adaptive source', source_version: 'v1', page: 21,
-        reason: 'Verify the contradictory evaluation result.', status: 'pending', admitted: false }],
-      total: 21, next_offset: null,
-    } : null);
-    if (url.pathname === '/api/literature-reviews/review-1/activity') return respond({
-      items: synthesisDetails ? [{ key: 'synthesize:receipt', stage: 'synthesis', status: 'completed',
-        model: 'main', tokens: 250, error: null }] : [],
-      total: synthesisDetails ? 1 : 0, next_offset: null,
-    });
-    if (url.pathname === '/api/literature-reviews/review-1/activity/detail') return respond({
-      key: 'synthesize:receipt', status: 'completed',
-      result: { sections: [{ title: 'Comparison draft', content: 'The methods disagree on noisy evaluations.' }] },
-      error: null,
-    });
-    if (url.pathname === '/api/literature-reviews/review-1/paper-progress') {
-      const items = capturedPages ? Array.from({ length: paperCount }, (_, index) => ({
-        candidate_id: index ? `summary-${index}` : 'already-approved',
-        title: index ? `Summary ${index}` : 'Approved original',
-        collected: true, prepared: true, plan_complete: true, summary_complete: true, operation: null, error: null,
-      })) : [];
-      const offset = Number(url.searchParams.get('offset'));
-      return respond({
-        items: items.slice(offset, offset + 25), total: items.length,
-        next_offset: offset + 25 < items.length ? offset + 25 : null,
-        counts: { total: items.length, collected: items.length, prepared: items.length,
-          plan_complete: items.length, summarized: items.length, failed: 0 }, operations: [],
-      });
-    }
-    if (url.pathname.startsWith('/api/literature-reviews/review-1/papers/')) {
-      detailReads.push(url.pathname);
-      if (rejectPaperDetails) return respond({ message: 'Paper details unavailable.' }, 500);
-      return respond({
-      candidate_id: 'already-approved', title: 'Approved original', source_version: 'version-1',
-      collected: true, prepared: true, plan_complete: true, error: null,
-      pages: [{ page: 9, action: 'defer', reference_page: true, reason: 'Bibliography page; extract citations separately.' }],
-      read_pages: [1], partial_pages: [], evidence_count: pendingQuotes || proseOnlySummary ? 0 : 3,
-      operation: 'Reading and extracting evidence',
-      findings: proseOnlySummary ? [] : [{ id: 'evidence-1', finding: 'Measured adaptive improvement.',
-        quote: pendingQuotes ? '' : 'Verbatim measured result.', page: 1 }],
-      partial_summaries: [{ sections: [{ title: 'Results', content: 'The source packet measured adaptive improvement.',
-        evidence_ids: proseOnlySummary ? [] : ['evidence-1'], ...(proseOnlySummary ? { source_pages: [1] } : {}) }],
-        limitations: ['Only this packet was read.'] }],
-      selective_summary: { sections: [{ title: 'Results', content: 'Combined selective results retain evaluation conditions.',
-        evidence_ids: proseOnlySummary ? [] : ['evidence-1'], ...(proseOnlySummary ? { source_pages: [1] } : {}) }],
-        limitations: ['Not full-paper coverage.'] },
-      });
-    }
-    if (url.pathname === '/api/documents/search') return respond([{ id: 'uploaded-paper', title: 'Recovered paper', source_filename: 'paper.pdf' }]);
-    if (url.pathname.endsWith('/candidates')) {
-      const offset = Number(url.searchParams.get('offset'));
-      const limit = Number(url.searchParams.get('limit'));
-      const candidates = Array.from({ length: 50 }, (_, index) => ({
-        id: index === 49 ? 'already-approved' : `paper-${index}`, title: `Paper ${index}`, selected: index === 49,
-        screening: { kind: 'research', relevance: 'HIGHLY_RELEVANT', reason: 'Relevant method.', matched_questions: [] },
-        ...candidateFields,
-      }));
-      return respond({
-        items: candidates.slice(offset, offset + limit),
-        total: 50, next_offset: offset + limit < 50 ? offset + limit : null, selected_ids: ['already-approved'],
-      });
-    }
-    if (url.pathname.endsWith('/references')) return respond([{
-      id: 'shared-ref', title: 'Shared adaptive reference', citing_count: 2, citing_paper_ids: ['paper-1', 'paper-2'],
-      citations: [{ candidate_id: 'paper-1', source_version: 'source-v1', page: 9, quote: 'Shared citation verbatim.' }],
-      selected: true, matches: [], metadata: null, screening: null, error: 'Unresolved arXiv match.',
+    if (path === '/api/providers') return respond([{
+      id: 'local', name: 'Local', kind: 'openai_compatible',
+      models: [
+        { name: 'research', capabilities: ['chat', 'embedding'], enabled: true },
+        { name: 'alternate', capabilities: ['chat', 'embedding'], enabled: true },
+      ],
     }]);
-    throw new Error(`Unexpected request: ${url.pathname}`);
+    if (path === '/api/settings') return respond({ default_model_references: configured
+      ? { chat: model, embedding: model, small_tasks: smallTasks } : {} });
+    if (path === '/api/research/arxiv') return respond({ query: 'calibration', provider: 'arxiv', results: [{
+      arxiv_id: '2610.01234', title: 'Explicit arXiv input', summary: 'Input abstract', authors: ['Researcher'],
+      url: 'https://arxiv.org/abs/2610.01234', pdf_url: null, published_at: '2026-10-01', updated_at: '2026-10-01', categories: [],
+    }], next_start: null });
+    if (path === '/api/literature-reviews') return respond([review]);
+    if (path.endsWith('/candidates')) return respond({ items: [
+      { id: 'p1', title: 'First paper', abstract: 'Calibration method abstract', document_id: 'd1' },
+      { id: 'p2', title: 'Second paper', abstract: 'Other method abstract' },
+    ], next_offset: null });
+    if (path.endsWith('/papers')) return respond(hasBrief ? [{
+      candidate_id: 'p1', brief: { question_focus: 'Compare calibration', sections: [
+        { title: 'Pertinent findings', content: 'Calibration finding', evidence_ids: ['e1'] },
+      ], findings: [{ id: 'e1', quote: 'Verbatim evidence.', page: 2, finding: 'A bounded result' }], limitations: ['Only selected passages.'] },
+    }] : []);
+    if (path.endsWith('/understanding')) return respond(hasBrief ? {
+      markdown: '## Agreements\nShared calibration assumptions.\n## Open questions\nUnmeasured transfer.',
+      candidate_ids: ['p1'], question_focus: 'Compare calibration', fingerprint: 'fingerprint',
+    } : null);
+    throw new Error(`Unexpected read ${path}`);
   }));
-  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
-  container = document.createElement('div');
-  document.body.append(container);
-  root = createRoot(container);
+  container = document.createElement('div'); document.body.append(container); root = createRoot(container);
 });
-
 afterEach(async () => {
-  await act(async () => { root.unmount(); });
-  container.remove();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  await act(async () => root.unmount());
+  container.remove(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks();
 });
 
-describe('literature review controls', () => {
-  it('shows a bounded synthesis plan and loads readable saved results on demand', async () => {
-    synthesisDetails = true;
-    rows = [{ ...original, status: 'awaiting_approval', stage: 'synthesis', approval: 'analysis', evidence_count: 3 }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.textContent).toContain('limited to 20 distinct pages');
-    expect(container.textContent).toContain('Verify the contradictory evaluation result.');
-    expect(container.querySelector<HTMLProgressElement>('progress[aria-label="Summary batches inspected"]')?.value).toBe(2);
-    const progress = container.querySelector<HTMLProgressElement>('progress[aria-label="Synthesis source reading"]');
-    expect(progress?.value).toBe(20);
-    expect(progress?.max).toBe(20);
-    expect(container.querySelector('section[aria-label="Saved job output"]')).toBeNull();
-    await act(async () => button('synthesize').click());
-    expect(container.textContent).toContain('The methods disagree on noisy evaluations.');
-    expect(container.textContent).toContain('Comparison draft');
-    expect(writes).toEqual([]);
+it('lands on a question, resolves defaults and creates only on explicit submission', async () => {
+  await mount();
+  expect(writes).toEqual([]);
+  expect(container.textContent).toContain('What do you want to understand?');
+  expect(container.textContent).not.toContain('Resume stage');
+  await input('textarea', 'How does calibration transfer?');
+  await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(writes[0].body).toMatchObject({
+    objective: 'How does calibration transfer?', reading_mode: 'targeted',
+    main_model: model, embedding_model: { model_reference: model, batch_size: 16 },
   });
+});
 
-  it.each([
-    ['Approve up to 20 more source pages', 'extend_analysis'],
-    ['Write report with current evidence', 'write_report'],
-  ])('sends the explicit synthesis decision: %s', async (title, action) => {
-    rows = [{ ...original, status: 'awaiting_approval', stage: 'synthesis', approval: 'analysis', evidence_count: 3 }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    await act(async () => button(title).click());
-    expect(writes[0].body).toEqual({ action, expected_revision: 7 });
+it('pairs the small task summary model with research and allows an explicit override', async () => {
+  smallTasks = { provider_profile_id: 'local', model: 'alternate' };
+  await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!.click());
+  expect(container.querySelector('[aria-label="Paper summary model"]')?.textContent).toContain('alternate');
+  await act(async () => button('Done').click());
+  await input('textarea', 'Compare calibration');
+  await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(writes[0].body).toMatchObject({
+    main_model: model, summary_model: { model_reference: smallTasks },
   });
+  await act(async () => button('New paper question').click());
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!.click());
+  await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Paper summary model"]')!.click());
+  await act(async () => [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((option) => option.textContent?.includes('Use research model'))!.click());
+  await act(async () => button('Done').click());
+  await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(writes[1].body).toMatchObject({ main_model: model, summary_model: { model_reference: model } });
+});
 
-  it.each(['reading', 'references', 'reference_screening', 'reference_collection'] as const)(
-    'can skip reference expansion from %s', async (stage) => {
-      rows = [{ ...original, status: 'running', stage, approval: null }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      await act(async () => button('Skip references').click());
-      expect(writes[0].body).toEqual({ action: 'skip_references', expected_revision: 7 });
+it('opens settings from the missing-model warning and enables starting only after both models are chosen', async () => {
+  configured = false;
+  await mount();
+  await input('textarea', 'Compare calibration');
+  expect(container.textContent).toContain('Choose a research model and embedding model before starting');
+  expect(button('Explore the landscape').disabled).toBe(true);
+  expect(container.querySelector<HTMLDialogElement>('dialog')?.open).toBe(false);
+  await act(async () => button('Open research settings').click());
+  const dialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Research settings"]')!;
+  expect(dialog.open).toBe(true);
+  await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-label="Research model"]')!.click());
+  await act(async () => dialog.querySelector<HTMLButtonElement>('[role="option"]')!.click());
+  expect(button('Explore the landscape').disabled).toBe(true);
+  await act(async () => dialog.querySelector<HTMLButtonElement>('[aria-label="Embedding model"]')!.click());
+  await act(async () => dialog.querySelector<HTMLButtonElement>('[role="option"]')!.click());
+  await act(async () => button('Done').click());
+  expect(button('Explore the landscape').disabled).toBe(false);
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+it('keeps arXiv entry out of the question form and settings', async () => {
+  await mount();
+  expect(container.querySelector('[aria-label="How research works"]')?.textContent).toContain('You choose which papers to read');
+  expect(container.querySelector('.arxiv-search')).toBeNull();
+  expect(container.textContent).not.toContain('Add papers from arXiv');
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!.click());
+  expect(container.querySelector('.arxiv-search')).toBeNull();
+  await act(async () => button('Done').click());
+  await input('textarea', 'Compare calibration');
+  await act(async () => container.querySelector('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body.input_papers).toEqual([]);
+});
+
+it('puts the question and action first and offers editable starters without launching work', async () => {
+  await mount();
+  expect(container.querySelector('.research-setup .research-options')).toBeNull();
+  expect(container.querySelector('.research-setup .model-select')).toBeNull();
+  expect(container.querySelector('[aria-label="How research works"]')?.closest('details')).toBeNull();
+  await act(async () => button('Find a research gap').click());
+  const question = container.querySelector('textarea')!;
+  expect(question.value).toContain('[your topic]');
+  expect(document.activeElement).toBe(question);
+  expect(container.querySelector('[aria-label="Question starters"]')).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+it.each(['close button', 'Escape', 'backdrop'])('dismisses settings using %s without losing the question and returns focus', async (method) => {
+  await mount();
+  await input('textarea', 'Keep this question');
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!;
+  trigger.focus();
+  await act(async () => trigger.click());
+  const dialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Research settings"]')!;
+  expect(dialog.open).toBe(true);
+  expect(dialog.closest('form')).toBeNull();
+  expect(document.body.style.overflow).toBe('hidden');
+  await act(async () => dialog.querySelector('h2')!.dispatchEvent(new MouseEvent('click', { bubbles: true })));
+  expect(dialog.open).toBe(true);
+  await act(async () => {
+    if (method === 'close button') dialog.querySelector<HTMLButtonElement>('[aria-label="Close research settings"]')!.click();
+    else if (method === 'Escape') dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    else dialog.click();
+  });
+  expect(dialog.open).toBe(false);
+  expect(document.activeElement).toBe(trigger);
+  expect(document.body.style.overflow).toBe('');
+  expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('Keep this question');
+  expect(writes).toEqual([]);
+});
+
+it('keeps selected models across closing settings and applies them only when starting research', async () => {
+  await mount();
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!;
+  await act(async () => trigger.click());
+  const dialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Research settings"]')!;
+  for (const label of ['Research model', 'Embedding model']) {
+    await act(async () => dialog.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click());
+    await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((item) => item.textContent?.includes('alternate'))!.click());
+  }
+  await act(async () => button('Done').click());
+  expect(dialog.open).toBe(false);
+  await act(async () => trigger.click());
+  expect(dialog.querySelector('[aria-label="Research model"]')?.textContent).toContain('alternate');
+  expect(dialog.querySelector('[aria-label="Embedding model"]')?.textContent).toContain('alternate');
+  expect(dialog.querySelector('a')?.getAttribute('href')).toBe('/settings');
+  await act(async () => button('Done').click());
+  expect(writes).toEqual([]);
+  await input('textarea', 'Use the chosen models');
+  await act(async () => button('Explore the landscape').click());
+  const selectedModel = { provider_profile_id: 'local', model: 'alternate' };
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body).toMatchObject({
+    main_model: selectedModel, summary_model: { model_reference: selectedModel },
+    embedding_model: { model_reference: selectedModel },
+  });
+});
+
+it('closes a model picker with Escape before dismissing the settings drawer', async () => {
+  await mount();
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!.click());
+  const dialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Research settings"]')!;
+  const modelTrigger = dialog.querySelector<HTMLButtonElement>('[aria-label="Research model"]')!;
+  await act(async () => modelTrigger.click());
+  expect(dialog.querySelector('[role="listbox"]')).not.toBeNull();
+  const escape = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+  await act(async () => dialog.querySelector('input')!.dispatchEvent(escape));
+  expect(escape.defaultPrevented).toBe(true);
+  expect(dialog.querySelector('[role="listbox"]')).toBeNull();
+  expect(dialog.open).toBe(true);
+  expect(document.activeElement).toBe(modelTrigger);
+  await act(async () => dialog.dispatchEvent(new Event('cancel', { cancelable: true })));
+  expect(dialog.open).toBe(false);
+  expect(writes).toEqual([]);
+});
+
+it.each(['running', 'awaiting_approval', 'completed'])('shows saved model choices without editing %s research', async (status) => {
+  review.status = status;
+  await mount(true);
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!.click());
+  const dialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Research settings"]')!;
+  expect(dialog.querySelectorAll('.research-settings-models dd')).toHaveLength(3);
+  expect([...dialog.querySelectorAll('dd')].map((item) => item.textContent)).toEqual(['research', 'research', 'research']);
+  expect(dialog.querySelector('.model-select')).toBeNull();
+  expect(dialog.querySelector('textarea')).toBeNull();
+  expect(writes).toEqual([]);
+});
+
+it.each([
+  ['running', 'scope', null, 'Preparing your search plan'],
+  ['running', 'discovery', null, 'Finding relevant papers'],
+  ['paused', 'reading', null, 'Research is paused'],
+  ['blocked', 'reading', null, 'Research is blocked'],
+  ['awaiting_approval', 'reading', 'budget', 'A work limit has been reached'],
+])('explains the next step for %s work at %s', async (status, stage, approval, heading) => {
+  review = { ...review, status, stage, approval };
+  await mount(true);
+  expect(container.querySelector('[aria-label="Next step"] h3')?.textContent).toBe(heading);
+  expect(writes).toEqual([]);
+});
+
+it('guides the next decision and makes paper questions and summaries visible', async () => {
+  await mount(true);
+  expect(container.querySelector('[aria-label="Next step"]')?.textContent).toContain('select paper checkboxes');
+  await act(async () => button('First paper').click());
+  expect(button('Summarize paper')).toBeDefined();
+  expect(button('Ask a question about this paper')).toBeDefined();
+});
+
+it('adds explicitly searched arXiv papers to an existing shortlist without approving reading', async () => {
+  await mount(true);
+  const addPapers = container.querySelector<HTMLDetailsElement>('.research-add-papers')!;
+  expect(addPapers.querySelector('summary')?.textContent).toBe('Add papers from arXiv');
+  expect(addPapers.closest('.research-discovery')).not.toBeNull();
+  await act(async () => addPapers.querySelector('summary')!.click());
+  expect(addPapers.open).toBe(true);
+  await input('.arxiv-search input', 'calibration');
+  await act(async () => button('Search arXiv').click());
+  expect(writes).toEqual([]);
+  await act(async () => button('Add to shortlist').click());
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body).toMatchObject({
+    action: 'add_arxiv_papers', expected_revision: 7,
+    input_papers: [{ arxiv_id: '2610.01234', title: 'Explicit arXiv input' }],
+  });
+  expect(container.querySelectorAll('input[type="checkbox"]:checked')).toHaveLength(0);
+  await act(async () => button('Findings').click());
+  expect(container.querySelector('.arxiv-search')).toBeNull();
+  expect(container.querySelector('.research-add-papers')).toBeNull();
+});
+
+it('adds a PDF URL to the shortlist without approving reading or requesting a download', async () => {
+  await mount(true);
+  await act(async () => button('Add PDF link').click());
+  await input('[aria-label="PDF URL"]', 'https://example.org/download?id=paper');
+  await input('[aria-label="PDF paper title"]', '  Calibration paper  ');
+  await act(async () => button('Add PDF to shortlist').click());
+  expect(writes).toEqual([{
+    path: '/api/literature-reviews/r1/control',
+    body: {
+      action: 'add_pdf_paper', expected_revision: 7,
+      pdf_paper: { url: 'https://example.org/download?id=paper', title: 'Calibration paper' },
     },
-  );
+  }]);
+  expect(container.querySelectorAll('input[type="checkbox"]:checked')).toHaveLength(0);
+  expect(container.querySelector('[aria-label="PDF URL"]')).toBeNull();
+});
 
-  it('shows the durable skipped choice instead of another skip button', async () => {
-    rows = [{ ...original, references_skipped: true }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.textContent).toContain('Reference expansion skipped.');
-    expect([...container.querySelectorAll('button')].some((item) => item.textContent === 'Skip references')).toBe(false);
+it('preserves a PDF URL draft on server failure and allows retry without a title', async () => {
+  await mount(true);
+  await act(async () => button('Add PDF link').click());
+  await input('[aria-label="PDF URL"]', 'https://example.org/paper.pdf');
+  vi.mocked(fetch).mockResolvedValueOnce(new Response('PDF intake unavailable', { status: 502 }));
+  await act(async () => button('Add PDF to shortlist').click());
+  expect(container.textContent).toContain('PDF intake unavailable');
+  expect(container.querySelector<HTMLInputElement>('[aria-label="PDF URL"]')?.value).toBe('https://example.org/paper.pdf');
+  await act(async () => button('Add PDF to shortlist').click());
+  expect(writes).toHaveLength(1);
+  expect(writes[0].body).toMatchObject({
+    action: 'add_pdf_paper', pdf_paper: { url: 'https://example.org/paper.pdf', title: null },
   });
+  expect(container.querySelector('[aria-label="PDF URL"]')).toBeNull();
+});
 
-  it('shows summary settings during running work with an explicit safe pause action', async () => {
-    rows = [{ ...original, status: 'running', stage: 'reading', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    const section = container.querySelector('section[aria-label="Summary model settings"]');
-    expect(section).not.toBeNull();
-    expect(section?.closest('details')).toBeNull();
-    expect(section?.querySelector('fieldset')?.disabled).toBe(true);
-    expect(section?.textContent).toContain('Use a separate compact summary model');
-    expect(writes).toEqual([]);
-    await act(async () => button('Pause to choose summary model').click());
-    expect(writes[0].body).toEqual({ action: 'pause', expected_revision: 7 });
+it('disables PDF intake while its request is pending', async () => {
+  await mount(true);
+  await act(async () => button('Add PDF link').click());
+  await input('[aria-label="PDF URL"]', 'https://example.org/paper.pdf');
+  let finish!: (response: Response) => void;
+  vi.mocked(fetch).mockReturnValueOnce(new Promise<Response>((resolve) => { finish = resolve; }));
+  await act(async () => button('Add PDF to shortlist').click());
+  expect(container.querySelector<HTMLInputElement>('[aria-label="PDF URL"]')?.disabled).toBe(true);
+  expect(button('Adding paper').disabled).toBe(true);
+  const requests = vi.mocked(fetch).mock.calls.length;
+  await act(async () => button('Adding paper').click());
+  expect(fetch).toHaveBeenCalledTimes(requests);
+  await act(async () => finish(new Response(JSON.stringify({ ...review, revision: 8 }))));
+  expect(container.querySelector('[aria-label="PDF URL"]')).toBeNull();
+});
+
+it('requires explicit paper choices and submits only those choices and focus', async () => {
+  await mount(true);
+  expect(button('Read selected papers').disabled).toBe(true);
+  await act(async () => (container.querySelector('[aria-label="Read First paper"]') as HTMLInputElement).click());
+  await input('input[aria-label="Reading question / follow-up focus"]', 'Which assumptions transfer?');
+  await act(async () => button('Read selected papers').click());
+  expect(writes[0].body).toEqual({
+    action: 'approve_topics', expected_revision: 7, topic_ids: ['t1'],
+    candidate_ids: ['p1'], feedback: 'Which assumptions transfer?', reading_mode: 'targeted',
   });
+});
 
-  it('requires a safe pause before switching the main research model', async () => {
-    rows = [{ ...original, status: 'running', stage: 'synthesis', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.querySelector<HTMLButtonElement>('button[aria-label="Resume main research model"]')?.disabled).toBe(true);
-    await act(async () => button('Pause to switch main model').click());
-    expect(writes[0].body).toEqual({ action: 'pause', expected_revision: 7 });
+it('requests reasoned metadata recommendations instead of selecting arbitrary papers', async () => {
+  await mount(true);
+  await act(async () => button('Explain fit').click());
+  expect(writes[0].body).toMatchObject({ action: 'explore_topics', topic_ids: ['t1'] });
+  expect(container.querySelectorAll('input[type="checkbox"]:checked')).toHaveLength(0);
+});
+
+it('keeps reading approval above the shortlist and secondary discovery collapsed', async () => {
+  await mount(true);
+  const batch = container.querySelector('[aria-label="Reading batch"]')!;
+  const shortlist = container.querySelector('[aria-label="Paper shortlist"]')!;
+  expect(batch.closest('[aria-label="Next step"]')).not.toBeNull();
+  expect(batch.compareDocumentPosition(shortlist) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(container.querySelector<HTMLDetailsElement>('.research-landscape')?.open).toBe(false);
+  expect(container.querySelector<HTMLDetailsElement>('.research-more-papers')?.open).toBe(false);
+  expect(batch.querySelector('.arxiv-search')).toBeNull();
+});
+
+it('returns from findings to the pending reading decision without discarding choices', async () => {
+  await mount(true);
+  await act(async () => (container.querySelector('[aria-label="Read First paper"]') as HTMLInputElement).click());
+  await input('[aria-label="Reading question / follow-up focus"]', 'Check transfer assumptions');
+  await act(async () => button('Findings').click());
+  expect(container.querySelector('[aria-label="Reading batch"]')).toBeNull();
+  expect(button('Choose papers').closest('[aria-label="Next step"]')).not.toBeNull();
+  await act(async () => button('Choose papers').click());
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Read First paper"]')?.checked).toBe(true);
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Reading question / follow-up focus"]')?.value).toBe('Check transfer assumptions');
+  expect(writes).toEqual([]);
+});
+
+it('filters selected papers without losing choices and explicitly clears the batch', async () => {
+  await mount(true);
+  await act(async () => (container.querySelector('[aria-label="Read First paper"]') as HTMLInputElement).click());
+  await act(async () => button('Selected only').click());
+  expect(container.querySelector('[aria-label="Paper shortlist"]')?.textContent).toContain('First paper');
+  expect(container.querySelector('[aria-label="Paper shortlist"]')?.textContent).not.toContain('Second paper');
+  await input('[aria-label="Search shortlist"]', 'Second');
+  expect(button('Read selected papers').textContent).toContain('(1)');
+  await act(async () => button('Show all papers').click());
+  expect(container.querySelectorAll('[aria-label="Paper shortlist"] input:checked')).toHaveLength(1);
+  await act(async () => button('Clear selection').click());
+  expect(button('Read selected papers').disabled).toBe(true);
+  expect(writes).toEqual([]);
+});
+
+it('filters by topic without losing the reading batch or starting recommendations', async () => {
+  review.topics = [
+    { id: 't1', title: 'Calibration', description: 'Calibration papers', candidate_ids: ['p1'] },
+    { id: 't2', title: 'Other methods', description: 'Other papers', candidate_ids: ['p2'] },
+  ];
+  await mount(true);
+  await act(async () => (container.querySelector('[aria-label="Read First paper"]') as HTMLInputElement).click());
+  await act(async () => {
+    const filter = container.querySelector<HTMLSelectElement>('[aria-label="Filter shortlist by topic"]')!;
+    filter.value = 't2';
+    filter.dispatchEvent(new Event('change', { bubbles: true }));
   });
+  const shortlist = container.querySelector('[aria-label="Paper shortlist"]')!;
+  expect(shortlist.textContent).not.toContain('First paper');
+  expect(shortlist.textContent).toContain('Second paper');
+  expect(button('Read selected papers').textContent).toContain('(1)');
+  await act(async () => button('Selected only').click());
+  await act(async () => button('Show all papers').click());
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Read First paper"]')?.checked).toBe(true);
+  expect(container.querySelector<HTMLSelectElement>('[aria-label="Filter shortlist by topic"]')?.value).toBe('');
+  expect(writes).toEqual([]);
+});
 
-  it.each(['paused', 'blocked'] as const)('switches the main model of a %s review without restarting its stage', async (status) => {
-    vi.useFakeTimers();
-    try {
-      rows = [{ ...original, status, stage: 'synthesis', approval: null, evidence_count: 12 }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      const picker = container.querySelector<HTMLButtonElement>('button[aria-label="Resume main research model"]')!;
-      expect(picker.disabled).toBe(false);
-      await act(async () => picker.click());
-      const option = [...container.querySelectorAll<HTMLElement>('[role="option"]')]
-        .find((item) => item.textContent?.includes('replacement-main'))!;
-      await act(async () => option.click());
-      const parallel = [...container.querySelectorAll<HTMLInputElement>('input[type="number"]')].find((input) =>
-        input.closest('label')?.textContent?.includes('Main model parallel requests'))!;
-      await act(async () => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(parallel, '3');
-        parallel.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-      await act(async () => { vi.advanceTimersByTime(3000); });
-      expect(picker.textContent).toContain('replacement-main');
-      expect(container.textContent).toContain('12 verified source excerpts');
-      expect(writes).toEqual([]);
-      await act(async () => button('Resume review').click());
-      expect(writes[0].body).toMatchObject({
-        action: 'resume', stage: 'synthesis', expected_revision: 7,
-        main_model: { provider_profile_id: 'cloud', model: 'replacement-main' },
-        main_parallel_requests: 3,
-      });
-    } finally {
-      vi.useRealTimers();
-    }
+it('restores an in-progress paper selection and focus after remounting the review', async () => {
+  await mount(true);
+  await act(async () => (container.querySelector('[aria-label="Read First paper"]') as HTMLInputElement).click());
+  await input('input[aria-label="Reading question / follow-up focus"]', 'Assumptions to compare');
+
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await mount(true);
+
+  expect((container.querySelector('[aria-label="Read First paper"]') as HTMLInputElement).checked).toBe(true);
+  expect((container.querySelector('[aria-label="Reading question / follow-up focus"]') as HTMLInputElement).value)
+    .toBe('Assumptions to compare');
+  expect(writes).toEqual([]);
+});
+
+it('drops stale saved paper choices after loading the current shortlist', async () => {
+  window.sessionStorage.setItem('scholarweave:literature-review-drafts:v1', JSON.stringify({
+    r1: { chosen: ['p1', 'removed-paper'], focus: 'Keep this focus' },
+  }));
+  await mount(true);
+  expect(container.querySelectorAll('[aria-label="Paper shortlist"] input:checked')).toHaveLength(1);
+  expect((container.querySelector('[aria-label="Reading question / follow-up focus"]') as HTMLInputElement).value)
+    .toBe('Keep this focus');
+});
+
+it('shows used, current, and editable proposed work limits before explicit extension', async () => {
+  review = {
+    ...review, status: 'awaiting_approval', approval: 'budget',
+    work_budget: { screened_papers: 100, read_papers: 20, comparison_passes: 1 },
+    work_used: { screened_papers: 96, read_papers: 20, comparison_passes: 1 },
+    suggested_work_budget: { screened_papers: 100, read_papers: 21, comparison_passes: 1 },
+    scope: { rationale: 'A bounded scope.', questions: [], suggested_work_budget: { screened_papers: 100, read_papers: 20, comparison_passes: 1 } },
+  };
+  await mount(true);
+  expect(container.querySelector('[aria-label="Current work budget"]')?.textContent)
+    .toContain('20 used / 20 current / 21 proposed');
+  expect(button('Approve additional work limits').disabled).toBe(false);
+
+  await input('[aria-label="Proposed read papers"]', '5001');
+  expect(button('Approve additional work limits').disabled).toBe(true);
+  await input('[aria-label="Proposed read papers"]', '32');
+  expect(button('Approve additional work limits').disabled).toBe(false);
+  await act(async () => button('Approve additional work limits').click());
+  expect(writes[0].body).toEqual({
+    action: 'extend_budget', expected_revision: 7,
+    work_budget: { screened_papers: 100, read_papers: 32, comparison_passes: 1 },
   });
+});
 
-  it.each(['new', 'paused'] as const)('configures compact summaries for a %s review without changing exploration models', async (mode) => {
-    rows = mode === 'new' ? [] : [{ ...original, status: 'paused', stage: 'reading', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews initialObjective="Compare adaptive methods." /></RouterProvider>));
-    const checkbox = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
-      input.closest('label')?.textContent?.includes('Use a separate compact summary model'));
-    if (!checkbox) throw new Error('Missing compact summary checkbox.');
-    expect(checkbox.closest('fieldset')?.disabled).toBe(false);
-    await act(async () => checkbox.click());
-    expect(button(mode === 'new' ? 'Propose review plan' : 'Resume review').disabled).toBe(true);
-    const picker = container.querySelector<HTMLButtonElement>('button[aria-label="Summary model"]');
-    if (!picker) throw new Error('Missing summary model picker.');
-    await act(async () => picker.click());
-    const option = [...container.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.textContent?.includes('main'));
-    if (!option) throw new Error('Missing chat-only summary model option.');
-    await act(async () => option.click());
-    const reasoning = [...container.querySelectorAll('select')].find((select) =>
-      select.closest('label')?.textContent?.includes('Summary reasoning'));
-    if (!reasoning) throw new Error('Missing summary reasoning selector.');
-    await act(async () => { reasoning.value = 'none'; reasoning.dispatchEvent(new Event('change', { bubbles: true })); });
-    const parallel = [...container.querySelectorAll<HTMLInputElement>('input[type="number"]')].find((input) =>
-      input.closest('label')?.textContent?.includes('Parallel summaries'))!;
-    for (const value of ['0', '33', '1.5']) {
-      await act(async () => {
-        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(parallel, value);
-        parallel.dispatchEvent(new Event('input', { bubbles: true }));
-      });
-      expect(button(mode === 'new' ? 'Propose review plan' : 'Resume review').disabled).toBe(true);
-    }
-    await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(parallel, '3');
-      parallel.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    await act(async () => button(mode === 'new' ? 'Propose review plan' : 'Resume review').click());
-    expect(writes[0].body.summary_model).toEqual({
-      model_reference: main, max_output_tokens: 26214, parallel_requests: 3, reasoning_effort: 'none',
-    });
-    if (mode === 'new') expect(writes[0].body).toMatchObject({ main_model: main, main_parallel_requests: 1 });
-    else expect(writes[0].body).toMatchObject({ action: 'resume', stage: 'reading', expected_revision: 7 });
-  });
+it('keeps pause outside collapsed diagnostics', async () => {
+  review.status = 'running'; review.approval = null;
+  await mount(true);
+  expect(button('Pause').closest('details')).toBeNull();
+  expect(button('Pause').closest('[aria-label="Review controls"]')).not.toBeNull();
+  await act(async () => button('Pause').click());
+  expect(writes[0].body).toMatchObject({ action: 'pause', expected_revision: 7 });
+});
 
-  it('keeps the summary configuration draft across unchanged review polling', async () => {
-    vi.useFakeTimers();
-    try {
-      rows = [{ ...original, status: 'paused', stage: 'reading', approval: null }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      const checkbox = [...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find((input) =>
-        input.closest('label')?.textContent?.includes('Use a separate compact summary model'))!;
-      await act(async () => checkbox.click());
-      rows = [{ ...rows[0], revision: 8 }];
-      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      expect(checkbox.checked).toBe(true);
-      expect(container.querySelector('button[aria-label="Summary model"]')).not.toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+it('offers the same saved-work model recovery in the standalone review surface', async () => {
+  review.status = 'paused'; review.approval = null;
+  await mount(true);
+  expect(button('Resume research')).toBeDefined();
+  expect(container.querySelector('[aria-label="Resume review"]')).not.toBeNull();
+  expect(container.querySelector('.research-run-controls button')?.textContent).not.toBe('Resume research');
+  expect(container.querySelector('[aria-label="Replacement research model"]')?.closest('dialog')?.open).toBe(false);
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Research settings"]')!.click());
+  const dialog = container.querySelector<HTMLDialogElement>('dialog[aria-label="Research settings"]')!;
+  expect(dialog.querySelector('[aria-label="Replacement research model"]')).not.toBeNull();
+  expect(dialog.querySelector('[aria-label="Replacement synthesis model"]')).not.toBeNull();
+  await act(async () => button('Done').click());
+  expect(writes).toEqual([]);
+  await act(async () => button('Resume research').click());
+  expect(writes[0].body).toEqual({ action: 'resume', expected_revision: 7 });
+});
 
-  it.each(['plan', 'budget'] as const)('preserves edited %s work limits across polling and submits them', async (approval) => {
-    vi.useFakeTimers();
-    try {
-      rows = [{ ...original, approval, stage: 'discovery',
-        suggested_work_budget: { screened_papers: 100, read_papers: 30, comparison_passes: 1 } }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      const inputs = [...container.querySelectorAll<HTMLInputElement>('.review-approval input[type="number"]')];
-      expect(inputs.map((input) => input.value)).toEqual(['100', '30', '1']);
-      for (const [index, value] of ['200', '60', '3'].entries()) {
-        await act(async () => {
-          Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(inputs[index], value);
-          inputs[index].dispatchEvent(new Event('input', { bubbles: true }));
-        });
-      }
-      expect(inputs.map((input) => input.value)).toEqual(['200', '60', '3']);
-      for (let poll = 0; poll < 2; poll += 1) {
-        rows = [{ ...rows[0], revision: rows[0].revision + 1,
-          suggested_work_budget: { ...rows[0].suggested_work_budget! },
-          work_budget: { ...original.work_budget! } }];
-        await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-        expect(inputs.map((input) => input.value)).toEqual(['200', '60', '3']);
-      }
-      await act(async () => button(approval === 'plan' ? 'Approve plan and work limits' : 'Extend work limits').click());
-      expect(writes[0].body).toMatchObject({
-        action: approval === 'plan' ? 'approve_plan' : 'extend_budget', expected_revision: 9,
-        work_budget: { screened_papers: 200, read_papers: 60, comparison_passes: 3 },
-      });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+it('reads source quotations in place and exposes cross-paper understanding inline', async () => {
+  hasBrief = true; review.status = 'completed'; review.approval = null;
+  await mount(true);
+  expect(container.querySelector('.research-tabs [aria-pressed="true"]')?.textContent).toContain('Findings');
+  await act(async () => button('Papers').click());
+  await act(async () => button('First paper').click());
+  expect(document.activeElement).toBe(container.querySelector('[aria-label="Paper reader"]'));
+  expect(container.querySelector('[aria-label="Paper reader"]')?.textContent).toContain('Verbatim evidence.');
+  expect(container.textContent).toContain('Page 2');
+  await act(async () => button('Findings').click());
+  expect(container.textContent).toContain('Shared calibration assumptions');
+  await act(async () => button('Refine understanding').click());
+  expect(writes[0].body).toMatchObject({ action: 'refine_understanding', expected_revision: 7 });
+});
 
-  it('refreshes the work-limit draft when the server proposes different limits', async () => {
-    vi.useFakeTimers();
-    try {
-      rows = [{ ...original, approval: 'budget',
-        suggested_work_budget: { screened_papers: 100, read_papers: 30, comparison_passes: 1 } }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      rows = [{ ...rows[0], revision: 8,
-        suggested_work_budget: { screened_papers: 200, read_papers: 60, comparison_passes: 2 } }];
-      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      const inputs = [...container.querySelectorAll<HTMLInputElement>('.review-approval input[type="number"]')];
-      expect(inputs.map((input) => input.value)).toEqual(['200', '60', '2']);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+it('does not switch away from papers when polling detects completed research', async () => {
+  vi.useFakeTimers();
+  review.status = 'running'; review.approval = null; review.stage = 'reading';
+  await mount(true);
+  expect(container.querySelector('.research-tabs [aria-pressed="true"]')?.textContent).toContain('Papers');
+  review = { ...review, revision: 8, status: 'completed' };
+  await act(async () => vi.advanceTimersByTimeAsync(3000));
+  expect(container.querySelector('[aria-label="Next step"]')?.textContent).toContain('Your findings are ready');
+  expect(container.querySelector('.research-tabs [aria-pressed="true"]')?.textContent).toContain('Papers');
+  await act(async () => button('View findings').click());
+  expect(container.querySelector('.research-tabs [aria-pressed="true"]')?.textContent).toContain('Findings');
+  expect(writes).toEqual([]);
+});
+it('provides resolved paper context to the embedded ideas panel without starting research', async () => {
+  await mount(true);
+  await act(async () => button('First paper').click());
+  await act(async () => button('Ideas').click());
+  expect(container.querySelector('[aria-label="Ideas panel"]')?.textContent).toContain('First paper');
+  expect(container.querySelector('[aria-label="Ideas panel"]')?.textContent).toContain('Calibration method abstract');
+  expect(container.querySelector('[aria-label="Ideas panel"]')?.textContent).not.toContain('candidate_id');
+  expect(writes).toEqual([]);
+});
 
-  it('approves three paper/comparison limits without a token allowance', async () => {
-    rows = [{ ...original, approval: 'plan', stage: 'discovery', work_budget: null,
-      scope: { questions: ['Compare methods'], inclusion_criteria: [], exclusion_criteria: [],
-        queries: [{ provider: 'library', query: 'adaptive', pages: 1 }],
-        suggested_work_budget: { screened_papers: 80, read_papers: 12, comparison_passes: 2 },
-        suggested_allowance_tokens: 1_000_000,
-        rationale: 'A bounded review.' } }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.textContent).toContain('Papers screened limit');
-    expect(container.textContent).toContain('Papers collected/read limit (including references)');
-    expect(container.textContent).toContain('Cross-paper comparison passes limit');
-    expect(container.textContent).not.toContain('Overall token allowance');
-    await act(async () => button('Approve plan and work limits').click());
-    expect(writes[0].body).toEqual({
-      action: 'approve_plan', expected_revision: 7,
-      work_budget: { screened_papers: 80, read_papers: 12, comparison_passes: 2 },
-    });
-  });
+it('opens an editable literature-check draft and ignores an old review selection', async () => {
+  window.history.replaceState({}, '', '/deep-work?view=reviews&new=1&review=r1&objective=Calibration%20premise');
+  await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
+  expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Calibration premise');
+  expect(button('Explore the landscape')).toBeDefined();
+  expect(writes).toEqual([]);
+});
 
-  it('fetches the clicked summary only and keeps source diagnostics behind a disclosure', async () => {
-    capturedPages = true;
-    rows = [{ ...original, status: 'running', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.textContent).toContain('Approved original');
-    expect(container.textContent).toContain('Summary ready');
-    expect(container.querySelector('progress[aria-label="PDFs collected or reused"]')?.getAttribute('value')).toBe('1');
-    expect(container.querySelector('progress[aria-label="Papers read and summarized"]')?.getAttribute('value')).toBe('1');
-    expect(container.textContent).not.toContain('Combined selective results retain evaluation conditions.');
-    expect(detailReads).toHaveLength(0);
-    await act(async () => button('View summary').click());
-    expect(detailReads).toEqual(['/api/literature-reviews/review-1/papers/already-approved']);
-    expect(container.textContent).not.toContain('Bibliography page; extract citations separately.');
-    expect(container.textContent).not.toContain('The source packet measured adaptive improvement.');
-    await openDetails('Source details and page decisions');
-    expect(container.textContent).toContain('Bibliography page; extract citations separately.');
-    expect(container.textContent).toContain('reference page');
-    expect(container.textContent).toContain('version-1');
-    expect(container.textContent).toContain('Reading and extracting evidence');
-    expect(container.textContent).toContain('Measured adaptive improvement.');
-    expect(container.textContent).toContain('Verbatim measured result.');
-    expect(container.textContent).toContain('Selective paper summary');
-    expect(container.textContent).toContain('Combined selective results retain evaluation conditions.');
-    await openDetails('Paper summary packets (1)');
-    expect(container.textContent).toContain('The source packet measured adaptive improvement.');
-    expect(container.textContent).toContain('Not full-paper coverage.');
-    expect(container.textContent).not.toContain('Creating summary');
-  });
-
-  it('counts a saved summary as complete while quotations await later analysis', async () => {
-    capturedPages = true;
-    pendingQuotes = true;
-    rows = [{ ...original, status: 'running', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.querySelector('progress[aria-label="Papers read and summarized"]')?.getAttribute('value')).toBe('1');
-    expect(container.textContent).not.toContain('verified excerpts');
-    await act(async () => button('View summary').click());
-    await openDetails('Source details and page decisions');
-    expect(container.textContent).toContain('0 verified excerpts');
-    expect(container.textContent).toContain('Combined selective results retain evaluation conditions.');
-    expect(container.textContent).toContain('Source quotation pending; verify against the original page during analysis.');
-    expect(container.querySelector('blockquote')).toBeNull();
-  });
-
-  it('shows prose-only summaries as complete with application-recorded source pages', async () => {
-    capturedPages = true;
-    proseOnlySummary = true;
-    rows = [{ ...original, status: 'running', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.querySelector('progress[aria-label="Papers read and summarized"]')?.getAttribute('value')).toBe('1');
-    expect(detailReads).toHaveLength(0);
-    await act(async () => button('View summary').click());
-    expect(container.textContent).toContain('Combined selective results retain evaluation conditions.');
-    await openDetails('Source details and page decisions');
-    expect(container.textContent).toContain('Read pages: 1');
-    expect(container.textContent).toContain('0 verified excerpts');
-    expect(container.textContent).not.toContain('see verified excerpts');
-    expect(container.querySelector('blockquote')).toBeNull();
-  });
-
-  it('paginates the summary browser without fetching hidden paper content', async () => {
-    capturedPages = true;
-    paperCount = 51;
-    rows = [{ ...original, status: 'running', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.querySelectorAll('.review-paper-list > li')).toHaveLength(25);
-    expect(detailReads).toHaveLength(0);
-    expect(container.textContent).toContain('1-25 of 51');
-    await act(async () => button('Next summaries').click());
-    expect(container.querySelectorAll('.review-paper-list > li')).toHaveLength(25);
-    expect(container.textContent).toContain('26-50 of 51');
-    expect(detailReads).toHaveLength(0);
-    await act(async () => button('View summary').click());
-    expect(detailReads).toEqual(['/api/literature-reviews/review-1/papers/summary-25']);
-    expect(container.textContent).toContain('Combined selective results retain evaluation conditions.');
-    await act(async () => button('Close paper').click());
-    expect(container.textContent).not.toContain('Combined selective results retain evaluation conditions.');
-    await act(async () => button('Next summaries').click());
-    expect(container.querySelectorAll('.review-paper-list > li')).toHaveLength(1);
-    expect(container.textContent).toContain('51-51 of 51');
-    expect(button('Next summaries').disabled).toBe(true);
-    expect(vi.mocked(globalThis.fetch).mock.calls.some(([input]) => String(input).endsWith('/review-1/papers'))).toBe(false);
-  });
-
-  it('reports detail retrieval errors and retries only when the reader is refreshed', async () => {
-    capturedPages = true;
-    rejectPaperDetails = true;
-    rows = [{ ...original, status: 'running', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    await act(async () => button('View summary').click());
-    expect(container.textContent).toContain('Paper details unavailable.');
-    expect(container.textContent).not.toContain('Combined selective results retain evaluation conditions.');
-    expect(detailReads).toHaveLength(1);
-    rejectPaperDetails = false;
-    await act(async () => button('Refresh paper').click());
-    expect(detailReads).toHaveLength(2);
-    expect(container.textContent).toContain('Combined selective results retain evaluation conditions.');
-    expect(container.textContent).not.toContain('Paper details unavailable.');
-  });
-
-  it('shows captured shared-reference provenance and resumes legacy gates automatically', async () => {
-    rows = [{ ...original, stage: 'reference_screening', approval: 'references' }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.textContent).toContain('Shared adaptive reference');
-    expect(container.textContent).toContain('Shared citation verbatim.');
-    expect(container.textContent).toContain('source-v1');
-    expect(container.textContent).toContain('Unresolved arXiv match');
-    expect(container.querySelector('a[href$="references.csv"]')).not.toBeNull();
-    expect(container.querySelector('input[aria-label="Select reference Shared adaptive reference"]')).toBeNull();
-    await act(async () => button('Continue automatically').click());
-    expect(writes[writes.length - 1]?.body).toMatchObject({ action: 'resume' });
-    expect(writes.some((write) => write.body.action === 'approve_reference_pdfs')).toBe(false);
-  });
-
-  it('keeps one slow paper-progress request in flight and distinguishes collection from reading', async () => {
-    vi.useFakeTimers();
-    const fetch = globalThis.fetch;
-    let complete!: (response: Response) => void;
-    const pending = new Promise<Response>((resolve) => { complete = resolve; });
-    let requests = 0;
-    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).includes('/review-1/paper-progress?')) { requests += 1; return pending; }
-      return fetch(input, init);
-    }));
-    try {
-      rows = [{ ...original, stage: 'reading_plan', status: 'running', approval: null }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      for (let poll = 0; poll < 3; poll += 1) {
-        rows = [{ ...rows[0], revision: rows[0].revision + 1 }];
-        await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      }
-      expect(requests).toBe(1);
-      await act(async () => complete(new Response(JSON.stringify({
-        items: [], total: 0, next_offset: null,
-        counts: { total: 2, collected: 2, prepared: 1, plan_complete: 0, summarized: 0, failed: 1 },
-        operations: [{ candidate_id: 'one', title: 'Collected source', operation: 'Deciding pages' }],
-      }))));
-      expect(container.textContent).toContain('PDFs collected or reused: 2 / 2');
-      expect(container.textContent).toContain('Source text prepared: 1 / 2');
-      expect(container.textContent).toContain('Papers read and summarized: 0 / 2');
-      expect(container.textContent).toContain('1 paper needs attention');
-      expect(container.textContent).toContain('choose All papers to inspect errors');
-      expect(container.textContent).toContain('Deciding pages: Collected source');
-      await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
-      expect(requests).toBe(2);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('updates screening progress for each streamed completion without waiting for a poll', async () => {
-    const sources: FakeEventSource[] = [];
-    class FakeEventSource extends EventTarget {
-      onerror: (() => void) | null = null;
-      closed = false;
-      constructor(readonly url: string) { super(); sources.push(this); }
-      close() { this.closed = true; }
-    }
-    vi.stubGlobal('EventSource', FakeEventSource);
-    rows = [{ ...original, status: 'running', stage: 'screening', approval: null, screened_count: 0 }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(sources).toHaveLength(1);
-    expect(sources[0].url).toContain('/literature-reviews/review-1/events');
-    for (const screened of [1, 2, 3]) {
-      await act(async () => sources[0].dispatchEvent(new MessageEvent('review.progress', {
-        data: JSON.stringify({ ...rows[0], revision: original.revision + screened, screened_count: screened }),
-      })));
-      expect(container.querySelector<HTMLProgressElement>('progress')?.value).toBe(screened);
-    }
-    await act(async () => sources[0].onerror?.());
-    expect(container.textContent).toContain('Live updates interrupted');
-    await act(async () => sources[0].dispatchEvent(new MessageEvent('review.progress', {
-      data: JSON.stringify({ ...rows[0], revision: 11, status: 'awaiting_approval', approval: 'papers', screened_count: 50 }),
-    })));
-    expect(sources[0].closed).toBe(true);
-  });
-
-  it('inherits the default native decision model in review setup', async () => {
-    rows = [];
-    defaultDecision = { provider_profile_id: 'local', model: 'tiny-decision' };
-    await act(async () => root.render(<RouterProvider><LiteratureReviews initialObjective="Adaptive research" /></RouterProvider>));
-    expect(container.querySelector('button[aria-label="Decision model"]')?.textContent).toContain('tiny-decision');
-    await act(async () => button('Propose review plan').click());
-    expect(writes[0].body.decision_model).toEqual({
-      model_reference: defaultDecision, protocol: 'systemone', input_tokens: 8192,
-    });
-  });
-
-  it('requires confirmation to clear and keeps the objective ready for a fresh review', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    await act(async () => button('Clear review').click());
-    expect(writes).toHaveLength(0);
-    confirm.mockReturnValue(true);
-    await act(async () => button('Clear review').click());
-    expect(writes[0]).toEqual({ path: '/api/literature-reviews/review-1/clear', body: { expected_revision: 7 } });
-    expect(container.textContent).toContain('Review cleared. Removed 1 task-owned papers');
-    expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe(original.objective);
-    expect(container.querySelector('.review-detail')).toBeNull();
-  });
-
-  it('preserves the review when clearing fails', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    rejectControl = true;
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    await act(async () => button('Clear review').click());
-    expect(container.textContent).toContain('The review changed');
-    expect(container.querySelector('.review-detail')).not.toBeNull();
-    expect(container.textContent).not.toContain('Review cleared.');
-  });
-
-  it('shows measurable screening progress and automatic exclusions', async () => {
-    rows = [{ ...original, status: 'running', stage: 'screening', approval: null,
-      candidate_count: 550, screened_count: 300, excluded_count: 220 }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    const progress = container.querySelector<HTMLProgressElement>('progress[aria-label="Paper screening progress"]');
-    expect(progress?.value).toBe(300);
-    expect(progress?.max).toBe(550);
-    expect(container.textContent).toContain('300 of 550 papers rated');
-    expect(container.textContent).toContain('220 irrelevant papers automatically excluded');
-    expect(container.textContent).toContain('highly relevant');
-  });
-
-  it('shows indeterminate discovery activity and no running indicator while paused', async () => {
-    rows = [{ ...original, status: 'running', stage: 'discovery', approval: null }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.querySelector('progress')?.hasAttribute('value')).toBe(false);
-    expect(container.textContent).toContain('discovery in progress');
-    await act(async () => root.unmount());
-    root = createRoot(container);
-    rows = [{ ...original, status: 'paused' }];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    expect(container.querySelector('progress')).toBeNull();
-  });
-
-  it('opens the saved literature section and links directly to the local paper', async () => {
-    rows = [{ ...original, status: 'completed', approval: null, stage: 'publication', track_id: 'track-1',
-      output_path: 'projects/tracks/adaptive--track-1/literature.md' }];
-    candidateFields = { document_id: 'local-paper-1' };
-    await act(async () => root.render(<RouterProvider><LiteratureReviews trackId="track-1" /></RouterProvider>));
-    const saved = [...container.querySelectorAll('a')].find((item) => item.textContent === 'Open saved review');
-    expect(saved?.getAttribute('href')).toBe('/tracks?id=track-1&section=literature&review=review-1&revision=7');
-    expect(container.querySelector('a[href="/library?paper=local-paper-1"]')?.textContent).toBe('Open local paper');
-  });
-
-  it('keeps shortlist pagination read-only with automatic selection', async () => {
-    await act(async () => root.render(<RouterProvider><LiteratureReviews initialModel={main} /></RouterProvider>));
-    const first = container.querySelector<HTMLButtonElement>('button[aria-label="Explore Paper 0"]');
-    if (!first) throw new Error('First candidate was not shown.');
-    await act(async () => first.click());
-    await act(async () => button('Next papers').click());
-    const second = container.querySelector<HTMLButtonElement>('button[aria-label="Explore Paper 26"]');
-    if (!second) throw new Error('Second page was not shown.');
-    await act(async () => second.click());
-    expect(container.textContent).not.toContain('Approve 3 papers');
-    expect(writes).toHaveLength(0);
-  });
-
-  it('surfaces stale automatic continuation without pretending work started', async () => {
-    rejectControl = true;
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    await act(async () => button('Resume review').click());
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain('The review changed');
-    expect(button('Resume review').disabled).toBe(false);
-  });
-
-  it('selects the main API model and local native decision model independently', async () => {
-    rows = [];
-    await act(async () => root.render(<RouterProvider><LiteratureReviews initialModel={main} initialObjective="Compare adaptive evidence." /></RouterProvider>));
-    const protocol = [...container.querySelectorAll('select')].find((select) => [...select.options].some((option) => option.value === 'systemone'));
-    if (!protocol) throw new Error('Missing decision protocol selector.');
-    await act(async () => { protocol.value = 'systemone'; protocol.dispatchEvent(new Event('change', { bubbles: true })); });
-    const picker = container.querySelector<HTMLButtonElement>('button[aria-label="Decision model"]');
-    if (!picker) throw new Error('Missing decision model picker.');
-    await act(async () => picker.click());
-    const option = [...container.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.textContent?.includes('tiny-decision'));
-    if (!option) throw new Error('Native model is not selectable.');
-    await act(async () => option.click());
-    expect(container.textContent).toContain('probabilities are not calibrated');
-    await act(async () => button('Propose review plan').click());
-    expect(writes[0].body.main_model).toEqual(main);
-    expect(writes[0].body.openalex_enabled).toBe(false);
-    expect(container.textContent).not.toContain('Include OpenAlex references');
-    expect(writes[0].body.decision_model).toEqual({
-      model_reference: { provider_profile_id: 'local', model: 'tiny-decision' },
-      protocol: 'systemone', input_tokens: 8192,
-    });
-  });
-
-  it('links an explicit library result without approving it or following unsafe source links', async () => {
-    rows = [{ ...original, status: 'paused', approval: null }];
-    candidateFields = { url: 'javascript:alert(1)', error: 'No accessible PDF is known.' };
-    await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-    await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Details for Paper 0"]')?.click());
-    expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
-    await act(async () => button('Find local copy').click());
-    const select = [...container.querySelectorAll('select')].find((item) => [...item.options].some((option) => option.value === 'uploaded-paper'));
-    if (!select) throw new Error('Missing local paper results.');
-    await act(async () => { select.value = 'uploaded-paper'; select.dispatchEvent(new Event('change', { bubbles: true })); });
-    await act(async () => button('Link local paper').click());
-    expect(writes[0].body).toEqual({
-      action: 'link_paper', candidate_ids: ['paper-0'], document_id: 'uploaded-paper', expected_revision: 7,
-    });
-  });
-
-    it('returns to automatic screening from a pending paper approval', async () => {
-      rows = [{ ...original, screened_count: 0, stage_history: { screening: 'stopped' } }];
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      const select = container.querySelector<HTMLSelectElement>('.review-controls select')!;
-      await act(async () => { select.value = 'screening'; select.dispatchEvent(new Event('change', { bubbles: true })); });
-      await act(async () => button('Resume review').click());
-      expect(writes[0].body).toEqual({ action: 'resume', stage: 'screening', expected_revision: 7 });
-    });
-
-    it('opens details without changing automatic paper selection', async () => {
-      await act(async () => root.render(<RouterProvider><LiteratureReviews /></RouterProvider>));
-      const pending = () => [...container.querySelectorAll<HTMLButtonElement>('.review-candidates .review-candidate-select')];
-      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="Details for Paper 0"]')?.click());
-      expect(pending()[0].getAttribute('aria-pressed')).toBe('false');
-      expect(container.querySelector('button[aria-label="Details for Paper 0"]')?.getAttribute('aria-expanded')).toBe('true');
-      await act(async () => pending()[0].click());
-      expect(pending()[0].getAttribute('aria-label')).toBe('Explore Paper 0');
-      expect(pending()).toHaveLength(25);
-      expect(container.querySelector('.review-selected')).toBeNull();
-      expect(container.textContent).not.toContain('Approve 1 papers');
-    });
+it('preserves old research as read-only history without destructive controls', async () => {
+  review.reading_mode = 'full';
+  await mount(true);
+  expect(container.textContent).toContain('Archived full-reading workspace');
+  expect(container.textContent).not.toContain('Read selected papers');
+  expect(container.textContent).not.toContain('Clear review');
+  expect(writes).toEqual([]);
 });

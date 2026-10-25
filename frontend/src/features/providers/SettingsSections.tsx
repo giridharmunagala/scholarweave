@@ -47,20 +47,59 @@ export function DocumentsPanel({
   return (
     <Panel
       title="Document OCR"
-      description="ScholarWeave uses embedded PDF text first, then Tesseract only for scanned or text-poor pages."
+      description="Use Surya for batch extraction, optional Indra CPU recovery and quick reading, or Tesseract for scanned pages."
     >
       <div className="stack">
-        <div className="setting-row">
-          <div className="setting-label">
-            <strong>Tesseract fallback</strong>
-            <small>
-              Native text is preserved whenever a page has enough readable content. OCR runs only
-              when that text is missing or insufficient.
-            </small>
+        <label className="field">
+          OCR engine
+          <select value={settings.ocr_engine} onChange={(event) => {
+            const engine = event.target.value;
+            if (engine === 'surya' || engine === 'tesseract') onChange({ ...settings, ocr_engine: engine });
+          }}>
+            <option value="tesseract">Tesseract (scanned-page fallback)</option>
+            <option value="surya">Surya 2 (layout, Markdown and figures)</option>
+          </select>
+        </label>
+        {settings.ocr_engine === 'surya' ? <>
+          <p>Automatic ingestion reads every page with Surya, including selectable PDFs. Use embedded text in the paper's extraction controls to opt out. Headings, reading order, tables, equations and figure crops are retained; page headers and footers stay in the layout manifest.</p>
+          <label className="field">
+            Surya server URL
+            <input value={settings.ocr_surya_base_url} onChange={(event) => onChange({ ...settings, ocr_surya_base_url: event.target.value })} />
+            <small>Loopback OpenAI-compatible endpoint ending in /v1. No document data leaves this machine.</small>
+          </label>
+          <label className="field">
+            Surya model ID
+            <input value={settings.ocr_surya_model} onChange={(event) => onChange({ ...settings, ocr_surya_model: event.target.value })} />
+            <small>Use the exact alias reported by the server's /v1/models endpoint.</small>
+          </label>
+          <div className="field-row">
+            <label className="field">
+              Parallel OCR pages
+              <input type="number" min={1} value={settings.ocr_surya_parallel} onChange={(event) => onChange({ ...settings, ocr_surya_parallel: Number(event.target.value) })} />
+              <small>Shared across papers, with no fixed app ceiling. Keep at or below llama-server --parallel and within available memory; 10 is a starting point, not a measured throughput guarantee.</small>
+            </label>
+            <label className="field">
+              OCR output tokens
+              <input type="number" min={512} max={32768} value={settings.ocr_surya_max_tokens} onChange={(event) => onChange({ ...settings, ocr_surya_max_tokens: Number(event.target.value) })} />
+              <small>8192 leaves image/prompt headroom in a 16k slot. Dense or truncated pages retry with layout and block OCR.</small>
+            </label>
           </div>
-          <span className="status-pill neutral">Tesseract</span>
-        </div>
+          <div className="setting-row">
+            <div className="setting-label">
+              <strong>Indra CPU recovery</strong>
+              <small>Recover only pages Surya cannot read. Experimental: verify equations, table values and reading order against the PDF. Models must be downloaded locally first.</small>
+            </div>
+            <Toggle
+              checked={settings.ocr_indra_fallback_enabled}
+              label="Indra CPU recovery"
+              onChange={(checked) => onChange({ ...settings, ocr_indra_fallback_enabled: checked })}
+            />
+          </div>
+        </> : <p>Native text is preserved when readable; Tesseract runs on scanned or text-poor pages. Choose Run OCR on a paper to process every page.</p>}
+        <p>Use Quick CPU OCR in the paper reader for fast local Indra extraction without changing the batch engine. Indra is best for prose, not exact equations or complex tables.</p>
+        <p className="field-hint">Download CPU models once with <code>hf download datalab-to/indra-ocr --revision v1.1.0</code>. Processing is local; no automatic model downloads run during ingestion.</p>
 
+        {settings.ocr_engine !== 'surya' ? <>
         <div className="setting-row">
           <div className="setting-label">
             <strong>Vision enhancement pass</strong>
@@ -76,25 +115,37 @@ export function DocumentsPanel({
         {settings.ocr_llm_enhancement_enabled ? (
           <div className="field-row setting-nested">
             <label className="field">
-              Enhancement model override
+              Legacy enhancement fallback
               <input
                 value={settings.ocr_llm_model ?? ''}
-                placeholder="Use the default vision model"
+                placeholder="No legacy fallback"
                 onChange={(event) => onChange({ ...settings, ocr_llm_model: event.target.value || null })}
               />
+              <small>
+                Used only when the request, agent, and settings have no vision model selected.
+                The name resolves on Default Ollama, or the first active provider if that profile is unavailable.
+                {settings.default_model_references.vision?.model ? ' A vision default is selected, so this fallback will not be used.' : ''}
+                {' '}Choose a provider and model in Models to set the normal vision default.
+              </small>
             </label>
             <label className="field">
-              Triage model override
+              Ollama triage model (same provider)
               <input
                 value={settings.ocr_llm_triage_model ?? ''}
-                placeholder="Use the default vision model"
+                placeholder="Use the enhancement model"
                 onChange={(event) =>
                   onChange({ ...settings, ocr_llm_triage_model: event.target.value || null })
                 }
               />
+              <small>
+                Used only when enhancement runs on Ollama, on that same provider.
+                Other providers use the enhancement model for triage and validation.
+                An explicit per-document triage choice takes precedence.
+              </small>
             </label>
           </div>
         ) : null}
+        </> : null}
       </div>
     </Panel>
   );

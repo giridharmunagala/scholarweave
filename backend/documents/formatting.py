@@ -59,7 +59,7 @@ class DocumentFormatter:
             if not paragraphs and page["text"].strip():
                 paragraphs = [page["text"].strip()]
             for paragraph in paragraphs:
-                if page.get("llm_enhanced"):
+                if page.get("llm_enhanced") or page.get("content_format") == "markdown":
                     normalized = paragraph.strip()
                 else:
                     normalized = " ".join(
@@ -67,9 +67,12 @@ class DocumentFormatter:
                     )
                 if not normalized:
                     continue
-                if self._looks_like_heading(normalized):
+                markdown_heading = re.fullmatch(r"#{1,6}\s+(.+?)\s*#*", normalized)
+                if markdown_heading or (
+                    page.get("content_format") != "markdown" and self._looks_like_heading(normalized)
+                ):
                     flush()
-                    current_section = normalized[:120]
+                    current_section = (markdown_heading[1] if markdown_heading else normalized)[:120]
                     continue
                 projected = len("\n\n".join(buffer + [normalized]))
                 if buffer and projected > self.settings.max_chunk_chars:

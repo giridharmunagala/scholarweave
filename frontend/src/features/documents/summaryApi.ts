@@ -19,11 +19,17 @@ export const summaryApi = {
       json('POST', { ...options, document_ids: documentIds })),
   versions: (documentId: string) =>
     request<SummaryVersion[]>(base(documentId)),
+  activeRuns: (documentId?: string) =>
+    request<SummaryRun[]>(`/documents/summary-runs${documentId ? `?${new URLSearchParams({ document_id: documentId })}` : ''}`),
   get: (documentId: string, versionId: string) =>
     request<SummaryContent>(`${base(documentId)}/${encodeURIComponent(versionId)}`),
-  promote: (documentId: string, versionId: string) =>
+  canonical: (path: string) =>
+    request<components['schemas']['WorkspaceFileContentResponse']>(`/workspace/files/content?${new URLSearchParams({ path })}`),
+  cancel: (runId: string) =>
+    request<components['schemas']['RunResponse']>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: 'POST' }),
+  promote: (documentId: string, versionId: string, expectedSha256: string) =>
     request<SummaryPromotion>(
       `${base(documentId)}/${encodeURIComponent(versionId)}/promote`,
-      { method: 'POST' },
+      json('POST', { expected_sha256: expectedSha256, replace_existing: true }),
     ),
 };

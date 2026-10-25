@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import threading
 import uuid
+import hashlib
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from backend.utils import dumps_json
-from backend.core.errors import ConflictError, ValidationError
+from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.persistence.files import SafeStorage, StorageError
 from backend.workspace.models import WorkspaceEntry
 from backend.workspace.repository import WorkspaceRepository
 from backend.workspace.layout import WorkspaceLayout
+from backend.workspace.highlights import highlights, connections, search_words
 
 _MAX_TAGS = 32
 _MAX_TAG_LENGTH = 64
@@ -113,16 +116,117 @@ class WorkspaceService:
         if any(kind not in WORKSPACE_KINDS for kind in kinds or []):
             raise ValidationError("Unknown workspace document kind.")
         normalized_tags = self._normalize_tags(tags or [])
+        related = {}
+        if query and (not kinds or "paper_notes" in kinds):
+            related = {
+                item["path"]: f"Connected highlight: {item['text'][:500]}"
+                for item in self._reader_note_matches(query=query)
+                if item["match_type"] == "connected"
+            }
         return [
-            replace(self._document_from_entry(entry), score=score, excerpt=excerpt)
+            replace(self._document_from_entry(entry), score=score, excerpt=excerpt or related.get(entry.path))
             for entry, score, excerpt in self._repository.search(
                 query=query,
                 kinds=kinds or [],
                 tags=normalized_tags,
                 limit=limit,
                 offset=offset,
+                related_paths=list(related),
             )
         ]
+
+    def _reader_note_graph(self) -> dict[str, dict[str, Any]]:
+        entries = self._repository.paper_notes()
+        notes = {}
+        for entry in entries:
+            revision = hashlib.sha256(entry.search_content.encode("utf-8")).hexdigest()
+            for note in highlights(entry.path, entry.search_content):
+                if note.id in notes:
+                    raise ValidationError("Reader highlight identifiers must be unique across paper notes.")
+                notes[note.id] = {
+                    "id": note.id, "text": note.text, "page": note.page, "path": entry.path,
+                    "paper_id": entry.paper_id, "paper_name": entry.paper_name or entry.paper_id,
+                    "sha256": revision, "connection_ids": [], "match_type": "direct", "connected_via": [],
+                }
+        for entry in entries:
+            for source, target in connections(entry.search_content):
+                if source == target or source not in notes or target not in notes or notes[source]["path"] != entry.path:
+                    continue
+                if target not in notes[source]["connection_ids"]:
+                    notes[source]["connection_ids"].append(target)
+                    notes[target]["connection_ids"].append(source)
+        return notes
+
+    def _reader_note_matches(
+        self, *, query: str | None = None, paper_ids: list[str] | None = None,
+        connected_to: str | None = None,
+    ) -> list[dict[str, Any]]:
+        notes = self._reader_note_graph()
+        scoped = {identifier: note for identifier, note in notes.items()
+                  if paper_ids is None or note["paper_id"] in paper_ids}
+        if connected_to:
+            if connected_to not in notes:
+                raise NotFoundError("The reader highlight was not found. Refresh the notes.")
+            scoped = {identifier: note for identifier, note in scoped.items()
+                      if identifier in notes[connected_to]["connection_ids"]}
+        if not query:
+            return list(scoped.values())
+        if not query.strip() or len(query) > 2000:
+            raise ValidationError("Reader note query must contain 1 to 2000 characters.")
+        matches = self._repository.search(
+            query=query, kinds=["paper_notes"], tags=[], limit=max(1, self._repository.count()), offset=0,
+        )
+        ranking = {entry.path: index for index, (entry, _, _) in enumerate(matches)}
+        words = search_words(query)
+        direct = {identifier for identifier, note in scoped.items()
+                  if note["path"] in ranking and words & search_words(f"{note['text']} {note['paper_name']}")}
+        related = {}
+        for identifier in direct:
+            for target in notes[identifier]["connection_ids"]:
+                if target in scoped and target not in direct:
+                    related.setdefault(target, []).append(identifier)
+        return [
+            scoped[identifier] for identifier in sorted(direct, key=lambda key: (ranking[notes[key]["path"]], key))
+        ] + [
+            {**scoped[identifier], "match_type": "connected", "connected_via": sorted(sources)}
+            for identifier, sources in sorted(related.items())
+        ]
+
+    def reader_notes(
+        self, *, query: str | None = None, paper_ids: list[str] | None = None,
+        connected_to: str | None = None, note_id: str | None = None, limit: int = 25, offset: int = 0,
+    ) -> dict[str, Any]:
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValidationError("Reader note pagination requires a limit of 1 to 100 and a nonnegative offset.")
+        with self._index_lock:
+            matches = self._reader_note_matches(query=query, paper_ids=paper_ids, connected_to=connected_to)
+            if note_id:
+                matches = [item for item in matches if item["id"] == note_id]
+                if not matches:
+                    raise NotFoundError("The reader highlight was not found. Show all highlights or refresh the index.")
+            return {"items": matches[offset:offset + limit], "total": len(matches),
+                    "next_offset": offset + limit if offset + limit < len(matches) else None}
+
+    def connect_reader_notes(self, source_id: str, target_id: str, expected_sha256: str) -> WorkspaceDocument:
+        with self._index_lock:
+            if source_id == target_id:
+                raise ValidationError("Choose a different highlight to connect.")
+            notes = self._reader_note_graph()
+            if source_id not in notes or target_id not in notes:
+                raise NotFoundError("A reader highlight was not found. Refresh the notes before connecting.")
+            source, target = notes[source_id], notes[target_id]
+            self._check_revision(source["path"], expected_sha256)
+            self._check_revision(target["path"], target["sha256"])
+            if source["sha256"] != expected_sha256:
+                raise ConflictError("The highlight index changed. Refresh the notes before connecting.")
+            if target_id in source["connection_ids"]:
+                return self.read_file(source["path"])
+            href = "/library?" + urlencode({
+                "document": target["paper_id"], "page": target["page"], "highlight": target_id,
+            })
+            text = (f"\n<!-- scholarweave-highlight-link:{source_id}:{target_id} -->\n"
+                    f"[Connected reader highlight, p. {target['page']}]({href})\n")
+            return self.edit_note(source["path"], content=text, expected_sha256=expected_sha256)
 
     def list_collection(
         self, collection: str, *, limit: int = 50, offset: int = 0,
@@ -133,6 +237,76 @@ class WorkspaceService:
 
     def index_status(self) -> dict[str, Any]:
         return {"engine": "sqlite-fts5-bm25", "indexed_files": self._repository.count()}
+
+    def _cleanup_note_snapshot(self, path: str) -> dict[str, Any]:
+        normalized = self._note_path(path)
+        self._protect_user_artifact(normalized)
+        if WorkspaceLayout.kind(normalized) not in WORKSPACE_COLLECTIONS["notes"]:
+            raise ValidationError("Only standalone notes and canonical paper notes can be cleaned up.")
+        info = self._storage.workspace_file_info(normalized)
+        if info.size_bytes >= 1024:
+            raise ValidationError("Note is no longer smaller than 1024 bytes.")
+        _, content, digest = self._storage.read_workspace_file_snapshot(normalized)
+        size_bytes = len(content.encode("utf-8"))
+        if size_bytes >= 1024:
+            raise ValidationError("Note is no longer smaller than 1024 bytes.")
+        return {"path": normalized, "size_bytes": size_bytes, "sha256": digest}
+
+    def preview_note_cleanup(self) -> dict[str, Any]:
+        candidates = []
+        failed = []
+        with self._index_lock:
+            for path in dict.fromkeys(self._storage.list_workspace_files()):
+                if WorkspaceLayout.kind(path) not in WORKSPACE_COLLECTIONS["notes"]:
+                    continue
+                try:
+                    candidates.append(self._cleanup_note_snapshot(path))
+                except (ValidationError, FileNotFoundError):
+                    continue
+                except (OSError, StorageError, UnicodeError) as error:
+                    failed.append({"path": path, "reason": str(error)})
+        return {"threshold_bytes": 1024, "candidates": candidates, "failed": failed}
+
+    def cleanup_notes(self, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        deleted_paths = []
+        skipped = []
+        failed = []
+        seen = set()
+        with self._index_lock:
+            for candidate in candidates:
+                path = candidate["path"]
+                key = path.replace("\\", "/").casefold()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    current = self._cleanup_note_snapshot(path)
+                    if (
+                        current["sha256"] != candidate["sha256"]
+                        or current["size_bytes"] != candidate["size_bytes"]
+                    ):
+                        raise ValidationError("Note changed since the cleanup preview; it was kept.")
+                except FileNotFoundError:
+                    skipped.append({"path": path, "reason": "Note no longer exists."})
+                    self._repository.delete_path(path)
+                    continue
+                except (ValidationError, StorageError) as error:
+                    skipped.append({"path": path, "reason": str(error)})
+                    continue
+                except (OSError, UnicodeError) as error:
+                    failed.append({"path": path, "reason": str(error)})
+                    continue
+                try:
+                    self.delete_user_file(current["path"])
+                    deleted_paths.append(current["path"])
+                except FileNotFoundError:
+                    skipped.append({"path": path, "reason": "Note no longer exists."})
+                    self._repository.delete_path(current["path"])
+                except ValidationError as error:
+                    skipped.append({"path": path, "reason": str(error)})
+                except (OSError, StorageError) as error:
+                    failed.append({"path": path, "reason": str(error)})
+        return {"deleted_paths": deleted_paths, "skipped": skipped, "failed": failed}
 
     def refresh_index(self) -> dict[str, Any]:
         with self._index_lock:
@@ -170,6 +344,33 @@ class WorkspaceService:
                 existing=self._repository.get(stored.relative_path),
             )
             return replace(document, sha256=stored.sha256)
+
+    def _protect_user_artifact(self, path: str) -> None:
+        self._protect_track_path(path)
+        absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, path)
+        canonical = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix().casefold()
+        if (
+            canonical.startswith((".scholarweave/", "inbox/attachments/"))
+            or (
+                canonical.startswith("library/papers/")
+                and WorkspaceLayout.kind(canonical) not in {"paper_notes", "paper_summary"}
+            )
+            or (canonical.startswith("research/") and canonical.endswith(".json"))
+        ):
+            raise ValidationError("Generated artifacts are read-only; use their owning paper or research workflow.")
+
+    def write_user_file(
+        self, path: str, content: Any, *, tags: list[str] | None = None,
+        expected_sha256: str | None = None,
+    ) -> WorkspaceDocument:
+        with self._index_lock:
+            self._protect_user_artifact(path)
+            return self.write_file(path, content, tags=tags, expected_sha256=expected_sha256)
+
+    def delete_user_file(self, path: str) -> None:
+        with self._index_lock:
+            self._protect_user_artifact(path)
+            self.delete_file(path)
 
     def _check_revision(self, path: str, expected_sha256: str | None) -> None:
         if expected_sha256 is None:
@@ -322,17 +523,18 @@ class WorkspaceService:
         return resolved
 
     def delete_folder(self, path: str) -> None:
-        absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, path)
-        normalized_path = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix()
-        self._protect_track_path(normalized_path)
-        if not normalized_path or normalized_path == ".":
-            raise ValueError("The workspace root cannot be deleted.")
-        if normalized_path in {"library", "knowledge", "projects", "inbox"} or (
-            normalized_path == WorkspaceLayout.paper_root
-            or normalized_path.startswith(f"{WorkspaceLayout.paper_root}/")
-        ):
-            raise ValueError("Managed research folders cannot be deleted through workspace tools.")
         with self._index_lock:
+            absolute = self._storage.resolve_path(self._storage.settings.workspace_dir, path)
+            normalized_path = absolute.relative_to(self._storage.settings.workspace_dir.resolve()).as_posix()
+            canonical = normalized_path.casefold()
+            self._protect_track_path(normalized_path)
+            if not normalized_path or normalized_path == ".":
+                raise ValidationError("The workspace root cannot be deleted.")
+            protected_roots = (WorkspaceLayout.paper_root, "research", ".scholarweave", "inbox/attachments")
+            if canonical in {"library", "knowledge", "projects", "inbox"} or any(
+                canonical == root or canonical.startswith(f"{root}/") for root in protected_roots
+            ):
+                raise ValidationError("Managed research folders cannot be deleted through workspace tools; use their owning workflow.")
             self._storage.delete_workspace_folder(normalized_path)
             self._repository.delete_prefix(normalized_path)
 
@@ -433,6 +635,16 @@ class WorkspaceService:
         with self._index_lock:
             return self._ensure_paper_folder(document_id, title)
 
+    def ensure_paper_notes(self, document_id: str, title: str) -> WorkspaceDocument:
+        with self._index_lock:
+            paper = self._repository.paper(document_id, self._normalize_paper_name(title))
+            path = f"{paper.folder}/notes.md"
+            self._ensure_paper_file(
+                path, self._paper_templates(paper.folder, title)[path],
+                document_id=document_id, paper_name=paper.name,
+            )
+            return self.read_file(path)
+
     @staticmethod
     def _paper_templates(folder: str, title: str) -> dict[str, str]:
         return {
@@ -460,28 +672,12 @@ class WorkspaceService:
     def _ensure_paper_folder(self, document_id: str, title: str) -> dict[str, Any]:
         paper = self._repository.paper(document_id, self._normalize_paper_name(title))
         folder = paper.folder
-        paper_tag = f"paper:{document_id}"
         paper_name = paper.name
         templates = self._paper_templates(folder, title)
         created: list[str] = []
         for path, content in templates.items():
-            existing = self._repository.get(path)
-            role = Path(path).stem
-            required_tags = ["paper", paper_tag, role]
-            existing_tags = list(existing.tags_json or []) if existing is not None else []
-            tags = self._normalize_tags([*existing_tags, *required_tags])
-            try:
-                self._storage.workspace_file_info(path)
-            except FileNotFoundError:
-                self.write_file(path, content, tags=tags)
+            if self._ensure_paper_file(path, content, document_id=document_id, paper_name=paper_name):
                 created.append(path)
-                continue
-            self._index_file(
-                path,
-                tags=tags,
-                existing=existing,
-                paper_names={document_id: paper_name},
-            )
         self.set_paper_name(document_id, paper_name)
         return {
             "document_id": document_id,
@@ -491,6 +687,18 @@ class WorkspaceService:
             "paper_name": paper_name,
             "created": created,
         }
+
+    def _ensure_paper_file(self, path: str, content: str, *, document_id: str, paper_name: str) -> bool:
+        existing = self._repository.get(path)
+        existing_tags = list(existing.tags_json or []) if existing is not None else []
+        tags = self._normalize_tags([*existing_tags, "paper", f"paper:{document_id}", Path(path).stem])
+        try:
+            self._storage.workspace_file_info(path)
+        except FileNotFoundError:
+            self.write_file(path, content, tags=tags)
+            return True
+        self._index_file(path, tags=tags, existing=existing, paper_names={document_id: paper_name})
+        return False
 
     def set_paper_name(self, document_id: str, name: str) -> dict[str, str]:
         normalized_name = self._normalize_paper_name(name)
@@ -551,6 +759,9 @@ class WorkspaceService:
         info = self._storage.workspace_file_info(path)
         media_type, content = self._storage.read_workspace_file(info.relative_path)
         searchable_content = content if isinstance(content, str) else dumps_json(content)
+        if info.relative_path.startswith("research/"):
+            # Research prose and receipts are file-only, including after an explicit index refresh.
+            searchable_content = ""
         paper_id = WorkspaceLayout.paper_id(info.relative_path)
         paper_name = (
             (paper_names or {}).get(paper_id)

@@ -26,6 +26,21 @@ class FakeReader:
         pass
 
 
+@pytest.mark.parametrize(("text", "expected", "warns"), [
+    ("  Valid \u4e2d\u6587 \U0001f600 \U0001d400  ", "Valid \u4e2d\u6587 \U0001f600 \U0001d400", False),
+    ("Pair \ud835\udc00", "Pair \U0001d400", True),
+    ("Broken \ud835\ud835 and \udc00", "Broken \ufffd\ufffd and \ufffd", True),
+    ("Pair \ud835\udc00, broken \ud835, emoji \U0001f600", "Pair \U0001d400, broken \ufffd, emoji \U0001f600", True),
+])
+def test_native_text_repairs_surrogates_before_utf8_encoding(text, expected, warns, caplog):
+    reader = FakeReader("paper.pdf")
+    reader.pages = [FakePage(text)]
+    actual = DocumentOCR._extract_native_text(reader, 0)
+    assert actual == expected
+    assert actual.encode("utf-8").decode("utf-8") == expected
+    assert ("PDF page 1" in caplog.text) is warns
+
+
 @pytest.mark.anyio
 @pytest.mark.parametrize("force_ocr", [False, True])
 async def test_pdf_parsing_and_ocr_probe_run_off_event_loop(
@@ -92,6 +107,40 @@ async def test_pdf_parsing_and_ocr_probe_run_off_event_loop(
     assert names.count("extract") == 2
     assert names.count("available") == int(force_ocr)
     assert all(thread != event_loop_thread for _operation, thread in operations), operations
+
+
+@pytest.mark.anyio
+async def test_cached_ocr_pages_remain_available_for_optional_vision_enhancement(
+    test_settings, monkeypatch,
+) -> None:
+    ocr = DocumentOCR(test_settings)
+    monkeypatch.setattr("backend.documents.ocr.PdfReader", FakeReader)
+    monkeypatch.setattr(FakeReader, "pages", [FakePage(""), FakePage("")])
+    monkeypatch.setattr(ocr, "render_page_png", lambda *_args: b"page-image")
+
+    async def unexpected_ocr(*_args):
+        pytest.fail("Cached pages must not make OCR requests")
+
+    monkeypatch.setattr(ocr, "ocr_image", unexpected_ocr)
+    cached = {
+        1: {"page": 1, "text": "Saved OCR draft.", "ocr_used": True},
+        2: {
+            "page": 2, "text": "Previously enhanced evidence.", "ocr_used": True,
+            "llm_enhanced": True, "ocr_quality": "good",
+        },
+    }
+    progress = []
+
+    async def report(payload):
+        progress.append(payload)
+
+    pages = await ocr.extract_pages(
+        Path("paper.pdf"), cached_pages=cached, retain_page_images=True, progress=report,
+    )
+    assert pages[0]["_image_png"] == b"page-image"
+    assert pages[1]["text"] == cached[2]["text"]
+    assert "_image_png" not in pages[1]
+    assert progress[0]["completed_pages"] == progress[0]["reused_pages"] == 2
 
 
 @pytest.mark.anyio

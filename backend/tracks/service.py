@@ -415,6 +415,12 @@ class TrackService:
                                      paper_ids=sorted([*papers, document_id]))
             return self.get(track_id)
 
+    def reader_notes(self, track_id: str, *, query: str | None = None, limit: int = 25, offset: int = 0) -> dict:
+        self._track(track_id)
+        return self.workspace.reader_notes(
+            query=query, paper_ids=self.repository.paper_ids(track_id), limit=limit, offset=offset,
+        )
+
     def remove_paper(self, track_id: str, document_id: str) -> TrackDetailResponse:
         with self.workspace.mutation_lock:
             self._track(track_id)

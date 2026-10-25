@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse, Response
 from backend.core.http import services
 from backend.research.reviews.schemas import CandidatePage, PaperProgressPage, PaperReview, ReviewClearRequest, ReviewClearResponse, ReviewControlRequest, ReviewCreateRequest, ReviewResponse, ReviewReference
 from backend.research.reviews.schemas import AnalysisProgress, ReviewActivityPage, ReviewActivityDetail
+from backend.research.reviews.schemas import UnderstandingSnapshot, ReviewTrackRequest
 
 router = APIRouter(prefix="/literature-reviews", tags=["literature reviews"])
 
@@ -40,6 +41,13 @@ def review_candidates(
     sort: Literal["relevance", "year", "title"] = "relevance",
 ) -> CandidatePage:
     return container.reviews.candidates(review_id, limit=limit, offset=offset, sort=sort)
+
+
+@router.put("/{review_id}/track", response_model=ReviewResponse)
+async def assign_review_track(
+    review_id: str, payload: ReviewTrackRequest, container=Depends(services),
+) -> ReviewResponse:
+    return await container.reviews.assign_track(review_id, payload.track_id, payload.expected_revision)
 
 
 @router.get("/{review_id}/events")
@@ -95,6 +103,11 @@ def review_analysis(
     offset: int = Query(default=0, ge=0), container=Depends(services),
 ) -> AnalysisProgress | None:
     return container.reviews.analysis_progress(review_id, limit=limit, offset=offset)
+
+
+@router.get("/{review_id}/understanding", response_model=UnderstandingSnapshot | None)
+def review_understanding(review_id: str, container=Depends(services)) -> UnderstandingSnapshot | None:
+    return container.reviews.topic_research.understanding(review_id)
 
 
 @router.get("/{review_id}/activity", response_model=ReviewActivityPage)

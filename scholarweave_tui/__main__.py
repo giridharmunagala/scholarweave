@@ -22,6 +22,7 @@ def main() -> None:
         description="ScholarWeave research cockpit. Starts or reuses your local backend automatically.",
     )
     parser.add_argument("--build-frontend", action="store_true", help="Build the web frontend before launching (requires Node.js).")
+    parser.add_argument("--ensure-frontend", action="store_true", help="Build the web frontend only when its verified assets are missing or outdated.")
     parser.add_argument("--web", action="store_true", help="Open the web app in your browser instead of the terminal UI.")
     parser.add_argument("--connect-only", action="store_true", help="Use an existing backend without starting one.")
     parser.add_argument("--startup-timeout", type=_positive_timeout, default=60, help="Backend readiness timeout in seconds (default: 60).")
@@ -46,8 +47,8 @@ def main() -> None:
     root = Path(__file__).resolve().parents[1]
     os.chdir(root)
     try:
-        if args.build_frontend:
-            build_frontend(root)
+        if args.build_frontend or args.ensure_frontend:
+            build_frontend(root, force=args.build_frontend)
         with BackendSession(
             base_url, root, connect_only=args.connect_only, timeout=args.startup_timeout,
         ) as session:

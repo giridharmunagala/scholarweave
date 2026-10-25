@@ -14,21 +14,107 @@ const runtimeSettings = {
   tool_result_max_tokens: 2000, agent_epoch_max_turns: 10, agent_max_epochs: 5,
   agent_run_timeout_seconds: 600, tool_call_timeout_seconds: 60,
   tool_read_retry_attempts: 2, retrieval_max_context_chars: 10000,
+  ocr_engine: 'tesseract', ocr_surya_base_url: 'http://localhost:18080/v1',
+  ocr_surya_model: 'Surya-ocr-2', ocr_surya_parallel: 10, ocr_surya_max_tokens: 8192,
+  ocr_indra_fallback_enabled: false,
   ocr_llm_enhancement_enabled: false, ocr_llm_model: null, ocr_llm_triage_model: null,
 };
 
 describe('runtime context settings', () => {
+  it('saves and clears a smaller task model independently from the main model', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
+    const chat = { provider_profile_id: 'local', model: 'large-model' };
+    let saved: Record<string, unknown> | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
+      return new Response(JSON.stringify(String(input).split('?')[0].endsWith('/providers') ? [{
+        id: 'local', name: 'Llama router', kind: 'openai_compatible', state: 'active',
+        models: [
+          { name: 'large-model', enabled: true, capabilities: ['chat', 'tools'] },
+          { name: 'small-model', enabled: true, capabilities: ['chat', 'tools'] },
+          { name: 'disabled-model', enabled: false, capabilities: ['chat'] },
+          { name: 'embed-only', enabled: true, capabilities: ['embedding'] },
+        ],
+      }] : { ...runtimeSettings, default_model_references: { chat }, ...(saved ?? {}) }));
+    }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    const save = () => [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Save changes'))!;
+    try {
+      await act(async () => root.render(<SettingsPage />));
+      const picker = () => container.querySelector<HTMLButtonElement>('[aria-label="Default Small tasks model"]')!;
+      await act(async () => picker().click());
+      const options = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+      expect(options.some((option) => /disabled-model|embed-only/.test(option.textContent ?? ''))).toBe(false);
+      await act(async () => options.find((option) => option.textContent?.includes('small-model'))!.click());
+      await act(async () => save().click());
+      expect(saved).toMatchObject({
+        default_model_references: { chat, small_tasks: { provider_profile_id: 'local', model: 'small-model' } },
+      });
+      await act(async () => picker().click());
+      await act(async () => [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+        .find((option) => option.textContent?.includes('Use main agent model'))!.click());
+      await act(async () => save().click());
+      expect(saved).toMatchObject({ default_model_references: { chat } });
+      expect(saved).not.toHaveProperty('default_model_references.small_tasks');
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('saves local layout OCR configuration separately from vision enhancement', async () => {
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    let saved: Record<string, unknown> | null = null;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
+      return new Response(JSON.stringify(String(input).split('?')[0].endsWith('/providers')
+        ? [] : { ...runtimeSettings, ...(saved ?? {}) }));
+    }));
+    const container = document.createElement('div');
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<SettingsPage />));
+      const button = (text: string) => [...container.querySelectorAll('button')].find((item) => item.textContent?.includes(text))!;
+      await act(async () => button('Documents').click());
+      const engine = container.querySelector<HTMLSelectElement>('select')!;
+      await act(async () => {
+        engine.value = 'surya';
+        engine.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      expect(container.textContent).toContain('Surya server URL');
+      expect(container.querySelector('[aria-label="Vision enhancement pass"]')).toBeNull();
+      const parallel = [...container.querySelectorAll('label')].find((label) => label.textContent?.includes('Parallel OCR pages'))!.querySelector('input')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(parallel, '48');
+        parallel.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      expect(parallel.checkValidity()).toBe(true);
+      await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Indra CPU recovery"]')!.click());
+      await act(async () => button('Save changes').click());
+      expect(saved).toMatchObject({
+        ocr_engine: 'surya', ocr_surya_base_url: 'http://localhost:18080/v1',
+        ocr_surya_model: 'Surya-ocr-2', ocr_surya_parallel: 48, ocr_surya_max_tokens: 8192,
+        ocr_llm_enhancement_enabled: false,
+        ocr_indra_fallback_enabled: true,
+      });
+    } finally {
+      await act(async () => root.unmount());
+      vi.unstubAllGlobals();
+    }
+  });
   it('saves an enabled System One default without offering chat-only models', async () => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: vi.fn() });
     let saved: Record<string, unknown> | null = null;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
-      const providers = [{ id: 'local', name: 'Local', kind: 'openai_compatible', models: [
+      const providers = [{ id: 'local', name: 'Local', kind: 'openai_compatible', state: 'active', models: [
         { name: 'system-one', enabled: true, capabilities: ['decision'] },
         { name: 'main-chat', enabled: true, capabilities: ['chat'] },
       ] }];
-      return new Response(JSON.stringify(String(input).endsWith('/providers') ? providers : { ...runtimeSettings, ...(saved ?? {}) }));
+      return new Response(JSON.stringify(String(input).split('?')[0].endsWith('/providers') ? providers : { ...runtimeSettings, ...(saved ?? {}) }));
     }));
     const container = document.createElement('div');
     const root = createRoot(container);
@@ -47,6 +133,7 @@ describe('runtime context settings', () => {
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(parallel, '12');
         parallel.dispatchEvent(new Event('input', { bubbles: true }));
       });
+
       const save = [...container.querySelectorAll('button')].find((button) => button.textContent?.includes('Save changes'));
       await act(async () => save!.click());
       expect(saved).toMatchObject({
@@ -65,7 +152,7 @@ describe('runtime context settings', () => {
     let saved: Record<string, unknown> | null = null;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
-      const body = String(input).endsWith('/providers') ? [] : { ...settings, ...(saved ?? {}) };
+      const body = String(input).split('?')[0].endsWith('/providers') ? [] : { ...settings, ...(saved ?? {}) };
       return new Response(JSON.stringify(body), {
         status: 200, headers: { 'content-type': 'application/json' },
       });
@@ -116,7 +203,7 @@ describe('runtime context settings', () => {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === 'PUT') saved = JSON.parse(String(init.body));
       return new Response(JSON.stringify(
-        String(input).endsWith('/providers') ? [] : { ...settings, ...(saved ?? {}) },
+        String(input).split('?')[0].endsWith('/providers') ? [] : { ...settings, ...(saved ?? {}) },
       ), { status: 200, headers: { 'content-type': 'application/json' } });
     }));
     const container = document.createElement('div');

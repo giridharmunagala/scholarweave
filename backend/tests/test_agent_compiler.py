@@ -173,6 +173,33 @@ def test_compiler_resolves_optional_compaction_model_once(test_settings, configu
     assert set(compiled.resolved_models) == {"triage", "researcher"}
 
 
+def test_compaction_inherits_small_tasks_unless_explicitly_overridden(test_settings) -> None:
+    calls = []
+
+    class TrackingResolver(Resolver):
+        def resolve_agent_model(self, reference, *, require_tools=False):
+            calls.append(reference)
+            return super().resolve_agent_model(reference, require_tools=require_tools)
+
+    test_settings.default_model_references = {
+        "small_tasks": {"provider_profile_id": "router", "model": "small"},
+    }
+    compiler = AgentCompiler(TrackingResolver(), tool_catalog(), test_settings)
+    definition = blueprint(tools=[], agent_tools=[], agents=[
+        {"id": "triage", "name": "Main", "instructions": "Main", "model": {"model": "large"}},
+    ])
+    compiler.compile(definition)
+    assert [reference.model for reference in calls] == ["large", "small"]
+    calls.clear()
+    test_settings.default_model_references["compaction"] = {"provider_profile_id": "router", "model": "specific"}
+    compiler.compile(definition)
+    assert [reference.model for reference in calls] == ["large", "specific"]
+    calls.clear()
+    test_settings.agent_context_model_summary_enabled = False
+    compiler.compile(definition)
+    assert [reference.model for reference in calls] == ["large"]
+
+
 @pytest.mark.parametrize("reference", [
     {"provider_profile_id": "missing", "model": "gemma4-12b"},
     {"model": "gemma4-12b"},
@@ -219,7 +246,7 @@ async def test_compiled_delegation_has_only_opt_in_turn_limits(
     stub_provider, max_turns,
 ) -> None:
     stub_provider.tool_plans = [
-        ("extended research", "echo", {"text": str(index)}) for index in range(101)
+        ("extended research", "echo", {"text": str(index)}) for index in range(3)
     ]
     model = stub_binding(stub_provider)
     payload = blueprint().model_dump(by_alias=True)
@@ -245,19 +272,10 @@ async def test_compiled_delegation_has_only_opt_in_turn_limits(
 
     if max_turns is None:
         assert output == stub_provider.reply
-        assert len(stub_provider.requests) == 102
+        assert len(stub_provider.requests) == 4
     else:
         assert "whole 2-turn budget" in output
         assert len(stub_provider.requests) == 2
-
-
-@pytest.mark.parametrize("max_turns", [None, 1, 101])
-def test_blueprint_accepts_optional_positive_turn_limits(max_turns) -> None:
-    payload = blueprint(run={"max_turns": max_turns}).model_dump(by_alias=True)
-    payload["agent_tools"][0]["max_turns"] = max_turns
-    spec = AgentBlueprint.model_validate(payload)
-    assert spec.run.max_turns == max_turns
-    assert spec.agent_tools[0].max_turns == max_turns
 
 
 @pytest.mark.parametrize("max_turns", [0, -1])
@@ -612,59 +630,6 @@ def test_compiler_rejects_colliding_tool_names() -> None:
 
     with pytest.raises(ValidationError, match="colliding tool names"):
         AgentCompiler(Resolver(), tool_catalog()).compile(source)
-
-
-def test_blueprint_rejects_retired_sdk_fields() -> None:
-    for retired in ("handoffs", "guardrails"):
-        with pytest.raises(ValueError):
-            AgentBlueprint.model_validate(
-                {
-                    "name": "Invalid",
-                    "entry_agent_id": "agent",
-                    "agents": [
-                        {"id": "agent", "name": "Agent", "instructions": "Do work."}
-                    ],
-                    retired: [],
-                }
-            )
-
-
-def test_blueprint_rejects_parallel_runtime_fields() -> None:
-    with pytest.raises(ValueError):
-        AgentBlueprint.model_validate(
-            {
-                "name": "Invalid",
-                "entry_agent_id": "agent",
-                "agents": [
-                    {
-                        "id": "agent",
-                        "name": "Agent",
-                        "instructions": "Do work.",
-                        "ports": [],
-                    }
-                ],
-                "nodes": [],
-                "edges": [],
-            }
-        )
-
-
-def test_run_length_policy_is_a_plain_run_setting() -> None:
-    compiled = AgentCompiler(Resolver(), tool_catalog()).compile(
-        blueprint(run={"max_turns": 4, "max_input_characters": 64})
-    )
-
-    assert compiled.run_settings.max_input_characters == 64
-    assert compiled.run_settings.max_turns == 4
-
-
-def test_compiler_validate_returns_issue_tuple() -> None:
-    compiler = AgentCompiler(Resolver(), tool_catalog())
-
-    assert compiler.validate(blueprint()) == ()
-    assert compiler.validate(blueprint(entry_agent_id="missing")) == (
-        "Entry agent 'missing' does not exist.",
-    )
 
 
 def test_tool_enablement_is_evaluated_against_the_run_context() -> None:

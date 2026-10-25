@@ -71,7 +71,9 @@ class _TransientClient:
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self._create_completion)
         )
-        self.embeddings = SimpleNamespace(create=self._create_embedding)
+        self.embeddings = SimpleNamespace(
+            with_raw_response=SimpleNamespace(create=self._create_embedding),
+        )
 
     async def __aenter__(self):
         return self
@@ -92,7 +94,11 @@ class _TransientClient:
         )
 
     async def _create_embedding(self, **_kwargs):
-        return SimpleNamespace(data=[SimpleNamespace(embedding=[1.0, 2.0])])
+        return SimpleNamespace(
+            http_response=httpx.Response(200, json={
+                "data": [{"index": 0, "embedding": [1.0, 2.0]}],
+            }),
+        )
 
 
 @pytest.mark.anyio

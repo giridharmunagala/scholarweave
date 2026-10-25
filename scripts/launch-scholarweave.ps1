@@ -8,7 +8,7 @@ $ErrorActionPreference = "Stop"
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $Host.UI.RawUI.WindowTitle = "ScholarWeave"
 try {
-    $arguments = @("-m", "scholarweave_tui", "--build-frontend", "--api-url", $ApiUrl)
+    $arguments = @("-m", "scholarweave_tui", "--ensure-frontend", "--api-url", $ApiUrl)
     if ($Check) { $arguments += "--check" }
     & (Join-Path $root ".venv\Scripts\python.exe") @arguments
     if ($LASTEXITCODE -ne 0) { throw "ScholarWeave exited with code $LASTEXITCODE. See the error above." }

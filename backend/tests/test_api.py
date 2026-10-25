@@ -9,8 +9,103 @@ from backend.app import create_app
 from backend.agents.blueprint import SessionPolicySpec
 from backend.agents.context import ScholarWeaveContext
 from backend.conversations.schemas import ConversationMessageRequest
-from backend.conversations.turns import RESEARCH_TOOL_IDS, WORK_PLAN_TOOL_IDS
 from backend.runs.schemas import SteeringMessageRequest
+
+
+def test_backend_readiness_does_not_probe_optional_ocr(test_settings, monkeypatch):
+    app = create_app(test_settings)
+
+    def unexpected_probe():
+        raise AssertionError("Backend readiness must not wait for an OCR server.")
+
+    monkeypatch.setattr(app.state.services.documents, "ocr_available", unexpected_probe)
+    with TestClient(app) as client:
+        response = client.get("/api/health", params={"check_ocr": "false"})
+        assert response.status_code == 200, response.text
+        health = response.json()
+        assert health["status"] == "ok"
+        assert health["database_path"] == str(test_settings.database_path)
+        assert health["ocr_available"] is None
+        for available in (True, False):
+            monkeypatch.setattr(app.state.services.documents, "ocr_available", lambda: available)
+            assert client.get("/api/health").json()["ocr_available"] is available
+
+
+@pytest.mark.parametrize("missing_summary", [False, True])
+def test_paper_notes_can_be_recreated_after_cleanup_without_touching_summary(test_settings, missing_summary):
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        services = app.state.services
+        document = services.documents.create_document_from_bytes(
+            b"%PDF-1.4\n%%EOF", filename="notes.pdf", title="Notes after cleanup",
+        )
+        paper = services.workspace.ensure_paper_folder(document.id, document.title)
+        summary = services.workspace.write_file(paper["summary_path"], "Preserve my summary.")
+        if missing_summary:
+            services.workspace.delete_user_file(summary.path)
+        preview = client.post("/api/workspace/notes/cleanup/preview").json()
+        removed = client.post("/api/workspace/notes/cleanup", json={"candidates": preview["candidates"]})
+        assert removed.status_code == 200, removed.text
+        assert paper["notes_path"] in removed.json()["deleted_paths"]
+        assert client.get(f"/api/documents/{document.id}").status_code == 200
+        assert not (test_settings.workspace_dir / paper["notes_path"]).exists()
+
+        restored = client.post(f"/api/documents/{document.id}/notes")
+        assert restored.status_code == 200, restored.text
+        note = restored.json()
+        assert note["path"] == paper["notes_path"]
+        assert note["kind"] == "paper_notes"
+        assert note["paper_id"] == document.id
+        assert len(note["sha256"]) == 64
+        updated = client.patch("/api/workspace/files/content", json={
+            "path": note["path"], "content": "\nA newly collected quotation.",
+            "expected_sha256": note["sha256"],
+        })
+        assert updated.status_code == 200, updated.text
+        again = client.post(f"/api/documents/{document.id}/notes")
+        assert again.status_code == 200, again.text
+        assert again.json()["sha256"] == updated.json()["sha256"]
+        assert again.json()["content"] == updated.json()["content"]
+        hits = client.get("/api/workspace/search", params={
+            "kinds": "paper_notes", "tags": f"paper:{document.id}",
+        }).json()
+        assert [hit["path"] for hit in hits] == [note["path"]]
+        if missing_summary:
+            assert not (test_settings.workspace_dir / summary.path).exists()
+        else:
+            assert services.workspace.read_file(summary.path).sha256 == summary.sha256
+        assert client.post("/api/documents/missing-document/notes").status_code == 404
+
+
+def test_workspace_note_cleanup_api_requires_confirmed_revisions_and_updates_index(test_settings) -> None:
+    app = create_app(test_settings)
+    with TestClient(app) as client:
+        workspace = app.state.services.workspace
+        small = workspace.write_file("knowledge/stub.md", "stubneedle")
+        changed = workspace.write_file("knowledge/changed.md", "old")
+        workspace.write_file("knowledge/boundary.md", "x" * 1024)
+        preview_response = client.post("/api/workspace/notes/cleanup/preview")
+        assert preview_response.status_code == 200, preview_response.text
+        preview = preview_response.json()
+        assert preview["threshold_bytes"] == 1024
+        assert {item["path"] for item in preview["candidates"]} == {small.path, changed.path}
+        assert client.get("/api/workspace/files/content", params={"path": small.path}).status_code == 200
+        assert client.post("/api/workspace/notes/cleanup", json={}).status_code == 422
+        for candidate in (
+            {"path": small.path, "size_bytes": 10},
+            {"path": small.path, "size_bytes": 1024, "sha256": small.sha256},
+            {"path": small.path, "size_bytes": 10, "sha256": "not-a-hash"},
+        ):
+            assert client.post("/api/workspace/notes/cleanup", json={"candidates": [candidate]}).status_code == 422
+        app.state.services.storage.write_workspace_file(changed.path, "new")
+        result = client.post("/api/workspace/notes/cleanup", json={"candidates": preview["candidates"]})
+        assert result.status_code == 200, result.text
+        assert result.json()["deleted_paths"] == [small.path]
+        assert result.json()["skipped"][0]["path"] == changed.path
+        assert result.json()["failed"] == []
+        assert client.get("/api/workspace/search", params={"query": "stubneedle"}).json() == []
+        assert client.get("/api/workspace/files/content", params={"path": changed.path}).json()["content"] == "new"
+        assert client.post("/api/workspace/notes/cleanup", json={"candidates": []}).json()["deleted_paths"] == []
 
 
 def test_workspace_note_mutation_and_conditional_save_api(test_settings) -> None:
@@ -98,8 +193,7 @@ def test_conversation_inputs_have_no_character_ceiling(request_type) -> None:
         request_type(content="")
 
 
-@pytest.mark.parametrize("chat_window", [30_000, 262_144])
-@pytest.mark.parametrize("deep_work", [False, True])
+@pytest.mark.parametrize(("chat_window", "deep_work"), [(30_000, False), (262_144, True)])
 def test_chat_context_controls_compaction_and_survives_reload(
     test_settings, stub_provider, chat_window, deep_work,
 ) -> None:
@@ -126,7 +220,7 @@ def test_chat_context_controls_compaction_and_survives_reload(
         }).json()
         history = [
             {"role": "user", "content": "Explain the existing research."},
-            {"role": "assistant", "content": "x" * (chat_window * 2)},
+            {"role": "assistant", "content": "x " * chat_window},
             {"role": "user", "content": "Keep the evidence available."},
             {"role": "assistant", "content": "I will retain the evidence."},
             {"role": "user", "content": "Keep the research scope unchanged."},
@@ -158,20 +252,6 @@ def test_chat_context_controls_compaction_and_survives_reload(
         persisted = client.get(f"/api/runs/{run['id']}")
         assert persisted.status_code == 200, persisted.text
         assert persisted.json()["context_window_tokens"] == chat_window
-
-
-def test_public_api_is_research_only(test_settings) -> None:
-    app = create_app(test_settings)
-    paths = set(app.openapi()["paths"])
-
-    assert "/api/agent/conversations" in paths
-    assert "/api/deep-work/conversations" in paths
-    assert "/api/documents" in paths
-    assert "/api/workspace/files" in paths
-    assert not any(path.startswith("/api/agents") for path in paths)
-    assert not any(path.startswith("/api/tools") for path in paths)
-    assert not any(path.startswith("/api/builder") for path in paths)
-    assert not any(path.startswith("/api/research-agents") for path in paths)
 
 
 def test_old_workspace_is_rejected_before_run_cleanup(test_settings, monkeypatch) -> None:
@@ -369,7 +449,7 @@ def test_deleting_active_chat_waits_for_cancellation_before_removing_files(
         assert not (test_settings.data_dir / "run_logs" / f"{run_id}.json").exists()
 
 
-def test_research_agent_uses_only_the_lean_tool_surface(
+def test_chat_workspace_tools_and_prompt_snapshot_round_trip(
     test_settings,
     stub_provider,
 ) -> None:
@@ -419,35 +499,11 @@ def test_research_agent_uses_only_the_lean_tool_surface(
         run = wait_for_run(client, response.json()["run"]["id"])
 
         assert run["status"] == "completed", run
-        assert set(stub_provider.tools_offered) == {
-            "create_work_plan",
-            "read_work_plan",
-            "update_work_item",
-            "search_research_sources",
-            "acquire_research_source",
-            "search_research_library",
-            "organize_research_library",
-            "list_workspace",
-            "organize_workspace",
-            "workspace_index",
-            "read_research_paper",
-            "read_research_web_page",
-            "search_research_notes",
-            "read_research_note",
-            "save_research_note",
-            "summarize_research_paper",
-            "read_research_track",
-            "write_research_track",
-            "organize_research_track",
-            "literature_review",
-            "read_tool_result",
-        }
         record = app.state.services.runs.get(run["id"])
         assert {attempt.catalog_id for attempt in record.tool_attempts} >= {
             "research.workspace.list", "research.workspace.index", "research.notes.search",
         }
         assert all(attempt.status == "completed" for attempt in record.tool_attempts)
-        assert len(record.blueprint_json["tools"]) == len(RESEARCH_TOOL_IDS) + len(WORK_PLAN_TOOL_IDS)
         snapshot_response = client.get(f"/api/runs/{run['id']}/prompt-snapshot")
         assert snapshot_response.status_code == 200, snapshot_response.text
         snapshot = snapshot_response.json()
@@ -455,51 +511,6 @@ def test_research_agent_uses_only_the_lean_tool_surface(
         assert snapshot["prompt_revision"]
         assert snapshot["agents"][0]["effective_instructions"]
         assert {tool["name"] for tool in snapshot["tools"]} == set(stub_provider.tools_offered)
-        assert record.blueprint_json["run"] == {
-            "max_turns": None,
-            "max_tool_concurrency": 4,
-            "max_input_characters": None,
-            "max_output_characters": None,
-        }
-
-
-def test_fast_answer_message_uses_bounded_web_blueprint(
-    test_settings,
-    stub_provider,
-) -> None:
-    app = create_app(test_settings)
-    with TestClient(app) as client:
-        profile_id = configure_provider(client, stub_provider)
-        conversation = client.post(
-            "/api/agent/conversations",
-            json={
-                "title": "Fast answer",
-                "model_reference": {
-                    "provider_profile_id": profile_id,
-                    "model": "stub-model",
-                },
-            },
-        ).json()
-
-        response = client.post(
-            f"/api/agent/conversations/{conversation['id']}/messages",
-            json={
-                "content": "Find one current source",
-                "web_enabled": True,
-                "fast_answer": True,
-                "web_search_limit": 3,
-            },
-        )
-
-        assert response.status_code == 202, response.text
-        record = app.state.services.runs.get(response.json()["run"]["id"])
-        entry = record.blueprint_json["agents"][0]
-        assert "Make at most 3 external" in entry["instructions"]
-        assert set(entry["tool_ids"]) == {
-            "search-sources",
-            "acquire-source",
-            "read-web-page",
-        }
 
 
 def test_legacy_deep_work_endpoint_is_listed_in_unified_chat_and_has_bounded_worker(

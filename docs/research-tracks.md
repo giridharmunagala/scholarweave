@@ -22,6 +22,35 @@ The database stores track identity and paper/conversation associations, not a co
 the document bodies or experiment statuses. Existing papers remain in the library; a paper can
 be linked to several tracks without being copied or physically moved.
 
+## Add existing research
+
+Open a track and choose **Add existing** to link a library paper or attach an existing saved
+review. A review belongs to one track; moving it from another track requires confirmation.
+Pause running reviews in Deep Work before moving them. Revision checks reject stale moves.
+The **Linked reviews** list opens the saved task and its report. Reassignment preserves the
+original files, prior-work snapshots, published notebook entries and existing paper links;
+it does not move files or rewrite earlier findings. Link a review's papers separately when
+you want their personal notes in the track.
+
+Linking a paper includes its existing personal notes automatically. **Reader highlights**
+shows page-attributed passages saved with the PDF reader's **Add to notes** action, not generated
+summaries. The same notes remain available in every track linked to that paper. Removing a paper
+from a track does not delete its notes or their connections.
+
+In a paper's Notes drawer, open **Highlights & connections**, or use the track's
+**Reader highlights** view. Choose **Connect highlight**, search highlights from any paper,
+and select **Connect this highlight**. Connections work in both directions and links open the
+original paper at the quoted page. They are stored alongside the original highlights in the
+canonical `notes.md`; no copied notes or separate notes catalog is created.
+
+Highlight search and the existing workspace Notes search use the SQLite FTS5/BM25 index,
+then include directly connected highlights, with connected matches labelled explicitly.
+Search follows one connection, not an unbounded chain. Track search stays within its linked
+papers; opening a highlight's connections can show notes from other papers. Existing kind/tag
+filters and pagination still apply. Old page-attributed reader quotes are recognized without
+rewriting the files; new captures have stable identifiers. External file edits require the
+existing workspace index refresh, and stale connection writes preserve the file and report a conflict.
+
 ## Four sections
 
 **Problem** explains what is being solved, why it matters, limitations of current approaches,
@@ -62,6 +91,22 @@ warnings; no measurements are invented and no outside code is executed by Schola
 
 ## Exploration
 
+**Explore ideas** opens lightweight chat from any topic, independently of tracks or
+completed reviews. The composer’s intent selector switches between ordinary chat
+and conceptual ideation. Start with a question; a paper passage or existing findings
+are optional context, not prerequisites for downloading papers or creating full
+summaries. Compare 3–5 different directions, then ask to expand, combine, challenge,
+simplify, or change direction. Observations, speculation, assumptions and unknowns
+stay separate, and novelty remains unverified. Discussion creates no saved artifact.
+The reusable Ideas workspace uses the same chat engine, with an editable question and
+bounded, readable evidence context. Edit **Selected idea**, then **Develop**, **Challenge**,
+**Combine** (with a second direction), or **Simplify** to prepare a draft. Nothing sends
+until you press Send. Selection edits are retained locally for that conversation;
+sent actions also preserve the selection in ordinary conversation history.
+**Check against literature** opens a **new editable review** carrying the selected idea,
+question and supplied context as text, not opaque paper IDs or a serialized review.
+It never starts a review, acquires papers, or treats novelty as verified.
+
 Every track has an `exploration\` folder. Existing tracks receive it at startup without changing
 their four documents. It begins empty: the researcher and assistant create as many topic-specific
 Markdown notes as needed, rather than filling a mandatory template with invented content.
@@ -84,6 +129,84 @@ remain importable and do not delete exploration. Import replaces only files show
 leaving other notes untouched. Archives support up to 100 exploration files within the existing
 upload and per-file size limits; larger tracks can export notes individually.
 
+## Connected research workspace
+
+The web track workspace exposes **Notebook**, **Reader highlights**, **Code & artifacts**,
+and **Claims & writing** without unmounting unsaved drafts when changing views.
+
+Switching tracks restores a valid section for the destination rather than carrying an absent
+exploration filename across notebooks. Import conflicts let you refresh the preview while
+retaining your reviewed merge; applying it still checks the current revision.
+For linked-file conflicts, compare the current file with your retained draft before explicitly
+adopting its baseline. Refreshing the file inventory alone does not authorize an overwrite.
+Drafts can be downloaded before reconciliation. Linked PDF previews provide selectable text
+and an authorized original-file download rather than a canvas-only reading surface.
+
+### References and manuscript
+
+Manage the global bibliography from the library's References panel. Metadata-only records do
+not download papers. Stable keys are separate from record IDs; authors, publication metadata,
+local paper links and explicit related-version links remain editable. DOI/arXiv/paper/key
+collisions report the existing record and never merge it silently. Imports are atomic and
+revision guarded. BibTeX/RIS interchange excludes ScholarWeave-local paper/version links.
+The panel documents its supported syntax and rejects unsupported fields rather than losing them.
+
+The manuscript is `exploration/manuscript.md`, so existing section revision history, guarded
+writes, workspace indexing, chat tools, and track ZIP round trips apply. Markdown headings
+provide sections; `[@citation_key]` cites a saved reference, and `[claim:id]` connects a statement
+to a track claim. The writing UI inserts these markers, previews the document, compares an
+externally changed revision without throwing away the draft, and exports saved text.
+Markdown/LaTeX/DOCX exports append cited bibliography entries and recorded evidence. Missing keys
+or claim IDs block export. DOCX and LaTeX preserve draft text, not arbitrary Markdown formatting
+or a journal citation style. Citation/paragraph warnings are structural checks, not a model
+judgment of novelty, validity, or scientific support.
+
+### Claim evidence
+
+Claims live in guarded `local_data/track_claims/<track-id>.json` records, independent of
+generated summaries. Each claim separates its statement, researcher interpretation, and
+supporting/contradicting/contextual evidence. The service verifies each quotation against its
+selected extracted page, ignoring whitespace, and records the document ID, page, title,
+source version, and page-text SHA-256. The stored quotation survives source edits; reads
+label unavailable or changed source evidence rather than silently recertifying it.
+Claims without evidence may represent hypotheses and are explicitly flagged.
+
+`read_research_track` actions `claims` and `references` return paginated evidence records and
+real bibliography keys for writing assistance. They do not automatically read linked code.
+Track ZIPs contain the manuscript Markdown, not the global bibliography or claim registry;
+use a writing export when sharing a self-contained draft with its evidence appendix.
+
+### Linked code and experiment artifacts
+
+Connect an existing local checkout by supplying its absolute path and explicitly authorizing
+access to that root. ScholarWeave never clones, executes, installs dependencies, launches a
+terminal, or invokes a coding agent. Browse selected paths rather than indexing the entire
+repository. Hidden files, credentials, dependency directories, symbolic links and junctions
+are excluded; traversal outside the authorized root is rejected. These controls are not an
+OS sandbox against a hostile process mutating the filesystem concurrently.
+
+File previews are capped at 10 MiB, manual UTF-8 edits at 256 KiB, and directory listings at
+300 entries with an explicit truncation notice. PDF pages render through pdf.js, without
+executing embedded scripts; Markdown, raster images, CSV tables and JSON have in-app previews.
+Version 4 notebooks display saved source cells and text/PNG outputs only, capped at 200 cells;
+widgets, HTML and JavaScript outputs never run, and unsupported representations are labeled.
+Unsupported binary formats show metadata rather than pretending to read their contents.
+Manual UTF-8 edits require the hash of the opened file. An external edit
+causes a conflict instead of an overwrite; the draft remains visible. Artifact receipts
+associate a file path and hash with an existing saved experiment ID, observation time,
+optional user-supplied producing revision, and a note. Refresh explicitly to detect changed
+or missing artifacts. The repository's observed current commit does not establish which
+revision produced an output or whether the working tree was clean. Unlinking removes the
+connection/receipts, never repository files. Repository contents are not automatically sent
+to any model provider.
+
+Receipts can be opened again or explicitly promoted into Results with a researcher-supplied
+observation. Promotion checks both the current artifact hash and the loaded Results revision.
+It appends provenance and an unverified-observation label, never infers a scientific result
+or copies an entire report into model context. Existing unsaved Results drafts are retained
+and must be reconciled before saving over the promoted content. There is no automatic artifact
+snapshot: retain externally generated outputs when you need the original bytes later.
+
 ## Chats and research skills
 
 Attach a chat to a track, or use a section's discussion action. A discussion action prepares an
@@ -104,14 +227,71 @@ experiments must not cause an agent run to continue indefinitely or poll for out
 
 ## Staged literature reviews
 
-Use **Deep Work > Literature reviews** when you explicitly want a saved review document,
-rather than an ordinary answer or a canonical single-paper summary. Track pages link to this
-dedicated workspace with the track selected. It shows stage progress, usage, source coverage,
-pending decisions, and pause/stop/resume controls without occupying main chat. The Deep Work
-coordinator can propose a review through `literature_review`; ordinary chat cannot start one.
+### Topic-led research
+
+New web reviews show three steps: ask and confirm, discover and choose, then read and compare.
+Start with a question and optionally use **Add papers from arXiv** to search titles, authors or
+keywords directly and add up to 24 explicit inputs. Search results and inputs are metadata only:
+no PDF is downloaded until you approve a reading batch. Inputs count toward the initial
+24-paper discovery limit. Confirm the proposed scope and work limits with **Find the landscape**.
+Setup uses your default chat and embedding models, with explicit selectors when needed.
+The research model also handles paper briefs. The embedding
+model groups titles and abstracts in batches of 16.
+The main model names the resulting groups; topic descriptions are metadata-based, not proof of
+scientific relevance or quality.
+
+Use **Explain fit and recommend reading** on a topic for metadata-based guidance.
+Select individual paper checkboxes, enter an optional reading question, and choose **Read selected
+papers**. **Find more topics** authorizes up to 100 additional discoveries, not PDF downloads.
+At the selection step, **Add more papers from arXiv** searches directly and adds individual results
+to the existing shortlist. Topics are updated without discarding earlier groups or authorizing reading.
+
+New web tasks read up to six question-matched source passages per paper, not the whole paper.
+Briefs appear progressively, with five sections and verbatim-checked page quotations.
+The report synthesizes those partial briefs and discloses missing coverage; it is not a full-paper
+audit. **Summarize paper** and **Ask a question about this paper** open contextual chat for collected
+papers. **Understanding** shows coverage and **Refine understanding** compares agreements,
+disagreements and open questions. **Choose follow-up reading** returns to selection without
+discarding prior work. Reference discovery does not enlarge your set.
+
+In the paper library, **Add paper** also offers direct arXiv search. **Use PDF link** fills the
+download form; **Download PDF** is a separate explicit action. The reader toolbar exposes
+**Summarize paper** (quick chat explanation or saved summary tools) and **Ask a question**.
+
+Files live together in `workspace/research/<track>/<review>/`, including topic data, selections,
+PDF copies, extracted text, paper summaries, model receipts, scratch notes and the final report.
+Summary prose stays on disk, including after workspace-index refresh; SQLite only retains
+operational metadata and file pointers. Your track receives a link to the report and the selected
+paper membership. Existing library papers are reused and retained.
+
+The default view focuses on your question, topics, reading progress and a status-specific next step.
+**Activity, errors and controls** exposes pause, retry and additional-work approval when needed.
+Older full-reading tasks remain read-only history in this web workspace.
+
+### Investigating within the same workspace
+
+Start with one research question. The same view then shows paper decisions, the work plan,
+delegated progress, findings and one follow-up composer. There is no separate **Chat research tasks**
+destination, assistant panel or second start action. **Saved research** groups linked papers and
+investigations in one history. Evidence comparison prepares a draft in the same composer; the
+Ideas view changes its focus instead of opening another chat. New paper research is linked to the
+same durable investigation conversation. **Pause research** cancels the active agent run and
+pauses paper work, reporting any partial failure. **Stop and summarize findings** pauses paper work
+before requesting an answer from the available evidence. Resume is explicit.
+Follow-ups include the selected review's question, reading focus, evidence paths and approval state;
+they do not approve paper reading or replace existing evidence. Old investigation links and history
+remain available, and navigating away does not stop work. **Ask** remains the contextual entry
+point for questions about a particular paper.
+
+### Legacy source-audited reviews
+
+Saved reviews and API/terminal requests without an embedding role retain the workflow below.
+
+The workflow below describes legacy API/terminal reviews, not the new web setup. Full-reading
+records remain read-only history in the web workspace. Current coordinator proposals through
+`literature_review` use topic-led targeted reading; ordinary chat cannot start staged reviews.
 Scope, constraints and paper/comparison limits require your initial approval. Highly relevant and
-relevant papers are then collected and read automatically. Research tasks in the same
-workspace expose open-ended coordinator work, steering, stop controls, findings and run history.
+relevant papers are then collected and read automatically.
 Edit the proposed paper/comparison limits before approving the plan or extending its budget;
 unchanged background status refreshes preserve those edits until you submit them.
 The progress panel separates PDFs collected/reused, prepared source text, completed page decisions,

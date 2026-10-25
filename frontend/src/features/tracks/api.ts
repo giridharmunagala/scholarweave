@@ -57,5 +57,5 @@ export const tracksApi = {
 
 export function trackAssistUrl(track: Pick<Track, 'id' | 'title'>, section: TrackSection, skill: string) {
   const research = `Help me with the ${section} section of research track "${track.title}" (track ID: ${track.id}).${skill ? ` Use the ${skill} skill.` : ''} Read the existing section and linked local evidence first. Discuss proposed changes in chat; do not save files unless I explicitly ask.`;
-  return `/?${new URLSearchParams({ track: track.id, research })}`;
+  return `/chat?${new URLSearchParams({ track: track.id, research })}`;
 }

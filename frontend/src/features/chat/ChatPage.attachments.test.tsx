@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import ChatPage from './ChatPage';
 import type { ConversationAttachment, ResponseEffort } from './api';
 import { RouterProvider } from '../../app/router';
+import { exploreIdeasHref } from '../../app/ask';
 
 const MODEL = { provider_profile_id: 'local', model: 'research-model' };
 const SETTINGS = {
@@ -45,7 +46,7 @@ function attachment(name = 'notes.md'): ConversationAttachment {
 }
 
 function response(body: unknown, status = 200): Response {
-  return { ok: status < 400, status, json: async () => body } as Response;
+  return new Response(JSON.stringify(body), { status });
 }
 
 function deferred<T>() {
@@ -74,6 +75,7 @@ describe('chat attachments', () => {
     openGate = null;
     upload = vi.fn(async (file: File) => response(attachment(file.name), 201));
     window.localStorage.clear();
+    window.sessionStorage.clear();
     window.history.replaceState({}, '', '/');
     (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
     vi.stubGlobal('EventSource', class {
@@ -202,8 +204,7 @@ describe('chat attachments', () => {
     await enter();
     expect(createRequests).toBe(0);
     expect(messageRequests).toEqual([]);
-    expect(container.textContent).toContain('default 2 MiB');
-    expect(container.textContent).toContain('default 40 MiB');
+    expect(container.textContent).not.toContain('MiB');
 
     await type('Compare the attached paper with my notes');
     await click(button('Send message'));
@@ -218,6 +219,39 @@ describe('chat attachments', () => {
     expect(button('Attach file').disabled).toBe(true);
     await selectFiles([new File(['more notes'], 'later.md')]);
     expect(upload).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts ideation from a question without opening history or acquiring papers', async () => {
+    conversations = [conversation('existing')];
+    window.history.replaceState({}, '', exploreIdeasHref('Different ways to think about memory'));
+    await mount();
+    expect(createRequests).toBe(0);
+    expect(messageRequests).toEqual([]);
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Conversation intent"]')?.value).toBe('ideation');
+    expect(container.textContent).toContain('Novelty is unverified');
+    expect(container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')?.value).toBe('Different ways to think about memory');
+    await click(button('Send message'));
+    expect(createRequests).toBe(1);
+    expect(upload).not.toHaveBeenCalled();
+    expect(messageRequests).toEqual([expect.objectContaining({
+      content: 'Different ways to think about memory', turn_intent: 'ideation',
+    })]);
+    expect(Array.from(container.querySelectorAll('a')).some((item) =>
+      item.textContent === 'Check against literature')).toBe(false);
+    const selectedIdea = container.querySelector<HTMLTextAreaElement>('.composer-ideation-hint textarea')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(selectedIdea, 'Memory as reconstruction');
+      selectedIdea.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const link = Array.from(container.querySelectorAll('a')).find((item) =>
+      item.textContent === 'Check against literature')!;
+    const target = new URL(link.href);
+    expect(target.pathname).toBe('/deep-work');
+    expect(target.searchParams.get('view')).toBe('reviews');
+    expect(target.searchParams.get('new')).toBe('1');
+    expect(target.searchParams.get('objective')).toContain('Memory as reconstruction');
+    expect(target.searchParams.has('conversation')).toBe(false);
+    expect(messageRequests).toHaveLength(1);
   });
 
   it('blocks sending while preparing a PDF without disabling Quick or losing its offline selection', async () => {
@@ -360,7 +394,7 @@ describe('chat attachments', () => {
     await selectFiles([new File(['notes'], 'notes.md')]);
     await selectEffort('quick');
     expect(effortSelect().disabled).toBe(false);
-    expect(container.textContent).toContain('Removing an attachment keeps the uploaded file');
+    expect(container.querySelector('[aria-label="Remove notes.md"]')?.getAttribute('title')).toContain('stays in your workspace');
     await click(button('Remove notes.md'));
     expect(container.querySelector('[aria-label="Attached files"]')).toBeNull();
     expect(effortSelect().disabled).toBe(false);
@@ -422,6 +456,7 @@ describe('chat attachments', () => {
     expect(container.querySelector('.composer-upload-status')?.textContent).toContain('new.md');
     expect(button('Send message').disabled).toBe(true);
     await act(async () => { next.resolve(response(attachment('new.md'), 201)); });
+    await type('Discuss the notes in this chat');
     await click(button('Send message'));
     expect(messageRequests[0].attachment_paths).toEqual(['research/uploads/new.md']);
   });
@@ -462,7 +497,7 @@ describe('chat attachments', () => {
   });
 
   it('prepares an unsent track prompt and links the new chat without changing model, effort or attachments', async () => {
-    window.history.replaceState({}, '', '/?track=track-1&research=Discuss%20the%20problem%20section');
+    window.history.replaceState({}, '', '/chat?track=track-1&research=Discuss%20the%20problem%20section');
     conversations = [conversation('existing')];
     await mount();
     expect(container.querySelector('textarea')!.value).toBe('Discuss the problem section');

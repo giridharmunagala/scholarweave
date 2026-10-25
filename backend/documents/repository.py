@@ -12,10 +12,10 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from backend.core.config import Settings
-from backend.core.errors import ConflictError, NotFoundError
+from backend.core.errors import ConflictError, NotFoundError, ValidationError
 from backend.core.errors import DocumentProcessingError
 from backend.utils import clean_filename, utcnow
-from backend.documents.models import Artifact, Document, DocumentChunk, PaperEvidence, PaperFolder
+from backend.documents.models import Artifact, Document, DocumentChunk, PaperEvidence, PaperFolder, PaperUsefulness
 from backend.persistence.files import SafeStorage, StoredFile
 from backend.workspace.layout import WorkspaceLayout
 
@@ -78,6 +78,21 @@ class DocumentRepository:
             session.refresh(document)
             return document
 
+    def opening_chunks(self, document_ids: list[str]) -> dict[str, list[tuple[str, str]]]:
+        result: dict[str, list[tuple[str, str]]] = {}
+        with self.session_factory() as session:
+            for start in range(0, len(document_ids), 500):
+                rows = session.execute(
+                    select(DocumentChunk.document_id, DocumentChunk.section_title,
+                           func.substr(DocumentChunk.text, 1, 12000))
+                    .where(DocumentChunk.document_id.in_(document_ids[start:start + 500]),
+                           DocumentChunk.chunk_index < 4, DocumentChunk.page_start <= 2)
+                    .order_by(DocumentChunk.document_id, DocumentChunk.chunk_index)
+                )
+                for document_id, section, content in rows:
+                    result.setdefault(document_id, []).append((section or "", content))
+        return result
+
     def list_folders(self) -> list[PaperFolder]:
         with self.session_factory() as session:
             return list(
@@ -90,19 +105,25 @@ class DocumentRepository:
             )
 
     def create_folder(self, name: str) -> PaperFolder:
-        normalized = " ".join(name.split())
-        if not normalized:
-            raise ValueError("Folder name cannot be empty.")
+        parts = [" ".join(part.split()) for part in name.split("/")]
+        normalized = "/".join(parts)
+        if any(not part or part in {".", ".."} or "\\" in part for part in parts):
+            raise ValidationError("Use nonempty collection names separated by '/'; '.' and '..' are not names.")
+        if len(parts) > 8 or len(normalized) > 100:
+            raise ValidationError("Collections support at most 8 levels and 100 characters in the full name.")
         with self.session_factory() as session:
-            existing = session.scalar(
-                select(PaperFolder).where(
-                    func.lower(PaperFolder.name) == normalized.casefold()
-                )
-            )
-            if existing is not None:
+            folders = {folder.name.casefold(): folder for folder in session.scalars(select(PaperFolder))}
+            if normalized.casefold() in folders:
                 raise ConflictError(f"A paper folder named '{normalized}' already exists.")
-            folder = PaperFolder(name=normalized)
-            session.add(folder)
+            prefix = ""
+            for part in parts:
+                path = f"{prefix}/{part}" if prefix else part
+                folder = folders.get(path.casefold())
+                if folder is None:
+                    folder = PaperFolder(name=path)
+                    session.add(folder)
+                    folders[path.casefold()] = folder
+                prefix = folder.name
             session.commit()
             session.refresh(folder)
             return folder
@@ -112,6 +133,11 @@ class DocumentRepository:
             folder = session.get(PaperFolder, folder_id)
             if folder is None:
                 return False
+            if any(
+                item.name.casefold().startswith(folder.name.casefold() + "/")
+                for item in session.scalars(select(PaperFolder))
+            ):
+                raise ConflictError("Delete child collections first. Their memberships were not changed.")
             documents = session.scalars(select(Document)).all()
             for document in documents:
                 metadata = dict(document.metadata_json or {})
@@ -134,6 +160,21 @@ class DocumentRepository:
                 metadata.pop("folder_id", None)
             else:
                 metadata["folder_id"] = folder_id
+            document.metadata_json = metadata
+            session.commit()
+            session.refresh(document)
+            return document
+
+    def set_usefulness(self, document_id: str, usefulness: PaperUsefulness) -> Document:
+        with self.session_factory() as session:
+            document = session.get(Document, document_id)
+            if document is None:
+                raise NotFoundError("Paper was not found.")
+            metadata = dict(document.metadata_json or {})
+            if usefulness == PaperUsefulness.UNRATED:
+                metadata.pop("usefulness", None)
+            else:
+                metadata["usefulness"] = usefulness.value
             document.metadata_json = metadata
             session.commit()
             session.refresh(document)
@@ -208,6 +249,7 @@ class DocumentRepository:
     def search(
         self, query: str, *, folder_id: str | None = None, unfiled: bool = False,
         status: str | None = None, limit: int = 25, offset: int = 0,
+        usefulness: PaperUsefulness | None = None,
     ) -> list[tuple[Document, float, str, str | None, int | None]]:
         tokens = list(dict.fromkeys(re.findall(r"[^\W_]+", query, flags=re.UNICODE)))[:32]
         if not tokens:
@@ -233,11 +275,14 @@ class DocumentRepository:
                     AND (:folder_id IS NULL OR json_extract(d.metadata_json, '$.folder_id') = :folder_id)
                     AND (:unfiled = 0 OR json_extract(d.metadata_json, '$.folder_id') IS NULL)
                     AND (:status IS NULL OR d.status = :status)
+                    AND (:usefulness IS NULL OR
+                        coalesce(json_extract(d.metadata_json, '$.usefulness'), 'unrated') = :usefulness)
                 ORDER BY score DESC, d.created_at DESC, d.id
                 LIMIT :limit OFFSET :offset
             """), {
                 "query": " OR ".join(f'"{token}"' for token in tokens),
                 "folder_id": folder_id, "unfiled": unfiled, "status": status,
+                "usefulness": usefulness,
                 "limit": limit, "offset": offset,
             }).all()
             documents = {
@@ -608,6 +653,18 @@ class DocumentRepository:
                     Artifact.kind != "source_pdf",
                 )
             )
+            session.commit()
+
+    def remove_stale_extracted_images(self, document_id: str, retained_ids: set[str]) -> None:
+        with self.session_factory() as session:
+            artifacts = list(session.scalars(select(Artifact).where(
+                Artifact.document_id == document_id,
+                Artifact.kind == "extracted_image",
+                Artifact.id.not_in(retained_ids),
+            )))
+            for artifact in artifacts:
+                self._delete_artifact_file(artifact)
+                session.delete(artifact)
             session.commit()
 
     def artifact_bytes(self, artifact: Artifact) -> bytes:

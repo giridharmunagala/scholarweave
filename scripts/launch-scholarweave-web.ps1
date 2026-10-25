@@ -12,7 +12,7 @@ try {
     if (-not (Test-Path -LiteralPath $python)) {
         throw 'Create .venv and install ScholarWeave first; see README.md.'
     }
-    $arguments = @("-m", "scholarweave_tui", "--web", "--build-frontend", "--api-url", $ApiUrl)
+    $arguments = @("-m", "scholarweave_tui", "--web", "--ensure-frontend", "--api-url", $ApiUrl)
     if ($Check) { $arguments += "--check" }
     & $python @arguments
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 130) {
