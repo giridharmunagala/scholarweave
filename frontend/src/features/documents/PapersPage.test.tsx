@@ -294,7 +294,7 @@ it('shows download progress and elapsed time until the prepared paper opens, eve
   vi.stubGlobal('fetch', fetch);
   await mount('/library?add=1');
   vi.useFakeTimers();
-  expect(container.querySelector('[role="progressbar"]')).toBeNull();
+  expect(container.querySelector('[role="progressbar"][aria-label="Paper download and preparation"]')).toBeNull();
   await change('PDF URL', 'https://example.org/paper.pdf');
   await change('Paper title', 'Downloaded paper');
   await act(async () => {
@@ -343,12 +343,12 @@ it('keeps download timing when browsing another paper, clears failures, and star
   await act(async () => vi.advanceTimersByTime(3_000));
   await click(container.querySelector('.paper-row-main'));
   expect(container.querySelector('.reader-title')?.textContent).toContain('Existing paper');
-  expect(container.querySelector('[role="progressbar"]')).not.toBeNull();
+  expect(container.querySelector('[role="progressbar"][aria-label="Paper download and preparation"]')).not.toBeNull();
   expect(container.querySelector('[role="timer"]')?.textContent).toBe('3s elapsed');
 
   await act(async () => finish(Response.json({ detail: 'Remote download failed' }, { status: 400 })));
   expect(container.textContent).toContain('Remote download failed');
-  expect(container.querySelector('[role="progressbar"]')).toBeNull();
+  expect(container.querySelector('[role="progressbar"][aria-label="Paper download and preparation"]')).toBeNull();
   expect(vi.getTimerCount()).toBe(0);
 
   await click(container.querySelector('[aria-label="Back to papers"]'));
@@ -482,18 +482,14 @@ it('browses bounded sorted pages and searches title/content by relevance within 
   expect(container.querySelector('.paper-row-main strong')?.textContent).toBe('Paper 59');
   await click(button('Next'));
   expect(container.textContent).toContain('Page 2 of 3');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   await change('Sort papers', 'title');
   expect(container.textContent).toContain('Page 1 of 3');
   expect(container.querySelector('.paper-row-main strong')?.textContent).toBe('Paper 00');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
 
   await click([...container.querySelectorAll('.folder-chip')].find((item) => item.textContent?.includes('Methods')));
   expect(container.querySelector('[aria-label="Paper folders"] [aria-current="true"]')?.textContent).toContain('Methods');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   await change('Paper status', 'ready');
   await change('Filter by usefulness', 'maybe_useful');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   expect(container.querySelector('.library-filter-row [role="status"]')?.textContent).toContain('Ready to read');
   await change('Search papers', 'quasar');
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
@@ -507,9 +503,7 @@ it('browses bounded sorted pages and searches title/content by relevance within 
   expect(container.querySelectorAll('.paper-row-main')).toHaveLength(2);
   expect(container.textContent).toContain('p.3: Quasar measurements in the body text.');
   expect(container.textContent).toContain('Title match: Quasar discovery');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   expect(container.querySelector<HTMLSelectElement>('[aria-label="Sort papers"]')!.disabled).toBe(true);
-  await click(container.querySelector('[aria-label="Papers settings"]'));
 
   await click(button('Clear'));
   expect(container.querySelector('.library-filter-row')?.textContent).not.toContain('Usefulness:');
@@ -580,7 +574,6 @@ it('hides the folder column by default and remembers opting in without changing 
   expect(container.querySelector('.paper-table-folder')).toBeNull();
   expect(container.querySelector('.paper-table-head')?.textContent).not.toContain('Folder');
   expect(container.querySelector('[aria-label="Paper folders"]')?.textContent).toContain('Methods');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   const toggle = [...container.querySelectorAll('label')].find((label) => label.textContent?.includes('Show folder column'))?.querySelector('input');
   await click(toggle);
   expect(container.querySelector('.paper-table-folder')?.textContent).toBe('Methods');
@@ -589,7 +582,6 @@ it('hides the folder column by default and remembers opting in without changing 
   root = createRoot(container);
   await mount('/library');
   expect(container.querySelector('.paper-table-folder')?.textContent).toBe('Methods');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   await click([...container.querySelectorAll('label')].find((label) => label.textContent?.includes('Show folder column'))?.querySelector('input'));
   expect(container.querySelector('.paper-table-folder')).toBeNull();
 });
@@ -664,12 +656,10 @@ it.each([false, true])('filters usefulness and recovers pagination after a ratin
     throw new Error(`Unexpected request: ${url}`);
   }));
   await mount('/library');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   for (const [value, count] of [['unrated', 2], ['maybe_useful', 1], ['not_useful', 1], ['useful', 25]] as const) {
     await change('Filter by usefulness', value);
     expect(container.querySelectorAll('.paper-row-main')).toHaveLength(count);
   }
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   expect(container.querySelector('.library-filter-row')?.textContent).toContain('Usefulness: Useful');
   if (withSearch) {
     await change('Search papers', 'rated');
@@ -709,15 +699,11 @@ it('filters topic shelves and shows an empty state when no usefulness labels mat
   }));
   await mount('/library');
   expect(container.querySelector('[aria-label="Observations, 8 papers"]')).not.toBeNull();
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   await change('Filter by usefulness', 'useful');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   await click(container.querySelector('[aria-label="Observations, 7 papers"]'));
   expect(container.querySelectorAll('.paper-row-main')).toHaveLength(7);
   expect(container.querySelector('[aria-label="Usefulness of Topic paper 0"]')).toBeNull();
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   await change('Filter by usefulness', 'maybe_useful');
-  await click(container.querySelector('[aria-label="Papers settings"]'));
   expect(container.querySelector('.paper-table')?.hasAttribute('hidden')).toBe(false);
   expect(container.textContent).toContain('No matching papers.');
   await click(button('Clear'));
@@ -772,7 +758,7 @@ it('does not replace a different open paper when a usefulness save finishes late
   expect(container.querySelector<HTMLSelectElement>('[aria-label="Usefulness of Second paper"]')!.value).toBe('unrated');
 });
 
-it('keeps primary library actions visible and exposes secondary controls in Papers settings', async () => {
+it('keeps library controls directly accessible above the paper results', async () => {
   const paper = makePaper('p1', 'Quasar survey');
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), 'http://localhost');
@@ -782,25 +768,21 @@ it('keeps primary library actions visible and exposes secondary controls in Pape
   }));
   await mount('/library');
 
-  const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Papers settings"]')!;
-  expect(trigger.classList.contains('icon-button')).toBe(true);
-  expect(trigger.getAttribute('aria-haspopup')).toBe('dialog');
-  expect(trigger.getAttribute('aria-expanded')).toBe('false');
+  const controls = container.querySelector('[aria-label="Paper controls"]')!;
+  expect(container.querySelector('h1')).toBeNull();
+  expect(container.querySelector('[aria-label="Papers settings"]')).toBeNull();
   expect(button('Add paper')).toBeTruthy();
   expect(container.querySelector('[aria-label="Search papers"]')).not.toBeNull();
   expect(container.querySelector('[aria-label="Select Quasar survey"]')).not.toBeNull();
 
-  await click(trigger);
-  expect(trigger.getAttribute('aria-expanded')).toBe('true');
-  expect(container.querySelector('#papers-library-settings')?.getAttribute('open')).not.toBeNull();
-  expect(container.querySelector('[aria-label="Paper status"]')).not.toBeNull();
-  expect(container.querySelector('[aria-label="Sort papers"]')).not.toBeNull();
-  expect(button('Summarize…')).toBeTruthy();
+  expect(controls.querySelector('[aria-label="Paper status"]')).not.toBeNull();
+  expect(controls.querySelector('[aria-label="Sort papers"]')).not.toBeNull();
+  expect(controls.contains(button('Summarize…'))).toBe(true);
 
   await change('Paper status', 'ready');
-  await click(trigger);
-  expect(trigger.getAttribute('aria-expanded')).toBe('false');
   expect(container.querySelector('.library-filter-row [role="status"]')?.textContent).toContain('Ready to read');
+  await click(button('Clear'));
+  expect(container.querySelector<HTMLSelectElement>('[aria-label="Paper status"]')!.value).toBe('');
   expect(button('Add paper')).toBeTruthy();
   expect(container.querySelector('[aria-label="Search papers"]')).not.toBeNull();
   expect(container.querySelector('[aria-label="Selected papers"]')).toBeNull();
@@ -1278,11 +1260,17 @@ it('creates folders, moves selected papers in bulk and deletes folders without d
   expect(container.querySelector('[aria-label="Select Alpha"]')).not.toBeNull();
 });
 
-it('remembers where you stopped reading', async () => {
-  localStorage.setItem('sw.reading', JSON.stringify({ p1: { page: 4, pages: 10, at: 1 } }));
+it('shows saved reading progress in paper rows and continue-reading cards without inventing unknown totals', async () => {
+  localStorage.setItem('sw.reading', JSON.stringify({
+    p1: { page: 4, pages: 10, at: 3 },
+    p2: { page: 14, pages: 10, at: 2 },
+    p3: { page: 4, pages: 0, at: 1 },
+  }));
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.endsWith('/api/documents')) return respond([makePaper('p1', 'Alpha'), makePaper('p2', 'Beta')]);
+    if (url.endsWith('/api/documents')) return respond([
+      makePaper('p1', 'Alpha'), makePaper('p2', 'Beta'), makePaper('p3', 'Unknown total'), makePaper('p4', 'Unread'),
+    ]);
     if (url.endsWith('/api/paper-folders')) return respond([]);
     throw new Error(`Unexpected request: ${url}`);
   }));
@@ -1290,6 +1278,21 @@ it('remembers where you stopped reading', async () => {
   const card = container.querySelector('[aria-label="Continue reading"] .continue-card');
   expect(card?.textContent).toContain('Alpha');
   expect(card?.textContent).toContain('Page 4 of 10');
+  for (const [title, value, count] of [['Alpha', '40', 2], ['Beta', '100', 2], ['Unread', '0', 1]] as const) {
+    const bars = container.querySelectorAll(`[role="progressbar"][aria-label="Reading progress for ${title}"]`);
+    expect(bars).toHaveLength(count);
+    for (const bar of bars) {
+      expect(bar.getAttribute('aria-valuenow')).toBe(value);
+      expect(bar.querySelector<HTMLElement>('.paper-reading-track > span')?.style.width).toBe(`${value}%`);
+      expect(bar.textContent).toContain(`${value}%`);
+    }
+  }
+  const unknown = container.querySelectorAll('[role="progressbar"][aria-label="Reading progress for Unknown total"]');
+  expect(unknown).toHaveLength(2);
+  for (const bar of unknown) {
+    expect(bar.hasAttribute('aria-valuenow')).toBe(false);
+    expect(bar.getAttribute('aria-valuetext')).toBe('Page 4');
+  }
 });
 
 it('lists nested collections, filters direct members and preserves children when parent deletion is rejected', async () => {
@@ -1387,11 +1390,11 @@ describe('topics, summaries and reading questions', () => {
     }));
     await mount('/library');
 
-    await click(container.querySelector('[aria-label="Papers settings"]'));
     await click(button('Topics'));
+    expect(container.querySelector('[aria-label="Paper results"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Select all shown papers"]')).toBeNull();
     expect(localStorage.getItem('scholarweave.papersLayout')).toBe('topics');
     expect(container.textContent).toContain('Group these 10 papers into topics');
-    await click(container.querySelector('[aria-label="Papers settings"]'));
     await click(button('Group by topic'));
     await act(async () => { await Promise.resolve(); });
 
@@ -1406,10 +1409,9 @@ describe('topics, summaries and reading questions', () => {
     await click(button('All topics'));
     expect(container.querySelectorAll('.topic-card')).toHaveLength(3);
 
-    await click(container.querySelector('[aria-label="Papers settings"]'));
     await click(button('List'));
-    await click(container.querySelector('[aria-label="Papers settings"]'));
     expect(container.querySelector('.topic-view')).toBeNull();
+    expect(container.querySelector('[aria-label="Select all shown papers"]')).not.toBeNull();
     expect(container.querySelectorAll('.paper-row-main')).toHaveLength(10);
   });
 

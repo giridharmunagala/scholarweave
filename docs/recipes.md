@@ -19,7 +19,7 @@ light and dark themes at desktop, tablet and mobile widths when changing this la
 Settings triggers keep a visible label and a 20px gear using the shared
 `settings-trigger` style, including the global navigation link. Match the standard
 button height of 2.25rem rather than making Settings larger than adjacent actions.
-Page settings use the shared `SettingsDrawer`: secondary Papers/Notes filters and maintenance,
+Page settings use the shared `SettingsDrawer`: paper-reader options, secondary Notes filters and maintenance,
 Track import/export and assistance options, Brief interests/model/temporary-data controls,
 and Research model choices stay out of the primary work surface. Keep the Notes workspace-view
 picker visible above search in the Artifact browser. Keep search, creation,
@@ -34,12 +34,19 @@ on query-only navigation and polling. Shared drawers transition both the panel a
 respect reduced-motion preferences and keep the navigation bar stable while content changes.
 
 The library separates folder navigation, filtered paper browsing, and the reader.
-The Folder column is hidden by default; Papers settings can show it and remember
+The Folder column is hidden by default; the library toolbar can show it and remember
 that choice locally without changing folder navigation or saved memberships.
-The Papers browser uses the available page width, with Batch OCR, Settings and Add paper
+The Papers library is centered at the shared content maximum width, without a large page heading.
+Folder navigation comes first, followed by search and compact status/usefulness/sort selectors.
+The count, folder-column visibility, List/Topics and Summarize controls share a quieter view row.
+These controls stay visible and wrap on small screens. Add paper and Batch OCR sit
 in a sticky right-hand action column that wraps above the browser on narrower screens.
 Continue-reading cards and their page-progress bars sit below the actions in the same
-column. Folders and search stay above the paper list.
+column. Paper rows and continue-reading cards share a filled, accent-blue reading-progress
+bar and percentage based only on the saved page position. Unknown page totals show the
+saved page without inventing a percentage. Reading bars use feature-specific classes,
+not the shared monitoring `.meter` style. Topic browsing replaces the flat table entirely,
+including its column headings and select-all control.
 Paper rows show a 280-character
 abstract preview below the title, with inline expansion beside file metadata, including search
 and topic views. Abstracts reuse stored metadata or an Abstract section in the opening
@@ -63,7 +70,7 @@ when a download finishes. The download endpoint does not report byte progress or
 do not invent a percentage or time remaining.
 
 Usefulness is a manual paper label: Unrated, Useful, Maybe useful, or Not useful.
-Change it from a paper row or the reader; filter it in Papers settings. The active
+Change it from a paper row or the reader; filter it in the library toolbar. The active
 filter stays visible beside search and Clear resets it. Labels persist in document
 metadata, separately from preparation status and browser reading progress. Unrated
 includes older papers without a label. Filtering applies before search pagination

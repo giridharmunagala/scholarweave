@@ -112,6 +112,19 @@ function DownloadProgress({ startedAt }: { startedAt: number }) {
 }
 
 interface ReadingEntry { page: number; pages: number; at: number }
+function ReadingProgress({ entry, title }: { entry?: ReadingEntry; title: string }) {
+  const percent = !entry ? 0 : entry.pages > 0
+    ? Math.min(100, Math.max(0, Math.round((entry.page / entry.pages) * 100))) : null;
+  return (
+    <span className="paper-reading-progress" role="progressbar" aria-label={`Reading progress for ${title}`}
+      aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined}
+      aria-valuetext={entry ? `Page ${entry.page}${entry.pages > 0 ? ` of ${entry.pages}` : ''}` : 'Not started'}>
+      <span className="paper-reading-track"><span style={{ width: `${percent ?? 0}%` }} /></span>
+      <small>{percent === null ? `p. ${entry?.page}` : `${percent}%`}</small>
+    </span>
+  );
+}
+
 const READING_KEY = 'sw.reading';
 function readingLog(): Record<string, ReadingEntry> {
   try { return JSON.parse(window.localStorage.getItem(READING_KEY) ?? '{}') as Record<string, ReadingEntry>; } catch { return {}; }
@@ -1030,8 +1043,8 @@ export default function PapersPage() {
             {hit ? <small className="paper-search-excerpt">{hit.citation ? `${hit.citation}: ` : 'Title match: '}{hit.excerpt}</small> : null}
           </div>
           {showFolderColumn ? <small className="paper-table-folder">{folderName(folderId(document)) ?? '—'}</small> : null}
-          <span className="paper-table-read" title={progress ? `Page ${progress.page} of ${progress.pages}` : 'Not opened yet'}>
-            {progress ? <span className="meter"><span style={{ width: `${Math.round((progress.page / Math.max(progress.pages, 1)) * 100)}%` }} /></span> : <small className="muted">—</small>}
+          <span className="paper-table-read">
+            <ReadingProgress entry={progress} title={document.title} />
           </span>
           {usefulnessControl(document)}
         </div>
@@ -1044,26 +1057,14 @@ export default function PapersPage() {
   const readyCount = documents.filter((document) => document.status === 'ready').length;
 
   return (
-    <div className="page page-wide papers-home">
+    <div className="page papers-home">
       <aside className="papers-actions" aria-label="Library actions">
+        <button className="button" type="button" aria-expanded={showImport} onClick={() => setShowImport((value) => !value)}>
+          <Icon name="plus" size={15} />Add paper
+        </button>
         <button className="button secondary" type="button" aria-expanded={showOcrBatch}
           onClick={() => setShowOcrBatch((value) => !value)}>
           {ocrBatch.status === 'running' || ocrBatch.status === 'stopping' ? 'OCR batch progress' : 'Batch OCR...'}
-        </button>
-        <button
-          className="icon-button settings-trigger"
-          type="button"
-          aria-label="Papers settings"
-          title="Papers settings"
-          aria-haspopup="dialog"
-          aria-expanded={settingsOpen}
-          aria-controls="papers-library-settings"
-          onClick={() => setSettingsOpen((value) => !value)}
-        >
-          <Icon name="settings" size={20} /><span>Settings</span>
-        </button>
-        <button className="button" type="button" aria-expanded={showImport} onClick={() => setShowImport((value) => !value)}>
-          <Icon name="plus" size={15} />Add paper
         </button>
         {recent.length && !query.trim() ? (
           <section className="continue-reading" aria-label="Continue reading">
@@ -1071,12 +1072,11 @@ export default function PapersPage() {
             <div className="continue-grid">
               {recent.map(([id, entry]) => {
                 const paper = library.byId.get(id)!;
-                const percent = entry.pages ? Math.round((entry.page / entry.pages) * 100) : 0;
                 return (
                   <button type="button" className="continue-card" key={id} onClick={() => openPaper(id)}>
                     <strong>{paper.title}</strong>
-                    <small>Page {entry.page} of {entry.pages}</small>
-                    <span className="meter" aria-hidden="true"><span style={{ width: `${percent}%` }} /></span>
+                    <small>Page {entry.page}{entry.pages > 0 ? ` of ${entry.pages}` : ''}</small>
+                    <ReadingProgress entry={entry} title={paper.title} />
                   </button>
                 );
               })}
@@ -1085,64 +1085,6 @@ export default function PapersPage() {
         ) : null}
       </aside>
       <div className="papers-browser">
-      <header className="papers-head">
-        <div>
-          <h1>Papers</h1>
-          <p className="muted">
-            {documents.length} paper{documents.length === 1 ? '' : 's'}
-            {documents.length && readyCount < documents.length ? ` · ${documents.length - readyCount} not indexed yet` : ''}
-          </p>
-        </div>
-      </header>
-      <SettingsDrawer id="papers-library-settings" title="Paper settings" open={settingsOpen} onClose={() => setSettingsOpen(false)}>
-        <div className="stack-tight">
-          <label>
-            <input type="checkbox" checked={showFolderColumn} onChange={(event) => {
-              setShowFolderColumn(event.target.checked);
-              localStorage.setItem('scholarweave.papersFolderColumn', String(event.target.checked));
-            }} />
-            Show folder column
-          </label>
-          <label>
-            Paper status
-            <select aria-label="Paper status" value={paperStatus} onChange={(event) => { setPaperStatus(event.target.value); setOffset(0); }}>
-              <option value="">All statuses</option>
-              <option value="ready">Ready to read</option>
-              <option value="uploaded">Not yet prepared</option>
-              <option value="processing">Preparing</option>
-              <option value="failed">Needs attention</option>
-            </select>
-          </label>
-          <label>
-            Usefulness
-            <select aria-label="Filter by usefulness" value={usefulness} onChange={(event) => { setUsefulness(event.target.value); setOffset(0); }}>
-              <option value="">All usefulness labels</option>
-              {USEFULNESS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          </label>
-          <label>
-            Sort papers
-            <select aria-label="Sort papers" value={query.trim() ? 'relevance' : sort} disabled={!!query.trim()} onChange={(event) => { setSort(event.target.value); setOffset(0); }}>
-              {query.trim() ? <option value="relevance">Relevance</option> : null}
-              <option value="newest">Newest first</option>
-              <option value="oldest">Oldest first</option>
-              <option value="title">Title A-Z</option>
-            </select>
-          </label>
-          {canTopics ? (
-            <div className="segmented" role="group" aria-label="Paper layout">
-              {(['list', 'topics'] as const).map((layout) => (
-                <button type="button" key={layout} aria-pressed={(layout === 'topics') === topicLayout} disabled={!!query.trim()} title={layout === 'topics' ? 'Group papers into topics' : 'Show a flat list'} onClick={() => { setTopicLayout(layout === 'topics'); localStorage.setItem('scholarweave.papersLayout', layout); }}>
-                  {layout === 'list' ? 'List' : 'Topics'}
-                </button>
-              ))}
-            </div>
-          ) : null}
-          <button className="button secondary" type="button" aria-expanded={showSummaryBatch} onClick={() => { setShowSummaryBatch((value) => !value); setSettingsOpen(false); }}>
-            Summarize…
-          </button>
-        </div>
-      </SettingsDrawer>
       {error ? <ErrorNotice error={error} /> : null}
       {ocrErrorNotice}
       {downloadProgress}
@@ -1188,7 +1130,7 @@ export default function PapersPage() {
           disabled={operationBusy} />
       </section> : null}
 
-      <div className="papers-toolbar">
+      <header className="papers-toolbar papers-library-controls" aria-label="Paper controls">
       <nav className="folder-chips" aria-label="Paper folders">
         {[
           { id: 'all', name: 'All papers', count: documents.length, target: undefined },
@@ -1229,14 +1171,57 @@ export default function PapersPage() {
 
       <div className="library-filter-row">
         <input type="search" aria-label="Search papers" placeholder="Search titles and full text" value={query} maxLength={1000} onChange={(event) => { setQuery(event.target.value); setOffset(0); }} />
+        <select aria-label="Paper status" value={paperStatus} onChange={(event) => { setPaperStatus(event.target.value); setOffset(0); }}>
+          <option value="">All statuses</option>
+          <option value="ready">Ready to read</option>
+          <option value="uploaded">Not yet prepared</option>
+          <option value="processing">Preparing</option>
+          <option value="failed">Needs attention</option>
+        </select>
+        <select aria-label="Filter by usefulness" value={usefulness} onChange={(event) => { setUsefulness(event.target.value); setOffset(0); }}>
+          <option value="">All usefulness labels</option>
+          {USEFULNESS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </select>
+        <select aria-label="Sort papers" value={query.trim() ? 'relevance' : sort} disabled={!!query.trim()} onChange={(event) => { setSort(event.target.value); setOffset(0); }}>
+          {query.trim() ? <option value="relevance">Relevance</option> : null}
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="title">Title A-Z</option>
+        </select>
         {paperStatus ? <span className="muted" role="status">Status: {PAPER_STATUS_LABELS[paperStatus] ?? paperStatus}</span> : null}
         {usefulness ? <span className="muted" role="status">Usefulness: {USEFULNESS_OPTIONS.find((option) => option.value === usefulness)?.label}</span> : null}
         {query || paperStatus || usefulness ? (
           <button className="button ghost small" type="button" onClick={() => { setQuery(''); setPaperStatus(''); setUsefulness(''); setOffset(0); }}>Clear</button>
         ) : null}
       </div>
-
+      <div className="papers-view-controls">
+        <small className="muted">
+          {documents.length} paper{documents.length === 1 ? '' : 's'}
+          {documents.length && readyCount < documents.length ? ` · ${documents.length - readyCount} not indexed yet` : ''}
+        </small>
+        <label className="papers-folder-toggle">
+          <input type="checkbox" checked={showFolderColumn} onChange={(event) => {
+            setShowFolderColumn(event.target.checked);
+            localStorage.setItem('scholarweave.papersFolderColumn', String(event.target.checked));
+          }} />
+          Show folder column
+        </label>
+        <div className="papers-view-actions">
+          {canTopics ? (
+            <div className="segmented" role="group" aria-label="Paper layout">
+              {(['list', 'topics'] as const).map((layout) => (
+                <button type="button" key={layout} aria-pressed={(layout === 'topics') === topicLayout} disabled={!!query.trim()} title={layout === 'topics' ? 'Group papers into topics' : 'Show a flat list'} onClick={() => { setTopicLayout(layout === 'topics'); localStorage.setItem('scholarweave.papersLayout', layout); }}>
+                  {layout === 'list' ? 'List' : 'Topics'}
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <button className="button secondary" type="button" aria-expanded={showSummaryBatch} onClick={() => setShowSummaryBatch((value) => !value)}>
+            Summarize…
+          </button>
+        </div>
       </div>
+      </header>
 
       {checked.size ? (
         <div className="bulk-bar" role="toolbar" aria-label="Selected papers">
@@ -1265,8 +1250,8 @@ export default function PapersPage() {
         </div>
       ) : null}
 
-      {topicView ? <PaperTopicsView folderId={topicScope ?? null} papers={sortedDocuments} renderRow={renderRow} /> : null}
-      <div className="paper-table" aria-label="Paper results" aria-busy={searching} hidden={topicView}>
+      {topicView ? <PaperTopicsView folderId={topicScope ?? null} papers={sortedDocuments} renderRow={renderRow} /> : (
+      <div className="paper-table" aria-label="Paper results" aria-busy={searching}>
         {visibleDocuments.length ? (
           <div className={`paper-table-head${showFolderColumn ? ' with-folder' : ''}`}>
             <input
@@ -1286,7 +1271,7 @@ export default function PapersPage() {
           </div>
         ) : null}
         {searching ? <Loading label="Searching papers…" /> : null}
-        {topicView ? null : visibleDocuments.map(renderRow)}
+        {visibleDocuments.map(renderRow)}
         {!documents.length ? (
           <EmptyState icon="papers" title="Your library is empty" description="Add a PDF to start reading, annotating and asking questions about it." />
         ) : null}
@@ -1294,6 +1279,7 @@ export default function PapersPage() {
           <p className="muted">{query.trim() || paperStatus || usefulness ? 'No matching papers. Try fewer terms or change the folder, status or usefulness filter.' : 'No papers in this folder yet. Drag papers onto a folder to file them.'}</p>
         ) : null}
       </div>
+      )}
       {!topicView && (offset > 0 || hasNextPage) ? (
         <div className="library-pagination">
           <button className="button secondary small" type="button" disabled={offset === 0 || searching} onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>Previous</button>
