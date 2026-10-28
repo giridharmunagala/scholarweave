@@ -1,12 +1,15 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { Link, useLocation } from './router';
 import { AskContextProvider, type AskApi, type AskOptions } from './ask';
 import { CommandPalette } from './CommandPalette';
 import { Icon } from '../shared/components/Icons';
 import { ThemeSwitcher } from '../shared/components/ThemeSwitcher';
 import { Loading } from '../shared/components/Ui';
+import { PaneResizer, readStoredWidth, storeWidth } from '../shared/components/PaneResizer';
 
 const AskPanel = lazy(() => import('../features/chat/AskPanel'));
+const ASK_WIDTH_KEY = 'scholarweave.assistant.width';
+const ASK_WIDTH = { value: 560, min: 320, max: 960 };
 
 /*
  * Research material is the face of the app: the bar names what you have
@@ -31,9 +34,27 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   const [askDraft, setAskDraft] = useState<(AskOptions & { text?: string; nonce: number }) | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [askWidth, setAskWidth] = useState(() => readStoredWidth(ASK_WIDTH_KEY, ASK_WIDTH));
+  const [viewportWidth, setViewportWidth] = useState(() => document.documentElement.clientWidth || window.innerWidth);
+  const [resizingAsk, setResizingAsk] = useState(false);
   const askRequest = useRef(0);
   const content = useRef<HTMLElement>(null);
   const onChatPage = pathname === '/chat' || pathname.startsWith('/chat/');
+  const askBounds = {
+    ...ASK_WIDTH,
+    min: Math.min(ASK_WIDTH.min, viewportWidth),
+    max: Math.min(ASK_WIDTH.max, viewportWidth <= 900 ? viewportWidth : viewportWidth - 480),
+  };
+  const visibleAskWidth = Math.min(askWidth, askBounds.max);
+
+  useEffect(() => {
+    const resize = () => {
+      setViewportWidth(document.documentElement.clientWidth || window.innerWidth);
+      setResizingAsk(false);
+    };
+    window.addEventListener('resize', resize);
+    return () => window.removeEventListener('resize', resize);
+  }, []);
 
   useLayoutEffect(() => {
     const element = content.current;
@@ -48,8 +69,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => { animation.cancel(); motion?.removeEventListener('change', reduceMotion); };
   }, [pathname]);
 
-  const ask = useCallback((text?: string, options?: AskOptions) => setAskDraft({ text, ...options, nonce: ++askRequest.current }), []);
-  const close = useCallback(() => setAskDraft(null), []);
+  const ask = useCallback((text?: string, options?: AskOptions) => {
+    setViewportWidth(document.documentElement.clientWidth || window.innerWidth);
+    setAskDraft({ text, ...options, nonce: ++askRequest.current });
+  }, []);
+  const close = useCallback(() => { setAskDraft(null); setResizingAsk(false); }, []);
   const askApi = useMemo<AskApi>(() => ({ ask, close, open: askDraft !== null }), [ask, close, askDraft]);
 
   useEffect(() => {
@@ -60,22 +84,24 @@ export function AppShell({ children }: { children: ReactNode }) {
         setPaletteOpen((value) => !value);
       } else if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'j' && !onChatPage) {
         event.preventDefault();
-        setAskDraft((value) => value ? null : { nonce: ++askRequest.current });
+        if (askDraft) close();
+        else ask();
       } else if (event.key === 'Escape' && !event.defaultPrevented && askDraft && !paletteOpen) {
         const target = event.target instanceof Element ? event.target : null;
         if (target?.closest('.ask-panel details[open], .ask-panel [role="dialog"]')) return;
-        setAskDraft(null);
+        close();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [askDraft, paletteOpen, onChatPage]);
+  }, [askDraft, paletteOpen, onChatPage, ask, close]);
 
-  useEffect(() => { if (onChatPage) setAskDraft(null); }, [onChatPage]);
+  useEffect(() => { if (onChatPage) close(); }, [onChatPage, close]);
 
   return (
     <AskContextProvider value={askApi}>
-      <div className={`app-shell${askDraft ? ' ask-open' : ''}`}>
+      <div className={`app-shell${askDraft ? ' ask-open' : ''}${resizingAsk ? ' resizing-assistant' : ''}`}
+        style={{ '--assistant-width': `${visibleAskWidth}px` } as CSSProperties}>
         <header className="topbar">
           <Link className="topbar-brand" to="/" aria-label="ScholarWeave home" title="ScholarWeave">
             <span className="rail-mark">SW</span>
@@ -128,6 +154,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         {askDraft ? (
           <aside className="ask-panel" aria-label="Assistant">
+            <PaneResizer side="left" label="Resize assistant" width={visibleAskWidth} bounds={askBounds}
+              onResize={(width) => { setAskWidth(width); storeWidth(ASK_WIDTH_KEY, width); }}
+              onResizingChange={setResizingAsk} />
             <Suspense fallback={<Loading label="Opening the assistant…" />}>
               <AskPanel key={askDraft.nonce} draft={askDraft.text} autoSend={askDraft.send} context={askDraft.context} intent={askDraft.intent} onClose={close} />
             </Suspense>

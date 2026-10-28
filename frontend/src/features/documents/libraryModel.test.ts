@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import type { components } from '../../api/schema.generated';
-import { buildLibraryIndex, collectionTree } from './libraryModel';
+import { buildLibraryIndex, collectionTree, sortPapers } from './libraryModel';
 
 type Paper = components['schemas']['DocumentSummaryResponse'];
 type Folder = components['schemas']['PaperFolderResponse'];
@@ -43,4 +43,16 @@ it('rebuilds membership after moves and folder deletion without duplicating pape
   const deleted = buildLibraryIndex([paper('moved'), paper('kept')], []);
   expect(deleted.byId.size).toBe(2);
   expect(deleted.unfiled).toHaveLength(2);
+});
+
+it('sorts by acquisition instant including time and timezone offsets without mutating the library', () => {
+  const papers = [
+    { ...paper('early'), created_at: '2026-01-02T08:00:00+05:30' },
+    { ...paper('late'), created_at: '2026-01-02T03:00:00Z' },
+    { ...paper('first'), created_at: '2026-01-01T23:00:00Z' },
+  ];
+  expect(sortPapers(papers, 'newest').map((item) => item.id)).toEqual(['late', 'early', 'first']);
+  expect(sortPapers(papers, 'oldest').map((item) => item.id)).toEqual(['first', 'early', 'late']);
+  expect(sortPapers(papers, 'title').map((item) => item.id)).toEqual(['early', 'first', 'late']);
+  expect(papers.map((item) => item.id)).toEqual(['early', 'late', 'first']);
 });

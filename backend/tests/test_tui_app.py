@@ -265,12 +265,22 @@ async def settle(app: ScholarWeaveApp, pilot) -> None:
     await pilot.pause()
 
 
+def test_terminal_defaults_to_white_and_preserves_saved_themes(tmp_path) -> None:
+    path = tmp_path / "theme-preferences.json"
+    preferences = Preferences(path)
+    assert preferences.theme == "light"
+    for theme in ("dark", "sepia", "light"):
+        preferences.save_theme(theme)
+        assert Preferences(path).theme == theme
+
+
 def test_send_stream_and_restore_without_duplicate_messages() -> None:
     async def scenario() -> None:
         server = CockpitServer()
         app = server.app()
         async with app.run_test(size=(140, 42)) as pilot:
             await settle(app, pilot)
+            assert app.theme == "light"
             app.query_one("#composer", TextArea).load_text("What connects these ideas?")
             app.run_command("effort", "thorough")
             app.run_command("web", "off")

@@ -61,6 +61,21 @@ Reader focus hides navigation without resetting filters, and previous/next paper
 controls follow the visible page. Summary tools collapse when a PDF is available;
 extraction controls stay expanded for papers that need preparation.
 
+Acquisition date and local time use the document's immutable `created_at`, not its
+publication year or last extraction time. Default ordering is newest acquired first;
+oldest-first and title ordering also apply inside topics. Saved topic maps retain their
+IDs, names, descriptions and manual memberships across restarts. The initial grouping uses
+the main chat model to name topics; the small-tasks helper is not used for library naming.
+Later grouping embeds only new papers and assigns them to existing topic centroids, without
+reclustering or renaming prior papers. Older saved maps reuse cached embeddings to initialize
+their per-paper vectors on their next update. In Topics, open any shelf (including Not yet
+grouped) and use the paper's Topic selector to move it to an existing topic. Empty saved topics
+remain available for assignment. In the Papers list, select one or more papers and use
+Assign topic in the selected-papers toolbar. Named folders use their saved topics; All papers
+and Unfiled use the library-wide topics. Failed assignments retain the selection for retry.
+Topic maps and vector caches live under `data_dir/paper_topics/`;
+folder-scoped reads and assignments include only papers currently in that folder.
+
 Downloading a paper shows an indeterminate progress bar and elapsed time through
 download and preparation. Keep its state outside the page instance so closing the form,
 browsing another paper or leaving and returning to Papers retains the original elapsed
@@ -156,8 +171,13 @@ expanding to full chat carries the same draft key and conversation ID. Hidden as
 must not install navigation guards on unrelated pages. Context-only paper questions must not
 implicitly join an unrelated latest chat. Active-run steering is text-only, so pending paper
 context requires an ordinary contextual message rather than silently omitted context.
-Changing the main model explicitly confirms a new thread without its old transcript while
-preserving unsent writing. Retry failed startup reads without throwing away successful data,
+The composer's Paper picker reuses existing workspace papers as reading context in the current
+chat; it never uploads or duplicates them. Changing the main model updates the same conversation
+after validating the model, preserving the transcript, paper evidence and unsent writing.
+Model changes are unavailable during active runs. The assistant sidebar has a draggable,
+keyboard-accessible left edge and remembers its width. At narrower widths it overlays the reader
+without hiding the resize handle or forcing the panel to stay full-width.
+Retry failed startup reads without throwing away successful data,
 and fence send/steer completions by conversation/run identity and draft version.
 
 The Chat/Explore ideas selector and idea-editing tools live in the composer's Options
@@ -507,7 +527,7 @@ for each destination. Reader highlights derive from linked paper membership, nev
 ## Change a provider generation protocol
 
 `default_model_references.small_tasks` is an optional helper paired with the main model.
-Use it only for known lightweight operations: library/research topic naming, paper summaries
+Use it only for known lightweight operations: research topic naming, paper summaries
 and briefs, and conversation-context summaries. Never infer task size from user keywords or
 model names; chat (including Quick), research planning, comparisons, and final answers retain
 their main model. Explicit task selections win. `summary` and `compaction` defaults override

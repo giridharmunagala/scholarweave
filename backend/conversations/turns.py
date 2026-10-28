@@ -205,6 +205,16 @@ class ConversationTurnService:
             raise ValueError("Conversation is not a deep-work chat.")
         return record
 
+    def update_model(self, conversation_id: str, model_reference: ModelReferenceSpec):
+        self.get_conversation(conversation_id)
+        if conversation_id in self._deleting_conversations:
+            raise ConflictError("Conversation deletion is in progress.")
+        if any(run.status in {"pending", "running"} for run in self._runs.list(conversation_id=conversation_id)):
+            raise ConflictError("Wait for the current run to finish before changing the model.")
+        reference = model_reference.model_dump(mode="json")
+        self._compiler.compile(research_blueprint(reference, prompts=self._prompts))
+        return self._conversations.set_model(conversation_id, reference)
+
     def compile_conversation(
         self,
         conversation_id: str,

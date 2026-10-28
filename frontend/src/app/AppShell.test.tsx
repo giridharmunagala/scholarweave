@@ -83,6 +83,49 @@ describe('application shell', () => {
     expect(container.querySelector('[role="menu"]')).toBeNull();
   });
 
+  it('defaults to white even when the operating system prefers dark', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    await render('/');
+
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(document.documentElement.dataset.themePreference).toBe('light');
+    expect(localStorage.getItem('scholarweave-theme')).toBe('light');
+  });
+
+  it.each(['sepia', 'dark', 'system'])('retains the explicitly saved %s theme', async (preference) => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: true,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })));
+    localStorage.setItem('scholarweave-theme', preference);
+    await render('/');
+
+    expect(document.documentElement.dataset.theme).toBe(preference === 'system' ? 'dark' : preference);
+    expect(localStorage.getItem('scholarweave-theme')).toBe(preference);
+  });
+
+  it('keeps the resize edge inside a narrow viewport with a reserved scrollbar gutter', async () => {
+    vi.stubGlobal('innerWidth', 390);
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('[]', { status: 200 })));
+    const clientWidth = vi.spyOn(document.documentElement, 'clientWidth', 'get').mockReturnValue(390);
+    try {
+      await render('/');
+      clientWidth.mockReturnValue(381);
+      await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'j', ctrlKey: true })); });
+      const handle = container.querySelector('[aria-label="Resize assistant"]')!;
+      expect(handle.getAttribute('aria-valuemax')).toBe('381');
+      expect(handle.getAttribute('aria-valuenow')).toBe('381');
+      expect(container.querySelector<HTMLElement>('.app-shell')!.style.getPropertyValue('--assistant-width')).toBe('381px');
+    } finally {
+      clientWidth.mockRestore();
+    }
+  });
+
   it('navigates to batch Runs and marks its page active', async () => {
     await render('/');
     const runs = container.querySelector<HTMLAnchorElement>('nav[aria-label="Primary"] a[href="/runs"]')!;

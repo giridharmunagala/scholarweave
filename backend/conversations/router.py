@@ -9,6 +9,7 @@ from backend.conversations.schemas import (
     ConversationDetailResponse,
     ConversationMessageRequest,
     ConversationMessageResponse,
+    ConversationModelUpdateRequest,
     ConversationResponse,
     ResearchConversationCreateRequest,
 )
@@ -75,6 +76,18 @@ async def get_research_conversation(
     record = container.conversation_turns.get_conversation(conversation_id)
     items = await container.conversation_turns.conversation_items(conversation_id)
     return ConversationDetailResponse(**_response(record, container.tracks).model_dump(), items=items)
+
+
+@router.patch("/agent/conversations/{conversation_id}", response_model=ConversationResponse)
+async def update_research_conversation_model(
+    conversation_id: str,
+    payload: ConversationModelUpdateRequest,
+    container=Depends(services),
+) -> ConversationResponse:
+    return _response(
+        container.conversation_turns.update_model(conversation_id, payload.model_reference),
+        container.tracks,
+    )
 
 
 @router.post(

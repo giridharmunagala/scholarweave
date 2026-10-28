@@ -1,47 +1,34 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 import { Icon } from '../../shared/components/Icons';
-import { ModelSelect, type ModelSelectValue } from '../../shared/components/ModelSelect';
 import { ErrorNotice, Loading } from '../../shared/components/Ui';
-import { capabilityOptions } from '../providers/ModelDefaultsPanel';
-import { defaultSmallTaskModel, providersApi, type Provider } from '../providers/api';
 
 export type TopicMap = components['schemas']['PaperTopicMapResponse'];
 type Paper = { id: string; title: string };
 
 export const MIN_TOPIC_PAPERS = 8;
-const NAMER_KEY = 'scholarweave.topicNamer';
-
 export const topicsApi = {
   get: (folderId: string | null) =>
     request<TopicMap | null>(`/paper-topics${folderId ? `?folder_id=${encodeURIComponent(folderId)}` : ''}`),
-  build: (folderId: string | null, namingModel: ModelSelectValue) =>
-    request<TopicMap>('/paper-topics', json('POST', { folder_id: folderId, naming_model: namingModel })),
+  build: (folderId: string | null) =>
+    request<TopicMap>('/paper-topics', json('POST', { folder_id: folderId, naming_model: {} })),
+  assign: (folderId: string | null, topicId: string, paperIds: string[]) =>
+    request<TopicMap>('/paper-topics/assign', json('PATCH', { folder_id: folderId, topic_id: topicId, paper_ids: paperIds })),
 };
 
-function storedNamer(): ModelSelectValue | null {
-  try {
-    const value = JSON.parse(localStorage.getItem(NAMER_KEY) ?? 'null') as ModelSelectValue | null;
-    return value?.model ? value : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Papers grouped into named topic shelves; new papers wait in "Not yet grouped" until regrouped. */
-export function PaperTopicsView<P extends Paper>({ folderId, papers, renderRow }: {
+/** Saved topic names and assignments survive updates; only new papers need grouping. */
+export function PaperTopicsView<P extends Paper>({ folderId, revision = 0, papers, renderRow }: {
   folderId: string | null;
+  revision?: number;
   papers: P[];
-  renderRow: (paper: P) => ReactNode;
+  renderRow: (paper: P, topicControl: ReactNode) => ReactNode;
 }) {
   const [map, setMap] = useState<TopicMap | null>(null);
   const [loading, setLoading] = useState(true);
   const [building, setBuilding] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [namer, setNamer] = useState<ModelSelectValue>(() => storedNamer() ?? {});
-  const [defaultNamer, setDefaultNamer] = useState<ModelSelectValue>({});
+  const [assigning, setAssigning] = useState(false);
   const [openTopic, setOpenTopic] = useState<string | null>(null);
 
   useEffect(() => {
@@ -53,29 +40,16 @@ export function PaperTopicsView<P extends Paper>({ folderId, papers, renderRow }
       .catch((reason: unknown) => { if (active) setError(reason); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [folderId]);
+  }, [folderId, revision]);
 
-  useEffect(() => {
-    let active = true;
-    Promise.all([providersApi.list(), providersApi.settings()]).then(([items, settings]) => {
-      if (!active) return;
-      setProviders(items);
-      setDefaultNamer(defaultSmallTaskModel(settings));
-    }).catch((reason) => { if (active) setError(reason); });
-    return () => { active = false; };
-  }, []);
-
-  const byId = useMemo(() => new Map(papers.map((paper) => [paper.id, paper])), [papers]);
-  const grouped = useMemo(() => new Set(map?.topics.flatMap((topic) => topic.paper_ids) ?? []), [map]);
+  const grouped = new Set(map?.topics.flatMap((topic) => topic.paper_ids) ?? []);
   const ungrouped = papers.filter((paper) => !grouped.has(paper.id));
 
   const build = async () => {
     setBuilding(true);
     setError(null);
     try {
-      if (namer.model) localStorage.setItem(NAMER_KEY, JSON.stringify(namer));
-      else localStorage.removeItem(NAMER_KEY);
-      setMap(await topicsApi.build(folderId, namer.model ? namer : {}));
+      setMap(await topicsApi.build(folderId));
     } catch (reason) {
       setError(reason);
     } finally {
@@ -83,19 +57,22 @@ export function PaperTopicsView<P extends Paper>({ folderId, papers, renderRow }
     }
   };
 
+  const assign = async (paperId: string, topicId: string) => {
+    setAssigning(true);
+    setError(null);
+    try {
+      setMap(await topicsApi.assign(folderId, topicId, [paperId]));
+    } catch (reason) {
+      setError(reason);
+    } finally {
+      setAssigning(false);
+    }
+  };
+
   const controls = (
     <div className="topic-controls">
-      <ModelSelect
-        options={capabilityOptions(providers, 'chat')}
-        value={namer}
-        emptyOptionLabel="Small tasks default"
-        emptyOptionHint={defaultNamer.model ?? 'Uses the main model when no helper is configured'}
-        onChange={setNamer}
-        ariaLabel="Topic naming model"
-        disabled={building}
-      />
-      <button className="button small" type="button" disabled={building} onClick={() => void build()}>
-        {building ? <><span className="button-spinner" aria-hidden="true" />Grouping…</> : <><Icon name="sparkle" size={13} />{map ? 'Regroup' : 'Group by topic'}</>}
+      <button className="button small" type="button" disabled={building || assigning || (map ? !ungrouped.length : papers.length < MIN_TOPIC_PAPERS)} onClick={() => void build()}>
+        {building ? <><span className="button-spinner" aria-hidden="true" />Grouping…</> : <><Icon name="sparkle" size={13} />{map ? `Group ${ungrouped.length} new paper${ungrouped.length === 1 ? '' : 's'}` : 'Group by topic'}</>}
       </button>
     </div>
   );
@@ -108,7 +85,7 @@ export function PaperTopicsView<P extends Paper>({ folderId, papers, renderRow }
         <div className="topic-empty">
           <p>
             <strong>Group these {papers.length} papers into topics.</strong>{' '}
-            <span className="muted">Papers are embedded locally, clustered, and each cluster is named by the model you choose.</span>
+            <span className="muted">The configured embedding model groups papers and the main model names each topic once. Available from {MIN_TOPIC_PAPERS} papers.</span>
           </p>
           {controls}
         </div>
@@ -121,10 +98,14 @@ export function PaperTopicsView<P extends Paper>({ folderId, papers, renderRow }
             <span className="row-spacer" />
             {controls}
           </div>
+          <small className="muted">Saved topic names and assignments are kept. Group new papers to enrich these topics, or open a topic to assign a paper manually.</small>
           {(() => {
-            const topics = [...map.topics.map((topic) => ({ ...topic, papers: topic.paper_ids.flatMap((id) => byId.get(id) ?? []) })),
-              ...(ungrouped.length ? [{ id: 'ungrouped', name: 'Not yet grouped', description: 'Added since the last grouping. Regroup to place them.', paper_ids: [], papers: ungrouped }] : []),
-            ].filter((topic) => topic.papers.length);
+            const topics = [...map.topics.map((topic) => {
+              const members = new Set(topic.paper_ids);
+              return { ...topic, papers: papers.filter((paper) => members.has(paper.id)) };
+            }),
+              ...(ungrouped.length ? [{ id: 'ungrouped', name: 'Not yet grouped', description: 'New papers can be grouped into saved topics or assigned manually.', paper_ids: [], papers: ungrouped }] : []),
+            ];
             const active = topics.find((topic) => topic.id === openTopic);
             if (active) return (
               <section className="topic-detail" aria-label={active.name}>
@@ -133,9 +114,19 @@ export function PaperTopicsView<P extends Paper>({ folderId, papers, renderRow }
                     <Icon name="arrowRight" size={13} className="flip" />All topics
                   </button>
                   <strong>{active.name}</strong>
-                  <small className="muted">{active.papers.length} papers ? {active.description}</small>
+                  <small className="muted">{active.papers.length} papers · {active.description}</small>
                 </div>
-                <div className="paper-table">{active.papers.map(renderRow)}</div>
+                <div className="paper-table">{active.papers.map((paper) => renderRow(paper, (
+                  <label className="paper-topic-assignment">
+                    <span>Topic</span>
+                    <select aria-label={`Assign topic for ${paper.title}`} value={active.id === 'ungrouped' ? '' : active.id}
+                      disabled={building || assigning} onChange={(event) => void assign(paper.id, event.target.value)}>
+                      <option value="" disabled>Assign to a topic…</option>
+                      {map.topics.map((topic) => <option value={topic.id} key={topic.id}>{topic.name}</option>)}
+                    </select>
+                  </label>
+                )))}</div>
+                {!active.papers.length ? <p className="muted">No papers in this topic match the current filters.</p> : null}
               </section>
             );
             return (

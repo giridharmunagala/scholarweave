@@ -8,12 +8,12 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import { subscribeToRun, type RunStreamEvent } from '../../api/events';
 import { Icon, type IconName } from '../../shared/components/Icons';
 import { MarkdownViewer } from '../../shared/components/MarkdownViewer';
 import { ErrorNotice, IconButton, Loading } from '../../shared/components/Ui';
+import { PaneResizer, readStoredWidth, storeWidth } from '../../shared/components/PaneResizer';
 import {
   providersApi,
   type Provider,
@@ -67,6 +67,7 @@ import { useThrottledRates } from './useThrottledRates';
 import { buildSessionObservability } from './sessionObservability';
 import { buildRunStages } from './runStages';
 import { RunActivity } from './RunActivity';
+import { WorkspacePaperPicker } from './WorkspacePaperPicker';
 import { SessionOverview } from './SessionMonitor';
 import { TrackChatSelector } from '../tracks/TrackChatSelector';
 import { Link, useNavigate } from '../../app/router';
@@ -123,95 +124,6 @@ const LIST_WIDTH_KEY = 'scholarweave.chat.list-width';
 const ACTIVITY_WIDTH_KEY = 'scholarweave.chat.activity-width';
 const LIST_WIDTH = { value: 272, min: 200, max: 520 };
 const ACTIVITY_WIDTH = { value: 380, min: 300, max: 760 };
-
-type WidthBounds = { value: number; min: number; max: number };
-
-function clampWidth(width: number, bounds: WidthBounds): number {
-  return Math.round(Math.min(bounds.max, Math.max(bounds.min, width)));
-}
-
-function readStoredWidth(key: string, bounds: WidthBounds): number {
-  if (typeof window === 'undefined') return bounds.value;
-  const stored = Number(window.localStorage.getItem(key));
-  return Number.isFinite(stored) && stored > 0 ? clampWidth(stored, bounds) : bounds.value;
-}
-
-function storeWidth(key: string, width: number) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(key, String(width));
-  } catch {
-    /* A full or blocked store only costs the remembered width, never the session. */
-  }
-}
-
-/** A drag handle on the pane edge; keyboard arrows move it too, so it is not mouse-only. */
-function PaneResizer({
-  side,
-  label,
-  width,
-  bounds,
-  onResize,
-  onResizingChange,
-}: {
-  side: 'left' | 'right';
-  label: string;
-  width: number;
-  bounds: WidthBounds;
-  onResize: (width: number) => void;
-  onResizingChange: (resizing: boolean) => void;
-}) {
-  const [active, setActive] = useState(false);
-  const originRef = useRef({ pointer: 0, width });
-
-  const finish = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!active) return;
-    event.currentTarget.releasePointerCapture?.(event.pointerId);
-    setActive(false);
-    onResizingChange(false);
-  };
-
-  return (
-    <div
-      className={`pane-resizer ${side}${active ? ' active' : ''}`}
-      role="separator"
-      tabIndex={0}
-      aria-orientation="vertical"
-      aria-label={label}
-      aria-valuenow={width}
-      aria-valuemin={bounds.min}
-      aria-valuemax={bounds.max}
-      onPointerDown={(event) => {
-        event.preventDefault();
-        event.currentTarget.setPointerCapture?.(event.pointerId);
-        originRef.current = { pointer: event.clientX, width };
-        setActive(true);
-        onResizingChange(true);
-      }}
-      onPointerMove={(event) => {
-        if (!active) return;
-        const delta = event.clientX - originRef.current.pointer;
-        onResize(clampWidth(originRef.current.width + (side === 'right' ? delta : -delta), bounds));
-      }}
-      onPointerUp={finish}
-      onPointerCancel={finish}
-      onDoubleClick={() => onResize(bounds.value)}
-      onKeyDown={(event) => {
-        const step = event.shiftKey ? 48 : 16;
-        if (event.key === 'ArrowLeft') {
-          event.preventDefault();
-          onResize(clampWidth(width + (side === 'right' ? -step : step), bounds));
-        } else if (event.key === 'ArrowRight') {
-          event.preventDefault();
-          onResize(clampWidth(width + (side === 'right' ? step : -step), bounds));
-        } else if (event.key === 'Home') {
-          event.preventDefault();
-          onResize(bounds.value);
-        }
-      }}
-    />
-  );
-}
 
 export function ResearchChatPage({ embedded = false, draft, autoSend = false, readingContext: initialReading, intent, initialTrack, ideaObjective, ideaContext, onHandoffChange }: {
   embedded?: boolean; draft?: string; autoSend?: boolean; readingContext?: AskContext; intent?: 'chat' | 'ideation';
@@ -285,6 +197,7 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
   const [loadError, setLoadError] = useState<unknown>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [sending, setSending] = useState(false);
+  const [updatingModel, setUpdatingModel] = useState(false);
   const [queueingSteering, setQueueingSteering] = useState(false);
   const [stopping, setStopping] = useState<'stop' | 'answer' | null>(null);
   const [pinnedToBottom, setPinnedToBottom] = useState(true);
@@ -496,6 +409,7 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
     setOptimisticUser(null);
     setSteeringMessages([]);
     setSending(false);
+    setUpdatingModel(false);
     setStopping(null);
     setPinnedToBottom(true);
     const [conversationResult, runsResult] = await Promise.allSettled([
@@ -832,6 +746,7 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
     setOptimisticUser(null);
     setSteeringMessages([]);
     setSending(false);
+    setUpdatingModel(false);
     setStopping(null);
     setPinnedToBottom(true);
   };
@@ -873,29 +788,36 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
     composerRef.current?.focus();
   };
 
-  const selectModel = (reference: ModelReference) => {
+  const selectModel = async (reference: ModelReference) => {
+    if (updatingModel || sending || uploading || historyState === 'loading') return;
     if (reference.provider_profile_id === modelReference.provider_profile_id && reference.model === modelReference.model) return;
-    if (current && !window.confirm(
-      'Changing the model starts a new chat without the existing transcript. Your current chat stays saved. Your unsent message, paper context and attachments will move to the new chat. Continue?',
-    )) return;
-    persistDraft();
-    setModelReference(reference);
-    setPreferredModelReference(reference);
-    setContextWindowTokens(
-      configuredContextWindow(
-        providers,
-        reference,
-        settings?.agent_context_window_tokens ?? 32_768,
-      ),
-    );
-    void providersApi
-      .updateSettings({ last_chat_model_reference: reference })
-      .then(setSettings)
-      .catch(setError);
-    if (current) {
-      setCurrent(null);
-      setDraftKey(contextualDraftKey(['model-change', current.id, reference]));
-      resetThread(true);
+    const request = openRequestRef.current;
+    setUpdatingModel(true);
+    setError(null);
+    try {
+      if (current) {
+        const updated = await chatApi.updateModel(current.id, reference);
+        if (!mountedRef.current || request !== openRequestRef.current) return;
+        setCurrent((active) => active?.id === updated.id ? { ...active, ...updated } : active);
+        setConversations((previous) => previous.map((item) => item.id === updated.id ? updated : item));
+      }
+      setModelReference(reference);
+      setPreferredModelReference(reference);
+      setContextWindowTokens(
+        configuredContextWindow(
+          providers,
+          resolveModelReference(reference, settings),
+          settings?.agent_context_window_tokens ?? 32_768,
+        ),
+      );
+      void providersApi
+        .updateSettings({ last_chat_model_reference: reference })
+        .then((updated) => { if (mountedRef.current && request === openRequestRef.current) setSettings(updated); })
+        .catch((nextError) => { if (mountedRef.current && request === openRequestRef.current) setError(nextError); });
+    } catch (nextError) {
+      if (mountedRef.current && request === openRequestRef.current) setError(nextError);
+    } finally {
+      if (mountedRef.current && request === openRequestRef.current) setUpdatingModel(false);
     }
   };
 
@@ -959,7 +881,7 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
     const draft = override ?? content;
     const consumesDraft = override === undefined || override === content;
     const submitted = draft.trim();
-    if (!submitted || uploadControllerRef.current || historyState === 'loading') return;
+    if (!submitted || uploadControllerRef.current || updatingModel || historyState === 'loading') return;
     optionsRef.current?.removeAttribute('open');
     if (sending) {
       if (
@@ -1651,11 +1573,15 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
                       >
                         <Icon name="upload" size={16} />
                       </button>
+                      <WorkspacePaperPicker key={current?.id ?? draftKey}
+                        disabled={runActive || uploading || updatingModel || historyState === 'loading'}
+                        selectedId={reading?.document_id}
+                        onSelect={(paper) => { setReading(paper); composerRef.current?.focus(); }} />
                       <ChatModelPicker
                         providers={providers}
                         settings={settings}
                         value={modelReference}
-                        disabled={sending || uploading || historyState === 'loading'}
+                        disabled={runActive || uploading || updatingModel || historyState === 'loading'}
                         onChange={selectModel}
                       />
                       <label className="response-effort-control">
@@ -1816,7 +1742,7 @@ export function ResearchChatPage({ embedded = false, draft, autoSend = false, re
                         className="composer-icon composer-send"
                         type="button"
                         aria-label="Send message"
-                        disabled={sending || uploading || historyState === 'loading' || !content.trim()}
+                        disabled={sending || uploading || updatingModel || historyState === 'loading' || !content.trim()}
                         onClick={() => void send()}
                       >
                         <Icon name="arrowRight" size={16} />

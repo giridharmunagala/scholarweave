@@ -96,12 +96,12 @@ DARK = Theme(
 )
 
 THEMES: tuple[Theme, ...] = (LIGHT, SEPIA, DARK)
-DEFAULT_THEME = DARK.name
+DEFAULT_THEME = LIGHT.name
 
 DESCRIPTIONS: dict[str, str] = {
-    "light": "Neutral white with a muted blue accent.",
+    "light": "Neutral white with a muted blue accent. The default.",
     "sepia": "Warm, low-glare paper for long reading.",
-    "dark": "Neutral graphite for low light. The default.",
+    "dark": "Neutral graphite for low light.",
 }
 
 # Retired themes map to the closest current one so a saved choice survives.

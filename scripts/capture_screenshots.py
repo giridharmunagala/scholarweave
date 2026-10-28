@@ -1,4 +1,4 @@
-"""Capture README screenshots without saving research or provider changes.
+"""Capture white-theme README screenshots without saving research or provider changes.
 
 Install the optional capture tools with:
     python -m pip install playwright
@@ -84,7 +84,11 @@ def main() -> None:
             viewport={"width": 1680, "height": 1050}, device_scale_factor=1,
             color_scheme="light", reduced_motion="reduce",
         )
-        context.add_init_script("localStorage.setItem('scholarweave.assistant.width', '440')")
+        context.add_init_script("""
+            localStorage.setItem('scholarweave-theme', 'light');
+            localStorage.setItem('scholarweave-theme-version', '3');
+            localStorage.setItem('scholarweave.assistant.width', '440');
+        """)
         providers_response = context.request.get(f"{api_url}/api/providers")
         assert providers_response.ok, "Cannot load saved provider catalogs."
         saved_catalogs = {
@@ -120,7 +124,11 @@ def main() -> None:
             targets.append((f"/tracks?id={quote(tracks[0]['id'], safe='')}", "tracks.png", None))
         else:
             print("No research track available; skipping tracks.png.")
-        targets.append(("/settings", "settings-providers.png", open_provider_form))
+        targets.extend([
+            ("/runs", "runs.png", None),
+            ("/settings", "settings.png", None),
+            ("/settings", "settings-providers.png", open_provider_form),
+        ])
         context.route(f"{base_url}/api/**", read_only_api)
         page = context.new_page()
         page.on("pageerror", lambda error: errors.append(str(error)))
@@ -128,6 +136,7 @@ def main() -> None:
             response = page.goto(f"{base_url}{route}", wait_until="networkidle")
             assert response is not None and response.ok, f"Failed to load {route}."
             expect(page.locator(".app-main")).to_be_visible()
+            expect(page.locator("html")).to_have_attribute("data-theme", "light")
             if prepare is not None:
                 prepare(page)
             expect(page.get_by_text("Loading…", exact=True)).to_have_count(0)
@@ -150,7 +159,7 @@ def main() -> None:
             page.screenshot(path=str(OUTPUT_DIR / filename), animations="disabled", clip=clip)
             print(f"captured {route} -> docs/screenshots/{filename}")
         browser.close()
-    print("Captured all README screenshots without API writes or live model discovery.")
+    print("Captured all README screenshots in white without API writes or live model discovery.")
 
 
 if __name__ == "__main__":

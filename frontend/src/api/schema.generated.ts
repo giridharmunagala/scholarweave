@@ -53,7 +53,8 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /** Update Research Conversation Model */
+        patch: operations["update_research_conversation_model_api_agent_conversations__conversation_id__patch"];
         trace?: never;
     };
     "/api/agent/conversations/{conversation_id}/messages": {
@@ -1050,6 +1051,23 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/paper-topics/assign": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Assign Paper Topics */
+        patch: operations["assign_paper_topics_api_paper_topics_assign_patch"];
         trace?: never;
     };
     "/api/path-picker": {
@@ -2834,6 +2852,10 @@ export interface components {
             conversation: components["schemas"]["ConversationResponse"];
             run: components["schemas"]["RunResponse"];
         };
+        /** ConversationModelUpdateRequest */
+        ConversationModelUpdateRequest: {
+            model_reference: components["schemas"]["ModelReferenceSpec"];
+        };
         /** ConversationResponse */
         ConversationResponse: {
             /**
@@ -3573,6 +3595,15 @@ export interface components {
             pages: number[];
             /** Total Pages */
             total_pages: number;
+        };
+        /** PaperTopicAssignmentRequest */
+        PaperTopicAssignmentRequest: {
+            /** Folder Id */
+            folder_id?: string | null;
+            /** Paper Ids */
+            paper_ids: string[];
+            /** Topic Id */
+            topic_id: string;
         };
         /** PaperTopicMapResponse */
         PaperTopicMapResponse: {
@@ -5428,6 +5459,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConversationDetailResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_research_conversation_model_api_agent_conversations__conversation_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                conversation_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ConversationModelUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -7539,6 +7605,39 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    assign_paper_topics_api_paper_topics_assign_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PaperTopicAssignmentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PaperTopicMapResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

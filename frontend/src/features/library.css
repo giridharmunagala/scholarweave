@@ -886,7 +886,8 @@
 /* Topic shelves */
 .topic-view { display: grid; gap: var(--space-3); }
 .topic-summary, .topic-controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
-.topic-controls > :first-child { min-width: 220px; }
+.paper-topic-assignment { display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-2); color: var(--muted); font-size: var(--text-xs); }
+.paper-topic-assignment select { width: auto; min-width: 0; max-width: 100%; font-size: var(--text-xs); }
 .topic-summary .topic-controls { margin-inline-start: auto; }
 .topic-empty { display: grid; gap: var(--space-3); padding: var(--space-5); border: 1px dashed var(--border); border-radius: var(--radius-lg); }
 .topic-empty p { margin: 0; }

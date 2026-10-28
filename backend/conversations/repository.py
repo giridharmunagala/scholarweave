@@ -72,6 +72,17 @@ class ConversationRepository:
             session.refresh(record)
             return record
 
+    def set_model(self, conversation_id: str, *, model_reference: dict[str, Any]) -> ConversationRecord:
+        with self._sessions() as session:
+            record = session.get(ConversationRecord, conversation_id)
+            if record is None:
+                raise NotFoundError("Conversation was not found.")
+            record.model_reference_json = model_reference
+            record.updated_at = utcnow()
+            session.commit()
+            session.refresh(record)
+            return record
+
     def delete(self, conversation_id: str) -> None:
         with self._sessions() as session:
             record = session.get(ConversationRecord, conversation_id)

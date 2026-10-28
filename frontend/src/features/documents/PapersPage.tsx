@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { apiUrl, json, request } from '../../api/client';
 import type { components } from '../../api/schema.generated';
 import { useAsk } from '../../app/ask';
@@ -10,7 +10,7 @@ import { EmptyState, ErrorNotice, IconButton, Loading, StatusPill } from '../../
 import { PaperNotesDrawer, quoteMarkdown, usePaperNotes } from './PaperNotes';
 import { PaperSummaryPanel, SummaryView } from './PaperSummaryPanel';
 import type { SummaryContent } from './summaryApi';
-import { MIN_TOPIC_PAPERS, PaperTopicsView } from './PaperTopics';
+import { PaperTopicsView, topicsApi, type TopicMap } from './PaperTopics';
 import { PdfReader } from './PdfReader';
 import { ReaderAsk } from './ReaderAsk';
 import { SummaryBatchPanel } from './SummaryBatchPanel';
@@ -199,6 +199,8 @@ export default function PapersPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showFolderColumn, setShowFolderColumn] = useState(() => localStorage.getItem('scholarweave.papersFolderColumn') === 'true');
   const [topicLayout, setTopicLayout] = useState(() => localStorage.getItem('scholarweave.papersLayout') === 'topics');
+  const [assignmentTopics, setAssignmentTopics] = useState<{ folderId: string | null; map: TopicMap | null } | null>(null);
+  const [topicsRevision, setTopicsRevision] = useState(0);
   const ingestionRequest = useRef<AbortController | null>(null);
   const textRequestId = useRef(0);
   const selectionRequestId = useRef(0);
@@ -600,6 +602,9 @@ export default function PapersPage() {
   );
   const folderDocuments = activeFolder === 'all' ? [...library.byId.values()]
     : activeFolder === 'unfiled' ? library.unfiled : library.byFolder.get(activeFolder) ?? [];
+  const topicScope = activeFolder === 'all' ? null : activeFolder === 'unfiled' ? undefined : activeFolder;
+  const assignmentScope = topicScope ?? null;
+  const assignmentMap = assignmentTopics?.folderId === assignmentScope ? assignmentTopics.map : undefined;
   const filteredDocuments = folderDocuments.filter((document) =>
     (!paperStatus || document.status === paperStatus) &&
     (!usefulness || (document.usefulness ?? 'unrated') === usefulness),
@@ -686,6 +691,36 @@ export default function PapersPage() {
       }
       setChecked(new Set());
       notify(`Moved ${moved} paper${moved === 1 ? '' : 's'} to ${label ?? 'the folder'}`);
+    } catch (reason) {
+      setError(reason);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const loadAssignmentTopics = async () => {
+    setBusyAction('load-topics');
+    setError(null);
+    try {
+      const map = await topicsApi.get(assignmentScope);
+      setAssignmentTopics({ folderId: assignmentScope, map });
+    } catch (reason) {
+      setError(reason);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const assignSelectedTopic = async (topicId: string) => {
+    const ids = [...checked];
+    setBusyAction('assign-topic');
+    setError(null);
+    try {
+      const map = await topicsApi.assign(assignmentScope, topicId, ids);
+      setAssignmentTopics({ folderId: assignmentScope, map });
+      setTopicsRevision((revision) => revision + 1);
+      setChecked((current) => new Set([...current].filter((id) => !ids.includes(id))));
+      notify(`Assigned ${ids.length} paper${ids.length === 1 ? '' : 's'} to topic`);
     } catch (reason) {
       setError(reason);
     } finally {
@@ -931,6 +966,7 @@ export default function PapersPage() {
                   </select>
                 </label>
                 <div className="detail-line"><span>File</span><small>{paper.source_filename}</small></div>
+                <div className="detail-line"><span>Acquired</span><time dateTime={paper.created_at}>{new Date(paper.created_at).toLocaleString()}</time></div>
                 {pdfUrl ? <a className="button small secondary" href={pdfUrl} target="_blank" rel="noreferrer">Open PDF in a new tab</a> : null}
               </div>
               {!ingesting ? (
@@ -999,7 +1035,7 @@ export default function PapersPage() {
     .filter(([id]) => library.byId.has(id))
     .sort((a, b) => b[1].at - a[1].at)
     .slice(0, 4);
-  const renderRow = (document: DocumentSummary) => {
+  const renderRow = (document: DocumentSummary, topicControl?: ReactNode) => {
       const hit = query.trim() ? searchResults.find((result) => result.id === document.id) : undefined;
       const progress = reading[document.id];
       const isChecked = checked.has(document.id);
@@ -1031,6 +1067,7 @@ export default function PapersPage() {
                 {document.status !== 'ready' ? <StatusPill value={document.status} /> : null}
                 {document.page_count ? `${document.page_count} pages · ` : ''}{document.source_filename}
               </small>
+              <small>Acquired <time dateTime={document.created_at}>{new Date(document.created_at).toLocaleString()}</time></small>
               {longAbstract ? <button type="button" className="paper-abstract-toggle"
                 aria-expanded={expanded} aria-controls={`paper-abstract-${document.id}`}
                 aria-label={`${expanded ? 'Show less abstract' : 'Read full abstract'} for ${document.title}`}
@@ -1040,6 +1077,7 @@ export default function PapersPage() {
                   return next;
                 })}>{expanded ? 'Show less' : 'Read full abstract'}</button> : null}
             </div>
+            {topicControl}
             {hit ? <small className="paper-search-excerpt">{hit.citation ? `${hit.citation}: ` : 'Title match: '}{hit.excerpt}</small> : null}
           </div>
           {showFolderColumn ? <small className="paper-table-folder">{folderName(folderId(document)) ?? '—'}</small> : null}
@@ -1051,8 +1089,7 @@ export default function PapersPage() {
       );
   };
 
-  const topicScope = activeFolder === 'all' ? null : activeFolder === 'unfiled' ? undefined : activeFolder;
-  const canTopics = topicScope !== undefined && folderDocuments.length >= MIN_TOPIC_PAPERS;
+  const canTopics = topicScope !== undefined && folderDocuments.length > 0;
   const topicView = topicLayout && canTopics && !query.trim() && sortedDocuments.length > 0;
   const readyCount = documents.filter((document) => document.status === 'ready').length;
 
@@ -1184,8 +1221,8 @@ export default function PapersPage() {
         </select>
         <select aria-label="Sort papers" value={query.trim() ? 'relevance' : sort} disabled={!!query.trim()} onChange={(event) => { setSort(event.target.value); setOffset(0); }}>
           {query.trim() ? <option value="relevance">Relevance</option> : null}
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
+          <option value="newest">Acquired: newest first</option>
+          <option value="oldest">Acquired: oldest first</option>
           <option value="title">Title A-Z</option>
         </select>
         {paperStatus ? <span className="muted" role="status">Status: {PAPER_STATUS_LABELS[paperStatus] ?? paperStatus}</span> : null}
@@ -1237,6 +1274,21 @@ export default function PapersPage() {
             <option value="unfiled">Unfiled</option>
             {folders.map((folder) => <option value={folder.id} key={folder.id}>{folder.name}</option>)}
           </select>
+          {assignmentMap?.topics.length ? (
+            <select aria-label="Assign selected papers to topic" value="" disabled={operationBusy}
+              onChange={(event) => { if (event.target.value) void assignSelectedTopic(event.target.value); }}>
+              <option value="">{busyAction === 'assign-topic' ? 'Assigning topic…' : 'Assign topic…'}</option>
+              {assignmentMap.topics.map((topic) => <option value={topic.id} key={topic.id}>{topic.name}</option>)}
+            </select>
+          ) : (
+            <button className="button small secondary" type="button" disabled={operationBusy}
+              onClick={() => void loadAssignmentTopics()}>
+              {busyAction === 'load-topics' ? 'Loading topics…' : 'Assign topic…'}
+            </button>
+          )}
+          {assignmentMap === null || assignmentMap?.topics.length === 0 ? (
+            <small className="muted" role="status">No saved topics for this view. Create topics in All papers or this folder first.</small>
+          ) : null}
           <button className="button small secondary" type="button" onClick={() => setShowSummaryBatch(true)}>Summarize</button>
           <button className="button small secondary" type="button" onClick={() => setShowOcrBatch(true)}>OCR non-OCR papers</button>
           <button className="button small secondary" type="button" onClick={() => ask.ask(`Compare these papers: ${checkedPapers.map((paper) => `"${paper.title}" (paper ID: ${paper.id})`).join('; ')}. Read their existing text and notes, and contrast their questions, methods, evidence and limitations.`)}>
@@ -1250,7 +1302,7 @@ export default function PapersPage() {
         </div>
       ) : null}
 
-      {topicView ? <PaperTopicsView folderId={topicScope ?? null} papers={sortedDocuments} renderRow={renderRow} /> : (
+      {topicView ? <PaperTopicsView key={topicScope ?? 'all'} folderId={topicScope ?? null} revision={topicsRevision} papers={sortedDocuments} renderRow={renderRow} /> : (
       <div className="paper-table" aria-label="Paper results" aria-busy={searching}>
         {visibleDocuments.length ? (
           <div className={`paper-table-head${showFolderColumn ? ' with-folder' : ''}`}>
@@ -1271,7 +1323,7 @@ export default function PapersPage() {
           </div>
         ) : null}
         {searching ? <Loading label="Searching papers…" /> : null}
-        {visibleDocuments.map(renderRow)}
+        {visibleDocuments.map((document) => renderRow(document))}
         {!documents.length ? (
           <EmptyState icon="papers" title="Your library is empty" description="Add a PDF to start reading, annotating and asking questions about it." />
         ) : null}

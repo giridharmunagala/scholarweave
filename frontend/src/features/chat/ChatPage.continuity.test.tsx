@@ -70,6 +70,7 @@ describe('chat continuity and recovery', () => {
   let activeRuns: Record<string, ReturnType<typeof runningRun>[]>;
   let steeringGate: Promise<Response> | null;
   let messageGate: Promise<Response> | null;
+  let modelGate: Promise<Response> | null;
   let failures: Set<string>;
   let requests: { url: string; method: string; body: Record<string, unknown> }[];
 
@@ -78,6 +79,7 @@ describe('chat continuity and recovery', () => {
     activeRuns = {};
     steeringGate = null;
     messageGate = null;
+    modelGate = null;
     failures = new Set();
     requests = [];
     localStorage.clear();
@@ -128,6 +130,13 @@ describe('chat continuity and recovery', () => {
         return response(activeRuns[id] ?? []);
       }
       const get = /\/api\/agent\/conversations\/([^/]+)$/.exec(url);
+      if (get && method === 'PATCH') {
+        if (modelGate) return modelGate;
+        if (failures.has('model')) return response({ message: 'Model unavailable' }, 422);
+        const current = conversations.find((item) => item.id === get[1])!;
+        current.model_reference = body.model_reference as typeof MODEL;
+        return response(current);
+      }
       if (get) return failures.has('conversation') ? response({ message: 'Conversation unavailable' }, 503)
         : response(conversations.find((item) => item.id === get[1]) ?? conversation(get[1]));
       throw new Error(`Unexpected request ${method} ${url}`);
@@ -330,7 +339,7 @@ describe('chat continuity and recovery', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
-  it('explains and confirms a model change without silently discarding the transcript or unsent context', async () => {
+  it('changes the model in place without losing the transcript, paper context or unsent attachments', async () => {
     saveChatDraft(conversationDraftKey('one'), {
       conversationId: 'one', content: 'Keep my question', reading: PAPER, attachments: [ATTACHMENT],
       selectedIdea: '', otherIdea: '', intent: 'chat', trackId: '', modelReference: MODEL,
@@ -338,35 +347,100 @@ describe('chat continuity and recovery', () => {
     });
     window.history.replaceState({}, '', '/chat?conversation=one');
     await mount();
-    vi.mocked(window.confirm).mockReturnValueOnce(false);
-    const chooseSecond = async () => {
-      await click(button('Main model'));
-      await click([...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-        .find((item) => item.textContent?.includes('second'))!);
-    };
-    await chooseSecond();
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('without the existing transcript'));
+    await click(button('Main model'));
+    await click([...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((item) => item.textContent?.includes('second'))!);
+    expect(window.confirm).not.toHaveBeenCalled();
     expect(container.querySelector('h1')?.textContent).toBe('Chat one');
     expect(container.textContent).toContain('Transcript for one');
-    expect(composer().value).toBe('Keep my question');
-
-    await chooseSecond();
-    expect(container.querySelector('h1')?.textContent).toBe('New chat');
     expect(composer().value).toBe('Keep my question');
     expect(button('Remove notes.md')).not.toBeNull();
     expect(container.querySelector('[aria-label="Reading context"]')?.textContent).toContain(PAPER.title);
     expect(container.querySelector<HTMLSelectElement>('[aria-label="Response effort"]')?.value).toBe('quick');
     expect(requests.some((item) => item.url.endsWith('/conversations') && item.method === 'POST')).toBe(false);
     await click(button('Send message'));
-    const created = requests.find((item) => item.url.endsWith('/conversations') && item.method === 'POST')!;
-    expect(created.body.model_reference).toEqual({ ...MODEL, model: 'second' });
+    const updated = requests.find((item) => item.url.endsWith('/conversations/one') && item.method === 'PATCH')!;
+    expect(updated.body.model_reference).toEqual({ ...MODEL, model: 'second' });
     const sent = requests.find((item) => item.url.endsWith('/messages'))!;
+    expect(sent.url).toContain('/conversations/one/messages');
     expect(sent.body).toMatchObject({
       content: 'Keep my question', attachment_paths: [ATTACHMENT.path], web_enabled: false,
       reading_context: { document_id: PAPER.document_id, page: PAPER.page, selection: PAPER.selection },
     });
-    await openConversation('one');
+    expect(requests.some((item) => item.url.endsWith('/conversations') && item.method === 'POST')).toBe(false);
+  });
+
+  it('keeps the previous model and draft when a model update fails', async () => {
+    await mount();
+    await type('Keep this draft');
+    failures.add('model');
+    await click(button('Main model'));
+    await click([...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((item) => item.textContent?.includes('second'))!);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Model unavailable');
+    expect(button('Main model').textContent).toContain('first');
     expect(container.textContent).toContain('Transcript for one');
+    expect(composer().value).toBe('Keep this draft');
+    expect(button('Send message').disabled).toBe(false);
+  });
+
+  it('blocks sending during a model update and ignores its completion after switching conversations', async () => {
+    const pending = deferred<Response>();
+    modelGate = pending.promise;
+    await mount();
+    await type('Keep this question here');
+    await click(button('Main model'));
+    await click([...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      .find((item) => item.textContent?.includes('second'))!);
+    expect(button('Send message').disabled).toBe(true);
+    await act(async () => { composer().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
+    expect(requests.some((item) => item.url.endsWith('/messages'))).toBe(false);
+    await openConversation('two');
+    await type('A different question');
+    await act(async () => pending.resolve(response({ ...conversation('one'), model_reference: { ...MODEL, model: 'second' } })));
+    expect(container.querySelector('h1')?.textContent).toBe('Chat two');
+    expect(button('Main model').textContent).toContain('first');
+    expect(composer().value).toBe('A different question');
+    expect(button('Send message').disabled).toBe(false);
+  });
+
+  it('resizes the assistant by dragging or keyboard without losing the paper draft and remembers the width', async () => {
+    const viewportWidth = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1440 });
+    await mount(true);
+    await click(byText('Ask about paper'));
+    await type('Keep this paper question while resizing');
+    const handle = container.querySelector<HTMLElement>('[aria-label="Resize assistant"]')!;
+    const initialWidth = Number(handle.getAttribute('aria-valuenow'));
+    const pointer = (type: string, clientX: number) => {
+      const event = new Event(type, { bubbles: true });
+      Object.defineProperty(event, 'clientX', { value: clientX });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      handle.dispatchEvent(event);
+    };
+    await act(async () => pointer('pointerdown', 500));
+    await act(async () => pointer('pointermove', 450));
+    await act(async () => pointer('pointerup', 450));
+    expect(Number(handle.getAttribute('aria-valuenow'))).toBe(initialWidth + 50);
+    await act(async () => { handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true })); });
+    expect(Number(handle.getAttribute('aria-valuenow'))).toBe(initialWidth + 34);
+    expect(localStorage.getItem('scholarweave.assistant.width')).toBe(String(initialWidth + 34));
+    expect(composer().value).toBe('Keep this paper question while resizing');
+    expect(container.querySelector('[aria-label="Reading context"]')?.textContent).toContain(PAPER.title);
+    await click(button('Close assistant'));
+    act(() => root.unmount());
+    root = createRoot(container);
+    await mount(true);
+    await click(byText('Open assistant'));
+    expect(Number(container.querySelector('[aria-label="Resize assistant"]')?.getAttribute('aria-valuenow'))).toBe(initialWidth + 34);
+    expect(composer().value).toBe('Keep this paper question while resizing');
+    await act(async () => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+      window.dispatchEvent(new Event('resize'));
+    });
+    expect(Number(container.querySelector('[aria-label="Resize assistant"]')?.getAttribute('aria-valuenow'))).toBe(544);
+    expect(localStorage.getItem('scholarweave.assistant.width')).toBe(String(initialWidth + 34));
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: viewportWidth });
   });
 
   it.each(['success', 'failure'])('ignores delayed steering %s after changing conversations', async (outcome) => {

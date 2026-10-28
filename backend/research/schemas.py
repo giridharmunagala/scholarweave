@@ -312,6 +312,12 @@ class PaperTopicRequest(ResearchSchema):
     naming_model: ModelReferenceSpec = Field(default_factory=ModelReferenceSpec)
 
 
+class PaperTopicAssignmentRequest(ResearchSchema):
+    folder_id: str | None = None
+    topic_id: str = Field(min_length=1)
+    paper_ids: list[Annotated[str, Field(min_length=1)]] = Field(min_length=1)
+
+
 class PaperTopicResponse(ResearchSchema):
     id: str
     name: str

@@ -64,6 +64,9 @@ class ConversationService:
             raise ValueError("Conversation title cannot exceed 120 characters.")
         return self._repository.set_title(conversation_id, title=normalized)
 
+    def set_model(self, conversation_id: str, model_reference: dict[str, Any]) -> ConversationRecord:
+        return self._repository.set_model(conversation_id, model_reference=model_reference)
+
     async def delete(
         self,
         conversation_id: str,

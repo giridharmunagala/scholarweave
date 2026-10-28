@@ -35,38 +35,6 @@
 .chat-layout.resizing { transition: none; user-select: none; }
 .chat-pane-backdrop { display: none; }
 
-/* ------------------------------------------------------- Pane resizers --- */
-
-.pane-resizer {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  z-index: 5;
-  width: 8px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  cursor: col-resize;
-  touch-action: none;
-}
-.pane-resizer.right { right: 0; }
-.pane-resizer.left { left: 0; }
-.pane-resizer::after {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 2px;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  transform: translateX(-50%);
-  transition: background var(--dur-fast) var(--ease);
-  content: '';
-}
-.pane-resizer:hover::after,
-.pane-resizer:focus-visible::after,
-.pane-resizer.active::after { background: var(--accent); }
-.pane-resizer:focus-visible { outline: none; }
 .chat-layout.collapsed .conversation-list .pane-resizer { display: none; }
 
 /* ----------------------------------------------------------- Chat list --- */
@@ -1210,6 +1178,43 @@
   font-size: var(--text-xs);
   line-height: 1.5;
 }
+.composer-paper-picker { display: flex; }
+.composer-paper-popover {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  left: 0;
+  z-index: 20;
+  display: grid;
+  gap: var(--space-2);
+  width: min(360px, 100%);
+  max-height: min(440px, 60dvh);
+  overflow-y: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+}
+.composer-paper-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.composer-paper-popover p { margin: 0; font-size: var(--text-xs); }
+.composer-paper-list { display: grid; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
+.composer-paper-list button {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--space-2);
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+.composer-paper-list button:hover:not(:disabled),
+.composer-paper-list button[aria-pressed="true"] { background: var(--accent-tint); }
+.composer-paper-list small { color: var(--muted); }
+.composer-paper-list button:disabled { opacity: .6; cursor: not-allowed; }
 .message.steering-queued { opacity: .72; }
 .message.steering-queued::after {
   content: 'Queued for the next model call';

@@ -68,6 +68,63 @@ def test_paper_context_preserves_layout_and_bounds_images(paper_context, vision,
         assert evidence["omitted_images"][0]["page_number"] == 1
 
 
+def test_switching_chat_model_preserves_paper_evidence_and_history(paper_context, stub_provider):
+    client, paper = paper_context
+    services = client.app.state.services
+    profile = services.providers.create(ProviderCreate(
+        name="Switchable paper models", kind="openai_compatible",
+        base_url=f"{stub_provider.base_url}/v1",
+        models=[
+            ProviderModel(name=name, context_window_tokens=32768, capabilities={"chat", "tools"})
+            for name in ["first-model", "second-model"]
+        ],
+    ))
+    first_model = {"provider_profile_id": profile.id, "model": "first-model"}
+    second_model = {"provider_profile_id": profile.id, "model": "second-model"}
+    chat = client.post("/api/agent/conversations", json={"model_reference": first_model}).json()
+    url = f"/api/agent/conversations/{chat['id']}"
+    stub_provider.stream_delay_seconds = 0.2
+    stub_provider.reply = "The measured improvement is 42 percent [p.1]."
+    sent = client.post(f"{url}/messages", json={
+        "content": "Explain this paper.", "web_enabled": False,
+        "reading_context": {"document_id": paper.id, "page": 1},
+    })
+    assert sent.status_code == 202, sent.text
+    busy = client.patch(url, json={"model_reference": second_model})
+    assert busy.status_code == 409, busy.text
+    assert client.get(url).json()["model_reference"] == first_model
+    run = wait_for_run(client, sent.json()["run"]["id"])
+    assert run["status"] == "completed", run["error"]
+    before = client.get(url).json()
+
+    invalid = client.patch(url, json={"model_reference": {
+        "provider_profile_id": "missing-provider", "model": "missing-model",
+    }})
+    assert invalid.status_code == 400, invalid.text
+    assert client.get(url).json()["model_reference"] == first_model
+    changed = client.patch(url, json={"model_reference": second_model})
+    assert changed.status_code == 200, changed.text
+    after = client.get(url).json()
+    assert after["id"] == before["id"]
+    assert after["title"] == before["title"]
+    assert after["items"] == before["items"]
+    assert after["model_reference"] == second_model
+
+    sent = client.post(f"{url}/messages", json={"content": "What did that result show?", "web_enabled": False})
+    assert sent.status_code == 202, sent.text
+    run = wait_for_run(client, sent.json()["run"]["id"])
+    assert run["status"] == "completed", run["error"]
+    request = stub_provider.requests[-1]
+    assert request["model"] == "second-model"
+    history = json.dumps(request["messages"])
+    assert paper.id in history
+    assert paper.title in history
+    assert "42 percent" in history
+    assert "Explain this paper." in history
+    assert len(client.get("/api/agent/conversations").json()) == 1
+    assert client.get(f"/api/runs?conversation_id={chat['id']}").json()[0]["id"] == run["id"]
+
+
 def test_paper_context_reports_missing_visuals_without_losing_text(paper_context, monkeypatch):
     client, paper = paper_context
     documents = client.app.state.services.documents

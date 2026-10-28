@@ -65,6 +65,7 @@ describe('chat attachments', () => {
   let failMessage: boolean;
   let messageGate: Promise<Response> | null;
   let openGate: Promise<Response> | null;
+  let paperListFails: boolean;
 
   beforeEach(() => {
     conversations = [];
@@ -73,6 +74,7 @@ describe('chat attachments', () => {
     failMessage = false;
     messageGate = null;
     openGate = null;
+    paperListFails = false;
     upload = vi.fn(async (file: File) => response(attachment(file.name), 201));
     window.localStorage.clear();
     window.sessionStorage.clear();
@@ -88,6 +90,13 @@ describe('chat attachments', () => {
       if (url.endsWith('/api/providers')) return response(PROVIDERS);
       if (url.endsWith('/api/settings')) return response(SETTINGS);
       if (url.endsWith('/api/tracks')) return response([]);
+      if (url.endsWith('/api/documents')) return paperListFails
+        ? response({ message: 'Workspace papers unavailable' }, 503)
+        : response([
+          { id: 'local-paper', title: 'Local evidence', source_filename: 'evidence.pdf', status: 'ready' },
+          { id: 'other-paper', title: 'Another study', source_filename: 'other.pdf', status: 'ready' },
+          { id: 'unprepared-paper', title: 'Scanned paper', source_filename: 'scan.pdf', status: 'uploaded' },
+        ]);
       if (url.endsWith('/api/agent/attachments')) {
         return upload((init!.body as FormData).get('file') as File, init?.signal);
       }
@@ -219,6 +228,67 @@ describe('chat attachments', () => {
     expect(button('Attach file').disabled).toBe(true);
     await selectFiles([new File(['more notes'], 'later.md')]);
     expect(upload).toHaveBeenCalledTimes(2);
+  });
+
+  it('adds an existing workspace paper to the current chat without uploading or creating a conversation', async () => {
+    conversations = [conversation('existing')];
+    await mount();
+    await type('Explain the local evidence');
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/documents'))).toBe(false);
+    await click(button('Add workspace paper'));
+    expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+    const search = container.querySelector<HTMLInputElement>('[aria-label="Search workspace papers"]')!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(search, 'evidence.pdf');
+      search.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container.querySelector('.composer-paper-list')?.textContent).not.toContain('Another study');
+    await click(container.querySelector<HTMLButtonElement>('.composer-paper-list button')!);
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('h1')?.textContent).toBe('Chat existing');
+    expect(container.querySelector('textarea')!.value).toBe('Explain the local evidence');
+    expect(container.querySelector('[aria-label="Reading context"]')?.textContent).toContain('Local evidence');
+    expect(document.activeElement).toBe(container.querySelector('textarea'));
+    await click(button('Send message'));
+    expect(createRequests).toBe(0);
+    expect(upload).not.toHaveBeenCalled();
+    expect(messageRequests).toEqual([expect.objectContaining({
+      content: 'Explain the local evidence',
+      reading_context: { document_id: 'local-paper', page: null, selection: null },
+    })]);
+    expect(button('Add workspace paper').disabled).toBe(true);
+  });
+
+  it('retries workspace failures and keeps unavailable papers unselectable', async () => {
+    paperListFails = true;
+    await mount();
+    await click(button('Add workspace paper'));
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Workspace papers unavailable');
+    expect(container.textContent).not.toContain('No workspace papers yet');
+    paperListFails = false;
+    await click([...container.querySelectorAll<HTMLButtonElement>('button')]
+      .find((item) => item.textContent === 'Retry loading papers')!);
+    const unavailable = [...container.querySelectorAll<HTMLButtonElement>('.composer-paper-list button')]
+      .find((item) => item.textContent?.includes('Scanned paper'))!;
+    expect(unavailable.disabled).toBe(true);
+    await click(unavailable);
+    expect(container.querySelector('[aria-label="Reading context"]')).toBeNull();
+    await act(async () => {
+      container.querySelector('[aria-label="Search workspace papers"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(container.querySelector('[aria-label="Choose a workspace paper"]')).toBeNull();
+    expect(document.activeElement).toBe(button('Add workspace paper'));
+    expect(messageRequests).toEqual([]);
+  });
+
+  it('lets a selected workspace paper be removed before sending', async () => {
+    await mount();
+    await click(button('Add workspace paper'));
+    await click(container.querySelector<HTMLButtonElement>('.composer-paper-list button')!);
+    await click(button("Don't use this paper as context"));
+    await type('Answer without a paper');
+    await click(button('Send message'));
+    expect(messageRequests[0].reading_context).toBeUndefined();
   });
 
   it('starts ideation from a question without opening history or acquiring papers', async () => {

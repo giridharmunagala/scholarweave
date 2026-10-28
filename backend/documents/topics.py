@@ -1,4 +1,4 @@
-"""Topic shelves for the paper library: embed papers, cluster them, let an LLM name the clusters."""
+"""Persistent paper topic shelves with incremental embedding-based assignment."""
 from __future__ import annotations
 
 import asyncio
@@ -180,12 +180,12 @@ class PaperTopicService:
         saved = self._read("maps.json").get(scope_key(folder_id))
         if not saved:
             return None
-        existing = {document.id for document in self.documents.list_documents()}
+        existing = {document.id for document in self._scope(folder_id)}
         topics = [
             {**topic, "paper_ids": [paper for paper in topic["paper_ids"] if paper in existing]}
             for topic in saved["topics"]
         ]
-        return {**saved, "topics": [topic for topic in topics if topic["paper_ids"]]}
+        return {**saved, "paper_ids": [paper for paper in saved["paper_ids"] if paper in existing], "topics": topics}
 
     def _scope(self, folder_id: str | None) -> list[Any]:
         papers = self.documents.list_documents()
@@ -215,13 +215,12 @@ class PaperTopicService:
             raise ConflictError("Topics are already being grouped. Wait for that run to finish.")
         async with self._lock:
             papers = self._scope(folder_id)
+            saved = self.get(folder_id)
+            if saved and saved["topics"]:
+                return await self._enrich(folder_id, papers, saved, embedding_model)
             if len(papers) < MIN_PAPERS:
                 raise ValidationError(f"Group papers by topic once this view has at least {MIN_PAPERS} papers.")
             embedder = self._resolve("embedding", embedding_model)
-            if not naming_model.provider_profile_id and not naming_model.model:
-                naming_model = ModelReferenceSpec.model_validate(
-                    self.storage.settings.default_model_references.get("small_tasks") or {},
-                )
             namer = self._resolve("chat", naming_model)
             vectors = await self._embed(embedder, papers)
             groups = await asyncio.to_thread(cluster_papers, np.array(vectors, dtype=np.float64))
@@ -242,21 +241,107 @@ class PaperTopicService:
                 "embedding_model": {"provider_profile_id": embedder.profile_id, "model": embedder.model},
                 "naming_model": {"provider_profile_id": namer.profile_id, "model": namer.model},
             }
-            maps = self._read("maps.json")
-            maps[scope_key(folder_id)] = result
-            self._write("maps.json", maps)
+            self._save_vectors(folder_id, result["embedding_model"], dict(zip(result["paper_ids"], vectors, strict=True)))
+            self._save_map(folder_id, result)
             return result
 
+    def _save_map(self, folder_id: str | None, result: dict[str, Any]) -> None:
+        maps = self._read("maps.json")
+        maps[scope_key(folder_id)] = result
+        self._write("maps.json", maps)
+
+    def _save_vectors(self, folder_id: str | None, model: dict[str, Any], vectors: dict[str, Any]) -> None:
+        saved = self._read("vectors.json")
+        saved[scope_key(folder_id)] = {"model": model, "papers": vectors}
+        self._write("vectors.json", saved)
+
+    async def _enrich(
+        self, folder_id: str | None, papers: list[Any], saved: dict[str, Any],
+        embedding_model: ModelReferenceSpec,
+    ) -> dict[str, Any]:
+        grouped = {paper for topic in saved["topics"] for paper in topic["paper_ids"]}
+        new_papers = [paper for paper in papers if paper.id not in grouped]
+        if not new_papers:
+            return saved
+        reference = embedding_model if embedding_model.model or embedding_model.provider_profile_id else (
+            ModelReferenceSpec.model_validate(saved["embedding_model"])
+        )
+        embedder = self._resolve("embedding", reference)
+        model = {"provider_profile_id": embedder.profile_id, "model": embedder.model}
+        cached = self._read("vectors.json").get(scope_key(folder_id), {})
+        vectors = cached.get("papers", {}) if cached.get("model") == model else {}
+        vectors = {paper.id: vectors[paper.id] for paper in papers if paper.id in vectors}
+        missing = [paper for paper in papers if paper.id not in vectors]
+        if missing:
+            vectors.update(zip([paper.id for paper in missing], await self._embed(embedder, missing), strict=True))
+        units = self._unit_vectors([vectors[paper.id] for paper in papers])
+        by_id = dict(zip([paper.id for paper in papers], units, strict=True))
+        centers = []
+        for topic in saved["topics"]:
+            members = [by_id[paper] for paper in topic["paper_ids"]]
+            if members:
+                center = np.mean(members, axis=0)
+            else:
+                # Empty shelves retain their identity and can attract papers again.
+                text = f"{topic['name']}: {topic['description']}"
+                center = self._unit_vectors(await self._embed_texts(embedder, [text]))[0]
+            centers.append(center)
+        centers_array = self._unit_vectors(centers)
+        assignments = np.argmax(np.array([by_id[paper.id] for paper in new_papers]) @ centers_array.T, axis=1)
+        for paper, index in zip(new_papers, assignments, strict=True):
+            saved["topics"][int(index)]["paper_ids"].append(paper.id)
+        saved["paper_ids"] = [paper.id for paper in papers]
+        saved["embedding_model"] = model
+        self._save_vectors(folder_id, model, vectors)
+        self._save_map(folder_id, saved)
+        return saved
+
+    @staticmethod
+    def _unit_vectors(vectors: Any) -> np.ndarray:
+        try:
+            array = np.asarray(vectors, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError("The embedding model returned inconsistent vector sizes.") from exc
+        if array.ndim != 2 or not array.shape[1] or not np.all(np.isfinite(array)):
+            raise ValidationError("The embedding model returned unusable vectors.")
+        norms = np.linalg.norm(array, axis=1, keepdims=True)
+        if np.any(norms == 0):
+            raise ValidationError("The embedding model returned unusable vectors.")
+        return array / norms
+
+    async def assign(self, folder_id: str | None, topic_id: str, paper_ids: list[str]) -> dict[str, Any]:
+        if self._lock.locked():
+            raise ConflictError("Topics are already being updated. Wait for that run to finish.")
+        async with self._lock:
+            saved = self.get(folder_id)
+            if not saved or topic_id not in {topic["id"] for topic in saved["topics"]}:
+                raise ValidationError("Paper topic was not found in this view.")
+            selected = set(paper_ids)
+            if not selected or not selected <= {paper.id for paper in self._scope(folder_id)}:
+                raise ValidationError("Choose existing papers from this topic view.")
+            for topic in saved["topics"]:
+                topic["paper_ids"] = [paper for paper in topic["paper_ids"] if paper not in selected]
+                if topic["id"] == topic_id:
+                    topic["paper_ids"].extend(dict.fromkeys(paper_ids))
+            saved["paper_ids"] = list(dict.fromkeys(paper for topic in saved["topics"] for paper in topic["paper_ids"]))
+            self._save_map(folder_id, saved)
+            return saved
+
     def clear(self, folder_id: str | None) -> None:
+        if self._lock.locked():
+            raise ConflictError("Topics are already being updated. Wait for that run to finish.")
         maps = self._read("maps.json")
         if maps.pop(scope_key(folder_id), None) is not None:
             self._write("maps.json", maps)
 
     async def _embed(self, resolved: ResolvedModel, papers: list[Any]) -> list[list[float]]:
-        """Embeddings are cached per paper text and model, so regrouping only embeds new papers."""
+        texts = await asyncio.to_thread(lambda: [self._text(paper) for paper in papers])
+        return await self._embed_texts(resolved, texts)
+
+    async def _embed_texts(self, resolved: ResolvedModel, texts: list[str]) -> list[list[float]]:
+        """Cache embeddings per text and model, including upgrades of older saved maps."""
         cache = self._read("embeddings.json")
         model_key = f"{resolved.profile_id}/{resolved.model}"
-        texts = await asyncio.to_thread(lambda: [self._text(paper) for paper in papers])
         keys = [hashlib.sha256(f"{model_key}\n{text}".encode()).hexdigest() for text in texts]
         missing = [index for index, key in enumerate(keys) if key not in cache]
         for offset in range(0, len(missing), EMBED_BATCH):
@@ -267,12 +352,11 @@ class PaperTopicService:
                 raise ValidationError("The embedding model did not return one vector per paper.")
             for index, vector in zip(batch, vectors, strict=True):
                 cache[keys[index]] = [round(value, 6) for value in vector]
+        vectors = [cache[key] for key in keys]
+        self._unit_vectors(vectors)
         if missing:
             self._write("embeddings.json", cache)
-        dimensions = {len(cache[key]) for key in keys}
-        if len(dimensions) != 1:
-            raise ValidationError("The embedding model returned inconsistent vector sizes. Regroup after changing models.")
-        return [cache[key] for key in keys]
+        return vectors
 
     async def _name(self, resolved: ResolvedModel, clusters: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
         packet = {"clusters": [{

@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Respon
 from fastapi.responses import StreamingResponse
 
 from backend.core.http import services
+from backend.utils import as_utc
 from backend.documents.models import PaperUsefulness
 from backend.runs.schemas import run_response
 from backend.workspace.schemas import WorkspaceFileContentResponse
@@ -36,6 +37,7 @@ from backend.research.schemas import (
     PaperSummaryRunRequest,
     PaperSummaryRunResponse,
     PaperSummaryVersionResponse,
+    PaperTopicAssignmentRequest,
     PaperTopicMapResponse,
     PaperTopicRequest,
     PaperUsefulnessRequest,
@@ -217,9 +219,14 @@ async def build_paper_topics(payload: PaperTopicRequest, container=Depends(servi
 
 
 @router.delete("/paper-topics", status_code=status.HTTP_204_NO_CONTENT)
-def clear_paper_topics(folder_id: str | None = None, container=Depends(services)) -> Response:
+async def clear_paper_topics(folder_id: str | None = None, container=Depends(services)) -> Response:
     container.paper_topics.clear(folder_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch("/paper-topics/assign", response_model=PaperTopicMapResponse)
+async def assign_paper_topics(payload: PaperTopicAssignmentRequest, container=Depends(services)) -> dict:
+    return await container.paper_topics.assign(payload.folder_id, payload.topic_id, payload.paper_ids)
 
 
 @router.get("/paper-folders", response_model=list[PaperFolderResponse])
@@ -558,8 +565,8 @@ def _document_response(container, document_id: str) -> DocumentResponse:
             )
             for chunk in chunks
         ],
-        created_at=document.created_at,
-        updated_at=document.updated_at,
+        created_at=as_utc(document.created_at),
+        updated_at=as_utc(document.updated_at),
     )
 
 
@@ -574,8 +581,8 @@ def _document_summary(document, abstract: str | None = None) -> DocumentSummaryR
         usefulness=(document.metadata_json or {}).get("usefulness", PaperUsefulness.UNRATED),
         page_count=document.page_count,
         metadata=document.metadata_json or {},
-        created_at=document.created_at,
-        updated_at=document.updated_at,
+        created_at=as_utc(document.created_at),
+        updated_at=as_utc(document.updated_at),
     )
 
 

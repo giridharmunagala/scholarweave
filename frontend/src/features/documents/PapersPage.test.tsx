@@ -4,6 +4,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Link, RouterProvider, useLocation } from '../../app/router';
+import { AppShell } from '../../app/AppShell';
+import { ThemeProvider } from '../../shared/theme/ThemeProvider';
 import { LibraryTabs } from '../../shared/components/Ui';
 import PapersPage from './PapersPage';
 import { cleanQuote } from './PdfReader';
@@ -92,6 +94,46 @@ const ocrJob = (status: OcrBatch['status'], itemStatus: OcrBatch['items'][number
   id: 'remote-batch', status, created_at: '2026-10-22T10:00:00Z', updated_at: '2026-10-22T10:01:00Z',
   finished_at: null, parallel_requests: 4,
   items: [{ document_id: 'remote', title: 'Remote paper', status: itemStatus, completed_pages: 0, total_pages: 3, phase_label: null, error: null }],
+});
+
+it.each([850, 390])('resizes Ask opened from a paper at a %spx viewport without losing the reader or paper context', async (width) => {
+  vi.stubGlobal('innerWidth', width);
+  const paper = makePaper('resize-paper', 'Reader resize example', {
+    artifacts: [{ id: 'pdf-resize', kind: 'source_pdf', media_type: 'application/pdf', sha256: 'preview' }],
+  });
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const path = new URL(String(input), 'http://localhost').pathname;
+    if (path === '/api/documents') return respond([paper]);
+    if (path === '/api/documents/resize-paper') return respond(paper);
+    if (path.endsWith('/ingestion-options')) return respond(options);
+    if (path === '/api/settings') return respond({ agent_context_window_tokens: 32768, default_model_references: {} });
+    if (['/api/paper-folders', '/api/workspace/search', '/api/documents/ocr-batches',
+      '/api/agent/conversations', '/api/providers', '/api/tracks'].includes(path)) return respond([]);
+    throw new Error(`Unexpected request: ${path}`);
+  }));
+  await import('../chat/AskPanel');
+  window.history.replaceState({}, '', '/?paper=resize-paper');
+  await act(async () => {
+    root.render(<ThemeProvider><RouterProvider><AppShell><PapersPage /></AppShell></RouterProvider></ThemeProvider>);
+  });
+  await click(button('Ask a question'));
+  const handle = container.querySelector<HTMLElement>('[aria-label="Resize assistant"]')!;
+  expect(Number(handle.getAttribute('aria-valuemax'))).toBe(width);
+  const initialWidth = Number(handle.getAttribute('aria-valuenow'));
+  const pointer = (type: string, clientX: number) => {
+    const event = new Event(type, { bubbles: true });
+    Object.defineProperties(event, { clientX: { value: clientX }, pointerId: { value: 1 } });
+    handle.dispatchEvent(event);
+  };
+  await act(async () => pointer('pointerdown', 100));
+  await act(async () => pointer('pointermove', 150));
+  await act(async () => pointer('pointerup', 150));
+  expect(Number(handle.getAttribute('aria-valuenow'))).toBe(initialWidth - 50);
+  expect(container.querySelector<HTMLElement>('.app-shell')!.style.getPropertyValue('--assistant-width')).toBe(`${initialWidth - 50}px`);
+  expect(container.querySelector('.mock-pdf')?.getAttribute('data-title')).toBe(paper.title);
+  expect(container.querySelector('[aria-label="Reading context"]')?.textContent).toContain(paper.title);
+  expect(window.location.search).toBe('?paper=resize-paper');
+  expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
 });
 
 it('runs explicit quick CPU extraction without starting or reconfiguring Surya batches', async () => {
@@ -1352,25 +1394,163 @@ describe('LibraryTabs', () => {
 });
 
 describe('topics, summaries and reading questions', () => {
-  it('groups the current folder into named topic shelves and keeps new papers visible', async () => {
-    const papers = Array.from({ length: 10 }, (_, index) => makePaper(`p${index}`, `Paper ${index}`));
-    const posts: unknown[] = [];
+  it('assigns single and multiple selected papers from the list, retains failed selections and refreshes topic shelves', async () => {
+    const papers = [makePaper('p1', 'Alpha'), makePaper('p2', 'Beta'), makePaper('p3', 'Gamma')];
+    const map = {
+      folder_id: null, created_at: '2026-01-01T00:00:00Z', paper_ids: ['p1', 'p2'],
+      embedding_model: { model: 'embed' }, naming_model: { model: 'main' },
+      topics: [
+        { id: 't1', name: 'Observations', description: 'Observational studies.', paper_ids: ['p1'] },
+        { id: 't2', name: 'Methods', description: 'Research methods.', paper_ids: ['p2'] },
+      ],
+    };
+    const assignments: unknown[] = [];
+    let failAssignment = true;
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input), 'http://localhost');
+      if (url.pathname.endsWith('/documents')) return respond(papers);
+      if (url.pathname.endsWith('/paper-folders')) return respond([]);
+      if (url.pathname.endsWith('/paper-topics')) return respond(map);
+      if (url.pathname.endsWith('/paper-topics/assign')) {
+        const payload = JSON.parse(String(init?.body)) as { topic_id: string; paper_ids: string[] };
+        assignments.push(payload);
+        if (failAssignment) return new Response(JSON.stringify({ detail: 'Could not assign topic' }), { status: 409 });
+        for (const topic of map.topics) {
+          topic.paper_ids = topic.paper_ids.filter((id) => !payload.paper_ids.includes(id));
+          if (topic.id === payload.topic_id) topic.paper_ids.push(...payload.paper_ids);
+        }
+        map.paper_ids = map.topics.flatMap((topic) => topic.paper_ids);
+        return respond(map);
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    await mount('/library');
+    await click(container.querySelector('[aria-label="Select Gamma"]'));
+    await click(button('Assign topic…'));
+    await change('Assign selected papers to topic', 't1');
+    expect(container.textContent).toContain('Could not assign topic');
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Select Gamma"]')?.checked).toBe(true);
+    failAssignment = false;
+    await change('Assign selected papers to topic', 't1');
+    expect(assignments.slice(0, 2)).toEqual([
+      { folder_id: null, topic_id: 't1', paper_ids: ['p3'] },
+      { folder_id: null, topic_id: 't1', paper_ids: ['p3'] },
+    ]);
+    expect(container.querySelector('[aria-label="Selected papers"]')).toBeNull();
+    expect(container.querySelector('.toast')?.textContent).toContain('Assigned 1 paper to topic');
+    await click(container.querySelector('[aria-label="Select Alpha"]'));
+    await click(container.querySelector('[aria-label="Select Beta"]'));
+    await change('Assign selected papers to topic', 't2');
+    expect(assignments[2]).toEqual({ folder_id: null, topic_id: 't2', paper_ids: ['p1', 'p2'] });
+    expect(container.querySelector('.toast')?.textContent).toContain('Assigned 2 papers to topic');
+    expect(map.topics[0].paper_ids).toEqual(['p3']);
+
+    await click(button('Topics'));
+    await click(container.querySelector('.topic-card'));
+    await click(container.querySelector('[aria-label="Select Gamma"]'));
+    await change('Assign selected papers to topic', 't2');
+    expect(container.querySelector('.topic-detail .paper-row-main')).toBeNull();
+    await click(button('All topics'));
+    await click([...container.querySelectorAll('.topic-card')][1]);
+    expect(container.querySelectorAll('.topic-detail .paper-row-main')).toHaveLength(3);
+  });
+
+  it('loads folder-specific topics on demand, handles empty topics and uses library topics for unfiled papers', async () => {
+    const papers = [
+      makePaper('p1', 'Alpha', { metadata: { folder_id: 'methods' } }),
+      makePaper('p2', 'Beta'),
+    ];
+    const topicRequests: string[] = [];
+    const assignments: unknown[] = [];
+    let hasTopics = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost');
+      if (url.pathname.endsWith('/documents')) return respond(papers);
+      if (url.pathname.endsWith('/paper-folders')) return respond([folder('methods', 'Methods')]);
+      if (url.pathname.endsWith('/paper-topics')) {
+        topicRequests.push(url.search);
+        if (!hasTopics) return respond(null);
+        return respond({
+          folder_id: url.searchParams.get('folder_id'), created_at: '2026-01-01T00:00:00Z', paper_ids: [],
+          embedding_model: { model: 'embed' }, naming_model: { model: 'main' },
+          topics: [{ id: 'topic', name: 'Existing topic', description: 'Saved topic.', paper_ids: [] }],
+        });
+      }
+      if (url.pathname.endsWith('/paper-topics/assign')) {
+        const payload = JSON.parse(String(init?.body)) as { folder_id: string | null; paper_ids: string[] };
+        assignments.push(payload);
+        return respond({
+          ...payload, created_at: '2026-01-01T00:00:00Z', embedding_model: { model: 'embed' }, naming_model: { model: 'main' },
+          topics: [{ id: 'topic', name: 'Existing topic', description: 'Saved topic.', paper_ids: payload.paper_ids }],
+        });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    await mount('/library');
+    await click([...container.querySelectorAll('.folder-chip')].find((item) => item.textContent?.includes('Methods')));
+    await click(container.querySelector('[aria-label="Select Alpha"]'));
+    expect(topicRequests).toEqual([]);
+    await click(button('Assign topic…'));
+    expect(container.textContent).toContain('No saved topics for this view');
+    expect(container.querySelector<HTMLInputElement>('[aria-label="Select Alpha"]')?.checked).toBe(true);
+    hasTopics = true;
+    await click(button('Assign topic…'));
+    await change('Assign selected papers to topic', 'topic');
+    expect(assignments[0]).toEqual({ folder_id: 'methods', topic_id: 'topic', paper_ids: ['p1'] });
+    expect(topicRequests).toEqual(['?folder_id=methods', '?folder_id=methods']);
+    await click([...container.querySelectorAll('.folder-chip')].find((item) => item.textContent?.includes('Unfiled')));
+    await click(container.querySelector('[aria-label="Select Beta"]'));
+    await click(button('Assign topic…'));
+    expect(topicRequests[2]).toBe('');
+    await change('Assign selected papers to topic', 'topic');
+    expect(assignments[1]).toEqual({ folder_id: null, topic_id: 'topic', paper_ids: ['p2'] });
+  });
+
+  it('keeps saved topics, groups new papers and manually assigns them with acquisition sorting', async () => {
+    const papers = Array.from({ length: 10 }, (_, index) => makePaper(`p${index}`, `Paper ${index}`, {
+      created_at: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    }));
+    const posts: unknown[] = [];
+    const assignments: unknown[] = [];
+    let saved: {
+      folder_id: null; created_at: string; paper_ids: string[];
+      embedding_model: { provider_profile_id: string; model: string };
+      naming_model: { provider_profile_id: string; model: string };
+      topics: { id: string; name: string; description: string; paper_ids: string[] }[];
+    } | null = null;
+    let failAssignment = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input), 'http://localhost');
+      if (url.pathname.endsWith('/paper-topics/assign')) {
+        const payload = JSON.parse(String(init?.body)) as { topic_id: string; paper_ids: string[] };
+        assignments.push(payload);
+        if (failAssignment) return new Response(JSON.stringify({ detail: 'Assignment failed' }), { status: 409 });
+        for (const topic of saved!.topics) {
+          topic.paper_ids = topic.paper_ids.filter((id) => !payload.paper_ids.includes(id));
+          if (topic.id === payload.topic_id) topic.paper_ids.push(...payload.paper_ids);
+        }
+        return respond(saved);
+      }
       if (url.pathname.endsWith('/paper-topics')) {
         if (init?.method === 'POST') {
           posts.push(JSON.parse(String(init.body)));
-          return respond({
+          if (saved) {
+            saved.topics[1].paper_ids.push('p9');
+            saved.paper_ids.push('p9');
+            return respond(saved);
+          }
+          saved = {
             folder_id: null, created_at: '2026-01-02T00:00:00Z', paper_ids: papers.slice(0, 9).map((paper) => paper.id),
             embedding_model: { provider_profile_id: 'llama', model: 'embeddinggemma-2' },
-            naming_model: { provider_profile_id: 'llama', model: 'gemma4-26b-a4b' },
+            naming_model: { provider_profile_id: 'llama', model: 'qwen-27b' },
             topics: [
               { id: 't1', name: 'Quasar surveys', description: 'Sky surveys of quasars.', paper_ids: ['p0', 'p1', 'p2', 'p3', 'p4'] },
               { id: 't2', name: 'Galaxy dynamics', description: 'Rotation and mass.', paper_ids: ['p5', 'p6', 'p7', 'p8'] },
             ],
-          });
+          };
+          return respond(saved);
         }
-        return respond(null);
+        return respond(saved);
       }
       if (url.pathname.endsWith('/documents')) return respond(papers);
       if (url.pathname.endsWith('/paper-folders')) return respond([]);
@@ -1405,14 +1585,36 @@ describe('topics, summaries and reading questions', () => {
     expect(cards[2].textContent).toContain('Paper 9');
     await click(cards[0]);
     expect(container.querySelector('.topic-detail')?.getAttribute('aria-label')).toBe('Quasar surveys');
-    expect(container.querySelectorAll('.topic-detail .paper-row-main').length).toBeGreaterThan(0);
+    expect([...container.querySelectorAll('.topic-detail .paper-row-main')].map((row) => row.textContent)).toEqual([
+      'Paper 4', 'Paper 3', 'Paper 2', 'Paper 1', 'Paper 0',
+    ]);
+    expect(container.querySelector('time')?.getAttribute('datetime')).toBe(papers[4].created_at);
+    expect(container.querySelector('time')?.textContent).toBe(new Date(papers[4].created_at).toLocaleString());
+    await change('Sort papers', 'oldest');
+    expect(container.querySelector('.topic-detail .paper-row-main')?.textContent).toBe('Paper 0');
+    await change('Assign topic for Paper 0', 't2');
+    expect(assignments).toEqual([{ folder_id: null, topic_id: 't2', paper_ids: ['p0'] }]);
+    expect([...container.querySelectorAll('.topic-detail .paper-row-main')].map((row) => row.textContent)).not.toContain('Paper 0');
     await click(button('All topics'));
     expect(container.querySelectorAll('.topic-card')).toHaveLength(3);
+    await click(button('Group 1 new paper'));
+    expect(posts).toHaveLength(2);
+    expect(container.querySelectorAll('.topic-card')).toHaveLength(2);
+    await click([...container.querySelectorAll('.topic-card')][1]);
+    expect(container.querySelector('[aria-label="Assign topic for Paper 0"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="Assign topic for Paper 9"]')).not.toBeNull();
+    failAssignment = true;
+    await change('Assign topic for Paper 9', 't1');
+    expect(container.textContent).toContain('Assignment failed');
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="Assign topic for Paper 9"]')?.value).toBe('t2');
 
     await click(button('List'));
     expect(container.querySelector('.topic-view')).toBeNull();
     expect(container.querySelector('[aria-label="Select all shown papers"]')).not.toBeNull();
     expect(container.querySelectorAll('.paper-row-main')).toHaveLength(10);
+    await click(button('Topics'));
+    expect(container.querySelectorAll('.topic-card')).toHaveLength(2);
+    expect(posts).toHaveLength(2);
   });
 
   it('opens a saved summary in the reader and returns to the paper', async () => {

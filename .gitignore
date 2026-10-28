@@ -19,6 +19,7 @@ htmlcov/
 # Application runtime data and generated workspaces
 local_data/
 workspace/
+/backend/tests/_runtime/
 !backend/workspace/
 !backend/workspace/**
 !frontend/src/features/workspace/

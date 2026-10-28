@@ -11,7 +11,9 @@ export function paperFolderId(paper: Paper): string | null {
 export function sortPapers(papers: Paper[], sort: string): Paper[] {
   return [...papers].sort((a, b) => sort === 'title'
     ? a.title.localeCompare(b.title)
-    : sort === 'oldest' ? a.created_at.localeCompare(b.created_at) : b.created_at.localeCompare(a.created_at));
+    : sort === 'oldest'
+      ? Date.parse(a.created_at) - Date.parse(b.created_at)
+      : Date.parse(b.created_at) - Date.parse(a.created_at));
 }
 
 export function buildLibraryIndex(papers: Paper[], folders: Folder[]) {

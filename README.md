@@ -13,7 +13,8 @@ with the provider you choose.
 
 ![Paper library with abstract previews, collections, usefulness labels, and reading progress](docs/screenshots/papers.png)
 
-Screenshots show an isolated demonstration workspace with illustrative documents, not research results.
+All screenshots use the default **Light (white)** theme and an isolated demonstration workspace
+with illustrative documents, not research results.
 
 [Get started](#get-started) · [Research workflows](#research-workflows) ·
 [Models and OCR](#models-and-ocr) · [Terminal interface](#terminal-interface) ·
@@ -90,7 +91,8 @@ the assistant alongside the page instead of replacing your workspace.
 | **Runs** | Monitor OCR batches, page progress, errors, and recent batch history. |
 
 Use **Search / Ctrl+K** to find papers, notes, tracks, reviews, and conversation titles/previews.
-Light, sepia, and dark themes are available. Page-specific settings live in drawers so the
+**Light (white) is the default** in both the web and terminal interfaces; sepia, dark, and
+explicitly saved theme choices remain available. Page-specific settings live in drawers so the
 reading and editing surfaces stay uncluttered.
 
 ### 1. Collect, organize, and read papers
@@ -265,6 +267,8 @@ maintenance** assignments can override it. Main chat, research planning, compari
 library topic naming still use the main model. Explicit task choices take precedence, and
 assignment changes apply to new work.
 
+![Default model assignments in the white theme](docs/screenshots/settings.png)
+
 Provider-level reasoning defaults and tool-specific overrides are optional. If a deployment
 rejects reasoning with function tools, use its supported protocol or set the tool reasoning
 override to `none`. Do not assume every OpenAI-compatible model supports tools, vision, or
@@ -309,6 +313,8 @@ canonical notes, and saved summaries are preserved.
 OCR and research jobs need the backend to keep running. Closing a browser tab does not stop
 them; stopping an owned launcher/backend does. Equations, table values, and figure interpretation
 should always be checked against the PDF.
+
+![OCR batch controls and history in the white theme](docs/screenshots/runs.png)
 
 ## Terminal interface
 
@@ -425,7 +431,8 @@ Production builds type-check application and test sources; they do not execute t
 To refresh images against an existing **demo** installation, install Playwright and its Chromium
 browser, then run `python -m scripts.capture_screenshots --base-url http://127.0.0.1:1102`.
 For a separate frontend dev server, also pass `--api-url` with the demo backend origin.
-The capture blocks API writes and uses saved provider catalogs instead of live model discovery;
+The capture explicitly selects and checks the white theme on every page, blocks API writes,
+and uses saved provider catalogs instead of live model discovery;
 it never submits the example chat draft. It requires a prepared paper and saved note, and
 includes a track if one exists. Review the images for private content before publishing.
 

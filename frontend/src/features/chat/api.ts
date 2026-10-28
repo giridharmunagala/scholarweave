@@ -63,6 +63,11 @@ function conversationApi(basePath: string) {
 }
 export const chatApi = {
   ...conversationApi('/agent/conversations'),
+  updateModel: (id: string, modelReference: ModelReference) =>
+    request<Conversation>(
+      `/agent/conversations/${encodeURIComponent(id)}`,
+      json('PATCH', { model_reference: modelReference } satisfies components['schemas']['ConversationModelUpdateRequest']),
+    ),
   uploadAttachment: (file: File, signal?: AbortSignal) => {
     const body = new FormData();
     body.append('file', file);

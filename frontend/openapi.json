@@ -1719,6 +1719,19 @@
         "title": "ConversationMessageResponse",
         "type": "object"
       },
+      "ConversationModelUpdateRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "model_reference": {
+            "$ref": "#/components/schemas/ModelReferenceSpec"
+          }
+        },
+        "required": [
+          "model_reference"
+        ],
+        "title": "ConversationModelUpdateRequest",
+        "type": "object"
+      },
       "ConversationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -3889,6 +3902,42 @@
           "complete"
         ],
         "title": "PaperSummaryVisualsResponse",
+        "type": "object"
+      },
+      "PaperTopicAssignmentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "paper_ids": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 1,
+            "title": "Paper Ids",
+            "type": "array"
+          },
+          "topic_id": {
+            "minLength": 1,
+            "title": "Topic Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic_id",
+          "paper_ids"
+        ],
+        "title": "PaperTopicAssignmentRequest",
         "type": "object"
       },
       "PaperTopicMapResponse": {
@@ -9447,6 +9496,56 @@
         "tags": [
           "research conversations"
         ]
+      },
+      "patch": {
+        "operationId": "update_research_conversation_model_api_agent_conversations__conversation_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConversationModelUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Research Conversation Model",
+        "tags": [
+          "research conversations"
+        ]
       }
     },
     "/api/agent/conversations/{conversation_id}/messages": {
@@ -12562,6 +12661,47 @@
           }
         },
         "summary": "Build Paper Topics",
+        "tags": [
+          "research"
+        ]
+      }
+    },
+    "/api/paper-topics/assign": {
+      "patch": {
+        "operationId": "assign_paper_topics_api_paper_topics_assign_patch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperTopicAssignmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaperTopicMapResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Assign Paper Topics",
         "tags": [
           "research"
         ]

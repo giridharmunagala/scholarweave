@@ -33,6 +33,10 @@ class ResearchConversationCreateRequest(ConversationSchema):
     track_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class ConversationModelUpdateRequest(ConversationSchema):
+    model_reference: ModelReferenceSpec
+
+
 class ConversationResponse(ConversationSchema):
     id: str
     title: str
